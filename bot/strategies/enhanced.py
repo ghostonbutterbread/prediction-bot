@@ -111,35 +111,57 @@ class EnhancedStrategyEngine:
         }
 
     def _price_signal(self, market, order_book: dict = None) -> Optional[dict]:
-        """Detect mispricing based on order book analysis."""
+        """Detect mispricing using market microstructure + known biases."""
         yes_price = market.yes_price
         if yes_price <= 0 or yes_price >= 1:
             return None
 
-        # Use order book imbalance as proxy for true probability
+        predicted = yes_price
+        confidence = 0.3
+
+        # === Bias 1: Longshot bias ===
+        # Markets < $0.10 tend to be OVERPRICED (people overbet longshots)
+        # Markets > $0.90 tend to be UNDERPRICED (people underbet near-certainties)
+        if yes_price < 0.10:
+            predicted -= 0.03  # Longshot likely overpriced → short it
+            confidence = 0.55
+        elif yes_price > 0.90:
+            predicted += 0.02  # Near-certainty likely underpriced → buy it
+            confidence = 0.60
+        elif 0.40 < yes_price < 0.60:
+            # Near coin-flip markets are most efficient
+            confidence = 0.35
+
+        # === Bias 2: Volume efficiency ===
+        volume = market.volume
+        if volume > 50000:
+            # High volume = more efficient pricing
+            confidence += 0.1
+        elif volume < 1000:
+            # Low volume = less efficient = more potential edge
+            confidence -= 0.1
+            predicted += 0.01 if yes_price < 0.5 else -0.01
+
+        # === Bias 3: Spread-based confidence ===
         if order_book:
-            yes_bids = order_book.get("yes_bids", [])
-            no_bids = order_book.get("no_bids", [])
+            spread_pct = order_book.get("spread_pct", 10)
+            if spread_pct < 3:
+                confidence += 0.1  # Tight spread = confident market
+            elif spread_pct > 10:
+                confidence -= 0.1  # Wide spread = uncertain
 
-            yes_depth = sum(qty for _, qty in yes_bids[:5])
-            no_depth = sum(qty for _, qty in no_bids[:5])
-            total_depth = yes_depth + no_depth
-
-            if total_depth > 0:
-                imbalance = (yes_depth - no_depth) / total_depth
-                predicted = yes_price + imbalance * 0.10
-            else:
-                predicted = yes_price
-        else:
-            predicted = yes_price
-
-        # Confidence based on spread (tighter = more confident)
-        spread = order_book.get("spread", 0.1) if order_book else 0.1
-        confidence = max(0.1, 1.0 - spread * 10)
+        # === Bias 4: Category-based signals ===
+        category = getattr(market, 'category', '').lower()
+        if 'sports' in category:
+            # Sports markets are less efficient (emotional betting)
+            confidence -= 0.05
+        elif 'politics' in category or 'election' in category:
+            # Political markets have polling data → more predictable
+            confidence += 0.05
 
         return {
             "predicted_prob": max(0.01, min(0.99, predicted)),
-            "confidence": confidence,
+            "confidence": max(0.1, min(0.95, confidence)),
         }
 
     def _news_signal(self, market) -> Optional[dict]:
