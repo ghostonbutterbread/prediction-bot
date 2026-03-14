@@ -7,6 +7,7 @@ from datetime import datetime, timezone, timedelta
 
 from bot.feeds.news import NewsFeed
 from bot.feeds.twitter import SocialFeed
+from bot.feeds.ai_signal import AISignalFeed
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,11 @@ class EnhancedStrategyEngine:
             self.news = NewsFeed()
         if self.enable_social:
             self.social = SocialFeed(config)
+
+        self.enable_ai = config.get("enable_ai", True)
+        self.ai_weight = config.get("ai_weight", 0.20)
+        if self.enable_ai:
+            self.ai_feed = AISignalFeed(config)
 
     def analyze_market(self, market, order_book: dict = None) -> Optional[dict]:
         """
@@ -82,6 +88,13 @@ class EnhancedStrategyEngine:
         if time_signal:
             signals["time"] = time_signal
             weights["time"] = 0.10
+
+        # 6. AI signal (Ghost's analysis)
+        if self.enable_ai:
+            ai_signal = self._ai_signal(market)
+            if ai_signal:
+                signals["ai"] = ai_signal
+                weights["ai"] = self.ai_weight
 
         if not signals:
             return None
@@ -223,6 +236,15 @@ class EnhancedStrategyEngine:
             }
         except Exception as e:
             logger.debug(f"Social signal error: {e}")
+            return None
+
+    def _ai_signal(self, market) -> Optional[dict]:
+        """Get AI signal from Ghost's analysis."""
+        try:
+            signal = self.ai_feed.get_signal(market.id)
+            return signal
+        except Exception as e:
+            logger.debug(f"AI signal error: {e}")
             return None
 
     def _volume_signal(self, market) -> Optional[dict]:
