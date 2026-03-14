@@ -124,28 +124,42 @@ class KalshiExchange(BaseExchange):
             return None
 
     def get_order_book(self, market_id: str) -> Optional[dict]:
+        """Get order book — uses market-level bid/ask from cached data."""
+        # The order book is already embedded in market data (yes_bid_dollars, etc.)
+        # This method returns None to signal "use market-level data in the signal engine"
+        return None
+
+    def get_market_bid_ask(self, market_id: str) -> Optional[dict]:
+        """Get bid/ask for a specific market by fetching it directly."""
         try:
-            resp = self.client.get_market_order_book(market_ticker=market_id, depth=10)
-            book = getattr(resp, 'order_book', None)
-            if not book:
-                return None
+            import httpx
+            auth_headers = self.client.kalshi_auth.create_auth_headers(
+                'GET', f'/trade-api/v2/markets/{market_id}'
+            )
+            url = f"{self.host}/markets/{market_id}"
+            resp = httpx.get(url, headers=auth_headers, timeout=5)
+            resp.raise_for_status()
+            data = resp.json()
 
-            yes_bids = getattr(book, 'yes', []) or []
-            no_bids = getattr(book, 'no', []) or []
+            yes_bid = float(data.get("yes_bid", 0)) / 100 if data.get("yes_bid") else 0
+            yes_ask = float(data.get("yes_ask", 0)) / 100 if data.get("yes_ask") else 0
+            no_bid = float(data.get("no_bid", 0)) / 100 if data.get("no_bid") else 0
+            no_ask = float(data.get("no_ask", 0)) / 100 if data.get("no_ask") else 0
 
-            best_yes = yes_bids[0].price / 100 if yes_bids else 0
-            best_no = no_bids[0].price / 100 if no_bids else 0
+            mid_yes = (yes_bid + yes_ask) / 2 if yes_ask > 0 else 0
+            spread = yes_ask - yes_bid if yes_ask > 0 and yes_bid > 0 else 0
 
             return {
-                "yes_bids": [(b.price / 100, b.quantity) for b in yes_bids[:10]],
-                "no_bids": [(b.price / 100, b.quantity) for b in no_bids[:10]],
-                "best_yes": best_yes,
-                "best_no": best_no,
-                "mid_yes": best_yes,
-                "spread": abs(best_yes - (1 - best_no)) if best_no else 0,
+                "best_yes_ask": yes_ask,
+                "best_yes_bid": yes_bid,
+                "best_no_ask": no_ask,
+                "best_no_bid": no_bid,
+                "mid_yes": mid_yes,
+                "spread": spread,
+                "spread_pct": (spread / mid_yes * 100) if mid_yes > 0 else 0,
             }
         except Exception as e:
-            logger.debug(f"Error getting order book for {market_id}: {e}")
+            logger.debug(f"Error getting bid/ask for {market_id}: {e}")
             return None
 
     def place_order(self, market_id: str, side: str, price: float,

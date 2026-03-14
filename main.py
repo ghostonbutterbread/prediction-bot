@@ -3,12 +3,14 @@
 Prediction Market Trading Bot — Multi-Exchange
 
 Usage:
-    python main.py demo           # Demo mode (Kalshi demo + paper trading)
-    python main.py paper          # Paper trading on live markets
-    python main.py live           # Live trading (real money!)
-    python main.py status         # Show bot status
-    python main.py markets        # List active markets
-    python main.py news <query>   # Test news feed
+    python main.py demo              # Demo mode (Kalshi demo + paper trading)
+    python main.py paper             # Single paper scan
+    python main.py simulate [N] [s]  # Run N scans (every s seconds), audit trail
+    python main.py audit [session]   # Review simulation results
+    python main.py live              # Live trading (real money!)
+    python main.py status            # Show bot status
+    python main.py markets           # List active markets
+    python main.py news <query>      # Test news feed
 """
 
 import sys
@@ -154,6 +156,130 @@ def cmd_markets():
     bot.close()
 
 
+def cmd_simulate(scans: int = 10, interval: int = 60):
+    """Run simulation mode — paper trades with full audit trail."""
+    from bot.runner import PredictionBot
+    from bot.simulator import Simulator
+
+    config = get_config()
+    bot = PredictionBot(config)
+
+    api_key = os.getenv("KALSHI_API_KEY_ID")
+    private_key_path = os.getenv("KALSHI_PRIVATE_KEY_PATH", "kalshi_private_key")
+    demo = os.getenv("KALSHI_USE_DEMO", "true").lower() == "true"
+
+    if not api_key:
+        print("❌ Set KALSHI_API_KEY_ID in .env")
+        return
+
+    bot.add_kalshi(api_key, private_key_path, demo=demo)
+    results = bot.connect_all()
+
+    if not any(results.values()):
+        print("❌ Connection failed")
+        return
+
+    sim = Simulator(config.get("strategy", {}))
+
+    print(f"\n🧪 Simulation Mode")
+    print(f"   Balance: ${sim.starting_balance:.2f}")
+    print(f"   Scans: {scans} (every {interval}s)")
+    print(f"   Min edge: {sim.min_edge:.2%}")
+    print(f"   Min confidence: {sim.min_confidence:.2%}")
+    print(f"\n   Running...\n")
+
+    exchange = list(bot.exchanges.values())[0]
+
+    for i in range(scans):
+        try:
+            result = sim.scan(exchange)
+            print(f"   Scan {i+1}/{scans}: {result['trades']} trades taken")
+        except Exception as e:
+            logger.error(f"Scan error: {e}")
+
+        if i < scans - 1:
+            import time
+            time.sleep(interval)
+
+    # Final report
+    sim.print_report()
+
+    # Save trades for review
+    print(f"\n📁 Session saved to: data/sim_{sim.session_id}.json")
+    print(f"   Review trades: python main.py audit {sim.session_id}")
+
+    bot.close()
+
+
+def cmd_audit(session_id: str = None):
+    """Review simulation results."""
+    from bot.simulator import Simulator
+    from pathlib import Path
+    import json
+
+    data_dir = Path("data")
+
+    if session_id:
+        session_file = data_dir / f"sim_{session_id}.json"
+        if not session_file.exists():
+            print(f"❌ Session not found: {session_file}")
+            return
+    else:
+        # Find latest session
+        sessions = sorted(data_dir.glob("sim_*.json"), reverse=True)
+        if not sessions:
+            print("❌ No simulation sessions found")
+            return
+        session_file = sessions[0]
+
+    with open(session_file) as f:
+        data = json.load(f)
+
+    report = data.get("report", {})
+
+    print(f"\n{'='*60}")
+    print(f"📊 Audit Report — {report.get('session', 'unknown')}")
+    print(f"{'='*60}")
+
+    if report.get("total_trades", 0) == 0:
+        print("No trades in this session.")
+        return
+
+    print(f"""
+Starting Balance:  ${report.get('starting_balance', 0):.2f}
+Current Balance:   ${report.get('current_balance', 0):.2f}
+P&L:               ${report.get('pnl', 0):+.2f} ({report.get('pnl_pct', 0):+.1f}%)
+
+Total Trades:      {report.get('total_trades', 0)}
+Scans Run:         {report.get('scans_run', 0)}
+
+Avg Edge:          {report.get('avg_edge', 0):.2%}
+Max Edge:          {report.get('max_edge', 0):.2%}
+Avg Confidence:    {report.get('avg_confidence', 0):.2%}
+
+Direction Breakdown:""")
+
+    for direction, count in report.get("by_direction", {}).items():
+        print(f"  {direction}: {count}")
+
+    # Show individual trades
+    trades = data.get("trades", [])
+    if trades:
+        print(f"\n{'─'*60}")
+        print("Individual Trades:")
+        print(f"{'─'*60}")
+
+        for i, t in enumerate(trades, 1):
+            print(f"\n  #{i}: {t.get('direction', '')}")
+            print(f"     Market: {t.get('question', '')[:60]}")
+            print(f"     Model: {t.get('model_probability', 0):.2%} vs Market: ${t.get('market_price', 0):.2f}")
+            print(f"     Edge: {t.get('edge', 0):.2%} | Conf: {t.get('confidence', 0):.2%}")
+            print(f"     Size: ${t.get('position_size', 0):.2f}")
+            print(f"     Signals: {t.get('signals', {})}")
+
+    print(f"\n{'='*60}\n")
+
+
 def cmd_news(query: str = None):
     """Test news feed."""
     from bot.feeds.news import NewsFeed
@@ -190,6 +316,13 @@ def main():
         cmd_live(interval)
     elif cmd == "markets":
         cmd_markets()
+    elif cmd == "simulate":
+        scans = int(sys.argv[2]) if len(sys.argv) > 2 else 10
+        interval = int(sys.argv[3]) if len(sys.argv) > 3 else 30
+        cmd_simulate(scans, interval)
+    elif cmd == "audit":
+        session_id = sys.argv[2] if len(sys.argv) > 2 else None
+        cmd_audit(session_id)
     elif cmd == "news":
         query = " ".join(sys.argv[2:]) if len(sys.argv) > 2 else None
         cmd_news(query)
