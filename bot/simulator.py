@@ -98,10 +98,23 @@ class Simulator:
         if not markets:
             return {"markets": 0, "signals": 0, "trades": 0}
 
-        # Write snapshot for Ghost to analyze (every 5th scan)
+        # Write snapshot and run AI analysis (every 5th scan)
         if self.scan_count % 5 == 0:
             from bot.feeds.ai_signal import write_snapshot
             write_snapshot(markets, self.session_id)
+
+            # Run AI analyzer as subprocess (Ghost's analysis)
+            import subprocess
+            try:
+                subprocess.Popen(
+                    ["python3", "-m", "bot.ai_analyzer"],
+                    cwd=str(Path(__file__).parent.parent),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                logger.info("🤖 AI analyzer spawned (subprocess)")
+            except Exception as e:
+                logger.debug(f"Failed to spawn AI analyzer: {e}")
 
         logger.info(f"Analyzing {len(markets)} markets...")
 
