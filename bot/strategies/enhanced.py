@@ -1,4 +1,4 @@
-"""Enhanced strategy engine — combines multiple signals with news sentiment."""
+"""Enhanced strategy engine — combines multiple signals with news + social sentiment."""
 
 import logging
 import math
@@ -6,6 +6,7 @@ from typing import Optional
 from datetime import datetime, timezone, timedelta
 
 from bot.feeds.news import NewsFeed
+from bot.feeds.twitter import SocialFeed
 
 logger = logging.getLogger(__name__)
 
@@ -17,9 +18,9 @@ class EnhancedStrategyEngine:
     Signals:
     1. Price mispricing (market price vs model probability)
     2. News sentiment (reactive trading on breaking news)
-    3. Volume analysis (unusual volume = informed trading)
-    4. Time decay (markets resolving soon have clearer signals)
-    5. Cross-market signals (same question on multiple exchanges)
+    3. Social media sentiment (Twitter/X via web search)
+    4. Volume analysis (unusual volume = informed trading)
+    5. Time decay (markets resolving soon have clearer signals)
     """
 
     def __init__(self, config: dict = None):
@@ -27,11 +28,15 @@ class EnhancedStrategyEngine:
         self.min_edge = config.get("min_edge", 0.05)
         self.min_confidence = config.get("min_confidence", 0.50)
         self.max_position_pct = config.get("max_position_pct", 0.10)
-        self.news_weight = config.get("news_weight", 0.30)
+        self.news_weight = config.get("news_weight", 0.20)
+        self.social_weight = config.get("social_weight", 0.15)
         self.enable_news = config.get("enable_news", True)
+        self.enable_social = config.get("enable_social", True)
 
         if self.enable_news:
             self.news = NewsFeed()
+        if self.enable_social:
+            self.social = SocialFeed(config)
 
     def analyze_market(self, market, order_book: dict = None) -> Optional[dict]:
         """
@@ -59,17 +64,24 @@ class EnhancedStrategyEngine:
                 signals["news"] = news_signal
                 weights["news"] = self.news_weight
 
-        # 3. Volume signal
+        # 3. Social media signal
+        if self.enable_social:
+            social_signal = self._social_signal(market)
+            if social_signal:
+                signals["social"] = social_signal
+                weights["social"] = self.social_weight
+
+        # 4. Volume signal
         volume_signal = self._volume_signal(market)
         if volume_signal:
             signals["volume"] = volume_signal
             weights["volume"] = 0.15
 
-        # 4. Time decay signal
+        # 5. Time decay signal
         time_signal = self._time_signal(market)
         if time_signal:
             signals["time"] = time_signal
-            weights["time"] = 0.15
+            weights["time"] = 0.10
 
         if not signals:
             return None
@@ -193,6 +205,24 @@ class EnhancedStrategyEngine:
             }
         except Exception as e:
             logger.debug(f"News signal error: {e}")
+            return None
+
+    def _social_signal(self, market) -> Optional[dict]:
+        """Analyze social media sentiment for the market."""
+        try:
+            signal = self.social.get_market_sentiment(market.question)
+            if not signal or signal.mention_count == 0:
+                return None
+
+            # Convert social sentiment to probability shift
+            predicted = market.yes_price + signal.predicted_prob_adjustment
+
+            return {
+                "predicted_prob": max(0.01, min(0.99, predicted)),
+                "confidence": signal.confidence,
+            }
+        except Exception as e:
+            logger.debug(f"Social signal error: {e}")
             return None
 
     def _volume_signal(self, market) -> Optional[dict]:
