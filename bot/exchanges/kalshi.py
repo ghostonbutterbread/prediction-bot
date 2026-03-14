@@ -6,6 +6,7 @@ from typing import Optional
 from datetime import datetime, timezone
 
 from kalshi_python_sync import Configuration, KalshiClient
+from kalshi_python_sync.auth import KalshiAuth
 
 from .base import BaseExchange, Market, Order, Position
 
@@ -18,7 +19,7 @@ KALSHI_PROD = "https://api.elections.kalshi.com/trade-api/v2"
 class KalshiExchange(BaseExchange):
     name = "kalshi"
 
-    def __init__(self, api_key_id: str, private_key_path: str, demo: bool = True):
+    def __init__(self, api_key_id: str, private_key_path: str, demo: bool = False):
         self.api_key_id = api_key_id
         self.private_key_path = private_key_path
         self.host = KALSHI_DEMO if demo else KALSHI_PROD
@@ -27,17 +28,15 @@ class KalshiExchange(BaseExchange):
     def connect(self) -> bool:
         try:
             with open(self.private_key_path, "r") as f:
-                private_key = f.read()
+                private_key_pem = f.read()
 
             config = Configuration(host=self.host)
-            config.api_key_id = self.api_key_id
-            config.private_key_pem = private_key
-
             self.client = KalshiClient(config)
+            self.client.kalshi_auth = KalshiAuth(self.api_key_id, private_key_pem)
 
             # Test connection
             balance = self.client.get_balance()
-            bal = balance.balance / 100 if hasattr(balance, 'balance') else 0
+            bal = (balance.balance or 0) / 100
             logger.info(f"Kalshi connected! Balance: ${bal:.2f}")
             return True
 
@@ -47,22 +46,32 @@ class KalshiExchange(BaseExchange):
 
     def get_markets(self, limit: int = 50, category: str = None) -> list[Market]:
         try:
-            params = {"status": "open", "limit": limit}
-            if category:
-                params["category"] = category
-
-            resp = self.client.get_events(limit=limit)
-            events = resp.events if hasattr(resp, 'events') else []
+            # Get events first, then fetch markets per event (gets better binary markets)
+            events_resp = self.client.get_events(limit=20, status="open")
+            events = getattr(events_resp, 'events', []) or []
 
             markets = []
             for event in events:
-                if not hasattr(event, 'markets'):
+                if len(markets) >= limit:
+                    break
+
+                event_ticker = getattr(event, 'event_ticker', '')
+                if not event_ticker:
                     continue
 
-                for m in event.markets:
-                    yes_price = getattr(m, 'yes_price', 0) / 100 if hasattr(m, 'yes_price') else 0
-                    no_price = getattr(m, 'no_price', 0) / 100 if hasattr(m, 'no_price') else 0
-                    volume = getattr(m, 'volume', 0) or 0
+                try:
+                    mresp = self.client.get_markets(event_ticker=event_ticker, limit=5)
+                    raw_markets = getattr(mresp, 'markets', []) or []
+                except Exception:
+                    continue
+
+                for m in raw_markets:
+                    yes_price = _dollars(m, 'yes_ask_dollars')
+                    no_price = _dollars(m, 'no_ask_dollars')
+
+                    # Skip markets with no valid prices
+                    if yes_price <= 0 or yes_price >= 1:
+                        continue
 
                     market = Market(
                         id=getattr(m, 'ticker', ''),
@@ -70,41 +79,44 @@ class KalshiExchange(BaseExchange):
                         question=getattr(m, 'title', ''),
                         yes_price=yes_price,
                         no_price=no_price,
-                        volume=volume,
-                        liquidity=getattr(m, 'liquidity', 0) or 0,
-                        closes_at=self._parse_time(getattr(m, 'close_time', None)),
+                        volume=_fp(m, 'volume_fp'),
+                        liquidity=_dollars(m, 'liquidity_dollars'),
+                        closes_at=_parse_dt(getattr(m, 'close_time', None)),
                         category=getattr(event, 'category', 'other'),
                         metadata={
-                            "event_ticker": getattr(event, 'ticker', ''),
+                            "event_ticker": event_ticker,
                             "status": getattr(m, 'status', ''),
                         }
                     )
                     markets.append(market)
 
+                    if len(markets) >= limit:
+                        break
+
             logger.info(f"Fetched {len(markets)} Kalshi markets")
             return markets[:limit]
 
         except Exception as e:
-            logger.error(f"Error fetching Kalshi markets: {e}")
+            logger.error(f"Error fetching markets: {e}")
             return []
 
     def get_market(self, market_id: str) -> Optional[Market]:
         try:
             resp = self.client.get_market(market_ticker=market_id)
-            if not hasattr(resp, 'market'):
+            m = getattr(resp, 'market', None)
+            if not m:
                 return None
 
-            m = resp.market
             return Market(
                 id=getattr(m, 'ticker', ''),
                 exchange="kalshi",
                 question=getattr(m, 'title', ''),
-                yes_price=(getattr(m, 'yes_price', 0) or 0) / 100,
-                no_price=(getattr(m, 'no_price', 0) or 0) / 100,
-                volume=getattr(m, 'volume', 0) or 0,
-                liquidity=getattr(m, 'liquidity', 0) or 0,
-                closes_at=self._parse_time(getattr(m, 'close_time', None)),
-                category='',
+                yes_price=_dollars(m, 'yes_ask_dollars'),
+                no_price=_dollars(m, 'no_ask_dollars'),
+                volume=_fp(m, 'volume_fp'),
+                liquidity=_dollars(m, 'liquidity_dollars'),
+                closes_at=_parse_dt(getattr(m, 'close_time', None)),
+                category=getattr(m, 'market_type', 'binary'),
                 metadata={"status": getattr(m, 'status', '')}
             )
         except Exception as e:
@@ -113,11 +125,11 @@ class KalshiExchange(BaseExchange):
 
     def get_order_book(self, market_id: str) -> Optional[dict]:
         try:
-            resp = self.client.get_market_order_book(market_ticker=market_id)
-            if not hasattr(resp, 'order_book'):
+            resp = self.client.get_market_order_book(market_ticker=market_id, depth=10)
+            book = getattr(resp, 'order_book', None)
+            if not book:
                 return None
 
-            book = resp.order_book
             yes_bids = getattr(book, 'yes', []) or []
             no_bids = getattr(book, 'no', []) or []
 
@@ -139,23 +151,28 @@ class KalshiExchange(BaseExchange):
     def place_order(self, market_id: str, side: str, price: float,
                     size: float) -> Optional[Order]:
         try:
-            # Kalshi prices are in cents (0-100)
             price_cents = int(price * 100)
             action = "buy"
-            side_map = {"YES": "yes", "NO": "no"}
+            count = max(1, int(size))
 
-            resp = self.client.create_order(
-                ticker=market_id,
-                client_order_id=f"bot_{datetime.now().timestamp()}",
-                action=action,
-                side=side_map.get(side, "yes"),
-                count=int(size),
-                type_="limit",
-                yes_price=price_cents if side == "YES" else None,
-                no_price=price_cents if side == "NO" else None,
-            )
+            kwargs = {
+                "ticker": market_id,
+                "client_order_id": f"bot_{datetime.now().timestamp()}",
+                "action": action,
+                "count": count,
+                "type": "limit",
+            }
 
-            order_id = getattr(resp, 'order', {}).get('order_id', '') if hasattr(resp, 'order') else ''
+            if side == "YES":
+                kwargs["side"] = "yes"
+                kwargs["yes_price"] = price_cents
+            else:
+                kwargs["side"] = "no"
+                kwargs["no_price"] = price_cents
+
+            resp = self.client.create_order(**kwargs)
+            order_data = getattr(resp, 'order', None)
+            order_id = getattr(order_data, 'order_id', '') if order_data else ''
 
             order = Order(
                 id=order_id,
@@ -163,15 +180,15 @@ class KalshiExchange(BaseExchange):
                 market_id=market_id,
                 side=side,
                 price=price,
-                size=size,
+                size=count,
                 status="submitted",
                 created_at=datetime.now(timezone.utc),
             )
-            logger.info(f"Kalshi order: {side} {size} @ ${price:.2f} on {market_id}")
+            logger.info(f"Kalshi order: {side} {count} @ ${price:.2f} on {market_id}")
             return order
 
         except Exception as e:
-            logger.error(f"Kalshi order failed: {e}")
+            logger.error(f"Order failed: {e}")
             return None
 
     def cancel_order(self, order_id: str) -> bool:
@@ -186,18 +203,18 @@ class KalshiExchange(BaseExchange):
         try:
             resp = self.client.get_positions()
             positions = getattr(resp, 'positions', []) or []
-
             result = []
             for p in positions:
+                pos = getattr(p, 'position', 0) or 0
                 result.append(Position(
                     market_id=getattr(p, 'ticker', ''),
                     exchange="kalshi",
                     question=getattr(p, 'title', ''),
-                    side="YES" if getattr(p, 'position', 0) > 0 else "NO",
+                    side="YES" if pos > 0 else "NO",
                     entry_price=0,
-                    size=abs(getattr(p, 'position', 0)),
+                    size=abs(pos),
                     current_price=0,
-                    pnl=getattr(p, 'realized_pnl', 0) or 0,
+                    pnl=(getattr(p, 'realized_pnl', 0) or 0) / 100,
                     opened_at=datetime.now(timezone.utc),
                 ))
             return result
@@ -208,7 +225,7 @@ class KalshiExchange(BaseExchange):
     def get_balance(self) -> float:
         try:
             resp = self.client.get_balance()
-            return (resp.balance or 0) / 100
+            return (getattr(resp, 'balance', 0) or 0) / 100
         except Exception as e:
             logger.error(f"Error getting balance: {e}")
             return 0
@@ -216,12 +233,26 @@ class KalshiExchange(BaseExchange):
     def close(self):
         pass
 
-    def _parse_time(self, ts) -> Optional[datetime]:
-        if ts is None:
-            return None
-        if isinstance(ts, datetime):
-            return ts
-        try:
-            return datetime.fromtimestamp(int(ts), tz=timezone.utc)
-        except (ValueError, TypeError):
-            return None
+
+def _dollars(obj, attr: str) -> float:
+    """Extract dollar value from SDK object."""
+    val = getattr(obj, attr, None)
+    return round(float(val), 4) if val is not None else 0.0
+
+
+def _fp(obj, attr: str) -> float:
+    """Extract fixed-point value from SDK object."""
+    val = getattr(obj, attr, None)
+    return round(float(val), 2) if val is not None else 0.0
+
+
+def _parse_dt(dt) -> Optional[datetime]:
+    """Parse datetime from SDK."""
+    if dt is None:
+        return None
+    if isinstance(dt, datetime):
+        return dt
+    try:
+        return datetime.fromtimestamp(int(dt), tz=timezone.utc)
+    except (ValueError, TypeError):
+        return None
