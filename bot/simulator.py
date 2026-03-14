@@ -114,15 +114,25 @@ class Simulator:
                     "spread_pct": (0.01 / market.yes_price * 100) if market.yes_price > 0 else 10,
                 }
 
-                signal = self.strategy.analyze_market(market, order_book)
+                try:
+                    signal = self.strategy.analyze_market(market, order_book)
+                except Exception as e:
+                    logger.debug(f"Strategy error for {market.id}: {e}")
+                    continue
+
+                if signal is None:
+                    continue
 
                 if signal:
                     signal["market_id"] = market.id
                     signal["question"] = market.question
                     signals_found.append(signal)
 
-                    # Would we trade this?
-                    if self._should_trade(signal):
+                    should_trade = self._should_trade(signal)
+                    # DEBUG: log every signal
+                    logger.info(f"  Signal: {signal.get('direction','')} edge={signal.get('edge',0):.3f} conf={signal.get('confidence',0):.3f} -> {should_trade}")
+
+                    if should_trade:
                         trade = self._create_trade(signal)
                         self.trades.append(trade)
                         trades_taken.append(trade)

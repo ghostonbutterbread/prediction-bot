@@ -179,7 +179,7 @@ def cmd_simulate(scans: int = 10, interval: int = 60):
         print("❌ Connection failed")
         return
 
-    sim = Simulator(config.get("strategy", {}))
+    sim = Simulator(config)
 
     print(f"\n🧪 Simulation Mode")
     print(f"   Balance: ${sim.starting_balance:.2f}")
