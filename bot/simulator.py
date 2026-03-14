@@ -72,8 +72,10 @@ class Simulator:
 
         self.starting_balance = config.get("starting_balance", 100.0)
         self.balance = self.starting_balance
-        self.min_edge = config.get("min_edge", 0.05)
-        self.min_confidence = config.get("min_confidence", 0.50)
+        strategy_cfg = config.get("strategy", {})
+        # Also check top-level config for env var overrides
+        self.min_edge = config.get("min_edge", strategy_cfg.get("min_edge", 0.01))
+        self.min_confidence = config.get("min_confidence", strategy_cfg.get("min_confidence", 0.50))
 
         # Storage
         self.data_dir = Path(config.get("data_dir", "data"))
@@ -160,11 +162,20 @@ class Simulator:
         )
 
     def _create_trade(self, signal: dict) -> SimTrade:
-        size = self.kelly.calculate(
-            signal.get("model_probability", 0.5),
-            signal.get("market_price", 0.5),
-            self.balance,
-        )
+        model_prob = signal.get("model_probability", 0.5)
+        market_price = signal.get("market_price", 0.5)
+        direction = signal.get("direction", "BUY_YES")
+
+        # Kelly needs probability of the BET winning, not YES probability
+        if direction == "BUY_NO":
+            # Betting on NO: winning prob = 1 - model_yes, price = 1 - market_yes
+            kelly_prob = 1 - model_prob
+            kelly_price = 1 - market_price
+        else:
+            kelly_prob = model_prob
+            kelly_price = market_price
+
+        size = self.kelly.calculate(kelly_prob, kelly_price, self.balance)
 
         trade = SimTrade(
             id=f"sim_{self.session_id}_{len(self.trades)+1:04d}",
