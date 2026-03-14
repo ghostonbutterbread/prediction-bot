@@ -98,6 +98,11 @@ class Simulator:
         if not markets:
             return {"markets": 0, "signals": 0, "trades": 0}
 
+        # Write snapshot for Ghost to analyze (every 5th scan)
+        if self.scan_count % 5 == 0:
+            from bot.feeds.ai_signal import write_snapshot
+            write_snapshot(markets, self.session_id)
+
         logger.info(f"Analyzing {len(markets)} markets...")
 
         signals_found = []
