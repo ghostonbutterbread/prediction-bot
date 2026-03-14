@@ -1,0 +1,6 @@
+httpx==0.28.1
+kalshi_python_sync==3.9.0
+pydantic==2.12.5
+pydantic_core==2.41.5
+python-dotenv==1.2.2
+pyyaml>=6.0
