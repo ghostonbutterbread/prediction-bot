@@ -7,6 +7,7 @@ Usage:
     python main.py paper             # Single paper scan
     python main.py simulate [N] [s]  # Run N scans (every s seconds), audit trail
     python main.py audit [session]   # Review simulation results
+    python main.py backtest [n] [m]  # Backtest on n markets
     python main.py live              # Live trading (real money!)
     python main.py status            # Show bot status
     python main.py markets           # List active markets
@@ -17,6 +18,9 @@ import sys
 import os
 import logging
 import json
+from dataclasses import asdict
+from datetime import datetime
+from pathlib import Path
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -282,6 +286,43 @@ Direction Breakdown:""")
     print(f"\n{'='*60}\n")
 
 
+def cmd_backtest(days: int = 7, limit: int = 30):
+    """Run backtest against current markets."""
+    from bot.backtest import Backtester
+
+    config = get_config()
+    api_key = os.getenv("KALSHI_API_KEY_ID")
+    private_key_path = os.getenv("KALSHI_PRIVATE_KEY_PATH", "kalshi_private_key")
+    demo = os.getenv("KALSHI_USE_DEMO", "true").lower() == "true"
+
+    if not api_key:
+        print("❌ Set KALSHI_API_KEY_ID in .env")
+        return
+
+    from bot.exchanges.kalshi import KalshiExchange
+    exchange = KalshiExchange(api_key, private_key_path, demo=demo)
+
+    if not exchange.connect():
+        print("❌ Connection failed")
+        return
+
+    bt = Backtester(config)
+    print(f"📊 Running backtest on {limit} markets...")
+    markets = exchange.get_markets(limit=limit)
+    result = bt.run(markets)
+    bt.print_report(result)
+
+    # Save results
+    data_dir = Path("data")
+    data_dir.mkdir(exist_ok=True)
+    result_file = data_dir / f"backtest_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    with open(result_file, "w") as f:
+        json.dump(asdict(result), f, indent=2)
+    print(f"📁 Results saved to: {result_file}")
+
+    exchange.close()
+
+
 def cmd_news(query: str = None):
     """Test news feed."""
     from bot.feeds.news import NewsFeed
@@ -325,6 +366,10 @@ def main():
     elif cmd == "audit":
         session_id = sys.argv[2] if len(sys.argv) > 2 else None
         cmd_audit(session_id)
+    elif cmd == "backtest":
+        days = int(sys.argv[2]) if len(sys.argv) > 2 else 7
+        limit = int(sys.argv[3]) if len(sys.argv) > 3 else 30
+        cmd_backtest(days, limit)
     elif cmd == "news":
         query = " ".join(sys.argv[2:]) if len(sys.argv) > 2 else None
         cmd_news(query)
