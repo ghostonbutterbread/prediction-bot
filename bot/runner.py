@@ -173,9 +173,12 @@ class PredictionBot:
 
     def _should_execute(self, signal: dict) -> bool:
         """Check if signal meets execution criteria."""
+        strategy_cfg = self.config.get("strategy", {})
+        min_conf = strategy_cfg.get("min_confidence", self.config.get("min_confidence", 0.50))
+        min_edge = strategy_cfg.get("min_edge", self.config.get("min_edge", 0.02))
         return (
-            signal["confidence"] >= self.config.get("min_confidence", 0.50) and
-            signal["edge"] >= self.config.get("min_edge", 0.05)
+            signal["confidence"] >= min_conf and
+            signal["edge"] >= min_edge
         )
 
     def _execute_signal(self, signal: dict) -> Optional[dict]:
