@@ -191,6 +191,14 @@ def cmd_simulate(scans: int = 10, interval: int = 60):
     
     # Sports mode is always enabled (quick-resolution markets)
     logger.info("🏀 Sports mode enabled — quick-resolution markets filtered")
+    
+    # Set up social feed scraper (if enabled)
+    # if config.get("enable_social", True) == True:
+    #     from bot.feeds.twitter import SocialFeed
+    #     social_feed = SocialFeed(config)
+    #     logger.info("🐦 Social feed enabled")
+    # else:
+    #     social_feed = None
 
     print(f"\n🧪 Simulation Mode")
     print(f"   Balance: ${sim.starting_balance:.2f}")
