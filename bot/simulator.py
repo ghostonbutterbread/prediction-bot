@@ -102,13 +102,17 @@ class Simulator:
         if not markets:
             return {"markets": 0, "signals": 0, "trades": 0}
         
-        # === SPORTS MODE: Also analyze quick-resolution sports markets ===
+        # === SPORTS MODE: Analyze sports markets + injury sniper ===
         sports_trades = []
         try:
             from bot.strategies.sports import MarketFilter, QuickBetStrategy
+            from bot.strategies.injury_sniper import InjurySniper
+            
             sports_markets = MarketFilter.filter_sports(markets, max_hours=48)
             if sports_markets:
                 logger.info(f"🏀 Found {len(sports_markets)} sports markets (closing within 48h)")
+                
+                # 1. Quick bet strategy (player props, totals, outcomes)
                 qb = QuickBetStrategy()
                 for sm in sports_markets:
                     sig = qb.analyze_market(sm)
@@ -117,6 +121,15 @@ class Simulator:
                         if trade:
                             self.trades.append(trade)
                             sports_trades.append(trade)
+                
+                # 2. Injury sniper (star player injuries → bet against team)
+                sniper = InjurySniper()
+                injury_signals = sniper.scan_markets_for_injuries(markets)
+                for sig in injury_signals:
+                    trade = self._create_trade(sig)
+                    if trade:
+                        self.trades.append(trade)
+                        sports_trades.append(trade)
         except Exception as e:
             logger.debug(f"Sports analysis error: {e}")
 
