@@ -68,13 +68,15 @@ class RiskState:
 
     @property
     def daily_pnl_pct(self) -> float:
-        return (self.daily_pnl / self.starting_balance) * 100 if self.starting_balance > 0 else 0
+        pnl = self.daily_pnl or 0
+        bal = self.starting_balance or 100
+        return (pnl / bal) * 100 if bal > 0 else 0
 
     @property
     def win_rate(self) -> float:
         if not self.trade_history:
             return 0
-        wins = sum(1 for t in self.trade_history if t.get("pnl", 0) > 0)
+        wins = sum(1 for t in self.trade_history if (t.get("pnl") or 0) > 0)
         return wins / len(self.trade_history)
 
     @property
@@ -277,7 +279,7 @@ class RiskManager:
             "size": trade.get("position_size", 0),
             "market_price": trade.get("market_price", 0),
             "resolved": False,
-            "pnl": None,
+            "pnl": 0,
         })
         self.state.open_positions += 1
         self.state.total_exposure += trade.get("position_size", 0)
