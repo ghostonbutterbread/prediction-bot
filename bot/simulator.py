@@ -70,6 +70,10 @@ class Simulator:
             max_bet_pct=config.get("max_position_pct", 0.10),
         )
 
+        # Risk management
+        from bot.risk import RiskManager
+        self.risk = RiskManager(config)
+
         self.starting_balance = config.get("starting_balance", 100.0)
         self.balance = self.starting_balance
         strategy_cfg = config.get("strategy", {})
@@ -173,6 +177,14 @@ class Simulator:
         else:
             logger.info(f"  No trades this scan ({len(signals_found)} signals, none met thresholds)")
 
+        # Log risk status
+        status = self.risk.get_status()
+        logger.info(
+            f"📊 Risk: balance={status['balance']} pnl={status['pnl']} "
+            f"drawdown={status['drawdown']} positions={status['open_positions']} "
+            f"streak={self.risk.state.consecutive_losses}L/{self.risk.state.consecutive_wins}W"
+        )
+
         self._save_session()
 
         return {
@@ -189,14 +201,13 @@ class Simulator:
             signal.get("confidence", 0) >= self.min_confidence
         )
 
-    def _create_trade(self, signal: dict) -> SimTrade:
+    def _create_trade(self, signal: dict) -> Optional[SimTrade]:
         model_prob = signal.get("model_probability", 0.5)
         market_price = signal.get("market_price", 0.5)
         direction = signal.get("direction", "BUY_YES")
 
         # Kelly needs probability of the BET winning, not YES probability
         if direction == "BUY_NO":
-            # Betting on NO: winning prob = 1 - model_yes, price = 1 - market_yes
             kelly_prob = 1 - model_prob
             kelly_price = 1 - market_price
         else:
@@ -204,6 +215,20 @@ class Simulator:
             kelly_price = market_price
 
         size = self.kelly.calculate(kelly_prob, kelly_price, self.balance)
+
+        # === Risk Management Check ===
+        risk_decision = self.risk.check_trade(signal, size)
+
+        if not risk_decision.approved:
+            logger.debug(f"🛑 Risk rejected: {risk_decision.reason}")
+            return None
+
+        if risk_decision.warnings:
+            for w in risk_decision.warnings:
+                logger.debug(f"⚠️  {w}")
+
+        # Use risk-adjusted size
+        size = risk_decision.adjusted_size
 
         trade = SimTrade(
             id=f"sim_{self.session_id}_{len(self.trades)+1:04d}",
@@ -219,6 +244,15 @@ class Simulator:
             position_size=round(size, 2),
             signals=signal.get("signals", {}),
         )
+
+        # Record with risk manager
+        self.risk.record_trade({
+            "question": trade.question,
+            "direction": trade.direction,
+            "position_size": trade.position_size,
+            "market_price": trade.market_price,
+        })
+
         return trade
 
     def report(self) -> dict:
