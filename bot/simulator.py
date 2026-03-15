@@ -101,6 +101,24 @@ class Simulator:
         markets = exchange.get_markets(limit=30)
         if not markets:
             return {"markets": 0, "signals": 0, "trades": 0}
+        
+        # === SPORTS MODE: Also analyze quick-resolution sports markets ===
+        sports_trades = []
+        try:
+            from bot.strategies.sports import MarketFilter, QuickBetStrategy
+            sports_markets = MarketFilter.filter_sports(markets, max_hours=48)
+            if sports_markets:
+                logger.info(f"🏀 Found {len(sports_markets)} sports markets (closing within 48h)")
+                qb = QuickBetStrategy()
+                for sm in sports_markets:
+                    sig = qb.analyze_market(sm)
+                    if sig.get("should_trade"):
+                        trade = self._create_trade(sig)
+                        if trade:
+                            self.trades.append(trade)
+                            sports_trades.append(trade)
+        except Exception as e:
+            logger.debug(f"Sports analysis error: {e}")
 
         # Write snapshot and run AI analysis (every 5th scan)
         if self.scan_count % 5 == 0:

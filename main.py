@@ -188,6 +188,11 @@ def cmd_simulate(scans: int = 10, interval: int = 60):
         return
 
     sim = Simulator(config)
+    
+    # If sports mode enabled, use sports strategy
+    if args.sports:
+        from bot.strategies.sports import QuickBetStrategy, MarketFilter
+        logger.info("🏀 Sports mode enabled — quick-resolution markets only")
 
     print(f"\n🧪 Simulation Mode")
     print(f"   Balance: ${sim.starting_balance:.2f}")
