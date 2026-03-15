@@ -87,6 +87,7 @@ class Simulator:
 
         self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.trades: list[SimTrade] = []
+        self.traded_markets: set = set()  # Prevent duplicate trades on same market
         self.scan_count = 0
 
         logger.info(f"Simulator started — session {self.session_id}")
@@ -115,21 +116,28 @@ class Simulator:
                 # 1. Quick bet strategy (player props, totals, outcomes)
                 qb = QuickBetStrategy()
                 for sm in sports_markets:
+                    if sm.market_id in self.traded_markets:
+                        continue
                     sig = qb.analyze_market(sm)
                     if sig.get("should_trade"):
                         trade = self._create_trade(sig)
                         if trade:
                             self.trades.append(trade)
                             sports_trades.append(trade)
+                            self.traded_markets.add(sm.market_id)
                 
                 # 2. Injury sniper (star player injuries → bet against team)
                 sniper = InjurySniper()
                 injury_signals = sniper.scan_markets_for_injuries(markets)
                 for sig in injury_signals:
+                    mid = sig.get("market_id", "")
+                    if mid in self.traded_markets:
+                        continue
                     trade = self._create_trade(sig)
                     if trade:
                         self.trades.append(trade)
                         sports_trades.append(trade)
+                        self.traded_markets.add(mid)
         except Exception as e:
             logger.debug(f"Sports analysis error: {e}")
 
@@ -186,10 +194,16 @@ class Simulator:
                     logger.info(f"  Signal: {signal.get('direction','')} edge={signal.get('edge',0):.3f} conf={signal.get('confidence',0):.3f} -> {should_trade}")
 
                     if should_trade:
+                        # Dedup: skip if we already traded this market
+                        market_id = signal.get("market_id", "")
+                        if market_id in self.traded_markets:
+                            logger.debug(f"  Skipping duplicate: {market_id}")
+                            continue
                         trade = self._create_trade(signal)
                         if trade:
                             self.trades.append(trade)
                             trades_taken.append(trade)
+                            self.traded_markets.add(market_id)
 
             except Exception as e:
                 logger.debug(f"Error analyzing {market.id}: {e}")
