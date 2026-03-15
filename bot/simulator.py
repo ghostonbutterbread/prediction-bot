@@ -292,11 +292,6 @@ class Simulator:
             f"streak={self.risk.state.consecutive_losses}L/{self.risk.state.consecutive_wins}W "
             f"Rolling Win Rate = {self.rolling_win_rate:.1f}%"
         )
-        logger.info(
-            f"📊 Risk: balance={status['balance']} pnl={status['pnl']} "
-            f"drawdown={status['drawdown']} positions={status['open_positions']} "
-            f"streak={self.risk.state.consecutive_losses}L/{self.risk.state.consecutive_wins}W"
-        )
 
         self._save_session()
 
