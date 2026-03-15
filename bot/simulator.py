@@ -156,8 +156,9 @@ class Simulator:
 
                     if should_trade:
                         trade = self._create_trade(signal)
-                        self.trades.append(trade)
-                        trades_taken.append(trade)
+                        if trade:
+                            self.trades.append(trade)
+                            trades_taken.append(trade)
 
             except Exception as e:
                 logger.debug(f"Error analyzing {market.id}: {e}")
