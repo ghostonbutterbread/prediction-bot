@@ -7,20 +7,6 @@ from pathlib import Path
 from dataclasses import dataclass, asdict
 from typing import Optional
 
-        self.scan_count = 0
-        self.trades = []
-        self.traded_markets: set = set()  # Prevent duplicate trades on same market
-        self.data_dir = Path(config.get("data_dir", "data"))
-        self.data_dir.mkdir(exist_ok=True)
-
-        # Social Feed
-        if config.get("enable_social", True) == True:
-            from bot.feeds.twitter import SocialFeed
-            self.social_feed = SocialFeed(config)
-            logger.info("🐦 Social feed enabled")
-        else:
-            self.social_feed = None
-
 from bot.strategies.enhanced import EnhancedStrategyEngine, KellySizer
 
 logger = logging.getLogger(__name__)
@@ -100,6 +86,16 @@ class Simulator:
 
         self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.trades: list[SimTrade] = []
+        self.scan_count = 0
+        self.traded_markets: set = set()  # Prevent duplicate trades on same market
+
+        # Social Feed
+        if config.get("enable_social", True) == True:
+            from bot.feeds.twitter import SocialFeed
+            self.social_feed = SocialFeed(config)
+            logger.info("🐦 Social feed enabled")
+        else:
+            self.social_feed = None
         self.traded_markets: set = set()  # Prevent duplicate trades on same market
         self.scan_count = 0
 
@@ -160,16 +156,6 @@ class Simulator:
             write_snapshot(markets, self.session_id)
 
             # Run AI analyzer as subprocess (Ghost's analysis)
-            import subprocess
-            try:
-                subprocess.Popen(
-                    ["python3", "-m", "bot.ai_analyzer"],
-                    cwd=str(Path(__file__).parent.parent),
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-                logger.info("🤖 AI analyzer spawned (subprocess)")
-        # Run AI analyzer as subprocess (Ghost's analysis)
             import subprocess
             try:
                 subprocess.Popen(
