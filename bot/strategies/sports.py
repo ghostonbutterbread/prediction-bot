@@ -186,6 +186,31 @@ class QuickBetStrategy:
             signal["confidence"] >= self.MIN_CONFIDENCE
         )
         
+from bot.strategies.injury_sniper import InjuryImpactAnalyzer, Player, InjuryAlert #Add imports
+
+
+          
+        
+        # === Injury News Scanning ===
+        try:
+            from bot.feeds.twitter import SocialFeed
+            # Get all the matches and search them here.  
+            feed = SocialFeed()
+            tweets = feed.get_tweets(market.title) # get the tweets for a specific market.
+            if tweets:
+                from bot.strategies.injury_sniper import InjuryDetector
+                for tweet in tweets:
+                    # Parse them and return the individual tweets here to a dictionary!
+                    alert = InjuryDetector.parse((tweet.get("text", "")))
+                    if alert:
+                        from bot.strategies.injury_sniper import InjuryImpactAnalyzer
+                        injury_signal = InjuryImpactAnalyzer.analyze(alert)
+                        if injury_signal:
+                             return injury_signal
+            
+        except Exception as e:
+            logger.warning(f"Error with Injury analysis: {e}")
+
         return signal
     
     def _analyze_total(self, market: SportsMarket) -> dict:
