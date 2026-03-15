@@ -119,17 +119,19 @@ class RiskManager:
     def __init__(self, config: dict = None):
         config = config or {}
 
-        # Risk limits
-        self.daily_loss_limit_pct = config.get("daily_loss_limit_pct", 20.0)
-        self.max_drawdown_pct = config.get("max_drawdown_pct", 50.0)
-        self.max_open_positions = config.get("max_open_positions", 10)
-        self.max_correlated = config.get("max_correlated", 3)
-        self.cooldown_after_losses = config.get("cooldown_after_losses", 3)
-        self.cooldown_scans = config.get("cooldown_scans", 2)
+        # Risk limits — AGGRESSIVE mode for small capital
+        # Trade-off: more risk = faster growth potential = faster loss potential
+        # With $10-100, we need concentrated bets to grow, not index-fund diversification
+        self.daily_loss_limit_pct = config.get("daily_loss_limit_pct", 35.0)  # Was 20%
+        self.max_drawdown_pct = config.get("max_drawdown_pct", 60.0)          # Was 50%
+        self.max_open_positions = config.get("max_open_positions", 15)        # Was 10
+        self.max_correlated = config.get("max_correlated", 5)                 # Was 3
+        self.cooldown_after_losses = config.get("cooldown_after_losses", 4)   # Was 3
+        self.cooldown_scans = config.get("cooldown_scans", 1)                 # Was 2 (shorter cooldown)
 
-        # Scaling thresholds
-        self.stress_threshold = config.get("stress_threshold", 0.7)  # 70% of loss limit
-        self.stress_reduction = config.get("stress_reduction", 0.5)  # Halve positions when stressed
+        # Scaling thresholds — more lenient
+        self.stress_threshold = config.get("stress_threshold", 0.8)   # 80% of loss limit (was 70%)
+        self.stress_reduction = config.get("stress_reduction", 0.3)   # 30% reduction (was 50%)
 
         # State
         self.state = RiskState(
