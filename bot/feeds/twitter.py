@@ -170,6 +170,29 @@ class SocialFeed:
         self._cache[cache_key] = (time.time(), signal)
 
         logger.info(f"Social sentiment '{query}': {len(mentions)} mentions, sentiment={avg:.3f}")
+        
+        # --- Analyze for injuries --- (combining for efficiency)
+        injury_alerts = self.analyze_tweets_for_injuries(mentions)
+        if injury_alerts:
+            # Note: only one injury signal per source, maybe? Depends on the problem
+            from bot.strategies.injury_sniper import InjuryImpactAnalyzer
+            """from bot.strategies.sports import MarketFilter, QuickBetStrategy
+            from bot.strategies.injury_sniper import InjurySniper"""
+            analyzer = InjuryImpactAnalyzer()
+            for alert in injury_alerts:
+                # Analyze
+                try:
+                    injury_signal = analyzer.analyze(alert)
+                    if injury_signal.should_trade:
+                        logger.info(
+                            f"  🏀 INJURY SNIPER: {injury_signal.player.name} ({injury_signal.player.tier_label}) "
+                            f"→ {alert.status} | Team: {alert.team} | "
+                            f"Swing: {injury_signal.estimated_swing*100:.1f}% | "
+                            f"Action: {injury_signal.recommendation}"
+                        )
+                        return injury_signal
+                except Exception as e:
+                    logging.warning(f'Could not form injury trade: {e}')
         return signal
 
     def close(self):
