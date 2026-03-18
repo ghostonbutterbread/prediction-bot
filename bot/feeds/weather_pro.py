@@ -79,33 +79,34 @@ CITY_COORDS = {
     "death valley": (36.5054, -117.0794),
 }
 
-# NWS grid coordinates
+# NWS grid coordinates + exact station IDs used for Kalshi settlement
+# CRITICAL: Kalshi settles using specific NWS stations, not city averages
 CITY_NWS = {
-    "austin": ("EWX", 152, 91),
-    "new york": ("OKX", 34, 37),
-    "chicago": ("LOT", 76, 73),
-    "los angeles": ("LOX", 154, 44),
-    "miami": ("MFL", 110, 50),
-    "denver": ("BOU", 62, 60),
-    "seattle": ("SEW", 124, 67),
-    "philadelphia": ("PHI", 49, 75),
-    "san francisco": ("MTR", 85, 105),
-    "houston": ("HGX", 65, 97),
-    "boston": ("BOX", 71, 65),
-    "new orleans": ("LIX", 51, 69),
-    "phoenix": ("PSR", 159, 57),
-    "dallas": ("FWD", 156, 45),
-    "minneapolis": ("MPX", 108, 48),
-    "atlanta": ("FFC", 57, 87),
-    "san antonio": ("EWX", 158, 97),
-    "las vegas": ("VEF", 153, 47),
-    "oklahoma city": ("OUN", 47, 38),
-    "portland": ("PQR", 113, 68),
-    "nashville": ("OHX", 42, 57),
-    "detroit": ("DTX", 66, 33),
-    "san diego": ("SGX", 155, 49),
-    "tampa": ("TBW", 97, 47),
-    "death valley": ("VEF", 158, 38),
+    "austin": ("EWX", 152, 91, "KAUS"),        # Austin-Bergstrom Airport
+    "new york": ("OKX", 34, 37, "KNYC"),        # Central Park
+    "chicago": ("LOT", 76, 73, "KMDW"),         # Chicago-Midway
+    "los angeles": ("LOX", 154, 44, "KLAX"),    # LAX
+    "miami": ("MFL", 110, 50, "KMIA"),          # Miami International
+    "denver": ("BOU", 62, 60, "KDEN"),          # Denver International
+    "seattle": ("SEW", 124, 67, "KSEA"),        # SeaTac
+    "philadelphia": ("PHI", 49, 75, "KPHL"),    # Philadelphia International
+    "san francisco": ("MTR", 85, 105, "KSFO"),  # SFO
+    "houston": ("HGX", 65, 97, "KHOU"),         # Houston Hobby
+    "boston": ("BOX", 71, 65, "KBOS"),          # Logan
+    "new orleans": ("LIX", 51, 69, "KMSY"),     # Louis Armstrong
+    "phoenix": ("PSR", 159, 57, "KPHX"),        # Sky Harbor
+    "dallas": ("FWD", 156, 45, "KDFW"),         # DFW
+    "minneapolis": ("MPX", 108, 48, "KMSP"),    # Minneapolis-St Paul
+    "atlanta": ("FFC", 57, 87, "KATL"),         # Hartsfield-Jackson
+    "san antonio": ("EWX", 158, 97, "KSAT"),    # San Antonio International
+    "las vegas": ("VEF", 153, 47, "KLAS"),      # Harry Reid
+    "oklahoma city": ("OUN", 47, 38, "KOKC"),   # Will Rogers
+    "portland": ("PQR", 113, 68, "KPDX"),       # Portland International
+    "nashville": ("OHX", 42, 57, "KBNA"),       # Nashville International
+    "detroit": ("DTX", 66, 33, "KDTW"),         # Detroit Metro
+    "san diego": ("SGX", 155, 49, "KSAN"),      # San Diego International
+    "tampa": ("TBW", 97, 47, "KTPA"),           # Tampa International
+    "death valley": ("VEF", 158, 38, "KDWA"),   # Death Valley
 }
 
 
@@ -186,17 +187,60 @@ class OpenMeteoFeed:
 
 
 class NWSFeed:
-    """NWS API: free, no key, US only, 1-2 hour updates."""
+    """NWS API: free, no key, US only, 1-2 hour updates. Also provides real-time station observations."""
 
     def __init__(self):
         self.http = httpx.Client(timeout=10)
+
+    def get_station_observation(self, city: str) -> Optional[dict]:
+        """
+        Get real-time NWS station observation for the exact station
+        used by Kalshi to settle temperature markets.
+        
+        This is the REAL edge — you can see current temperature at
+        the settlement station throughout the day.
+        
+        Note: Daily high will almost always be higher than any individual
+        hourly reading, because the true max occurs between readings.
+        """
+        grid = CITY_NWS.get(city.lower())
+        if not grid:
+            return None
+
+        office, grid_x, grid_y, station = grid
+        
+        try:
+            url = f"https://api.weather.gov/stations/{station}/observations/latest"
+            resp = self.http.get(url, headers={"User-Agent": "PredictionBot/1.0"})
+            resp.raise_for_status()
+            data = resp.json()
+            
+            props = data.get("properties", {})
+            temp_c = props.get("temperature", {}).get("value")
+            
+            if temp_c is None:
+                return None
+            
+            temp_f = temp_c * 9/5 + 32
+            
+            return {
+                "station": station,
+                "city": city.lower(),
+                "current_temp_f": round(temp_f, 1),
+                "observation_time": props.get("timestamp", ""),
+                "source": "nws_observation",
+            }
+            
+        except Exception as e:
+            logger.debug(f"NWS observation error for {station}: {e}")
+            return None
 
     def get_forecast(self, city: str) -> Optional[WeatherSnapshot]:
         grid = CITY_NWS.get(city.lower())
         if not grid:
             return None
 
-        office, grid_x, grid_y = grid
+        office, grid_x, grid_y, station = grid
         try:
             url = f"https://api.weather.gov/gridpoints/{office}/{grid_x},{grid_y}/forecast"
             resp = self.http.get(url, headers={"User-Agent": "PredictionBot/1.0"})
