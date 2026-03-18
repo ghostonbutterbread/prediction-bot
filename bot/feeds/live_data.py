@@ -546,6 +546,9 @@ class ForexFeed:
         self.http.close()
 
 
+from bot.feeds.weather_pro import ProWeatherEngine, CITY_COORDS
+
+
 class LiveFeedAggregator:
     """
     Routes market questions to the appropriate live data feed.
@@ -553,7 +556,7 @@ class LiveFeedAggregator:
     """
 
     def __init__(self):
-        self.weather = WeatherFeed()
+        self.weather = ProWeatherEngine()  # Multi-source weather engine
         self.crypto = CryptoFeed()
         self.forex = ForexFeed()
 
@@ -563,14 +566,22 @@ class LiveFeedAggregator:
         Get market-specific live data signal.
 
         Routes to the right feed based on market type:
-        - Temperature → WeatherFeed
+        - Temperature → ProWeatherEngine (multi-source)
         - Crypto/Coin → CryptoFeed
         - EUR/USD, USD/JPY → ForexFeed
         """
         q = question.lower()
 
-        # Temperature markets
+        # Temperature markets → multi-source weather engine
         if any(w in q for w in ["temperature", "temp", "°", "degrees", "high", "low"]):
+            # If no city in question, try to extract from series ticker
+            # e.g., KXHIGHAUS → Austin, KXHIGHPHIL → Philadelphia, KXLOWCHI → Chicago
+            if not any(c in q for c in CITY_COORDS):
+                city = self._city_from_ticker(category)
+                if city:
+                    # Inject city into question for the weather engine
+                    modified_q = question + f" in {city}"
+                    return self.weather.score_temperature_market(modified_q, yes_price)
             return self.weather.score_temperature_market(question, yes_price)
 
         # Crypto markets
@@ -590,3 +601,54 @@ class LiveFeedAggregator:
         self.weather.close()
         self.crypto.close()
         self.forex.close()
+
+    def _city_from_ticker(self, ticker: str) -> Optional[str]:
+        """Extract city name from Kalshi series ticker.
+        
+        Examples:
+          KXHIGHAUS → austin
+          KXHIGHPHIL → philadelphia  
+          KXLOWCHI → chicago
+          KXMINTEMPDEN → denver
+          KXHIGHTEMPMIAMI → miami
+        """
+        if not ticker:
+            return None
+        
+        ticker_upper = ticker.upper()
+        
+        # Map ticker suffixes to city names
+        ticker_cities = {
+            "AUS": "austin",
+            "PHIL": "philadelphia",
+            "CHI": "chicago",
+            "LA": "los angeles",
+            "NYC": "new york",
+            "NY": "new york",
+            "MIA": "miami",
+            "DEN": "denver",
+            "SEA": "seattle",
+            "BOS": "boston",
+            "HOU": "houston",
+            "DAL": "dallas",
+            "PHX": "phoenix",
+            "ATL": "atlanta",
+            "MIN": "minneapolis",
+            "NOLA": "new orleans",
+            "SA": "san antonio",
+            "LV": "las vegas",
+            "OKC": "oklahoma city",
+            "PDX": "portland",
+            "NSH": "nashville",
+            "DET": "detroit",
+            "SD": "san diego",
+            "TPA": "tampa",
+            "SF": "san francisco",
+        }
+        
+        # Try matching from longest suffix first
+        for suffix, city in sorted(ticker_cities.items(), key=lambda x: -len(x[0])):
+            if suffix in ticker_upper:
+                return city
+        
+        return None
