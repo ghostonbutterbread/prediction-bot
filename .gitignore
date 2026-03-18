@@ -15,6 +15,8 @@ kalshi_private_key
 data/
 *.db
 *.jsonl
+researcher_stats.json
+researcher_recommendations.jsonl
 
 # IDE
 .vscode/
