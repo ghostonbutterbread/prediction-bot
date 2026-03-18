@@ -10,8 +10,8 @@
 # Uses direct OpenRouter API calls (not sub-agent spawning).
 openrouter:
   api_key_env: OPENROUTER_API_KEY        # env var name holding the key
-  model: "google/gemini-2.5-flash"       # fast, cheap model for most calls
-  fallback_model: "anthropic/claude-sonnet-4"  # for complex analysis
+  model: "minimax/minimax-m2.5"           # cheap deep reasoning model
+  fallback_model: "google/gemini-2.5-flash"  # fallback if m2.5 fails
   max_tokens: 1024
   temperature: 0.3                        # low temp for analytical work
   daily_call_budget: 20                   # max API calls per day (cost control)

@@ -8,6 +8,7 @@ from datetime import datetime, timezone, timedelta
 from bot.feeds.news import NewsFeed
 from bot.feeds.twitter import SocialFeed
 from bot.feeds.ai_signal import AISignalFeed
+from bot.feeds.live_data import LiveFeedAggregator
 
 logger = logging.getLogger(__name__)
 
@@ -18,10 +19,11 @@ class EnhancedStrategyEngine:
 
     Signals:
     1. Price mispricing (market price vs model probability)
-    2. News sentiment (reactive trading on breaking news)
-    3. Social media sentiment (Twitter/X via web search)
-    4. Volume analysis (unusual volume = informed trading)
-    5. Time decay (markets resolving soon have clearer signals)
+    2. Live data (weather forecasts, crypto prices, forex rates)
+    3. News sentiment (reactive trading on breaking news)
+    4. Social media sentiment (Twitter/X via web search)
+    5. Volume analysis (unusual volume = informed trading)
+    6. Time decay (markets resolving soon have clearer signals)
     """
 
     def __init__(self, config: dict = None):
@@ -43,6 +45,9 @@ class EnhancedStrategyEngine:
         self.ai_weight = config.get("ai_weight", 0.20)
         if self.enable_ai:
             self.ai_feed = AISignalFeed(config)
+
+        # Live data feeds (weather, crypto, forex)
+        self.live_feeds = LiveFeedAggregator()
 
     def analyze_market(self, market, order_book: dict = None) -> Optional[dict]:
         """
@@ -76,6 +81,12 @@ class EnhancedStrategyEngine:
             if social_signal:
                 signals["social"] = social_signal
                 weights["social"] = self.social_weight
+
+        # 3.5 Live data signal (weather forecasts, crypto prices, forex)
+        live_signal = self._live_data_signal(market)
+        if live_signal:
+            signals["live"] = live_signal
+            weights["live"] = 0.50  # Heavy weight — real data beats generic signals
 
         # 4. Volume signal
         volume_signal = self._volume_signal(market)
@@ -190,6 +201,53 @@ class EnhancedStrategyEngine:
         }
 
     def _news_signal(self, market) -> Optional[dict]:
+        """Analyze news sentiment for the market."""
+        try:
+            news_items = self.news.get_news_for_market(market.question)
+
+            if not news_items:
+                return None
+
+            # Average sentiment weighted by relevance
+            total_weight = sum(n.relevance for n in news_items)
+            if total_weight == 0:
+                return None
+
+            avg_sentiment = sum(
+                n.sentiment * n.relevance for n in news_items
+            ) / total_weight
+
+            # Convert sentiment (-1 to 1) to probability shift
+            predicted = market.yes_price + avg_sentiment * 0.15
+
+            # More news = higher confidence
+            confidence = min(len(news_items) / 5, 1.0) * 0.8
+
+            return {
+                "predicted_prob": max(0.01, min(0.99, predicted)),
+                "confidence": confidence,
+            }
+        except Exception as e:
+            logger.debug(f"News signal error: {e}")
+            return None
+
+    def _live_data_signal(self, market) -> Optional[dict]:
+        """Get market-specific live data signal (weather, crypto, forex)."""
+        try:
+            result = self.live_feeds.get_signal(
+                market.question,
+                market.yes_price,
+                getattr(market, 'category', '')
+            )
+            if result:
+                return {
+                    "predicted_prob": result["predicted_prob"],
+                    "confidence": result["confidence"],
+                }
+            return None
+        except Exception as e:
+            logger.debug(f"Live data signal error: {e}")
+            return None
         """Analyze news sentiment for the market."""
         try:
             news_items = self.news.get_news_for_market(market.question)
