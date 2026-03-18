@@ -350,20 +350,46 @@ class ProWeatherEngine:
         highs = [s.high_temp_f for s in snapshots]
         lows = [s.low_temp_f for s in snapshots]
 
-        avg_high = sum(highs) / len(highs)
-        avg_low = sum(lows) / len(lows)
-        avg_current = sum(s.current_temp_f for s in snapshots) / len(snapshots)
+        # NWS is the settlement source for Kalshi temperature markets.
+        # Weight NWS more heavily when available, but use others for validation.
+        nws_snapshot = next((s for s in snapshots if s.source == "nws"), None)
+        
+        if nws_snapshot:
+            # Use NWS as primary, others for confidence boost
+            avg_high = nws_snapshot.high_temp_f
+            avg_low = nws_snapshot.low_temp_f
+            avg_current = nws_snapshot.current_temp_f
+            
+            # Check if other sources agree with NWS
+            other_highs = [s.high_temp_f for s in snapshots if s.source != "nws"]
+            if other_highs:
+                # How close are other sources to NWS?
+                nws_agreement = 1 - (abs(avg_high - sum(other_highs)/len(other_highs)) / 10)
+                nws_agreement = max(0.3, min(1.0, nws_agreement))
+            else:
+                nws_agreement = 0.85  # NWS alone is still good
+        else:
+            # No NWS — use average of available sources
+            avg_high = sum(highs) / len(highs)
+            avg_low = sum(lows) / len(lows)
+            avg_current = sum(s.current_temp_f for s in snapshots) / len(snapshots)
+            nws_agreement = 1.0
 
-        # Source agreement: how close are the sources?
+        # Source agreement: how much do sources agree?
         if len(snapshots) > 1:
             high_spread = max(highs) - min(highs)
             low_spread = max(lows) - min(lows)
-            agreement = max(0, 1 - (high_spread + low_spread) / 20)  # 10°F spread = 50% agreement
+            agreement = max(0, 1 - (high_spread + low_spread) / 20)
         else:
             agreement = 1.0
 
-        # Confidence: more sources + higher agreement = higher confidence
-        base_confidence = {1: 0.75, 2: 0.85, 3: 0.92}.get(len(snapshots), 0.75)
+        # Confidence: more sources + NWS agreement = higher confidence
+        # NWS is the settlement source, so NWS presence boosts confidence
+        has_nws = nws_snapshot is not None
+        base_confidence = {1: 0.70, 2: 0.82, 3: 0.90}.get(len(snapshots), 0.70)
+        if has_nws:
+            base_confidence += 0.05  # NWS is the settlement source
+        
         confidence = base_confidence * agreement
 
         result = MultiSourceForecast(
@@ -378,6 +404,9 @@ class ProWeatherEngine:
             details={
                 "individual_highs": {s.source: s.high_temp_f for s in snapshots},
                 "individual_lows": {s.source: s.low_temp_f for s in snapshots},
+                "settlement_source": "nws",  # Kalshi uses NWS to settle
+                "nws_high": nws_snapshot.high_temp_f if nws_snapshot else None,
+                "nws_low": nws_snapshot.low_temp_f if nws_snapshot else None,
             }
         )
 
