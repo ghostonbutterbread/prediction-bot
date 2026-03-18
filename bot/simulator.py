@@ -262,27 +262,14 @@ class Simulator:
         else:
             logger.info(f"  No trades this scan ({len(signals_found)} signals, none met thresholds)")
 
-        # Calculate rolling win rate
-        for trade in self.trades:
-            if trade.resolved and trade.pnl > 0:
-                self.rolling_win_count += 1
-            elif trade.resolved and trade.pnl < 0:
-                self.rolling_loss_count += 1
-            
-        total_trades = self.rolling_win_count + self.rolling_loss_count
-        if total_trades > self.rolling_window:
-            # Adjust moving average
-            if self.trades and len(self.trades) > self.rolling_window:
-                # Find the earliest trade to remove from the calculation
-                oldest_trade = next(t for t in self.trades if t.id == self.trades[0].id and t.resolved) # find the first resolved trade
-
-                assert oldest_trade,'oldest_trade must exist'
-                if oldest_trade.pnl > 0:
-                    self.rolling_win_count -= 1
-                elif oldest_trade.pnl < 0:
-                    self.rolling_loss_count -= 1
-            
-        self.rolling_win_rate = self.rolling_win_count / total_trades if total_trades > 0 else 0.0
+        # Calculate rolling win rate from RESOLVED trades only
+        resolved_trades = [t for t in self.trades if t.resolved and t.pnl is not None]
+        if resolved_trades:
+            recent = resolved_trades[-self.rolling_window:]
+            wins = sum(1 for t in recent if t.pnl > 0)
+            self.rolling_win_rate = wins / len(recent) if recent else 0.0
+        else:
+            self.rolling_win_rate = 0.0
 
         # Log risk status
         status = self.risk.get_status()
@@ -292,6 +279,20 @@ class Simulator:
             f"streak={self.risk.state.consecutive_losses}L/{self.risk.state.consecutive_wins}W "
             f"Rolling Win Rate = {self.rolling_win_rate:.1f}%"
         )
+
+        # Resolve open trades every 10 scans
+        if self.scan_count % 10 == 0:
+            try:
+                from bot.resolver import TradeResolver
+                resolver = TradeResolver(str(self.data_dir))
+                resolve_result = resolver.resolve_session(self.session_id, exchange)
+                if resolve_result.get("resolved_this_pass", 0) > 0:
+                    logger.info(
+                        f"🔄 Resolved {resolve_result['resolved_this_pass']} trades | "
+                        f"Session P&L: ${resolve_result['session_pnl']:+.4f}"
+                    )
+            except Exception as e:
+                logger.debug(f"Resolution pass error: {e}")
 
         self._save_session()
 

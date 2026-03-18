@@ -24,6 +24,7 @@ class KalshiExchange(BaseExchange):
         self.private_key_path = private_key_path
         self.host = KALSHI_DEMO if demo else KALSHI_PROD
         self.client = None
+        self._daily_series_tickers: list[str] = []
 
     def connect(self) -> bool:
         try:
@@ -38,6 +39,10 @@ class KalshiExchange(BaseExchange):
             balance = self.client.get_balance()
             bal = (balance.balance or 0) / 100
             logger.info(f"Kalshi connected! Balance: ${bal:.2f}")
+
+            # Discover daily series for quick-resolution markets
+            self._discover_daily_series()
+
             return True
 
         except Exception as e:
@@ -46,55 +51,188 @@ class KalshiExchange(BaseExchange):
 
     def get_markets(self, limit: int = 50, category: str = None) -> list[Market]:
         try:
-            # Get events first, then fetch markets per event (gets better binary markets)
-            events_resp = self.client.get_events(limit=20, status="open")
-            events = getattr(events_resp, 'events', []) or []
-
             markets = []
-            for event in events:
-                if len(markets) >= limit:
-                    break
+            now = datetime.now(timezone.utc)
 
-                event_ticker = getattr(event, 'event_ticker', '')
-                if not event_ticker:
-                    continue
-
+            # === Pass 0: Daily series markets (BTC, ETH, S&P 500, etc.) ===
+            # These resolve daily — exactly what we need for quick paper trading cycles
+            if self._daily_series_tickers:
                 try:
-                    mresp = self.client.get_markets(event_ticker=event_ticker, limit=5)
-                    raw_markets = getattr(mresp, 'markets', []) or []
-                except Exception:
-                    continue
-
-                for m in raw_markets:
-                    yes_price = _dollars(m, 'yes_ask_dollars')
-                    no_price = _dollars(m, 'no_ask_dollars')
-
-                    # Skip markets with no valid prices
-                    if yes_price <= 0 or yes_price >= 1:
-                        continue
-
-                    market = Market(
-                        id=getattr(m, 'ticker', ''),
-                        exchange="kalshi",
-                        question=getattr(m, 'title', ''),
-                        yes_price=yes_price,
-                        no_price=no_price,
-                        volume=_fp(m, 'volume_fp'),
-                        liquidity=_dollars(m, 'liquidity_dollars'),
-                        closes_at=_parse_dt(getattr(m, 'close_time', None)),
-                        category=getattr(event, 'category', 'other'),
-                        metadata={
-                            "event_ticker": event_ticker,
-                            "status": getattr(m, 'status', ''),
-                        }
+                    import httpx
+                    auth_headers = self.client.kalshi_auth.create_auth_headers(
+                        'GET', '/trade-api/v2/markets'
                     )
-                    markets.append(market)
+                    for series_ticker in self._daily_series_tickers:
+                        if len(markets) >= limit:
+                            break
+                        try:
+                            url = f'{self.host}/markets?status=open&limit=5&series_ticker={series_ticker}'
+                            resp = httpx.get(url, headers=auth_headers, timeout=5)
+                            if resp.status_code != 200:
+                                continue
+                            data = resp.json()
+                            for m in data.get('markets', []):
+                                if len(markets) >= limit:
+                                    break
+                                yes_price = _dollars_from_raw(m, 'yes_ask')
+                                no_price = _dollars_from_raw(m, 'no_ask')
+                                if yes_price <= 0 or yes_price >= 1:
+                                    continue
+                                close_time = _parse_dt_raw(m.get('close_time'))
+                                market = Market(
+                                    id=m.get('ticker', ''),
+                                    exchange="kalshi",
+                                    question=m.get('title', ''),
+                                    yes_price=yes_price,
+                                    no_price=no_price,
+                                    volume=float(m.get('volume_fp', 0) or 0),
+                                    liquidity=_dollars_from_raw(m, 'liquidity'),
+                                    closes_at=close_time,
+                                    category=series_ticker,
+                                    metadata={
+                                        "status": m.get('status', ''),
+                                        "source": "daily_series",
+                                        "series": series_ticker,
+                                    }
+                                )
+                                markets.append(market)
+                        except Exception:
+                            continue
+                    logger.info(f"Daily series pass: {len(markets)} markets from {len(self._daily_series_tickers)} series")
+                except Exception as e:
+                    logger.debug(f"Daily series fetch failed: {e}")
 
+            # === Pass 1: Direct /markets endpoint (catches daily markets like BTC price) ===
+            try:
+                import httpx
+                auth_headers = self.client.kalshi_auth.create_auth_headers(
+                    'GET', '/trade-api/v2/markets'
+                )
+                cursor = None
+                direct_count = 0
+                while len(markets) < limit and direct_count < 200:
+                    params = f'?status=open&limit=100'
+                    if cursor:
+                        params += f'&cursor={cursor}'
+                    url = f'{self.host}/markets{params}'
+                    resp = httpx.get(url, headers=auth_headers, timeout=10)
+                    resp.raise_for_status()
+                    data = resp.json()
+                    raw = data.get('markets', [])
+                    if not raw:
+                        break
+
+                    for m in raw:
+                        yes_price = _dollars_from_raw(m, 'yes_ask')
+                        no_price = _dollars_from_raw(m, 'no_ask')
+
+                        if yes_price <= 0 or yes_price >= 1:
+                            continue
+
+                        close_time = _parse_dt_raw(m.get('close_time'))
+
+                        market = Market(
+                            id=m.get('ticker', ''),
+                            exchange="kalshi",
+                            question=m.get('title', ''),
+                            yes_price=yes_price,
+                            no_price=no_price,
+                            volume=float(m.get('volume_fp', 0) or 0),
+                            liquidity=_dollars_from_raw(m, 'liquidity'),
+                            closes_at=close_time,
+                            category=m.get('series_ticker', 'other'),
+                            metadata={
+                                "status": m.get('status', ''),
+                                "source": "direct",
+                            }
+                        )
+                        markets.append(market)
+                        direct_count += 1
+
+                    cursor = data.get('cursor')
+                    if not cursor:
+                        break
+
+                logger.info(f"Direct markets pass: {direct_count} markets")
+            except Exception as e:
+                logger.debug(f"Direct markets fetch failed: {e}")
+
+            # === Pass 2: Events → markets (catches everything else) ===
+            if len(markets) < limit:
+                all_events = []
+                cursor = None
+                while len(all_events) < 200:
+                    kwargs = {"limit": 50, "status": "open"}
+                    if cursor:
+                        kwargs["cursor"] = cursor
+                    events_resp = self.client.get_events(**kwargs)
+                    events = getattr(events_resp, 'events', []) or []
+                    if not events:
+                        break
+                    all_events.extend(events)
+                    cursor = getattr(events_resp, 'cursor', None)
+                    if not cursor:
+                        break
+
+                logger.info(f"Fetched {len(all_events)} events from Kalshi")
+
+                for event in all_events:
                     if len(markets) >= limit:
                         break
 
-            logger.info(f"Fetched {len(markets)} Kalshi markets")
-            return markets[:limit]
+                    event_ticker = getattr(event, 'event_ticker', '')
+                    if not event_ticker:
+                        continue
+
+                    try:
+                        mresp = self.client.get_markets(event_ticker=event_ticker, limit=20)
+                        raw_markets = getattr(mresp, 'markets', []) or []
+                    except Exception:
+                        continue
+
+                    for m in raw_markets:
+                        yes_price = _dollars(m, 'yes_ask_dollars')
+                        no_price = _dollars(m, 'no_ask_dollars')
+
+                        if yes_price <= 0 or yes_price >= 1:
+                            continue
+
+                        market = Market(
+                            id=getattr(m, 'ticker', ''),
+                            exchange="kalshi",
+                            question=getattr(m, 'title', ''),
+                            yes_price=yes_price,
+                            no_price=no_price,
+                            volume=_fp(m, 'volume_fp'),
+                            liquidity=_dollars(m, 'liquidity_dollars'),
+                            closes_at=_parse_dt(getattr(m, 'close_time', None)),
+                            category=getattr(event, 'category', 'other'),
+                            metadata={
+                                "event_ticker": event_ticker,
+                                "status": getattr(m, 'status', ''),
+                                "source": "events",
+                            }
+                        )
+                        markets.append(market)
+
+                        if len(markets) >= limit:
+                            break
+
+            # Dedup by market ID
+            seen = set()
+            deduped = []
+            for m in markets:
+                if m.id not in seen:
+                    seen.add(m.id)
+                    deduped.append(m)
+
+            # Sort: prioritize markets closing sooner
+            deduped.sort(key=lambda m: (
+                (m.closes_at - now).total_seconds() if m.closes_at else float('inf')
+            ))
+
+            logger.info(f"Fetched {len(deduped)} unique Kalshi markets (sorted by close time)")
+            return deduped[:limit]
 
         except Exception as e:
             logger.error(f"Error fetching markets: {e}")
@@ -122,6 +260,40 @@ class KalshiExchange(BaseExchange):
         except Exception as e:
             logger.error(f"Error fetching market {market_id}: {e}")
             return None
+
+    def _discover_daily_series(self):
+        """Find all daily-frequency series tickers on Kalshi."""
+        try:
+            import httpx
+            auth_headers = self.client.kalshi_auth.create_auth_headers(
+                'GET', '/trade-api/v2/series'
+            )
+            cursor = None
+            self._daily_series_tickers = []
+            while True:
+                params = '?limit=200'
+                if cursor:
+                    params += f'&cursor={cursor}'
+                url = f'{self.host}/series{params}'
+                resp = httpx.get(url, headers=auth_headers, timeout=15)
+                resp.raise_for_status()
+                data = resp.json()
+                series_list = data.get('series', [])
+                if not series_list:
+                    break
+                for s in series_list:
+                    if s.get('frequency') == 'daily':
+                        # Daily series use 'ticker', not 'series_ticker'
+                        ticker = s.get('ticker', '')
+                        if ticker:
+                            self._daily_series_tickers.append(ticker)
+                cursor = data.get('cursor')
+                if not cursor:
+                    break
+            logger.info(f"Discovered {len(self._daily_series_tickers)} daily series")
+        except Exception as e:
+            logger.warning(f"Could not discover daily series: {e}")
+            self._daily_series_tickers = []
 
     def get_order_book(self, market_id: str) -> Optional[dict]:
         """Get order book — uses market-level bid/ask from cached data."""
@@ -268,5 +440,29 @@ def _parse_dt(dt) -> Optional[datetime]:
         return dt
     try:
         return datetime.fromtimestamp(int(dt), tz=timezone.utc)
+    except (ValueError, TypeError):
+        return None
+
+
+def _dollars_from_raw(data: dict, key: str) -> float:
+    """Extract dollar value from raw API JSON (already in dollars)."""
+    # Try with _dollars suffix first (raw API format), then without
+    val = data.get(f'{key}_dollars') or data.get(key)
+    if val is None:
+        return 0.0
+    try:
+        return round(float(val), 4)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _parse_dt_raw(dt_str) -> Optional[datetime]:
+    """Parse datetime from raw API JSON string."""
+    if dt_str is None:
+        return None
+    if isinstance(dt_str, datetime):
+        return dt_str
+    try:
+        return datetime.fromisoformat(dt_str.replace('Z', '+00:00'))
     except (ValueError, TypeError):
         return None
