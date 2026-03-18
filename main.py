@@ -7,6 +7,7 @@ Usage:
     python main.py paper             # Single paper scan
     python main.py simulate [N] [s]  # Run N scans (every s seconds), audit trail
     python main.py audit [session]   # Review simulation results
+    python main.py resolve [session] # Resolve open trades — check outcomes, compute P&L
     python main.py backtest [n] [m]  # Backtest on n markets
     python main.py live              # Live trading (real money!)
     python main.py status            # Show bot status
@@ -379,6 +380,53 @@ def cmd_backtest(days: int = 7, limit: int = 30):
     exchange.close()
 
 
+def cmd_resolve():
+    """Resolve open paper trades — check market outcomes and compute P&L."""
+    from bot.resolver import TradeResolver
+    from bot.runner import PredictionBot
+
+    config = get_config()
+    bot = PredictionBot(config)
+
+    api_key = os.getenv("KALSHI_API_KEY_ID")
+    private_key_path = os.getenv("KALSHI_PRIVATE_KEY_PATH", "kalshi_private_key")
+    demo = os.getenv("KALSHI_USE_DEMO", "true").lower() == "true"
+
+    if not api_key:
+        print("❌ Set KALSHI_API_KEY_ID in .env")
+        return
+
+    bot.add_kalshi(api_key, private_key_path, demo=demo)
+    results = bot.connect_all()
+
+    if not any(results.values()):
+        print("❌ Connection failed")
+        return
+
+    exchange = list(bot.exchanges.values())[0]
+    resolver = TradeResolver(config.get("log_dir", "data"))
+
+    session_id = sys.argv[2] if len(sys.argv) > 2 else None
+
+    if session_id:
+        print(f"🔍 Resolving session: {session_id}")
+        result = resolver.resolve_session(session_id, exchange)
+    else:
+        print("🔍 Resolving all sessions with open trades...")
+        results = resolver.resolve_all_open(exchange)
+        if results:
+            for r in results:
+                print(f"\n  Session {r['session_id']}: "
+                      f"{r['resolved_this_pass']} resolved, "
+                      f"{r['still_open']} still open | "
+                      f"P&L: ${r['session_pnl']:+.4f} | "
+                      f"Balance: ${r['balance']:.2f}")
+        else:
+            print("  No open trades found in any session.")
+
+    bot.close()
+
+
 def cmd_news(query: str = None):
     """Test news feed."""
     from bot.feeds.news import NewsFeed
@@ -426,6 +474,8 @@ def main():
         days = int(sys.argv[2]) if len(sys.argv) > 2 else 7
         limit = int(sys.argv[3]) if len(sys.argv) > 3 else 30
         cmd_backtest(days, limit)
+    elif cmd == "resolve":
+        cmd_resolve()
     elif cmd == "news":
         query = " ".join(sys.argv[2:]) if len(sys.argv) > 2 else None
         cmd_news(query)
