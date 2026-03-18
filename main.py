@@ -164,12 +164,27 @@ def cmd_markets():
     bot.close()
 
 
-def cmd_simulate(scans: int = 10, interval: int = 60):
-    """Run simulation mode — paper trades with full audit trail."""
+def cmd_simulate(scans: int = 10, interval: int = 60, use_scheduler: bool = True):
+    """Run simulation mode — paper trades with full audit trail.
+
+    With --use-scheduler (default), scan interval adapts dynamically based
+    on time-to-close of nearest market. The interval parameter becomes the
+    fallback when scheduler is disabled.
+    """
     from bot.runner import PredictionBot
     from bot.simulator import Simulator
+    from bot.scheduler import ScanScheduler
+    from bot.researcher import OpenRouterClient, FeedbackTracker
 
-    config = get_config()
+    # Load config (config.yaml + .env overrides)
+    try:
+        from bot.config import load_config as load_yaml_config
+        config = load_yaml_config()
+        logger.info("📋 Loaded config.yaml")
+    except Exception:
+        config = get_config()
+        logger.info("📋 Using .env config (config.yaml not available)")
+
     bot = PredictionBot(config)
 
     api_key = os.getenv("KALSHI_API_KEY_ID")
@@ -188,23 +203,36 @@ def cmd_simulate(scans: int = 10, interval: int = 60):
         return
 
     sim = Simulator(config)
-    
-    # Sports mode is always enabled (quick-resolution markets)
+
+    # Initialize scheduler for dynamic scan intervals
+    scheduler = ScanScheduler(config) if use_scheduler else None
+
+    # Initialize researcher (OpenRouter direct API)
+    researcher = None
+    feedback = None
+    try:
+        researcher = OpenRouterClient(config.get("openrouter", {}))
+        feedback = FeedbackTracker(config.get("logging", {}).get("log_dir", "data"))
+        if researcher.is_available():
+            logger.info(f"🔬 Researcher active: {researcher.model} ({researcher.daily_budget} calls/day)")
+        else:
+            logger.info("🔬 Researcher standby (no API key or budget exhausted)")
+    except Exception as e:
+        logger.debug(f"Researcher init failed: {e}")
+
     logger.info("🏀 Sports mode enabled — quick-resolution markets filtered")
-    
-    # Set up social feed scraper (if enabled)
-    # if config.get("enable_social", True) == True:
-    #     from bot.feeds.twitter import SocialFeed
-    #     social_feed = SocialFeed(config)
-    #     logger.info("🐦 Social feed enabled")
-    # else:
-    #     social_feed = None
 
     print(f"\n🧪 Simulation Mode")
     print(f"   Balance: ${sim.starting_balance:.2f}")
-    print(f"   Scans: {scans} (every {interval}s)")
+    print(f"   Scans: {scans}")
+    if scheduler:
+        print(f"   Scheduler: dynamic (15s-300s based on time-to-close)")
+    else:
+        print(f"   Interval: fixed {interval}s")
     print(f"   Min edge: {sim.min_edge:.2%}")
     print(f"   Min confidence: {sim.min_confidence:.2%}")
+    if researcher and researcher.is_available():
+        print(f"   Researcher: {researcher.model} ({researcher.daily_budget} calls/day)")
     print(f"\n   Running...\n")
 
     exchange = list(bot.exchanges.values())[0]
@@ -213,12 +241,27 @@ def cmd_simulate(scans: int = 10, interval: int = 60):
         try:
             result = sim.scan(exchange)
             print(f"   Scan {i+1}/{scans}: {result['trades']} trades taken")
+
+            # Dynamic interval from scheduler
+            if scheduler and i < scans - 1:
+                try:
+                    markets = exchange.get_markets(limit=30)
+                    dynamic_interval, researcher_enabled = scheduler.auto_interval(markets, "sports")
+                    if researcher_enabled and researcher and researcher.is_available():
+                        # TODO: researcher analyzes interesting markets here
+                        pass
+                except Exception:
+                    dynamic_interval = interval
+            else:
+                dynamic_interval = interval
+
         except Exception as e:
             logger.error(f"Scan error: {e}")
+            dynamic_interval = interval
 
         if i < scans - 1:
             import time
-            time.sleep(interval)
+            time.sleep(dynamic_interval)
 
     # Final report
     sim.print_report()
