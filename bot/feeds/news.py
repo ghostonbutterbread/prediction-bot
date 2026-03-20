@@ -23,6 +23,10 @@ class NewsItem:
 
 class NewsFeed:
     """Aggregates news from multiple sources for sentiment analysis."""
+    
+    # Circuit breaker - Google News frequently returns 503
+    _google_down = False
+    _google_down_since = None
 
     def __init__(self):
         self.http = httpx.Client(timeout=15)
@@ -30,6 +34,9 @@ class NewsFeed:
         self.cache_ttl = 300  # 5 min cache
 
     def get_news_for_market(self, market_question: str, keywords: list = None) -> list[NewsItem]:
+        # Fast-fail if Google News is down
+        if NewsFeed._google_down:
+            return []
         """Get relevant news for a specific market question."""
         search_terms = self._extract_keywords(market_question)
         if keywords:
@@ -69,40 +76,8 @@ class NewsFeed:
         return keywords[:5]  # Top 5 keywords
 
     def _fetch_google_news(self, keywords: list[str]) -> list[NewsItem]:
-        """Fetch from Google News RSS."""
-        query = "+".join(keywords[:3])
-        url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
-
-        try:
-            resp = self.http.get(url)
-            resp.raise_for_status()
-
-            # Simple XML parsing
-            items = []
-            entries = re.findall(r'<item>(.*?)</item>', resp.text, re.DOTALL)
-
-            for entry in entries[:20]:
-                title = self._xml_extract(entry, 'title')
-                link = self._xml_extract(entry, 'link')
-                pub_date = self._xml_extract(entry, 'pubDate')
-                source = self._xml_extract(entry, 'source')
-
-                if title and title != "Google News":
-                    items.append(NewsItem(
-                        title=title,
-                        source=source or "Google News",
-                        url=link or "",
-                        published=self._parse_date(pub_date),
-                        summary="",
-                        relevance=0.5,
-                        sentiment=0,
-                    ))
-
-            return items
-
-        except Exception as e:
-            logger.debug(f"Google News fetch error: {e}")
-            return []
+        """Fetch from Google News RSS - DISABLED due to 503 blocks."""
+        return []  # Google News blocks scrapers - disabled
 
     def _score_relevance(self, title: str, question: str) -> float:
         """Score how relevant a news title is to a market question."""

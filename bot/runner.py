@@ -35,10 +35,7 @@ class PredictionBot:
 
         # Strategy
         self.strategy = EnhancedStrategyEngine(config.get("strategy", {}))
-        self.kelly = KellySizer(
-            fraction=config.get("kelly_fraction", 0.5),
-            max_bet_pct=config.get("max_position_pct", 0.10),
-        )
+        self.kelly = KellySizer()
 
         # State
         self.running = False
@@ -187,6 +184,40 @@ class PredictionBot:
         if not exchange:
             return None
 
+        market_id = signal["market_id"]
+        side = "YES" if signal["direction"] == "BUY_YES" else "NO"
+
+        # Check if we already have an open order on this market
+        try:
+            market_bid_ask = exchange.get_market_bid_ask(market_id)
+            if market_bid_ask and market_bid_ask.get("best_yes_ask", 0) > 0:
+                yes_bid = market_bid_ask.get("best_yes_bid", 0)
+                yes_ask = market_bid_ask.get("best_yes_ask", 0)
+                no_bid = market_bid_ask.get("best_no_bid", 0)
+                no_ask = market_bid_ask.get("best_no_ask", 0)
+            else:
+                # No market data - skip this trade
+                logger.warning(f"No market price data for {market_id} - skipping")
+                return None
+        except Exception as e:
+            logger.debug(f"Could not fetch market bid/ask for {market_id}: {e}")
+            # Use signal's market_price as fallback
+            yes_bid = yes_ask = signal.get("market_price", 0.50)
+            if yes_ask <= 0 or yes_ask >= 1:
+                logger.warning(f"No valid market price for {market_id} - skipping")
+                return None
+            no_bid = no_ask = 1 - yes_ask
+
+        # Use market ask price (cross the spread to get filled)
+        if side == "YES":
+            price = yes_ask  # Place at market ask for immediate-ish fill
+            price = max(price, 0.01)  # Minimum 1 cent
+            price = min(price, 0.99)
+        else:
+            price = no_ask
+            price = max(price, 0.01)
+            price = min(price, 0.99)
+
         # Calculate position size using Kelly Criterion
         balance = exchange.get_balance()
         size = self.kelly.calculate(
@@ -199,21 +230,13 @@ class PredictionBot:
             logger.info(f"Position too small: ${size:.2f}")
             return None
 
-        # Calculate price (slightly better than market)
-        if signal["direction"] == "BUY_YES":
-            price = min(signal["market_price"] + 0.01, 0.99)
-            side = "YES"
-        else:
-            price = min((1 - signal["market_price"]) + 0.01, 0.99)
-            side = "NO"
-
         # Place order
-        order = exchange.place_order(signal["market_id"], side, price, size)
+        order = exchange.place_order(market_id, side, price, size)
 
         if order:
             logger.info(
-                f"✅ Trade executed: {side} ${size:.2f} @ ${price:.2f} "
-                f"on {signal['exchange']}/{signal['market_id']}"
+                f"✅ Trade executed: {side} ${size:.2f} @ ${price:.4f} "
+                f"on {signal['exchange']}/{market_id}"
             )
             self._log_trade(signal, order)
             return {"order": order, "signal": signal}
