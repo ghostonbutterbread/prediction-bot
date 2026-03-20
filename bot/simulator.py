@@ -107,6 +107,7 @@ class Simulator:
     def scan(self, exchange) -> dict:
         """Run a simulation scan on an exchange."""
         self.scan_count += 1
+        self.risk.reset_daily()  # Reset daily trackers if new day
         logger.info(f"\n{'='*60}")
         logger.info(f"Sim Scan #{self.scan_count} at {datetime.now(timezone.utc).strftime('%H:%M:%S')}")
 
@@ -282,7 +283,7 @@ class Simulator:
             try:
                 from bot.resolver import TradeResolver
                 resolver = TradeResolver(str(self.data_dir))
-                resolve_result = resolver.resolve_session(self.session_id, exchange)
+                resolve_result = resolver.resolve_session(self.session_id, exchange, self.risk)
                 if resolve_result.get("resolved_this_pass", 0) > 0:
                     logger.info(
                         f"🔄 Resolved {resolve_result['resolved_this_pass']} trades | "
