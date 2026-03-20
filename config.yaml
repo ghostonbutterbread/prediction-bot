@@ -150,9 +150,32 @@ strategy:
   enable_ai: true
 
 # === Kelly / Risk ===
+# Two presets: PAPER (aggressive for simulation) and LIVE (conservative for real money)
+# Mode auto-detected from KALSHI_USE_DEMO env var:
+#   KALSHI_USE_DEMO=true  → PAPER limits (Half-Kelly, 10% max bet, 20% daily loss)
+#   KALSHI_USE_DEMO=false → LIVE limits (Quarter-Kelly, 5% max bet, 10% daily loss)
+#
+# Override individual values with env vars (e.g. KELLY_FRACTION=0.3)
 risk:
-  kelly_fraction: 0.75
-  max_position_pct: 0.20
+  # ── Paper trading (KALSHI_USE_DEMO=true) ──
+  kelly_fraction_paper: 0.50       # Half-Kelly
+  max_bet_pct_paper: 0.10          # Max 10% per trade
+  max_exposure_pct_paper: 0.40    # Max 40% of bankroll at risk
+  daily_loss_limit_pct_paper: 0.20 # Stop if down 20% today
+  max_drawdown_pct_paper: 0.50     # Pause if down 50% from peak
+  max_open_positions_paper: 15    # Max 15 concurrent trades
+
+  # ── Live trading (KALSHI_USE_DEMO=false) ──
+  kelly_fraction_live: 0.25        # Quarter-Kelly — conservative for real money
+  max_bet_pct_live: 0.05          # Max 5% per trade
+  max_exposure_pct_live: 0.25     # Max 25% of bankroll at risk
+  daily_loss_limit_pct_live: 0.10 # Stop if down 10% in a day
+  max_drawdown_pct_live: 0.25     # Pause if down 25% from peak
+  max_open_positions_live: 10     # Max 10 concurrent trades
+
+  # ── Backward compat (overridden by mode detection) ──
+  kelly_fraction: 0.50
+  max_position_pct: 0.10
   daily_loss_limit_pct: 35
   max_drawdown_pct: 60
   max_open_positions: 15

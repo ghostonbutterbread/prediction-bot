@@ -357,7 +357,7 @@ class EnhancedStrategyEngine:
 
 class KellySizer:
     """
-    Kelly Criterion position sizing.
+    Kelly Criterion position sizing with automatic mode-aware defaults.
 
     Optimal bet size = (p * b - q) / b
     where:
@@ -365,12 +365,24 @@ class KellySizer:
         q = 1 - p
         b = odds (payout per $1 bet)
 
-    We use fractional Kelly (0.5x) for safety.
+    Mode-aware:
+    - Paper (KALSHI_USE_DEMO=true): Half-Kelly, 10% max bet
+    - Live (KALSHI_USE_DEMO=false): Quarter-Kelly, 5% max bet
     """
 
-    def __init__(self, fraction: float = 0.5, max_bet_pct: float = 0.10):
-        self.fraction = fraction
-        self.max_bet_pct = max_bet_pct
+    # Presets by mode
+    PAPER = {"fraction": 0.50, "max_bet_pct": 0.10}
+    LIVE = {"fraction": 0.25, "max_bet_pct": 0.05}
+
+    def __init__(self, fraction: float = None, max_bet_pct: float = None,
+                 kelly_fraction: float = None):
+        import os
+        is_live = os.getenv("KALSHI_USE_DEMO", "true").lower() == "false"
+        preset = self.LIVE if is_live else self.PAPER
+
+        # Explicit params override preset
+        self.fraction = kelly_fraction if kelly_fraction is not None else (fraction if fraction is not None else preset["fraction"])
+        self.max_bet_pct = max_bet_pct if max_bet_pct is not None else preset["max_bet_pct"]
 
     def calculate(self, model_prob: float, market_price: float,
                   bankroll: float) -> float:
@@ -391,7 +403,7 @@ class KellySizer:
         # Apply fractional Kelly
         size = kelly * self.fraction * bankroll
 
-        # Cap at max bet percentage
+        # Cap at max bet percentage (of current bankroll)
         max_size = bankroll * self.max_bet_pct
         size = min(size, max_size)
 

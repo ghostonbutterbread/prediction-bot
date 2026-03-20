@@ -8,10 +8,12 @@ Core principles:
 2. Small losses are fine, big losses are not
 3. Scale position size with confidence AND bankroll health
 4. Stop trading when the market isn't cooperating
+5. Variable risk: scale limits with bankroll growth
 """
 
 import json
 import logging
+import os
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -19,6 +21,36 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+
+# ─── Risk Presets ────────────────────────────────────────────────────────────
+
+PAPER_LIMITS = {
+    "kelly_fraction": 0.50,      # Half-Kelly — aggressive for growth
+    "max_bet_pct": 0.10,         # Max 10% per trade
+    "max_exposure_pct": 0.40,    # Max 40% of bankroll at risk
+    "daily_loss_limit_pct": 0.20, # Stop if down 20% today
+    "max_drawdown_pct": 0.50,    # Pause if down 50% from peak
+    "max_open_positions": 15,    # Max 15 concurrent trades
+    "cooldown_after_losses": 4,   # Cooldown after 4 consecutive losses
+}
+
+LIVE_LIMITS = {
+    "kelly_fraction": 0.25,      # Quarter-Kelly — conservative
+    "max_bet_pct": 0.05,         # Max 5% per trade
+    "max_exposure_pct": 0.25,    # Max 25% of bankroll at risk
+    "daily_loss_limit_pct": 0.10, # Stop if down 10% today
+    "max_drawdown_pct": 0.25,    # Pause if down 25% from peak
+    "max_open_positions": 10,    # Max 10 concurrent trades
+    "cooldown_after_losses": 3,   # Cooldown after 3 consecutive losses
+}
+
+
+def get_preset(is_live: bool) -> dict:
+    """Return the appropriate risk preset based on mode."""
+    return LIVE_LIMITS if is_live else PAPER_LIMITS
+
+
+# ─── Dataclasses ─────────────────────────────────────────────────────────────
 
 @dataclass
 class RiskState:
@@ -68,9 +100,15 @@ class RiskState:
 
     @property
     def daily_pnl_pct(self) -> float:
+        """Daily P&L as percentage of current balance (dynamic)."""
         pnl = self.daily_pnl or 0
-        bal = self.starting_balance or 100
+        bal = self.current_balance or 100
         return (pnl / bal) * 100 if bal > 0 else 0
+
+    @property
+    def exposure_pct(self) -> float:
+        """Current exposure as percentage of bankroll."""
+        return (self.total_exposure / self.current_balance * 100) if self.current_balance > 0 else 0
 
     @property
     def win_rate(self) -> float:
@@ -107,31 +145,44 @@ class RiskManager:
     """
     Risk management for prediction market trading.
 
+    Modes:
+    - Paper (default): Aggressive limits for growth simulation
+    - Live: Conservative limits for real money protection
+
     Rules (all configurable):
-    1. Daily loss limit: stop trading if down X% today
+    1. Daily loss limit: stop trading if down X% today (vs current balance)
     2. Max drawdown: pause if total balance drops X% from peak
     3. Max open positions: limit concurrent exposure
-    4. Correlation limit: max N bets on correlated markets
-    5. Cooldown: skip scans after consecutive losses
-    6. Position scaling: reduce size when bankroll is stressed
+    4. Max exposure: limit total dollars at risk simultaneously
+    5. Correlation limit: max N bets on correlated markets
+    6. Cooldown: skip scans after consecutive losses
+    7. Position scaling: reduce size when bankroll is stressed
+    8. Variable sizing: limits scale with bankroll growth
     """
 
     def __init__(self, config: dict = None):
         config = config or {}
 
-        # Risk limits — AGGRESSIVE mode for small capital
-        # Trade-off: more risk = faster growth potential = faster loss potential
-        # With $10-100, we need concentrated bets to grow, not index-fund diversification
-        self.daily_loss_limit_pct = config.get("daily_loss_limit_pct", 35.0)  # Was 20%
-        self.max_drawdown_pct = config.get("max_drawdown_pct", 60.0)          # Was 50%
-        self.max_open_positions = config.get("max_open_positions", 15)        # Was 10
-        self.max_correlated = config.get("max_correlated", 5)                 # Was 3
-        self.cooldown_after_losses = config.get("cooldown_after_losses", 4)   # Was 3
-        self.cooldown_scans = config.get("cooldown_scans", 1)                 # Was 2 (shorter cooldown)
+        # Detect mode: live = not demo
+        self.is_live = os.getenv("KALSHI_USE_DEMO", "true").lower() == "false"
+        preset = get_preset(self.is_live)
 
-        # Scaling thresholds — more lenient
-        self.stress_threshold = config.get("stress_threshold", 0.8)   # 80% of loss limit (was 70%)
-        self.stress_reduction = config.get("stress_reduction", 0.3)   # 30% reduction (was 50%)
+        # Resolve limits: env vars override preset, explicit config overrides both
+        def resolve(key: str, default: float) -> float:
+            env_key = key.upper()
+            return float(os.getenv(env_key, config.get(key, preset.get(key, default))))
+
+        self.kelly_fraction = resolve("kelly_fraction", preset["kelly_fraction"])
+        self.max_bet_pct = resolve("max_bet_pct", preset["max_bet_pct"])
+        self.max_exposure_pct = resolve("max_exposure_pct", preset["max_exposure_pct"])
+        self.daily_loss_limit_pct = resolve("daily_loss_limit_pct", preset["daily_loss_limit_pct"])
+        self.max_drawdown_pct = resolve("max_drawdown_pct", preset["max_drawdown_pct"])
+        self.max_open_positions = resolve("max_open_positions", preset["max_open_positions"])
+        self.cooldown_after_losses = resolve("cooldown_after_losses", preset["cooldown_after_losses"])
+
+        # Stress scaling — more lenient as bankroll grows
+        self.stress_threshold = config.get("stress_threshold", 0.8)
+        self.stress_reduction = config.get("stress_reduction", 0.3)
 
         # State
         self.state = RiskState(
@@ -146,6 +197,12 @@ class RiskManager:
         # Data path
         self.data_path = Path(config.get("data_dir", "data")) / "risk_state.json"
         self._load_state()
+
+        mode_label = "🔴 LIVE" if self.is_live else "🟡 PAPER"
+        logger.info(
+            f"{mode_label} risk mode | Kelly={self.kelly_fraction:.0%} "
+            f"max_bet={self.max_bet_pct:.0%} daily_loss={self.daily_loss_limit_pct:.0%}"
+        )
 
     def _build_correlation_groups(self) -> dict[str, str]:
         """Map market keywords to correlation groups."""
@@ -185,19 +242,21 @@ class RiskManager:
 
         # === Hard stops (reject immediately) ===
 
-        # 1. Daily loss limit
-        if abs(self.state.daily_pnl_pct) >= self.daily_loss_limit_pct and self.state.daily_pnl < 0:
-            return RiskDecision(
-                approved=False,
-                reason=f"Daily loss limit hit ({self.state.daily_pnl_pct:.1f}% / {self.daily_loss_limit_pct}%)",
-                risk_score=1.0,
-            )
+        # 1. Daily loss limit — relative to CURRENT balance (dynamic)
+        if self.state.daily_pnl < 0:
+            daily_loss_pct = abs(self.state.daily_pnl_pct)
+            if daily_loss_pct >= self.daily_loss_limit_pct * 100:
+                return RiskDecision(
+                    approved=False,
+                    reason=f"Daily loss limit hit ({daily_loss_pct:.1f}% / {self.daily_loss_limit_pct * 100:.0f}%)",
+                    risk_score=1.0,
+                )
 
         # 2. Max drawdown
-        if self.state.drawdown_pct >= self.max_drawdown_pct:
+        if self.state.drawdown_pct >= self.max_drawdown_pct * 100:
             return RiskDecision(
                 approved=False,
-                reason=f"Max drawdown hit ({self.state.drawdown_pct:.1f}% / {self.max_drawdown_pct}%)",
+                reason=f"Max drawdown hit ({self.state.drawdown_pct:.1f}% / {self.max_drawdown_pct * 100:.0f}%)",
                 risk_score=1.0,
             )
 
@@ -209,7 +268,17 @@ class RiskManager:
                 risk_score=0.8,
             )
 
-        # 4. Cooldown
+        # 4. Max exposure — total dollars at risk
+        projected_exposure = self.state.total_exposure + position_size
+        projected_exposure_pct = (projected_exposure / self.state.current_balance * 100) if self.state.current_balance > 0 else 0
+        if projected_exposure_pct > self.max_exposure_pct * 100:
+            return RiskDecision(
+                approved=False,
+                reason=f"Max exposure ({projected_exposure_pct:.1f}% / {self.max_exposure_pct * 100:.0f}% of ${self.state.current_balance:.2f})",
+                risk_score=1.0,
+            )
+
+        # 5. Cooldown
         if self.state.is_in_cooldown:
             return RiskDecision(
                 approved=False,
@@ -221,7 +290,7 @@ class RiskManager:
 
         risk_score = 0.0
 
-        # 5. Correlation check
+        # 6. Correlation check
         question = signal.get("question", "")
         corr_group = self._get_correlation_group(question)
         if corr_group:
@@ -230,20 +299,21 @@ class RiskManager:
                 if self._get_correlation_group(t.get("question", "")) == corr_group
                 and not t.get("resolved", False)
             )
-            if correlated_count >= self.max_correlated:
-                warnings.append(f"Correlation limit: {corr_group} ({correlated_count}/{self.max_correlated})")
-                position_size *= 0.5  # Halve position on correlated trades
+            if correlated_count >= 5:  # Max 5 correlated bets
+                warnings.append(f"Correlation: {corr_group} ({correlated_count}/5)")
+                position_size *= 0.5
                 risk_score += 0.3
 
-        # 6. Stress scaling (reduce size when bankroll is stressed)
-        loss_used_pct = abs(self.state.daily_pnl_pct) / self.daily_loss_limit_pct
-        if loss_used_pct >= self.stress_threshold:
-            reduction = self.stress_reduction
-            warnings.append(f"Stress scaling: {reduction:.0%} reduction (loss limit {loss_used_pct:.0%} used)")
-            position_size *= (1 - reduction)
-            risk_score += 0.2
+        # 7. Stress scaling (reduce size when near daily loss limit)
+        if self.state.daily_pnl < 0:
+            loss_used_pct = abs(self.state.daily_pnl_pct) / (self.daily_loss_limit_pct * 100)
+            if loss_used_pct >= self.stress_threshold:
+                reduction = self.stress_reduction
+                warnings.append(f"Stress scaling: -{reduction:.0%} (loss limit {loss_used_pct * 100:.0f}% used)")
+                position_size *= (1 - reduction)
+                risk_score += 0.2
 
-        # 7. Consecutive loss scaling
+        # 8. Consecutive loss scaling
         if self.state.consecutive_losses >= 2:
             scale = 1.0 - (self.state.consecutive_losses * 0.15)
             scale = max(0.3, scale)
@@ -251,9 +321,10 @@ class RiskManager:
             position_size *= scale
             risk_score += 0.1 * self.state.consecutive_losses
 
-        # 8. Drawdown scaling
-        if self.state.drawdown_pct > self.max_drawdown_pct * 0.5:
-            scale = 1.0 - (self.state.drawdown / (self.max_drawdown_pct / 100) * 0.5)
+        # 9. Drawdown scaling
+        drawdown_threshold = self.max_drawdown_pct * 50  # 50% of max drawdown
+        if self.state.drawdown_pct > drawdown_threshold:
+            scale = 1.0 - (self.state.drawdown_pct / (self.max_drawdown_pct * 100) * 0.5)
             scale = max(0.25, scale)
             warnings.append(f"Drawdown scaling: {scale:.0%} (drawdown {self.state.drawdown_pct:.1f}%)")
             position_size *= scale
@@ -295,6 +366,9 @@ class RiskManager:
             trade["resolved"] = True
             trade["pnl"] = pnl
 
+            # Release exposure (approximate — full size released on resolve)
+            self.state.total_exposure = max(0, self.state.total_exposure - trade.get("size", 0))
+
             # Update balance
             self.state.current_balance += pnl
             self.state.daily_pnl += pnl
@@ -314,7 +388,7 @@ class RiskManager:
 
                 # Trigger cooldown after N consecutive losses
                 if self.state.consecutive_losses >= self.cooldown_after_losses:
-                    cooldown_time = datetime.now(timezone.utc) + timedelta(minutes=self.cooldown_scans * 3)
+                    cooldown_time = datetime.now(timezone.utc) + timedelta(minutes=self.cooldown_after_losses * 3)
                     self.state.cooldown_until = cooldown_time.isoformat()
                     logger.warning(
                         f"🛑 Cooldown triggered: {self.state.consecutive_losses} losses, "
@@ -323,18 +397,37 @@ class RiskManager:
 
             self._save_state()
 
+    def reset_daily(self):
+        """Reset daily trackers. Call at start of each trading day."""
+        today = datetime.now(timezone.utc).date().isoformat()
+        if self.state.last_reset_date != today:
+            self.state.daily_pnl = 0.0
+            self.state.daily_trades = 0
+            self.state.last_reset_date = today
+            self._save_state()
+            logger.info(f"📅 Daily reset — new trading day: {today}")
+
     def get_status(self) -> dict:
         """Get current risk status summary."""
         return {
+            "mode": "🔴 LIVE" if self.is_live else "🟡 PAPER",
             "balance": f"${self.state.current_balance:.2f}",
             "pnl": f"${self.state.total_pnl:+.2f} ({self.state.total_pnl_pct:+.1f}%)",
             "drawdown": f"{self.state.drawdown_pct:.1f}%",
-            "daily_pnl": f"${self.state.daily_pnl:+.2f} ({self.state.daily_pnl_pct:+.1f}%)",
+            "daily_pnl": f"${self.state.daily_pnl:+.2f} ({self.state.daily_pnl_pct:.1f}%)",
+            "exposure": f"${self.state.total_exposure:.2f} ({self.state.exposure_pct:.1f}%)",
             "open_positions": self.state.open_positions,
             "win_rate": f"{self.state.win_rate:.1%}",
             "consecutive_losses": self.state.consecutive_losses,
             "cooldown": "YES" if self.state.is_in_cooldown else "no",
-            "risk_headroom": f"{100 - (abs(self.state.daily_pnl_pct) / self.daily_loss_limit_pct * 100):.0f}%",
+            "risk_headroom": f"{max(0, 100 - (abs(self.state.daily_pnl_pct) / (self.daily_loss_limit_pct * 100) * 100)):.0f}%",
+            "limits": {
+                "kelly": f"{self.kelly_fraction:.0%}",
+                "max_bet": f"{self.max_bet_pct:.0%}",
+                "max_exposure": f"{self.max_exposure_pct * 100:.0f}%",
+                "daily_loss": f"{self.daily_loss_limit_pct * 100:.0f}%",
+                "max_drawdown": f"{self.max_drawdown_pct * 100:.0f}%",
+            },
         }
 
     def _save_state(self):

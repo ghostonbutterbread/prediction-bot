@@ -41,20 +41,20 @@ def analyze() -> dict:
     }
     
     if resolved:
-        wins = [t for t in resolved if (t.get("actual_pnl") or 0) > 0]
-        losses = [t for t in resolved if (t.get("actual_pnl") or 0) < 0]
-        total_pnl = sum(t.get("actual_pnl", 0) for t in resolved)
+        wins = [t for t in resolved if (t.get("pnl") or 0) > 0]
+        losses = [t for t in resolved if (t.get("pnl") or 0) < 0]
+        total_pnl = sum(t.get("pnl", 0) for t in resolved)
         
         result["performance"] = {
             "win_rate": round(len(wins) / len(resolved) * 100, 1),
             "total_pnl": round(total_pnl, 2),
             "wins": len(wins),
             "losses": len(losses),
-            "avg_win": round(sum(t.get("actual_pnl", 0) for t in wins) / len(wins), 2) if wins else 0,
-            "avg_loss": round(sum(t.get("actual_pnl", 0) for t in losses) / len(losses), 2) if losses else 0,
+            "avg_win": round(sum(t.get("pnl", 0) for t in wins) / len(wins), 2) if wins else 0,
+            "avg_loss": round(sum(t.get("pnl", 0) for t in losses) / len(losses), 2) if losses else 0,
             "profit_factor": round(
-                sum(t.get("actual_pnl", 0) for t in wins) / abs(sum(t.get("actual_pnl", 0) for t in losses))
-                if losses and sum(t.get("actual_pnl", 0) for t in losses) != 0 else 0, 2
+                sum(t.get("pnl", 0) for t in wins) / abs(sum(t.get("pnl", 0) for t in losses))
+                if losses and sum(t.get("pnl", 0) for t in losses) != 0 else 0, 2
             ),
         }
     
@@ -161,7 +161,7 @@ def detect_issues(trades: list, resolved: list, session: dict) -> list:
     # 6. Win rate too low (if we have resolutions)
     resolved_trades = [t for t in trades if t.get("resolved")]
     if len(resolved_trades) >= 10:
-        wins = sum(1 for t in resolved_trades if (t.get("actual_pnl") or 0) > 0)
+        wins = sum(1 for t in resolved_trades if (t.get("pnl") or 0) > 0)
         wr = wins / len(resolved_trades)
         if wr < 0.40:
             issues.append({

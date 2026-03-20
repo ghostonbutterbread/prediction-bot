@@ -64,10 +64,7 @@ class Simulator:
     def __init__(self, config: dict = None):
         config = config or {}
         self.strategy = EnhancedStrategyEngine(config.get("strategy", {}))
-        self.kelly = KellySizer(
-            fraction=config.get("kelly_fraction", 0.5),
-            max_bet_pct=config.get("max_position_pct", 0.10),
-        )
+        self.kelly = KellySizer()
 
         # Risk management
         from bot.risk import RiskManager
