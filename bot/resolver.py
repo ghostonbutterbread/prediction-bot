@@ -45,9 +45,15 @@ class TradeResolver:
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
-    def resolve_session(self, session_id: str, exchange) -> dict:
+    def resolve_session(self, session_id: str, exchange, risk_manager=None) -> dict:
         """
         Resolve all open trades in a simulation session.
+        
+        Args:
+            session_id: The session ID to resolve.
+            exchange: Exchange instance for fetching market data.
+            risk_manager: Optional RiskManager instance. If provided, record_outcome
+                         will be called for each resolved trade to keep risk state in sync.
         
         Returns summary: {resolved: N, still_open: N, total_pnl: float}
         """
@@ -67,7 +73,7 @@ class TradeResolver:
         still_open_count = 0
         session_pnl_delta = 0.0
 
-        for trade in trades:
+        for trade_idx, trade in enumerate(trades):
             if trade.get("resolved"):
                 continue  # Already resolved
 
@@ -107,6 +113,10 @@ class TradeResolver:
                     session_pnl_delta += pnl
                     resolved_count += 1
 
+                    # Sync outcome to RiskManager so streaks/drawdown/daily_PnL update
+                    if risk_manager is not None:
+                        risk_manager.record_outcome(trade_idx, pnl)
+
                     logger.info(
                         f"  ✅ Resolved: {trade['question'][:50]}... | "
                         f"{direction} @ ${entry_price:.2f} | "
@@ -130,6 +140,10 @@ class TradeResolver:
 
                     session_pnl_delta += pnl
                     resolved_count += 1
+
+                    # Sync outcome to RiskManager so streaks/drawdown/daily_PnL update
+                    if risk_manager is not None:
+                        risk_manager.record_outcome(trade_idx, pnl)
 
                     logger.info(
                         f"  ⏳ Closed (unsettled): {trade['question'][:50]}... | "
@@ -306,16 +320,16 @@ class TradeResolver:
             "by_direction": by_direction,
         }
 
-    def resolve_latest(self, exchange) -> dict:
+    def resolve_latest(self, exchange, risk_manager=None) -> dict:
         """Resolve the most recent session."""
         sessions = sorted(self.data_dir.glob("sim_*.json"), reverse=True)
         if not sessions:
             return {"error": "no sessions found"}
 
         session_id = sessions[0].stem.replace("sim_", "")
-        return self.resolve_session(session_id, exchange)
+        return self.resolve_session(session_id, exchange, risk_manager)
 
-    def resolve_all_open(self, exchange) -> list[dict]:
+    def resolve_all_open(self, exchange, risk_manager=None) -> list[dict]:
         """Resolve all sessions that have open trades."""
         results = []
         for session_file in sorted(self.data_dir.glob("sim_*.json"), reverse=True):
@@ -325,7 +339,7 @@ class TradeResolver:
             open_trades = [t for t in data.get("trades", []) if not t.get("resolved")]
             if open_trades:
                 session_id = session_file.stem.replace("sim_", "")
-                result = self.resolve_session(session_id, exchange)
+                result = self.resolve_session(session_id, exchange, risk_manager)
                 results.append(result)
 
         return results
