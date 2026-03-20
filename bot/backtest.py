@@ -69,10 +69,7 @@ class Backtester:
     def __init__(self, config: dict = None):
         config = config or {}
         self.strategy = EnhancedStrategyEngine(config.get("strategy", {}))
-        self.kelly = KellySizer(
-            fraction=config.get("kelly_fraction", 0.5),
-            max_bet_pct=config.get("max_position_pct", 0.10),
-        )
+        self.kelly = KellySizer()
         self.starting_balance = config.get("starting_balance", 1000)
         self.min_edge = config.get("strategy", {}).get("min_edge", 0.02)
         self.min_confidence = config.get("strategy", {}).get("min_confidence", 0.50)

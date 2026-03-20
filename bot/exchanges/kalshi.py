@@ -240,7 +240,7 @@ class KalshiExchange(BaseExchange):
 
     def get_market(self, market_id: str) -> Optional[Market]:
         try:
-            resp = self.client.get_market(market_ticker=market_id)
+            resp = self.client.get_market(ticker=market_id)
             m = getattr(resp, 'market', None)
             if not m:
                 return None
@@ -374,7 +374,30 @@ class KalshiExchange(BaseExchange):
             return order
 
         except Exception as e:
-            logger.error(f"Order failed: {e}")
+            # Log the actual error response for debugging
+            err_detail = str(e)
+            if hasattr(e, 'response') and e.response is not None:
+                try:
+                    err_body = e.response.json()
+                    err_detail = f"HTTP {e.response.status_code} - {err_body}"
+                except Exception:
+                    err_detail = f"HTTP {e.response.status_code} - {e.response.text[:200]}"
+
+            # 409 Conflict means an order already exists on this market — treat as success
+            if hasattr(e, 'response') and e.response is not None and e.response.status_code == 409:
+                logger.warning(f"Order already exists on {market_id} — skipping duplicate")
+                return Order(
+                    id="existing",
+                    exchange="kalshi",
+                    market_id=market_id,
+                    side=side,
+                    price=price,
+                    size=count,
+                    status="existing",
+                    created_at=datetime.now(timezone.utc),
+                )
+
+            logger.error(f"Order failed on {market_id}: {err_detail}")
             return None
 
     def cancel_order(self, order_id: str) -> bool:
