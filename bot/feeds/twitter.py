@@ -7,7 +7,7 @@ Integrates with Google News RSS for broader social signal coverage.
 import logging
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
@@ -42,6 +42,10 @@ class SocialSignal:
     neutral_count: int
     sources: list
     timestamp: str = ""
+    warnings: list[str] = field(default_factory=list)
+    confidence_cap: Optional[float] = None
+    manipulation_flag: bool = False
+    max_engagement_ratio: float = 0.0
 
     @property
     def predicted_prob_adjustment(self) -> float:
@@ -52,14 +56,19 @@ class SocialSignal:
     def confidence(self) -> float:
         """Confidence based on sample size."""
         if self.mention_count >= 20:
-            return 0.7
+            base = 0.7
         elif self.mention_count >= 10:
-            return 0.6
+            base = 0.6
         elif self.mention_count >= 5:
-            return 0.5
+            base = 0.5
         elif self.mention_count >= 2:
-            return 0.4
-        return 0.3
+            base = 0.4
+        else:
+            base = 0.3
+
+        if self.confidence_cap is not None:
+            base = min(base, self.confidence_cap)
+        return base
 
 
 class SocialFeed:
@@ -133,6 +142,8 @@ class SocialFeed:
 
                 text = f"{title} {description}"
                 sentiment = self.analyze_text(text)
+                followers = self._extract_numeric_metric(text, "followers")
+                engagement = self._extract_engagement(text)
 
                 if sentiment != 0:
                     mentions.append({
@@ -140,6 +151,8 @@ class SocialFeed:
                         "source": source,
                         "sentiment": round(sentiment, 2),
                         "date": pub_date[:16],
+                        "followers": followers,
+                        "engagement": engagement,
                     })
                     sentiments.append(sentiment)
 
@@ -154,6 +167,28 @@ class SocialFeed:
         bullish = sum(1 for s in sentiments if s > 0.2)
         bearish = sum(1 for s in sentiments if s < -0.2)
         neutral = len(sentiments) - bullish - bearish
+        warnings = []
+        confidence_cap = None
+        manipulation_flag = False
+        max_engagement_ratio = 0.0
+
+        follower_counts = [m["followers"] for m in mentions if m.get("followers") is not None]
+        if follower_counts and len(follower_counts) == len(mentions) and all(f < 100 for f in follower_counts):
+            confidence_cap = 0.35
+            warnings.append("All sampled accounts have fewer than 100 followers; confidence capped")
+
+        for mention in mentions:
+            followers = mention.get("followers")
+            engagement = mention.get("engagement")
+            if followers is None or engagement is None or followers <= 0:
+                continue
+            ratio = engagement / followers
+            max_engagement_ratio = max(max_engagement_ratio, ratio)
+            if engagement >= 200 and ratio > 3.0:
+                manipulation_flag = True
+
+        if manipulation_flag:
+            warnings.append("Engagement is extreme relative to account size; potentially manipulated")
 
         signal = SocialSignal(
             query=query,
@@ -164,6 +199,10 @@ class SocialFeed:
             neutral_count=neutral,
             sources=mentions[:5],
             timestamp=datetime.now(timezone.utc).isoformat(),
+            warnings=warnings,
+            confidence_cap=confidence_cap,
+            manipulation_flag=manipulation_flag,
+            max_engagement_ratio=round(max_engagement_ratio, 2),
         )
 
         # Cache result
@@ -194,6 +233,29 @@ class SocialFeed:
                 except Exception as e:
                     logging.warning(f'Could not form injury trade: {e}')
         return signal
+
+    def _extract_numeric_metric(self, text: str, label: str) -> Optional[float]:
+        match = re.search(rf'(\d+(?:\.\d+)?)\s*([kKmM]?)\s+{label}', text)
+        if not match:
+            return None
+
+        value = float(match.group(1))
+        suffix = match.group(2).lower()
+        if suffix == "k":
+            value *= 1_000
+        elif suffix == "m":
+            value *= 1_000_000
+        return value
+
+    def _extract_engagement(self, text: str) -> Optional[float]:
+        total = 0.0
+        found = False
+        for label in ("likes", "retweets", "reposts", "replies", "comments"):
+            value = self._extract_numeric_metric(text, label)
+            if value is not None:
+                total += value
+                found = True
+        return total if found else None
 
     def close(self):
         """Close the HTTP client."""
