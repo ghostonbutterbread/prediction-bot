@@ -320,10 +320,259 @@ class CryptoFeed:
             logger.debug(f"Crypto fetch error for {symbol}: {e}")
             return None
 
-    def score_range_market(self, question: str, yes_price: float) -> Optional[dict]:
+    def _resolve_strike_from_kalshi(self, question: str, yes_price: float, series_ticker: str = None) -> Optional[dict]:
+        """
+        Use Kalshi's public API to resolve a market's strike price.
+
+        Returns dict with keys:
+          - strike_price (float): the threshold price
+          - strike_type ("greater"|"less"|"between")
+          - close_time (datetime): when the market resolves
+          - ticker (str): the full market ticker
+        Or None if resolution fails.
+        """
+        import re
+
+        # Extract crypto name from question to build series ticker if not provided
+        if not series_ticker:
+            q_lower = question.lower()
+            if "shiba" in q_lower:
+                series_ticker = "KXSHIBA"
+            elif "bitcoin" in q_lower or "btc" in q_lower:
+                series_ticker = "KXBTC"
+            elif "ethereum" in q_lower or "eth" in q_lower:
+                series_ticker = "KXETH"
+            elif "dogecoin" in q_lower or "doge" in q_lower:
+                series_ticker = "KXDOGE"
+            elif "solana" in q_lower or "sol" in q_lower:
+                series_ticker = "KXSOL"
+            elif "ripple" in q_lower or "xrp" in q_lower:
+                series_ticker = "KXXLM"  #XRPL uses XLM
+
+        if not series_ticker:
+            return None
+
+        try:
+            # Fetch all contracts in this series from public API
+            url = f"https://api.elections.kalshi.com/trade-api/v2/markets?status=open&limit=50&series_ticker={series_ticker}"
+            resp = self.http.get(url, timeout=10)
+            if resp.status_code != 200:
+                logger.debug(f"Kalshi API returned {resp.status_code} for {series_ticker}")
+                return None
+
+            data = resp.json()
+            markets = data.get("markets", [])
+            if not markets:
+                return None
+
+            # Match by YES price (last_price_dollars in public API)
+            # yes_price is in [0,1] range; last_price_dollars is also in [0,1]
+            for m in markets:
+                m_price_str = m.get("last_price_dollars", "")
+                if not m_price_str:
+                    continue
+                try:
+                    m_price = float(m_price_str)
+                except (ValueError, TypeError):
+                    continue
+
+                # Allow 1% tolerance for price matching
+                if abs(m_price - yes_price) < 0.015:
+                    strike = m.get("custom_strike", {})
+                    strike_type = strike.get("strike_type", "")
+                    floor = strike.get("floor_strike", "")
+                    cap = strike.get("cap_strike", "")
+
+                    # Parse close_time
+                    close_str = m.get("close_time", "")
+                    close_time = None
+                    if close_str:
+                        try:
+                            close_time = datetime.fromisoformat(close_str.replace("Z", "+00:00"))
+                        except ValueError:
+                            pass
+
+                    if strike_type == "greater" and floor:
+                        return {
+                            "strike_price": float(floor),
+                            "strike_type": "greater",
+                            "close_time": close_time,
+                            "ticker": m.get("ticker", ""),
+                        }
+                    elif strike_type == "less" and cap:
+                        return {
+                            "strike_price": float(cap),
+                            "strike_type": "less",
+                            "close_time": close_time,
+                            "ticker": m.get("ticker", ""),
+                        }
+                    elif strike_type == "between" and floor and cap:
+                        return {
+                            "strike_price_low": float(floor),
+                            "strike_price_high": float(cap),
+                            "strike_type": "between",
+                            "close_time": close_time,
+                            "ticker": m.get("ticker", ""),
+                        }
+
+            logger.debug(f"No matching market found for {series_ticker} at yes_price={yes_price}")
+            return None
+
+        except Exception as e:
+            logger.debug(f"Failed to resolve strike from Kalshi: {e}")
+            return None
+
+    def _score_by_strike_distance(
+        self,
+        current_price: float,
+        strike_info: dict,
+        daily_vol_pct: float,
+        yes_price: float,
+    ) -> tuple[float, float]:
+        """
+        Compute probability based on distance between current price and strike.
+
+        Uses a conservative log-normal model: crypto prices follow rough geometric
+        Brownian motion. Daily volatility drives a standard deviation; we compute
+        how many sigma the required move is and convert to a probability.
+
+        Returns (predicted_prob, confidence).
+        """
+        from datetime import timezone
+
+        strike_type = strike_info.get("strike_type", "")
+        close_time = strike_info.get("close_time")
+        ticker = strike_info.get("ticker", "")
+
+        # Days until close (minimum 0.5 to avoid divide-by-zero)
+        if close_time:
+            now = datetime.now(timezone.utc)
+            hours_left = max((close_time - now).total_seconds() / 3600, 0.5)
+            days_toExpiry = hours_left / 24
+        else:
+            days_toExpiry = 1.0
+
+        # Daily sigma as fraction of price
+        daily_sigma = daily_vol_pct / 100
+
+        # Annualized sigma * sqrt(time) for the move
+        # For a move of size M, number of sigmas = M / (sigma * sqrt(days))
+        def sigmas_away(current: float, target: float) -> float:
+            if target == 0:
+                return 99.0
+            move_pct = abs(target - current) / current
+            # Convert percentage move to number of daily sigmas
+            return move_pct / (daily_sigma * (days_toExpiry ** 0.5))
+
+        if strike_type == "greater":
+            threshold = strike_info["strike_price"]
+            if current_price >= threshold:
+                # Already above — high probability
+                predicted = 0.95
+            else:
+                sigma = sigmas_away(current_price, threshold)
+                # Normal CDF: P(X > threshold) for X ~ N(current, sigma*sqrt(t))
+                # Using approximation: if sigma < 1: high prob; sigma 1-2: moderate;
+                # sigma 2-3: low; sigma > 3: very low
+                if sigma < 0.5:
+                    predicted = 0.90
+                elif sigma < 1.0:
+                    predicted = 0.75
+                elif sigma < 2.0:
+                    predicted = 0.40
+                elif sigma < 3.0:
+                    predicted = 0.15
+                elif sigma < 5.0:
+                    predicted = 0.05
+                else:
+                    predicted = 0.01
+
+        elif strike_type == "less":
+            threshold = strike_info["strike_price"]
+            if current_price <= threshold:
+                predicted = 0.95
+            else:
+                sigma = sigmas_away(current_price, threshold)
+                if sigma < 0.5:
+                    predicted = 0.90
+                elif sigma < 1.0:
+                    predicted = 0.75
+                elif sigma < 2.0:
+                    predicted = 0.40
+                elif sigma < 3.0:
+                    predicted = 0.15
+                elif sigma < 5.0:
+                    predicted = 0.05
+                else:
+                    predicted = 0.01
+
+        elif strike_type == "between":
+            low = strike_info["strike_price_low"]
+            high = strike_info["strike_price_high"]
+            if low <= current_price <= high:
+                # Already in range
+                predicted = 0.90
+            else:
+                # Distance to nearest boundary
+                if current_price < low:
+                    sigma = sigmas_away(current_price, low)
+                else:
+                    sigma = sigmas_away(current_price, high)
+                if sigma < 0.5:
+                    predicted = 0.80
+                elif sigma < 1.0:
+                    predicted = 0.60
+                elif sigma < 2.0:
+                    predicted = 0.25
+                elif sigma < 3.0:
+                    predicted = 0.08
+                else:
+                    predicted = 0.02
+        else:
+            # Unknown strike type — fall back to market price
+            predicted = yes_price
+
+        # Safety cap: if the required move exceeds 3x daily_vol * sqrt(days),
+        # the probability should not exceed 10%
+        # (prevents the "SHIB needs 140% move in 1 day = 85% prob" bug)
+        required_move_pct = 0.0
+        if strike_type in ("greater", "less"):
+            threshold = strike_info.get("strike_price", current_price)
+            required_move_pct = abs(threshold - current_price) / current_price
+        elif strike_type == "between":
+            if current_price < strike_info["strike_price_low"]:
+                required_move_pct = abs(strike_info["strike_price_low"] - current_price) / current_price
+            elif current_price > strike_info["strike_price_high"]:
+                required_move_pct = abs(current_price - strike_info["strike_price_high"]) / current_price
+
+        max_safe_move_pct = daily_vol_pct * 3.0 * (days_toExpiry ** 0.5)
+        if required_move_pct > max_safe_move_pct and predicted > 0.10:
+            logger.debug(
+                f"  Safety cap triggered: required_move={required_move_pct:.1%} > "
+                f"max_safe={max_safe_move_pct:.1%}, capping prob"
+            )
+            predicted = min(predicted, 0.10)
+
+        # Confidence based on how well we understand this market
+        confidence = 0.65
+        if ticker:
+            confidence = 0.75  # Resolved from API = more confident
+        if abs(yes_price - predicted) < 0.05:
+            # Market and model agree — high confidence
+            confidence = 0.80
+
+        return predicted, confidence
+
+    def score_range_market(self, question: str, yes_price: float,
+                          series_ticker: str = None) -> Optional[dict]:
         """
         Score a crypto price range/above-below market.
-        Works with or without explicit range in the question text.
+
+        Scoring hierarchy:
+        1. Resolve strike from Kalshi public API (preferred)
+           → use log-normal distance-to-strike model
+        2. Parse explicit threshold from question text (above/below/range)
+        3. Fall back to market price (no opinion)
         """
         import re
 
@@ -345,12 +594,36 @@ class CryptoFeed:
 
         # Estimate daily volatility from 24h change
         daily_vol_pct = max(abs(change_pct) * 0.8, 2.0)  # At least 2%
-        expected_daily_range = current_price * (daily_vol_pct / 100)
 
-        # Try to parse range from question
+        # ── Tier 1: Resolve strike from Kalshi public API ──────────────────
+        strike_info = self._resolve_strike_from_kalshi(question, yes_price, series_ticker)
+        if strike_info:
+            logger.debug(
+                f"  Resolved strike: type={strike_info['strike_type']} "
+                f"ticker={strike_info.get('ticker','')}"
+            )
+            predicted_prob, confidence = self._score_by_strike_distance(
+                current_price, strike_info, daily_vol_pct, yes_price
+            )
+            return {
+                "predicted_prob": max(0.01, min(0.99, predicted_prob)),
+                "confidence": confidence,
+                "data": {
+                    "current_price": current_price,
+                    "change_24h": change_pct,
+                    "daily_volatility": daily_vol_pct,
+                    "strike_type": strike_info.get("strike_type"),
+                    "ticker": strike_info.get("ticker", ""),
+                    "source": "kalshi_api",
+                }
+            }
+
+        # ── Tier 2: Parse explicit threshold from question ─────────────────
         range_match = re.search(r'(\d[\d,.]*)\s*-\s*(\d[\d,.]*)', question)
         is_above = "above" in question.lower() or "over" in question
         is_below = "below" in question.lower() or "under" in question
+
+        expected_daily_range = current_price * (daily_vol_pct / 100)
 
         if range_match:
             # Explicit range market
@@ -373,6 +646,7 @@ class CryptoFeed:
                     predicted_prob = 0.15
                 else:
                     predicted_prob = 0.35
+
         elif is_above:
             threshold_match = re.search(r'above\s*\$?(\d[\d,.]*)', question.lower())
             if threshold_match:
@@ -385,6 +659,7 @@ class CryptoFeed:
                     predicted_prob = 0.30
             else:
                 predicted_prob = yes_price  # Can't parse threshold
+
         elif is_below:
             threshold_match = re.search(r'below\s*\$?(\d[\d,.]*)', question.lower())
             if threshold_match:
@@ -398,17 +673,16 @@ class CryptoFeed:
             else:
                 predicted_prob = yes_price
         else:
-            # Generic "price range" market without specific range — use volatility
-            # If price is stable, likely to stay in range
-            # If volatile, more likely to break out
-            if abs(change_pct) < 2:
-                predicted_prob = 0.85  # Stable = likely in range
-            elif abs(change_pct) < 5:
-                predicted_prob = 0.65
-            else:
-                predicted_prob = 0.40  # Very volatile = might break range
+            # ── Tier 3: No parseable threshold ────────────────────────────
+            # We cannot determine what price the market is asking about.
+            # Fall back to market price — do NOT make up a prediction.
+            logger.debug(
+                f"  Cannot resolve strike for '{question[:60]}', "
+                f"falling back to market price {yes_price}"
+            )
+            return None
 
-        # Adjust confidence by volume (higher volume = more data)
+        # Adjust confidence by volume
         confidence = 0.70
         if price_data.volume_24h > 1e9:
             confidence = 0.80
@@ -422,6 +696,7 @@ class CryptoFeed:
                 "current_price": current_price,
                 "change_24h": change_pct,
                 "daily_volatility": daily_vol_pct,
+                "source": "question_parse",
             }
         }
 
@@ -588,7 +863,8 @@ class LiveFeedAggregator:
         if any(w in q for w in ["bitcoin", "btc", "ethereum", "eth", "shiba",
                                  "litecoin", "solana", "chainlink", "avalanche",
                                  "polkadot", "ripple", "crypto"]):
-            return self.crypto.score_range_market(question, yes_price)
+            return self.crypto.score_range_market(question, yes_price,
+                                                  series_ticker=category if category else None)
 
         # Forex markets
         if any(w in q for w in ["eur/usd", "usd/jpy", "gbp/usd", "exchange rate",
