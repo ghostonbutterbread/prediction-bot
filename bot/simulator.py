@@ -197,42 +197,22 @@ class Simulator:
         sports_trades = []
         try:
             from bot.strategies.sports import MarketFilter, QuickBetStrategy
-            from bot.strategies.injury_sniper import InjurySniper
-            
+
             sports_markets = MarketFilter.filter_sports(markets, max_hours=48)
             if sports_markets:
                 logger.info(f"🏀 Found {len(sports_markets)} sports markets (closing within 48h)")
-                
-                # 1. Quick bet strategy (player props, totals, outcomes)
+
                 qb = QuickBetStrategy()
                 for sm in sports_markets:
-                    if sm.market_id in self.traded_markets:
+                    if sm.id in self.traded_markets:
                         continue
                     sig = qb.analyze_market(sm)
-                    if sig.get("should_trade"):
+                    if sig and sig.get("should_trade"):
                         trade = self._create_trade(sig)
                         if trade:
                             self.trades.append(trade)
                             sports_trades.append(trade)
-                            self.traded_markets.add(sm.market_id)
-                
-                # 2. Injury sniper (star player injuries → bet against team)
-                sniper = InjurySniper()
-                # for tweet in tweets: Replace THIS
-                #     injury_signals = sniper.scan_markets_for_injuries(markets)
-                injury_signals = []# Replace THIS
-                for market in markets : # Added this to show the code I was trying to implement.
-                    if MarketFilter.classify_market(market.title) in MarketFilter.SPORTS_KEYWORDS:
-                        injury_signal = self.analyze_sports_signal(market, sniper)
-                        if injury_signal:
-                            injury_signals.append(injury_signal) # Append the new signal
-                # for sig in injury_signals: - Delete this old code
-                    #trade = self._create_trade(sig)
-                    # if trade:
-                    #   self.trades.append(trade)
-                    #   sports_trades.append(trade)
-                    #  self.traded_markets.add(mid) - Delete this old code
-            
+                            self.traded_markets.add(sm.id)
 
         except Exception as e:
             logger.debug(f"Sports analysis error: {e}")
@@ -261,7 +241,7 @@ class Simulator:
         try:
             if self.social_feed:
                 # Check for injury alerts in feed (Twitter API)
-                alerts = social_feed.scan()
+                alerts = self.social_feed.scan()
                 if alerts:
                     injury_signals = []
                     for alert in alerts:
