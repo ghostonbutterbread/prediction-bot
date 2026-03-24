@@ -33,6 +33,7 @@ class NewsItem:
     summary: str
     relevance: float  # 0-1
     sentiment: float  # -1 (bearish) to +1 (bullish)
+    recency_weight: float = 1.0
 
 
 # ── Feed definitions ──────────────────────────────────────────────────────────
@@ -118,13 +119,29 @@ class NewsFeed:
 
             article.relevance = relevance
             article.sentiment = self._simple_sentiment(article.title + " " + article.summary)
+            article.recency_weight = self._recency_weight(article.published)
             scored.append(article)
 
-        scored.sort(key=lambda a: a.relevance, reverse=True)
+        scored.sort(key=lambda a: a.relevance * a.recency_weight, reverse=True)
         result = scored[:10]
 
         self.cache[cache_key] = (result, datetime.now(timezone.utc))
         return result
+
+    def assess_signal_quality(self, items: list[NewsItem]) -> dict:
+        """Return confidence penalties and warnings for news signal quality."""
+        warnings = []
+        confidence_penalty = 0.0
+
+        sources = {item.source for item in items if item.source}
+        if items and len(sources) == 1:
+            confidence_penalty += 0.10
+            warnings.append("All news items came from a single source")
+
+        return {
+            "confidence_penalty": confidence_penalty,
+            "warnings": warnings,
+        }
 
     # ── Fetchers ──────────────────────────────────────────────────────────────
 
@@ -294,6 +311,19 @@ class NewsFeed:
         if total == 0:
             return 0.0
         return (pos - neg) / total
+
+    def _recency_weight(self, published: datetime) -> float:
+        """Progressively discount news older than 24 hours."""
+        pub_dt = published
+        if pub_dt.tzinfo is None:
+            pub_dt = pub_dt.replace(tzinfo=timezone.utc)
+
+        age_hours = max((datetime.now(timezone.utc) - pub_dt).total_seconds() / 3600, 0)
+        if age_hours <= 24:
+            return 1.0
+
+        extra_age = age_hours - 24
+        return max(0.20, 1.0 - extra_age / 72)
 
     def _xml_text(self, element, tags: list[str]) -> Optional[str]:
         """Find the first matching child tag and return its text."""

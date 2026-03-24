@@ -9,6 +9,7 @@ from bot.feeds.news import NewsFeed
 from bot.feeds.twitter import SocialFeed
 from bot.feeds.ai_signal import AISignalFeed
 from bot.feeds.live_data import LiveFeedAggregator
+from bot.strategies.signal_validator import SignalAuditLog, SignalValidator
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,8 @@ class EnhancedStrategyEngine:
 
         # Live data feeds (weather, crypto, forex)
         self.live_feeds = LiveFeedAggregator()
+        self.validator = SignalValidator()
+        self.signal_audit = SignalAuditLog()
 
     def analyze_market(self, market, order_book: dict = None) -> Optional[dict]:
         """
@@ -110,19 +113,46 @@ class EnhancedStrategyEngine:
         if not signals:
             return None
 
+        validation_results = self.validator.validate_all(signals, market)
+        raw_predictions = {
+            name: round(float(signal.get("predicted_prob", 0.5) or 0.5), 4)
+            for name, signal in signals.items()
+        }
+        validated_signals = {}
+        validated_weights = {}
+
+        for name, sig in signals.items():
+            validation = validation_results[name]
+            self.signal_audit.write(market, name, sig, raw_predictions, validation)
+            if validation.accepted:
+                adjusted = dict(sig)
+                adjusted["predicted_prob"] = validation.adjusted_prob
+                adjusted["confidence"] = validation.adjusted_confidence
+                if validation.warnings:
+                    adjusted.setdefault("warnings", []).extend(validation.warnings)
+                    for warning in validation.warnings:
+                        logger.warning(f"Signal warning [{name}]: {warning}")
+                validated_signals[name] = adjusted
+                validated_weights[name] = weights[name]
+            else:
+                logger.warning(f"Signal REJECTED [{name}]: {validation.rejection_reason}")
+
+        if not validated_signals:
+            return None
+
         # Weighted ensemble
-        total_weight = sum(weights.values())
+        total_weight = sum(validated_weights.values())
         if total_weight == 0:
             return None
 
         weighted_prob = sum(
-            s["predicted_prob"] * weights[k]
-            for k, s in signals.items()
+            s["predicted_prob"] * validated_weights[k]
+            for k, s in validated_signals.items()
         ) / total_weight
 
         weighted_confidence = sum(
-            s["confidence"] * weights[k]
-            for k, s in signals.items()
+            s["confidence"] * validated_weights[k]
+            for k, s in validated_signals.items()
         ) / total_weight
 
         edge = abs(weighted_prob - market.yes_price)
@@ -142,7 +172,7 @@ class EnhancedStrategyEngine:
             "market_price": market.yes_price,
             "edge": round(edge, 4),
             "confidence": round(weighted_confidence, 4),
-            "signals": {k: s["predicted_prob"] for k, s in signals.items()},
+            "signals": {k: s["predicted_prob"] for k, s in validated_signals.items()},
             "question": market.question,
         }
 
@@ -196,6 +226,7 @@ class EnhancedStrategyEngine:
             confidence += 0.05
 
         return {
+            "signal_type": "price",
             "predicted_prob": max(0.01, min(0.99, predicted)),
             "confidence": max(0.1, min(0.95, confidence)),
         }
@@ -209,23 +240,35 @@ class EnhancedStrategyEngine:
                 return None
 
             # Average sentiment weighted by relevance
-            total_weight = sum(n.relevance for n in news_items)
+            total_weight = sum(n.relevance * getattr(n, "recency_weight", 1.0) for n in news_items)
             if total_weight == 0:
                 return None
 
             avg_sentiment = sum(
-                n.sentiment * n.relevance for n in news_items
+                n.sentiment * n.relevance * getattr(n, "recency_weight", 1.0)
+                for n in news_items
             ) / total_weight
 
-            # Convert sentiment (-1 to 1) to probability shift
+            quality = self.news.assess_signal_quality(news_items)
+
             predicted = market.yes_price + avg_sentiment * 0.15
 
-            # More news = higher confidence
             confidence = min(len(news_items) / 5, 1.0) * 0.8
+            confidence = max(0.01, confidence - quality["confidence_penalty"])
+            latest_published = max((n.published for n in news_items), default=datetime.now(timezone.utc))
 
             return {
+                "signal_type": "news",
                 "predicted_prob": max(0.01, min(0.99, predicted)),
                 "confidence": confidence,
+                "source_timestamp": latest_published.isoformat(),
+                "ttl_seconds": 86400,
+                "data": {
+                    "sources": [n.source for n in news_items],
+                    "source_count": len({n.source for n in news_items}),
+                    "quality_warnings": quality["warnings"],
+                },
+                "warnings": quality["warnings"],
             }
         except Exception as e:
             logger.debug(f"News signal error: {e}")
@@ -240,10 +283,7 @@ class EnhancedStrategyEngine:
                 getattr(market, 'category', '')
             )
             if result:
-                return {
-                    "predicted_prob": result["predicted_prob"],
-                    "confidence": result["confidence"],
-                }
+                return result
             return None
         except Exception as e:
             logger.debug(f"Live data signal error: {e}")
@@ -260,8 +300,17 @@ class EnhancedStrategyEngine:
             predicted = market.yes_price + signal.predicted_prob_adjustment
 
             return {
+                "signal_type": "social",
                 "predicted_prob": max(0.01, min(0.99, predicted)),
                 "confidence": signal.confidence,
+                "source_timestamp": signal.timestamp,
+                "ttl_seconds": self.social.cache_ttl,
+                "data": {
+                    "warnings": list(signal.warnings),
+                    "manipulation_flag": signal.manipulation_flag,
+                    "confidence_cap": signal.confidence_cap,
+                },
+                "warnings": list(signal.warnings),
             }
         except Exception as e:
             logger.debug(f"Social signal error: {e}")
@@ -294,6 +343,7 @@ class EnhancedStrategyEngine:
 
         # Volume doesn't predict direction, just reliability
         return {
+            "signal_type": "volume",
             "predicted_prob": market.yes_price,  # Neutral
             "confidence": confidence,
         }
@@ -321,6 +371,7 @@ class EnhancedStrategyEngine:
             confidence = 0.2
 
         return {
+            "signal_type": "time",
             "predicted_prob": market.yes_price,
             "confidence": confidence,
         }

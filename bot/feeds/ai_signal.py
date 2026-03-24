@@ -148,8 +148,11 @@ class AISignalFeed:
                     return None  # SKIP
 
                 return {
+                    "signal_type": "ai",
                     "predicted_prob": max(0.01, min(0.99, predicted)),
                     "confidence": confidence,
+                    "source_timestamp": sig.get("timestamp"),
+                    "ttl_seconds": 1800,
                 }
 
         return None

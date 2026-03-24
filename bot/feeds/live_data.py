@@ -20,6 +20,17 @@ from dataclasses import dataclass
 logger = logging.getLogger(__name__)
 
 
+def _infer_question_side(question: str) -> Optional[str]:
+    q = (question or "").lower()
+    if any(token in q for token in [" below ", " under ", "<", " less than "]):
+        return "below"
+    if any(token in q for token in [" above ", " over ", ">", " more than ", " hit ", " reach "]):
+        return "above"
+    if any(token in q for token in [" between ", " range ", "-"]) and any(char.isdigit() for char in q):
+        return "range"
+    return None
+
+
 @dataclass
 class WeatherForecast:
     city: str
@@ -428,7 +439,7 @@ class CryptoFeed:
         strike_info: dict,
         daily_vol_pct: float,
         yes_price: float,
-    ) -> tuple[float, float]:
+    ) -> tuple[float, float, dict]:
         """
         Compute probability based on distance between current price and strike.
 
@@ -545,7 +556,8 @@ class CryptoFeed:
             elif current_price > strike_info["strike_price_high"]:
                 required_move_pct = abs(current_price - strike_info["strike_price_high"]) / current_price
 
-        max_safe_move_pct = daily_vol_pct * 3.0 * (days_toExpiry ** 0.5)
+        daily_sigma_fraction = daily_vol_pct / 100
+        max_safe_move_pct = daily_sigma_fraction * 3.0 * (days_toExpiry ** 0.5) * 2.5
         if required_move_pct > max_safe_move_pct and predicted > 0.10:
             logger.debug(
                 f"  Safety cap triggered: required_move={required_move_pct:.1%} > "
@@ -561,7 +573,12 @@ class CryptoFeed:
             # Market and model agree — high confidence
             confidence = 0.80
 
-        return predicted, confidence
+        diagnostics = {
+            "required_move_pct": required_move_pct,
+            "max_plausible_move_pct": max_safe_move_pct,
+            "days_to_expiry": round(days_toExpiry, 4),
+        }
+        return predicted, confidence, diagnostics
 
     def score_range_market(self, question: str, yes_price: float,
                           series_ticker: str = None) -> Optional[dict]:
@@ -591,6 +608,7 @@ class CryptoFeed:
 
         current_price = price_data.price_usd
         change_pct = price_data.change_24h_pct
+        question_side = _infer_question_side(question)
 
         # Estimate daily volatility from 24h change
         daily_vol_pct = max(abs(change_pct) * 0.8, 2.0)  # At least 2%
@@ -598,16 +616,32 @@ class CryptoFeed:
         # ── Tier 1: Resolve strike from Kalshi public API ──────────────────
         strike_info = self._resolve_strike_from_kalshi(question, yes_price, series_ticker)
         if strike_info:
+            strike_side = {
+                "greater": "above",
+                "less": "below",
+                "between": "range",
+            }.get(strike_info.get("strike_type"))
+            if question_side and strike_side and question_side != strike_side:
+                logger.warning(
+                    f"Rejecting incoherent crypto market parse: question_side={question_side}, "
+                    f"strike_side={strike_side}, question='{question[:80]}'"
+                )
+                return None
+
             logger.debug(
                 f"  Resolved strike: type={strike_info['strike_type']} "
                 f"ticker={strike_info.get('ticker','')}"
             )
-            predicted_prob, confidence = self._score_by_strike_distance(
+            predicted_prob, confidence, diagnostics = self._score_by_strike_distance(
                 current_price, strike_info, daily_vol_pct, yes_price
             )
             return {
+                "signal_type": "crypto",
                 "predicted_prob": max(0.01, min(0.99, predicted_prob)),
                 "confidence": confidence,
+                "source_timestamp": price_data.timestamp.isoformat(),
+                "ttl_seconds": self._cache_ttl,
+                "question_side": question_side,
                 "data": {
                     "current_price": current_price,
                     "change_24h": change_pct,
@@ -615,6 +649,8 @@ class CryptoFeed:
                     "strike_type": strike_info.get("strike_type"),
                     "ticker": strike_info.get("ticker", ""),
                     "source": "kalshi_api",
+                    "answered_question_side": strike_side,
+                    **diagnostics,
                 }
             }
 
@@ -624,12 +660,16 @@ class CryptoFeed:
         is_below = "below" in question.lower() or "under" in question
 
         expected_daily_range = current_price * (daily_vol_pct / 100)
+        required_move_pct = 0.0
+        days_to_expiry = 1.0
+        max_plausible_move_pct = (daily_vol_pct / 100) * 3.0 * (days_to_expiry ** 0.5) * 2.5
 
         if range_match:
             # Explicit range market
             low_range = float(range_match.group(1).replace(',', ''))
             high_range = float(range_match.group(2).replace(',', ''))
             range_width = high_range - low_range
+            question_side = "range"
 
             if low_range <= current_price <= high_range:
                 if range_width > expected_daily_range * 2:
@@ -646,11 +686,16 @@ class CryptoFeed:
                     predicted_prob = 0.15
                 else:
                     predicted_prob = 0.35
+                if current_price < low_range:
+                    required_move_pct = abs(low_range - current_price) / current_price
+                elif current_price > high_range:
+                    required_move_pct = abs(current_price - high_range) / current_price
 
         elif is_above:
             threshold_match = re.search(r'above\s*\$?(\d[\d,.]*)', question.lower())
             if threshold_match:
                 threshold = float(threshold_match.group(1).replace(',', ''))
+                required_move_pct = max((threshold - current_price) / current_price, 0.0)
                 if current_price > threshold * 1.05:
                     predicted_prob = 0.90
                 elif current_price > threshold:
@@ -664,6 +709,7 @@ class CryptoFeed:
             threshold_match = re.search(r'below\s*\$?(\d[\d,.]*)', question.lower())
             if threshold_match:
                 threshold = float(threshold_match.group(1).replace(',', ''))
+                required_move_pct = max((current_price - threshold) / current_price, 0.0)
                 if current_price < threshold * 0.95:
                     predicted_prob = 0.90
                 elif current_price < threshold:
@@ -689,14 +735,27 @@ class CryptoFeed:
         elif price_data.volume_24h < 1e6:
             confidence = 0.55
 
+        if required_move_pct > max_plausible_move_pct:
+            confidence = min(confidence, 0.25)
+            if days_to_expiry <= 1.0 and required_move_pct > 0.50:
+                predicted_prob = min(predicted_prob, 0.10)
+
         return {
+            "signal_type": "crypto",
             "predicted_prob": max(0.01, min(0.99, predicted_prob)),
             "confidence": confidence,
+            "source_timestamp": price_data.timestamp.isoformat(),
+            "ttl_seconds": self._cache_ttl,
+            "question_side": question_side,
             "data": {
                 "current_price": current_price,
                 "change_24h": change_pct,
                 "daily_volatility": daily_vol_pct,
                 "source": "question_parse",
+                "required_move_pct": required_move_pct,
+                "max_plausible_move_pct": max_plausible_move_pct,
+                "days_to_expiry": days_to_expiry,
+                "answered_question_side": question_side,
             }
         }
 
@@ -783,6 +842,7 @@ class ForexFeed:
 
         threshold = float(threshold_match.group(1))
         is_above = "above" in question.lower() or ">" in question
+        question_side = "above" if is_above else "below"
 
         # Forex moves ~0.5-1% daily typically
         daily_volatility_pct = 0.5
@@ -807,13 +867,22 @@ class ForexFeed:
         else:
             predicted_prob = 0.05 if not is_above else 0.95
 
+        implied_move_pct = abs(threshold - current_rate) / current_rate if current_rate else 0.0
+
         return {
+            "signal_type": "forex",
             "predicted_prob": max(0.01, min(0.99, predicted_prob)),
             "confidence": 0.70,
+            "source_timestamp": rate_data.timestamp.isoformat(),
+            "ttl_seconds": self._cache_ttl,
+            "question_side": question_side,
             "data": {
                 "current_rate": current_rate,
                 "threshold": threshold,
                 "daily_range": daily_range,
+                "implied_move_pct": implied_move_pct,
+                "days_to_expiry": 1.0,
+                "answered_question_side": question_side,
             }
         }
 
