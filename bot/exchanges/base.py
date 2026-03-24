@@ -19,6 +19,7 @@ class Market:
     closes_at: Optional[datetime]
     category: str
     metadata: dict
+    close_price: Optional[float] = None  # Settlement price: 1.0=YES, 0.0=NO, None=not settled
 
 
 @dataclass

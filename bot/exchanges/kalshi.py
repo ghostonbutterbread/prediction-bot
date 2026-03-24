@@ -277,7 +277,8 @@ class KalshiExchange(BaseExchange):
                 liquidity=_dollars(m, 'liquidity_dollars'),
                 closes_at=_parse_dt(getattr(m, 'close_time', None)),
                 category=getattr(m, 'market_type', 'binary'),
-                metadata={"status": getattr(m, 'status', '')}
+                metadata={"status": getattr(m, 'status', '')},
+                close_price=_dollars(m, 'close_price_dollars'),
             )
         except Exception as e:
             logger.error(f"Error fetching market {market_id}: {e}")

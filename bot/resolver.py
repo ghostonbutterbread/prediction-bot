@@ -230,6 +230,12 @@ class TradeResolver:
             if normalized:
                 return normalized
 
+        # Use close_price for settlement — this is the definitive outcome
+        # close_price: 1.0 = YES won, 0.0 = NO won
+        close = getattr(market, 'close_price', None)
+        if close is not None:
+            return "YES" if close >= 0.5 else "NO"
+
         # Fallback: if one price is at/near $1.00, that side won
         yes_price, no_price = self._extract_market_prices(market)
         if yes_price is not None and yes_price >= 0.99:
