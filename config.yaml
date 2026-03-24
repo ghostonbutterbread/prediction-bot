@@ -98,7 +98,7 @@ market_types:
       - "playoff"
       - "championship"
     strategy_overrides:
-      min_edge: 0.015        # sports move fast, lower edge OK
+      min_edge: 0.035        # sports move fast, VALIX proved 3.4% works
       min_confidence: 0.50
     researcher_prompts: "sports"   # references bot/researcher/prompts.py
     schedule: "sports"             # references schedule.sports above
@@ -140,7 +140,7 @@ market_types:
 
 # === Strategy ===
 strategy:
-  min_edge: 0.015
+  min_edge: 0.035          # 3.5% — VALIX proved this works at scale
   min_confidence: 0.50
   news_weight: 0.15
   social_weight: 0.10

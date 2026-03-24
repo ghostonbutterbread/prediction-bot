@@ -15,7 +15,6 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from dataclasses import asdict
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -71,18 +70,21 @@ class TradeResolver:
 
         resolved_count = 0
         still_open_count = 0
-        session_pnl_delta = 0.0
 
-        for trade_idx, trade in enumerate(trades):
+        for trade in trades:
             if trade.get("resolved"):
                 continue  # Already resolved
 
             market_id = trade.get("market_id", "")
             direction = trade.get("direction", "")
-            entry_price = trade.get("market_price", 0.5)
-            position_size = trade.get("position_size", 0)
+            entry_price = self._normalize_entry_price(
+                direction,
+                trade.get("market_price"),
+                trade.get("model_probability"),
+            )
+            position_size = self._coerce_float(trade.get("position_size"))
 
-            if not market_id or position_size <= 0:
+            if not market_id or entry_price is None or position_size <= 0:
                 continue
 
             try:
@@ -92,14 +94,16 @@ class TradeResolver:
                     still_open_count += 1
                     continue
 
-                market_status = market.metadata.get("status", "") if market.metadata else ""
-                current_yes_price = market.yes_price
-                current_no_price = market.no_price
+                market_status = str(market.metadata.get("status", "")).strip().lower() if market.metadata else ""
+                current_yes_price, current_no_price = self._extract_market_prices(market)
 
                 # Check if market is resolved/settled
                 if market_status in ("settled", "resolved", "closed"):
                     # Market resolved — determine winner
-                    outcome = self._determine_outcome(market, direction)
+                    outcome = self._determine_outcome(market)
+                    if outcome == "UNKNOWN":
+                        still_open_count += 1
+                        continue
                     pnl = self._calculate_realized_pnl(
                         direction, entry_price, position_size, outcome
                     )
@@ -109,13 +113,13 @@ class TradeResolver:
                     trade["pnl"] = round(pnl, 4)
                     trade["resolved_at"] = datetime.now(timezone.utc).isoformat()
                     trade["resolution_type"] = "settled"
+                    trade["market_price"] = round(entry_price, 4)
 
-                    session_pnl_delta += pnl
                     resolved_count += 1
 
                     # Sync outcome to RiskManager so streaks/drawdown/daily_PnL update
                     if risk_manager is not None:
-                        risk_manager.record_outcome(trade_idx, pnl)
+                        risk_manager.record_outcome(trade.get("id") or market_id, pnl)
 
                     logger.info(
                         f"  ✅ Resolved: {trade['question'][:50]}... | "
@@ -123,27 +127,27 @@ class TradeResolver:
                         f"Outcome: {outcome} | P&L: ${pnl:+.4f}"
                     )
 
-                elif market.closes_at and market.closes_at < datetime.now(timezone.utc):
-                    # Market closed but not yet settled — use current price as proxy
+                elif self._is_market_closed(market):
+                    # Market closed but not yet settled — keep tracking mark-to-market
+                    # P&L, but do not realize it or close the position.
                     current_price = current_no_price if direction == "BUY_NO" else current_yes_price
+                    if current_price is None:
+                        still_open_count += 1
+                        continue
                     pnl = self._calculate_unrealized_pnl(
                         direction, entry_price, current_price, position_size
                     )
 
-                    # Mark as "closed_unsettled" — P&L is approximate
-                    trade["resolved"] = True
+                    trade["resolved"] = False
                     trade["outcome"] = "pending_settlement"
-                    trade["pnl"] = round(pnl, 4)
-                    trade["resolved_at"] = datetime.now(timezone.utc).isoformat()
                     trade["resolution_type"] = "closed_unsettled"
                     trade["exit_price"] = current_price
-
-                    session_pnl_delta += pnl
-                    resolved_count += 1
-
-                    # Sync outcome to RiskManager so streaks/drawdown/daily_PnL update
-                    if risk_manager is not None:
-                        risk_manager.record_outcome(trade_idx, pnl)
+                    trade["current_price"] = current_price
+                    trade["unrealized_pnl"] = round(pnl, 4)
+                    trade["price_delta"] = round(current_price - entry_price, 4)
+                    trade["pnl"] = None
+                    trade["resolved_at"] = None
+                    still_open_count += 1
 
                     logger.info(
                         f"  ⏳ Closed (unsettled): {trade['question'][:50]}... | "
@@ -154,6 +158,9 @@ class TradeResolver:
                 else:
                     # Still open — compute unrealized P&L
                     current_price = current_no_price if direction == "BUY_NO" else current_yes_price
+                    if current_price is None:
+                        still_open_count += 1
+                        continue
                     pnl = self._calculate_unrealized_pnl(
                         direction, entry_price, current_price, position_size
                     )
@@ -161,6 +168,7 @@ class TradeResolver:
                     trade["current_price"] = current_price
                     trade["unrealized_pnl"] = round(pnl, 4)
                     trade["price_delta"] = round(current_price - entry_price, 4)
+                    trade["market_price"] = round(entry_price, 4)
                     still_open_count += 1
 
             except Exception as e:
@@ -174,7 +182,7 @@ class TradeResolver:
 
         # Recalculate balance
         total_realized_pnl = sum(
-            t.get("pnl", 0) for t in trades if t.get("resolved")
+            self._coerce_float(t.get("pnl")) for t in trades if t.get("resolved")
         )
         data["balance"] = round(data.get("starting_balance", 100) + total_realized_pnl, 2)
 
@@ -205,21 +213,28 @@ class TradeResolver:
 
         return summary
 
-    def _determine_outcome(self, market, direction: str) -> str:
+    def _determine_outcome(self, market) -> str:
         """
         Determine market outcome from market data.
         Returns "YES" or "NO".
         """
         # Check metadata for resolution info
         if market.metadata:
-            result = market.metadata.get("result") or market.metadata.get("outcome")
-            if result:
-                return result.upper()
+            result = market.metadata.get("result")
+            normalized = self._normalize_outcome_value(result)
+            if normalized:
+                return normalized
+
+            result = market.metadata.get("outcome")
+            normalized = self._normalize_outcome_value(result)
+            if normalized:
+                return normalized
 
         # Fallback: if one price is at/near $1.00, that side won
-        if market.yes_price >= 0.99:
+        yes_price, no_price = self._extract_market_prices(market)
+        if yes_price is not None and yes_price >= 0.99:
             return "YES"
-        if market.no_price >= 0.99:
+        if no_price is not None and no_price >= 0.99:
             return "NO"
 
         # Default: can't determine
@@ -235,6 +250,9 @@ class TradeResolver:
         If you win: gross profit = contracts * (1 - entry_price), fee = 7% of gross
         If you lose: you paid entry_price per contract, so loss = -size
         """
+        if size <= 0 or not (0 < entry_price < 1):
+            return 0.0
+
         contracts = size / entry_price if entry_price > 0 else 0
 
         if direction == "BUY_YES":
@@ -267,6 +285,9 @@ class TradeResolver:
         P&L = contracts * ((1 - current_price) - (1 - entry_price)) for BUY_NO
              = contracts * (entry_price - current_price) for BUY_NO
         """
+        if size <= 0 or not (0 < entry_price < 1) or current_price is None:
+            return 0.0
+
         contracts = size / entry_price if entry_price > 0 else 0
 
         if direction == "BUY_YES":
@@ -288,7 +309,7 @@ class TradeResolver:
         edges = [t.get("edge", 0) for t in trades]
         confidences = [t.get("confidence", 0) for t in trades]
         sizes = [t.get("position_size", 0) for t in trades]
-        pnls = [t.get("pnl", 0) for t in resolved_trades]
+        pnls = [self._coerce_float(t.get("pnl")) for t in resolved_trades]
 
         by_direction = {}
         for t in trades:
@@ -343,3 +364,75 @@ class TradeResolver:
                 results.append(result)
 
         return results
+
+    def _coerce_float(self, value, default: float = 0.0) -> float:
+        try:
+            if value is None:
+                return default
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _extract_market_prices(self, market) -> tuple[Optional[float], Optional[float]]:
+        yes_price = self._coerce_float(getattr(market, "yes_price", None), default=None)
+        no_price = self._coerce_float(getattr(market, "no_price", None), default=None)
+
+        if yes_price is None and no_price is not None:
+            yes_price = round(1 - no_price, 4)
+        if no_price is None and yes_price is not None:
+            no_price = round(1 - yes_price, 4)
+
+        return yes_price, no_price
+
+    def _normalize_outcome_value(self, value) -> Optional[str]:
+        if isinstance(value, bool):
+            return "YES" if value else "NO"
+        if isinstance(value, (int, float)) and value in (0, 1):
+            return "YES" if int(value) == 1 else "NO"
+        if isinstance(value, str):
+            normalized = value.strip().upper()
+            aliases = {
+                "YES": "YES",
+                "NO": "NO",
+                "TRUE": "YES",
+                "FALSE": "NO",
+                "WIN": "YES",
+                "LOSE": "NO",
+                "WON": "YES",
+                "LOST": "NO",
+                "1": "YES",
+                "0": "NO",
+            }
+            return aliases.get(normalized)
+        return None
+
+    def _normalize_entry_price(
+        self, direction: str, market_price, model_probability
+    ) -> Optional[float]:
+        raw_price = self._coerce_float(market_price, default=None)
+        model_prob = self._coerce_float(model_probability, default=0.5)
+
+        if raw_price is None or not (0 < raw_price < 1):
+            return None
+        if not (0 <= model_prob <= 1):
+            return None
+
+        if direction == "BUY_NO":
+            same_side_edge = model_prob - raw_price
+            flipped_edge = (1 - model_prob) - (1 - raw_price)
+            return round((1 - raw_price) if flipped_edge > same_side_edge else raw_price, 4)
+
+        return round(raw_price, 4)
+
+    def _is_market_closed(self, market) -> bool:
+        closes_at = getattr(market, "closes_at", None)
+        if closes_at is None:
+            return False
+        if isinstance(closes_at, str):
+            try:
+                closes_at = datetime.fromisoformat(closes_at)
+            except ValueError:
+                return False
+        if closes_at.tzinfo is None:
+            closes_at = closes_at.replace(tzinfo=timezone.utc)
+        return closes_at < datetime.now(timezone.utc)
