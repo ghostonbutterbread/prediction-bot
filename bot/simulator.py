@@ -193,6 +193,7 @@ class Simulator:
             return {"markets": 0, "signals": 0, "trades": 0}
         
         # === SPORTS MODE: Analyze sports markets + injury sniper ===
+        # (sports_trades currently unused — populated but never consumed)
         sports_trades = []
         try:
             from bot.strategies.sports import MarketFilter, QuickBetStrategy
@@ -258,7 +259,7 @@ class Simulator:
 
         # Start social media tasks
         try:
-            if social_feed:
+            if self.social_feed:
                 # Check for injury alerts in feed (Twitter API)
                 alerts = social_feed.scan()
                 if alerts:

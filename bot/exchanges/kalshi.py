@@ -16,6 +16,27 @@ KALSHI_DEMO = "https://demo-api.kalshi.co/trade-api/v2"
 KALSHI_PROD = "https://api.elections.kalshi.com/trade-api/v2"
 
 
+def _http_get_with_retry(url: str, headers: dict, timeout: int = 10, max_retries: int = 3) -> Optional[httpx.Response]:
+    """Fetch a URL with exponential backoff on rate limiting."""
+    import time
+    import httpx
+    for attempt in range(max_retries):
+        try:
+            resp = httpx.get(url, headers=headers, timeout=timeout)
+            if resp.status_code == 429:
+                wait = 2 ** attempt
+                logger.warning(f"Rate limited (429). Waiting {wait}s before retry {attempt+1}/{max_retries}")
+                time.sleep(wait)
+                continue
+            return resp
+        except httpx.RequestError as e:
+            if attempt == max_retries - 1:
+                logger.error(f"HTTP request failed after {max_retries} attempts: {e}")
+                return None
+            time.sleep(2 ** attempt)
+    return None
+
+
 class KalshiExchange(BaseExchange):
     name = "kalshi"
 
@@ -115,8 +136,9 @@ class KalshiExchange(BaseExchange):
                     if cursor:
                         params += f'&cursor={cursor}'
                     url = f'{self.host}/markets{params}'
-                    resp = httpx.get(url, headers=auth_headers, timeout=10)
-                    resp.raise_for_status()
+                    resp = _http_get_with_retry(url, auth_headers, timeout=10)
+                    if not resp or resp.status_code != 200:
+                        break
                     data = resp.json()
                     raw = data.get('markets', [])
                     if not raw:
@@ -228,7 +250,7 @@ class KalshiExchange(BaseExchange):
 
             # Sort: prioritize markets closing sooner
             deduped.sort(key=lambda m: (
-                (m.closes_at - now).total_seconds() if m.closes_at else float('inf')
+                (m.closes_at - now).total_seconds() if isinstance(m.closes_at, datetime) else float('inf')
             ))
 
             logger.info(f"Fetched {len(deduped)} unique Kalshi markets (sorted by close time)")
@@ -275,8 +297,9 @@ class KalshiExchange(BaseExchange):
                 if cursor:
                     params += f'&cursor={cursor}'
                 url = f'{self.host}/series{params}'
-                resp = httpx.get(url, headers=auth_headers, timeout=15)
-                resp.raise_for_status()
+                resp = _http_get_with_retry(url, auth_headers, timeout=15)
+                if not resp or resp.status_code != 200:
+                    break
                 data = resp.json()
                 series_list = data.get('series', [])
                 if not series_list:
