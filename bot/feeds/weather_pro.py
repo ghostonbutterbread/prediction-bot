@@ -17,6 +17,9 @@ from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
+TEMP_MIN_F = -60
+TEMP_MAX_F = 130
+
 
 @dataclass
 class WeatherSnapshot:
@@ -362,6 +365,10 @@ class ProWeatherEngine:
         self._cache = {}
         self._cache_ttl = 600  # 10 min
 
+    def _snapshot_is_plausible(self, snapshot: WeatherSnapshot) -> bool:
+        temps = [snapshot.high_temp_f, snapshot.low_temp_f, snapshot.current_temp_f]
+        return all(TEMP_MIN_F <= temp <= TEMP_MAX_F for temp in temps)
+
     def get_forecast(self, city: str) -> Optional[MultiSourceForecast]:
         """Get cross-validated forecast from all sources."""
         city_lower = city.lower().strip()
@@ -377,15 +384,24 @@ class ProWeatherEngine:
         # Fetch from all sources
         om = self.open_meteo.get_forecast(city_lower)
         if om:
-            snapshots.append(om)
+            if self._snapshot_is_plausible(om):
+                snapshots.append(om)
+            else:
+                logger.warning(f"Discarding implausible Open-Meteo forecast for {city_lower}")
 
         nws = self.nws.get_forecast(city_lower)
         if nws:
-            snapshots.append(nws)
+            if self._snapshot_is_plausible(nws):
+                snapshots.append(nws)
+            else:
+                logger.warning(f"Discarding implausible NWS forecast for {city_lower}")
 
         owm = self.owm.get_forecast(city_lower)
         if owm:
-            snapshots.append(owm)
+            if self._snapshot_is_plausible(owm):
+                snapshots.append(owm)
+            else:
+                logger.warning(f"Discarding implausible OpenWeatherMap forecast for {city_lower}")
 
         if not snapshots:
             return None
@@ -435,6 +451,15 @@ class ProWeatherEngine:
             base_confidence += 0.05  # NWS is the settlement source
         
         confidence = base_confidence * agreement
+        om_snapshot = next((s for s in snapshots if s.source == "open-meteo"), None)
+        nws_open_meteo_gap = None
+        if nws_snapshot and om_snapshot:
+            nws_open_meteo_gap = max(
+                abs(nws_snapshot.high_temp_f - om_snapshot.high_temp_f),
+                abs(nws_snapshot.low_temp_f - om_snapshot.low_temp_f),
+            )
+            if nws_open_meteo_gap > 10:
+                confidence = max(0.10, confidence - 0.15)
 
         result = MultiSourceForecast(
             city=city_lower,
@@ -451,6 +476,7 @@ class ProWeatherEngine:
                 "settlement_source": "nws",  # Kalshi uses NWS to settle
                 "nws_high": nws_snapshot.high_temp_f if nws_snapshot else None,
                 "nws_low": nws_snapshot.low_temp_f if nws_snapshot else None,
+                "nws_open_meteo_gap": nws_open_meteo_gap,
             }
         )
 
@@ -484,6 +510,10 @@ class ProWeatherEngine:
 
         is_high = "high" in q or "maximum" in q or "max" in q
         actual_temp = forecast.high_temp_f if is_high else forecast.low_temp_f
+
+        if not (TEMP_MIN_F <= actual_temp <= TEMP_MAX_F):
+            logger.warning(f"Rejecting implausible temperature forecast for {city}: {actual_temp:.1f}F")
+            return None
 
         is_above = ">" in q or "above" in q or "over" in q
         is_below = "<" in q or "below" in q or "under" in q
@@ -536,17 +566,24 @@ class ProWeatherEngine:
         edge = abs(predicted_prob - yes_price)
 
         return {
+            "signal_type": "weather",
             "predicted_prob": round(max(0.01, min(0.99, predicted_prob)), 4),
             "confidence": forecast.confidence,
+            "source_timestamp": forecast.fetched_at.isoformat(),
+            "ttl_seconds": self._cache_ttl,
+            "question_side": "range" if is_range else "above" if is_above else "below" if is_below else None,
             "edge": round(edge, 4),
             "data": {
                 "forecast_high": forecast.high_temp_f,
                 "forecast_low": forecast.low_temp_f,
                 "current_temp": forecast.current_temp_f,
+                "actual_temp_used": actual_temp,
+                "predicted_temp": actual_temp,
                 "threshold": threshold,
                 "city": city,
                 "sources": forecast.sources_used,
                 "agreement": forecast.source_agreement,
+                "nws_open_meteo_gap": forecast.details.get("nws_open_meteo_gap"),
             }
         }
 
