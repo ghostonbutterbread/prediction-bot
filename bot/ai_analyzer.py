@@ -129,6 +129,7 @@ def analyze_single(market: dict) -> dict | None:
 
     return {
         "market_id": market_id,
+        "category": category,
         "question": question,
         "direction": direction,
         "confidence": round(min(0.95, max(0.1, confidence)), 3),

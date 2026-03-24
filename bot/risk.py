@@ -14,6 +14,7 @@ Core principles:
 import json
 import logging
 import os
+from math import isfinite
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -168,17 +169,21 @@ class RiskManager:
         preset = get_preset(self.is_live)
 
         # Resolve limits: env vars override preset, explicit config overrides both
-        def resolve(key: str, default: float) -> float:
+        def resolve_float(key: str, default: float) -> float:
             env_key = key.upper()
             return float(os.getenv(env_key, config.get(key, preset.get(key, default))))
 
-        self.kelly_fraction = resolve("kelly_fraction", preset["kelly_fraction"])
-        self.max_bet_pct = resolve("max_bet_pct", preset["max_bet_pct"])
-        self.max_exposure_pct = resolve("max_exposure_pct", preset["max_exposure_pct"])
-        self.daily_loss_limit_pct = resolve("daily_loss_limit_pct", preset["daily_loss_limit_pct"])
-        self.max_drawdown_pct = resolve("max_drawdown_pct", preset["max_drawdown_pct"])
-        self.max_open_positions = resolve("max_open_positions", preset["max_open_positions"])
-        self.cooldown_after_losses = resolve("cooldown_after_losses", preset["cooldown_after_losses"])
+        def resolve_int(key: str, default: int) -> int:
+            env_key = key.upper()
+            return int(float(os.getenv(env_key, config.get(key, preset.get(key, default)))))
+
+        self.kelly_fraction = resolve_float("kelly_fraction", preset["kelly_fraction"])
+        self.max_bet_pct = resolve_float("max_bet_pct", preset["max_bet_pct"])
+        self.max_exposure_pct = resolve_float("max_exposure_pct", preset["max_exposure_pct"])
+        self.daily_loss_limit_pct = resolve_float("daily_loss_limit_pct", preset["daily_loss_limit_pct"])
+        self.max_drawdown_pct = resolve_float("max_drawdown_pct", preset["max_drawdown_pct"])
+        self.max_open_positions = resolve_int("max_open_positions", preset["max_open_positions"])
+        self.cooldown_after_losses = resolve_int("cooldown_after_losses", preset["cooldown_after_losses"])
 
         # Stress scaling — more lenient as bankroll grows
         self.stress_threshold = config.get("stress_threshold", 0.8)
@@ -239,6 +244,24 @@ class RiskManager:
         """
         warnings = []
         original_size = position_size
+
+        try:
+            position_size = float(position_size)
+        except (TypeError, ValueError):
+            return RiskDecision(
+                approved=False,
+                reason="Invalid position size",
+                original_size=original_size,
+                risk_score=1.0,
+            )
+
+        if not isfinite(position_size) or position_size <= 0:
+            return RiskDecision(
+                approved=False,
+                reason="Non-positive position size",
+                original_size=original_size,
+                risk_score=1.0,
+            )
 
         # === Hard stops (reject immediately) ===
 
@@ -345,33 +368,41 @@ class RiskManager:
 
     def record_trade(self, trade: dict):
         """Record a trade for risk tracking."""
+        size = self._coerce_float(trade.get("position_size"))
+        if size <= 0:
+            return
         self.state.trade_history.append({
+            "trade_id": trade.get("id", ""),
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "question": trade.get("question", ""),
             "direction": trade.get("direction", ""),
-            "size": trade.get("position_size", 0),
-            "market_price": trade.get("market_price", 0),
+            "size": size,
+            "market_price": self._coerce_float(trade.get("market_price")),
             "resolved": False,
             "pnl": 0,
         })
         self.state.open_positions += 1
-        self.state.total_exposure += trade.get("position_size", 0)
+        self.state.total_exposure += size
         self.state.daily_trades += 1
         self._save_state()
 
-    def record_outcome(self, trade_idx: int, pnl: float):
+    def record_outcome(self, trade_ref, pnl: float):
         """Record the outcome of a resolved trade."""
-        if 0 <= trade_idx < len(self.state.trade_history):
-            trade = self.state.trade_history[trade_idx]
+        self.reset_daily()
+        trade = self._find_trade_record(trade_ref)
+        if trade is not None:
+            if trade.get("resolved"):
+                return
+
             trade["resolved"] = True
-            trade["pnl"] = pnl
+            trade["pnl"] = self._coerce_float(pnl)
 
             # Release exposure (approximate — full size released on resolve)
             self.state.total_exposure = max(0, self.state.total_exposure - trade.get("size", 0))
 
             # Update balance
-            self.state.current_balance += pnl
-            self.state.daily_pnl += pnl
+            self.state.current_balance += trade["pnl"]
+            self.state.daily_pnl += trade["pnl"]
             self.state.open_positions = max(0, self.state.open_positions - 1)
 
             # Update peak
@@ -379,10 +410,11 @@ class RiskManager:
                 self.state.peak_balance = self.state.current_balance
 
             # Update streaks
-            if pnl > 0:
+            if trade["pnl"] > 0:
                 self.state.consecutive_wins += 1
                 self.state.consecutive_losses = 0
-            else:
+                self.state.cooldown_until = ""
+            elif trade["pnl"] < 0:
                 self.state.consecutive_losses += 1
                 self.state.consecutive_wins = 0
 
@@ -394,6 +426,8 @@ class RiskManager:
                         f"🛑 Cooldown triggered: {self.state.consecutive_losses} losses, "
                         f"pausing until {cooldown_time.strftime('%H:%M UTC')}"
                     )
+            else:
+                self.state.consecutive_wins = 0
 
             self._save_state()
 
@@ -450,3 +484,26 @@ class RiskManager:
                            f"{self.state.open_positions} open positions")
         except Exception as e:
             logger.debug(f"Failed to load risk state: {e}")
+
+    def _coerce_float(self, value, default: float = 0.0) -> float:
+        try:
+            if value is None:
+                return default
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _find_trade_record(self, trade_ref):
+        if isinstance(trade_ref, str) and trade_ref:
+            for trade in self.state.trade_history:
+                if trade.get("trade_id") == trade_ref:
+                    return trade
+
+        try:
+            trade_idx = int(trade_ref)
+        except (TypeError, ValueError):
+            return None
+
+        if 0 <= trade_idx < len(self.state.trade_history):
+            return self.state.trade_history[trade_idx]
+        return None
