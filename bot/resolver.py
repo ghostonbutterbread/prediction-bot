@@ -97,8 +97,14 @@ class TradeResolver:
                 market_status = str(market.metadata.get("status", "")).strip().lower() if market.metadata else ""
                 current_yes_price, current_no_price = self._extract_market_prices(market)
 
-                # Check if market is resolved/settled
-                if market_status in ("settled", "resolved", "closed"):
+                # Check if market is resolved/settled.
+                # We require the result field to be populated — do NOT resolve
+                # on "closed" status alone, as Kalshi marks markets closed before
+                # the settlement result is available.
+                result_available = self._has_result(market)
+                if market_status in ("settled", "resolved") or (
+                    market_status == "closed" and result_available
+                ):
                     # Market resolved — determine winner
                     outcome = self._determine_outcome(market)
                     if outcome == "UNKNOWN":
@@ -429,6 +435,34 @@ class TradeResolver:
             return round((1 - raw_price) if flipped_edge > same_side_edge else raw_price, 4)
 
         return round(raw_price, 4)
+
+    def _has_result(self, market) -> bool:
+        """Return True only when the market has a definitive settlement result.
+
+        A market is "closed" before it is "settled" on Kalshi.  We must not
+        resolve paper positions at close time — we wait until the result field
+        is actually populated or close_price is set.
+        """
+        # Explicit result/outcome fields in metadata
+        if market.metadata:
+            for key in ("result", "outcome"):
+                val = market.metadata.get(key)
+                if val is not None and str(val).strip().upper() not in ("", "NONE", "UNKNOWN", "PENDING"):
+                    return True
+
+        # close_price is set by Kalshi when the market settles (1.0 = YES, 0.0 = NO)
+        close = getattr(market, "close_price", None)
+        if close is not None:
+            return True
+
+        # Price has converged to a terminal value (99 cents or more)
+        yes_price, no_price = self._extract_market_prices(market)
+        if (yes_price is not None and yes_price >= 0.99) or (
+            no_price is not None and no_price >= 0.99
+        ):
+            return True
+
+        return False
 
     def _is_market_closed(self, market) -> bool:
         closes_at = getattr(market, "closes_at", None)

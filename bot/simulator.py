@@ -397,8 +397,11 @@ class Simulator:
             f"Rolling Win Rate = {self.rolling_win_rate:.1f}%"
         )
 
-        # Resolve open trades every 10 scans
-        if self.scan_count % 10 == 0:
+        # Auto-resolve open positions every scan.
+        # The resolver only settles positions where the market result field is
+        # populated — it will NOT close positions on "closed" status alone.
+        open_count = sum(1 for t in self.trades if not t.resolved)
+        if open_count > 0:
             try:
                 # Persist current state before resolution so the resolver works on the
                 # full trade set, then reload the updated session into memory.
