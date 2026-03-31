@@ -1,12 +1,17 @@
 """News feed aggregator — multi-source RSS for trading signals.
 
 Sources (all free, no API key required):
-- Yahoo Finance Search RSS  — keyword-specific news (best for market queries)
-- Reuters Top News RSS      — general breaking news
-- BBC News RSS              — international perspective
-- ESPN RSS                  — sports markets
-- CoinDesk RSS              — crypto markets
-- NPR News RSS              — US politics / policy markets
+- Yahoo Finance headline RSS  — broad financial/business news
+- Yahoo Finance Search RSS    — keyword-specific news (best for market queries)
+- Bing News RSS               — broad news fallback
+- Reuters Top News RSS        — general breaking news
+- BBC News RSS                — international perspective
+- ESPN RSS                    — sports markets
+- CoinDesk RSS                — crypto markets
+- NPR News RSS                — US politics / policy markets
+
+Fallback chain when primary sources are unavailable (ENABLE_NEWS_FALLBACK=true):
+  Google News (blocked) → Yahoo Finance RSS → Bing News RSS → static feeds
 
 Each source has a per-session circuit breaker: after 3 consecutive failures it
 is skipped for 15 minutes, then retried automatically.
@@ -14,6 +19,7 @@ is skipped for 15 minutes, then retried automatically.
 
 import httpx
 import logging
+import os
 import re
 import xml.etree.ElementTree as ET
 from typing import Optional
@@ -39,26 +45,45 @@ class NewsItem:
 # ── Feed definitions ──────────────────────────────────────────────────────────
 
 RSS_FEEDS = {
-    "reuters":   "https://feeds.reuters.com/reuters/topNews",
-    "bbc":       "http://feeds.bbci.co.uk/news/rss.xml",
-    "espn":      "https://www.espn.com/espn/rss/news",
-    "coindesk":  "https://www.coindesk.com/arc/outboundfeeds/rss/",
-    "npr":       "https://feeds.npr.org/1001/rss.xml",
-    "ap":        "https://rsshub.app/apnews/topics/apf-topnews",
+    "reuters":        "https://feeds.reuters.com/reuters/topNews",
+    "bbc":            "http://feeds.bbci.co.uk/news/rss.xml",
+    "espn":           "https://www.espn.com/espn/rss/news",
+    "coindesk":       "https://www.coindesk.com/arc/outboundfeeds/rss/",
+    "npr":            "https://feeds.npr.org/1001/rss.xml",
+    "ap":             "https://rsshub.app/apnews/topics/apf-topnews",
+    # Fallback feeds — used when primary sources fail
+    "yahoo_finance":  "https://feeds.finance.yahoo.com/rss/2.0/headline",
+    "bing_news":      "https://www.bing.com/news/search?q=financial+markets&format=rss",
 }
 
 # Topic routing — which feeds to try for a given market category
 TOPIC_FEEDS = {
-    "sports":   ["espn", "reuters"],
-    "crypto":   ["coindesk", "reuters"],
-    "politics": ["npr", "reuters", "bbc"],
-    "finance":  ["reuters", "bbc"],
-    "default":  ["reuters", "bbc", "npr"],
+    "sports":   ["espn", "reuters", "bing_news"],
+    "crypto":   ["coindesk", "reuters", "yahoo_finance"],
+    "politics": ["npr", "reuters", "bbc", "bing_news"],
+    "finance":  ["reuters", "yahoo_finance", "bbc"],
+    "default":  ["reuters", "bbc", "npr", "yahoo_finance"],
 }
+
+# Fallback search URL templates — tried in order when Yahoo search RSS is unavailable
+SEARCH_FALLBACKS = [
+    # Yahoo Finance search RSS (primary)
+    lambda q: f"https://news.search.yahoo.com/search?p={q}&output=rss",
+    # Yahoo Finance headline RSS (always available, no per-query targeting)
+    lambda q: "https://feeds.finance.yahoo.com/rss/2.0/headline",
+    # Bing News RSS
+    lambda q: f"https://www.bing.com/news/search?q={q}&format=rss",
+]
 
 
 class NewsFeed:
-    """Aggregates news from multiple RSS sources for sentiment analysis."""
+    """Aggregates news from multiple RSS sources for sentiment analysis.
+
+    When ENABLE_NEWS_FALLBACK=true (default), automatically falls back to
+    Yahoo Finance RSS and Bing News RSS if the primary Yahoo search RSS is
+    unavailable.  If all sources fail, returns an empty list so the caller
+    can degrade gracefully.
+    """
 
     def __init__(self):
         self.http = httpx.Client(
@@ -71,6 +96,15 @@ class NewsFeed:
 
         # Per-feed circuit breakers: feed_name → (fail_count, disabled_until)
         self._breakers: dict[str, tuple[int, Optional[datetime]]] = {}
+
+        # Whether to try fallback RSS sources when primary fails
+        self.enable_fallback = os.getenv("ENABLE_NEWS_FALLBACK", "true").lower() != "false"
+
+        # Track which search fallback index is currently working (0 = Yahoo search)
+        self._active_search_fallback: int = 0
+
+        # Runtime flag: set to True when ALL sources have failed this session
+        self.all_sources_failed: bool = False
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -93,9 +127,9 @@ class NewsFeed:
 
         articles: list[NewsItem] = []
 
-        # 1. Yahoo Finance search RSS — most relevant for specific queries
+        # 1. Search RSS (Yahoo Finance → Bing News fallback chain)
         if search_terms:
-            articles.extend(self._fetch_yahoo_search(search_terms))
+            articles.extend(self._fetch_search_with_fallback(search_terms))
 
         # 2. Topic-routed static feeds as fallback / supplement
         topic = self._detect_topic(market_question)
@@ -145,11 +179,49 @@ class NewsFeed:
 
     # ── Fetchers ──────────────────────────────────────────────────────────────
 
-    def _fetch_yahoo_search(self, keywords: list[str]) -> list[NewsItem]:
-        """Fetch Yahoo Finance News search RSS for specific keywords."""
+    def _fetch_search_with_fallback(self, keywords: list[str]) -> list[NewsItem]:
+        """Try each search RSS fallback in order until one succeeds.
+
+        Fallback chain:
+          0. Yahoo Finance search RSS (keyword-targeted)
+          1. Yahoo Finance headline RSS (broad, always available)
+          2. Bing News RSS (keyword-targeted)
+
+        If ENABLE_NEWS_FALLBACK=false, only attempt the primary source.
+        Remembers which source last worked to avoid re-probing on every call.
+        """
         query = quote_plus(" ".join(keywords[:4]))
-        url = f"https://news.search.yahoo.com/search?p={query}&output=rss"
-        return self._fetch_rss(url, source_name="yahoo")
+        candidates = SEARCH_FALLBACKS if self.enable_fallback else SEARCH_FALLBACKS[:1]
+
+        # Start from the last known-good index so we don't always start over
+        start = self._active_search_fallback if self._active_search_fallback < len(candidates) else 0
+
+        for offset in range(len(candidates)):
+            idx = (start + offset) % len(candidates)
+            url = candidates[idx](query)
+            source_name = f"search_fallback_{idx}"
+            if self._is_broken(source_name):
+                continue
+            items = self._fetch_rss(url, source_name=source_name)
+            if items:
+                if idx != self._active_search_fallback:
+                    logger.info(f"News: using search fallback #{idx} ({url[:60]}...)")
+                    self._active_search_fallback = idx
+                self.all_sources_failed = False
+                return items
+
+        # All search sources exhausted
+        if not self.all_sources_failed:
+            self.all_sources_failed = True
+            logger.warning(
+                "⚠️  All news search RSS sources are unavailable. "
+                "Strategy will run on price+volume signals only."
+            )
+        return []
+
+    def _fetch_yahoo_search(self, keywords: list[str]) -> list[NewsItem]:
+        """Fetch Yahoo Finance News search RSS for specific keywords (legacy, use _fetch_search_with_fallback)."""
+        return self._fetch_search_with_fallback(keywords)
 
     def _fetch_feed(self, feed_name: str) -> list[NewsItem]:
         """Fetch a named static RSS feed, respecting its circuit breaker."""

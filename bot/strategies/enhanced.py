@@ -113,6 +113,27 @@ class EnhancedStrategyEngine:
         if not signals:
             return None
 
+        # If the news feed has exhausted all fallback sources, remove its weight
+        # and redistribute proportionally among remaining active signals so that
+        # total confidence isn't artificially deflated by a zeroed news weight.
+        if "news" in signals and self.enable_news:
+            news_feed_obj = getattr(self, "news", None)
+            if news_feed_obj is not None and getattr(news_feed_obj, "all_sources_failed", False):
+                redistributed = weights.pop("news", 0)
+                signals.pop("news", None)
+                if weights and redistributed > 0:
+                    remaining_total = sum(weights.values())
+                    if remaining_total > 0:
+                        for k in list(weights.keys()):
+                            weights[k] += redistributed * (weights[k] / remaining_total)
+                logger.debug(
+                    f"News unavailable — redistributed {redistributed:.0%} weight "
+                    f"to remaining signals: {list(weights.keys())}"
+                )
+
+        if not signals:
+            return None
+
         validation_results = self.validator.validate_all(signals, market)
         raw_predictions = {
             name: round(float(signal.get("predicted_prob", 0.5) or 0.5), 4)
