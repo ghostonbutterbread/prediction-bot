@@ -113,6 +113,27 @@ class EnhancedStrategyEngine:
         if not signals:
             return None
 
+        # If the news feed has exhausted all fallback sources, remove its weight
+        # and redistribute proportionally among remaining active signals so that
+        # total confidence isn't artificially deflated by a zeroed news weight.
+        if "news" in signals and self.enable_news:
+            news_feed_obj = getattr(self, "news", None)
+            if news_feed_obj is not None and getattr(news_feed_obj, "all_sources_failed", False):
+                redistributed = weights.pop("news", 0)
+                signals.pop("news", None)
+                if weights and redistributed > 0:
+                    remaining_total = sum(weights.values())
+                    if remaining_total > 0:
+                        for k in list(weights.keys()):
+                            weights[k] += redistributed * (weights[k] / remaining_total)
+                logger.debug(
+                    f"News unavailable — redistributed {redistributed:.0%} weight "
+                    f"to remaining signals: {list(weights.keys())}"
+                )
+
+        if not signals:
+            return None
+
         validation_results = self.validator.validate_all(signals, market)
         raw_predictions = {
             name: round(float(signal.get("predicted_prob", 0.5) or 0.5), 4)
@@ -170,6 +191,7 @@ class EnhancedStrategyEngine:
             "direction": direction,
             "model_probability": round(weighted_prob, 4),
             "market_price": market.yes_price,
+            "no_market_price": market.no_price,
             "edge": round(edge, 4),
             "confidence": round(weighted_confidence, 4),
             "signals": {k: s["predicted_prob"] for k, s in validated_signals.items()},
@@ -381,46 +403,72 @@ class KellySizer:
     """
     Kelly Criterion position sizing with automatic mode-aware defaults.
 
-    Optimal bet size = (p * b - q) / b
+    Optimal bet size = (p * b_net - q) / b_net
     where:
-        p = probability of winning
-        q = 1 - p
-        b = odds (payout per $1 bet)
+        p     = probability of winning
+        q     = 1 - p
+        b_net = net odds after Kalshi fee = (1 - market_price) / market_price * (1 - fee_rate)
+
+    The fee is deducted from expected value before computing the fraction so
+    that Kelly sizing is never over-aggressive on low-edge trades.
 
     Mode-aware:
     - Paper (KALSHI_USE_DEMO=true): Half-Kelly, 10% max bet
     - Live (KALSHI_USE_DEMO=false): Quarter-Kelly, 5% max bet
+
+    Fee rate configurable via KALSHI_FEE_RATE env var (default 0.07 = 7%).
     """
 
     # Presets by mode
     PAPER = {"fraction": 0.50, "max_bet_pct": 0.10}
     LIVE = {"fraction": 0.25, "max_bet_pct": 0.05}
 
+    DEFAULT_FEE_RATE = 0.07  # 7% on winnings — Kalshi standard
+
     def __init__(self, fraction: float = None, max_bet_pct: float = None,
-                 kelly_fraction: float = None):
+                 kelly_fraction: float = None, fee_rate: float = None):
         import os
         is_live = os.getenv("KALSHI_USE_DEMO", "true").lower() == "false"
         preset = self.LIVE if is_live else self.PAPER
 
         # Explicit params override preset
-        self.fraction = kelly_fraction if kelly_fraction is not None else (fraction if fraction is not None else preset["fraction"])
+        self.fraction = (
+            kelly_fraction if kelly_fraction is not None
+            else (fraction if fraction is not None else preset["fraction"])
+        )
         self.max_bet_pct = max_bet_pct if max_bet_pct is not None else preset["max_bet_pct"]
+
+        # Fee rate: env var → explicit param → default
+        env_fee = os.getenv("KALSHI_FEE_RATE")
+        if fee_rate is not None:
+            self.fee_rate = float(fee_rate)
+        elif env_fee is not None:
+            self.fee_rate = float(env_fee)
+        else:
+            self.fee_rate = self.DEFAULT_FEE_RATE
 
     def calculate(self, model_prob: float, market_price: float,
                   bankroll: float) -> float:
-        """Calculate optimal bet size in dollars."""
+        """Calculate optimal bet size in dollars, accounting for Kalshi fees."""
         if market_price <= 0 or market_price >= 1:
             return 0
 
         p = model_prob
         q = 1 - p
-        b = (1 - market_price) / market_price  # Decimal odds
 
-        # Kelly formula
-        kelly = (p * (b + 1) - 1) / b if b > 0 else 0
+        # Net odds after fee: winning a contract pays (1 - market_price) per dollar staked,
+        # but Kalshi takes fee_rate of that gross profit.
+        gross_odds = (1 - market_price) / market_price  # decimal odds pre-fee
+        b_net = gross_odds * (1 - self.fee_rate)        # net odds after fee
+
+        if b_net <= 0:
+            return 0
+
+        # Kelly formula using fee-adjusted odds
+        kelly = (p * (b_net + 1) - 1) / b_net
 
         if kelly <= 0:
-            return 0  # No bet (negative expected value)
+            return 0  # No bet (negative expected value after fees)
 
         # Apply fractional Kelly
         size = kelly * self.fraction * bankroll
