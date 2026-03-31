@@ -170,6 +170,7 @@ class EnhancedStrategyEngine:
             "direction": direction,
             "model_probability": round(weighted_prob, 4),
             "market_price": market.yes_price,
+            "no_market_price": market.no_price,
             "edge": round(edge, 4),
             "confidence": round(weighted_confidence, 4),
             "signals": {k: s["predicted_prob"] for k, s in validated_signals.items()},

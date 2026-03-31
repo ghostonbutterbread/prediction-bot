@@ -482,6 +482,11 @@ class Simulator:
             if len(parts) >= 2:
                 raw_category = parts[0]  # e.g. KXHIGHNY, KXLOWTCHI
 
+        # === Partial fill / slippage simulation ===
+        # If our position size is large relative to available liquidity,
+        # model a worse fill price (we walk up/down the book).
+        fill_price = self._apply_fill_slippage(entry_price, size, signal, direction)
+
         trade = SimTrade(
             id=f"sim_{self.session_id}_{len(self.trades)+1:04d}",
             timestamp=datetime.now(timezone.utc).isoformat(),
@@ -490,7 +495,7 @@ class Simulator:
             question=signal.get("question", ""),
             direction=direction,
             model_probability=round(win_probability, 4),
-            market_price=round(entry_price, 4),
+            market_price=round(fill_price, 4),
             edge=signal.get("edge", 0),
             confidence=signal.get("confidence", 0),
             position_size=round(size, 2),
@@ -510,33 +515,43 @@ class Simulator:
         return trade
 
     def _normalize_trade_terms(self, signal: dict) -> Optional[dict]:
-        """Normalize a signal into the purchased contract price and win probability."""
+        """Normalize a signal into the purchased contract price and win probability.
+
+        Uses the actual ask price for each side:
+        - BUY_YES: entry = yes_ask (market_price)
+        - BUY_NO:  entry = no_ask  (no_market_price when available, else 1 - yes_ask)
+        """
         try:
-            raw_price = float(signal.get("market_price", 0) or 0)
+            yes_ask = float(signal.get("market_price", 0) or 0)
             model_prob = float(signal.get("model_probability", 0.5) or 0.5)
         except (TypeError, ValueError):
             return None
 
-        if not (isfinite(raw_price) and isfinite(model_prob)):
+        if not (isfinite(yes_ask) and isfinite(model_prob)):
             return None
-        if not (0 < raw_price < 1):
+        if not (0 < yes_ask < 1):
             return None
         if not (0 <= model_prob <= 1):
             return None
 
         direction = str(signal.get("direction", "BUY_YES") or "BUY_YES").upper()
         if direction == "BUY_NO":
-            same_side_edge = model_prob - raw_price
-            flipped_edge = (1 - model_prob) - (1 - raw_price)
-            if flipped_edge > same_side_edge:
-                entry_price = 1 - raw_price
-                win_probability = 1 - model_prob
+            # Use actual NO ask price if provided, else fall back to complement of YES ask
+            try:
+                no_ask_raw = signal.get("no_market_price")
+                no_ask = float(no_ask_raw) if no_ask_raw is not None else None
+            except (TypeError, ValueError):
+                no_ask = None
+
+            if no_ask is not None and 0 < no_ask < 1:
+                entry_price = no_ask
             else:
-                entry_price = raw_price
-                win_probability = model_prob
+                entry_price = 1 - yes_ask
+
+            win_probability = 1 - model_prob
         else:
             direction = "BUY_YES"
-            entry_price = raw_price
+            entry_price = yes_ask
             win_probability = model_prob
 
         if not (0 < entry_price < 1):
@@ -549,6 +564,51 @@ class Simulator:
             "entry_price": entry_price,
             "win_probability": win_probability,
         }
+
+    def _apply_fill_slippage(self, entry_price: float, size: float,
+                              signal: dict, direction: str) -> float:
+        """
+        Model realistic fill price based on position size vs liquidity.
+
+        When position_size is small relative to liquidity, fill at best ask/bid.
+        As size grows relative to liquidity, simulate walking up the book
+        by adding a slippage factor proportional to size / liquidity.
+
+        Kalshi order books are shallow — even modest sizes can move the fill price.
+        """
+        # Get liquidity from the market signal (dollars at best level)
+        market = signal.get("_market")
+        liquidity = getattr(market, "liquidity", 0) if market else 0
+
+        if liquidity <= 0 or size <= 0:
+            return entry_price
+
+        # What fraction of available liquidity are we consuming?
+        consumption_pct = size / max(liquidity, 1.0)
+
+        if consumption_pct < 0.05:
+            # Small relative to book — no meaningful slippage
+            return entry_price
+
+        # Linear slippage model: each percent of liquidity consumed adds ~0.1% to price
+        # Cap slippage at 3 cents (prevents absurd fill prices on thin books)
+        slippage = min(consumption_pct * 0.10, 0.03)
+
+        if direction == "BUY_YES":
+            # Buying YES → slippage makes price worse (higher)
+            fill_price = min(entry_price + slippage, 0.99)
+        else:
+            # Buying NO → slippage makes price worse (higher for NO contracts)
+            fill_price = min(entry_price + slippage, 0.99)
+
+        if fill_price != entry_price:
+            logger.debug(
+                f"  📉 Slippage: {entry_price:.3f} → {fill_price:.3f} "
+                f"(size=${size:.2f}, liquidity=${liquidity:.2f}, "
+                f"consumption={consumption_pct:.1%})"
+            )
+
+        return round(fill_price, 4)
 
     def _compute_time_adjusted_score(self, signal: dict, market) -> float:
         """
