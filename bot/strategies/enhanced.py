@@ -382,46 +382,72 @@ class KellySizer:
     """
     Kelly Criterion position sizing with automatic mode-aware defaults.
 
-    Optimal bet size = (p * b - q) / b
+    Optimal bet size = (p * b_net - q) / b_net
     where:
-        p = probability of winning
-        q = 1 - p
-        b = odds (payout per $1 bet)
+        p     = probability of winning
+        q     = 1 - p
+        b_net = net odds after Kalshi fee = (1 - market_price) / market_price * (1 - fee_rate)
+
+    The fee is deducted from expected value before computing the fraction so
+    that Kelly sizing is never over-aggressive on low-edge trades.
 
     Mode-aware:
     - Paper (KALSHI_USE_DEMO=true): Half-Kelly, 10% max bet
     - Live (KALSHI_USE_DEMO=false): Quarter-Kelly, 5% max bet
+
+    Fee rate configurable via KALSHI_FEE_RATE env var (default 0.07 = 7%).
     """
 
     # Presets by mode
     PAPER = {"fraction": 0.50, "max_bet_pct": 0.10}
     LIVE = {"fraction": 0.25, "max_bet_pct": 0.05}
 
+    DEFAULT_FEE_RATE = 0.07  # 7% on winnings — Kalshi standard
+
     def __init__(self, fraction: float = None, max_bet_pct: float = None,
-                 kelly_fraction: float = None):
+                 kelly_fraction: float = None, fee_rate: float = None):
         import os
         is_live = os.getenv("KALSHI_USE_DEMO", "true").lower() == "false"
         preset = self.LIVE if is_live else self.PAPER
 
         # Explicit params override preset
-        self.fraction = kelly_fraction if kelly_fraction is not None else (fraction if fraction is not None else preset["fraction"])
+        self.fraction = (
+            kelly_fraction if kelly_fraction is not None
+            else (fraction if fraction is not None else preset["fraction"])
+        )
         self.max_bet_pct = max_bet_pct if max_bet_pct is not None else preset["max_bet_pct"]
+
+        # Fee rate: env var → explicit param → default
+        env_fee = os.getenv("KALSHI_FEE_RATE")
+        if fee_rate is not None:
+            self.fee_rate = float(fee_rate)
+        elif env_fee is not None:
+            self.fee_rate = float(env_fee)
+        else:
+            self.fee_rate = self.DEFAULT_FEE_RATE
 
     def calculate(self, model_prob: float, market_price: float,
                   bankroll: float) -> float:
-        """Calculate optimal bet size in dollars."""
+        """Calculate optimal bet size in dollars, accounting for Kalshi fees."""
         if market_price <= 0 or market_price >= 1:
             return 0
 
         p = model_prob
         q = 1 - p
-        b = (1 - market_price) / market_price  # Decimal odds
 
-        # Kelly formula
-        kelly = (p * (b + 1) - 1) / b if b > 0 else 0
+        # Net odds after fee: winning a contract pays (1 - market_price) per dollar staked,
+        # but Kalshi takes fee_rate of that gross profit.
+        gross_odds = (1 - market_price) / market_price  # decimal odds pre-fee
+        b_net = gross_odds * (1 - self.fee_rate)        # net odds after fee
+
+        if b_net <= 0:
+            return 0
+
+        # Kelly formula using fee-adjusted odds
+        kelly = (p * (b_net + 1) - 1) / b_net
 
         if kelly <= 0:
-            return 0  # No bet (negative expected value)
+            return 0  # No bet (negative expected value after fees)
 
         # Apply fractional Kelly
         size = kelly * self.fraction * bankroll

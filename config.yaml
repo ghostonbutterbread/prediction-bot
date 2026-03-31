@@ -149,6 +149,12 @@ strategy:
   enable_social: true
   enable_ai: true
 
+# === Kalshi Fee ===
+# Kalshi charges this fraction of gross winnings as a fee.
+# Deducted from expected value before computing Kelly fraction.
+# Override with KALSHI_FEE_RATE env var.
+kalshi_fee_rate: 0.07   # 7% — Kalshi standard
+
 # === Kelly / Risk ===
 # Two presets: PAPER (aggressive for simulation) and LIVE (conservative for real money)
 # Mode auto-detected from KALSHI_USE_DEMO env var:
