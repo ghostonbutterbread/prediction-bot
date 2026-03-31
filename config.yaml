@@ -149,6 +149,12 @@ strategy:
   enable_social: true
   enable_ai: true
 
+# === Kalshi Fee ===
+# Kalshi charges this fraction of gross winnings as a fee.
+# Deducted from expected value before computing Kelly fraction.
+# Override with KALSHI_FEE_RATE env var.
+kalshi_fee_rate: 0.07   # 7% — Kalshi standard
+
 # === Kelly / Risk ===
 # Two presets: PAPER (aggressive for simulation) and LIVE (conservative for real money)
 # Mode auto-detected from KALSHI_USE_DEMO env var:
@@ -172,6 +178,12 @@ risk:
   daily_loss_limit_pct_live: 0.10 # Stop if down 10% in a day
   max_drawdown_pct_live: 0.25     # Pause if down 25% from peak
   max_open_positions_live: 10     # Max 10 concurrent trades
+
+  # ── Session kill-switch ──
+  # Permanently halts trading if balance drops this fraction below max(session_start, session_peak).
+  # Requires manual reset: delete data/risk_state.json or set FORCE_RESUME=true.
+  # Override with MAX_DRAWDOWN_PCT env var.
+  max_session_drawdown_pct: 0.20   # 20% session drawdown = hard stop
 
   # ── Backward compat (overridden by mode detection) ──
   kelly_fraction: 0.50

@@ -12,14 +12,16 @@ class Market:
     id: str
     exchange: str
     question: str
-    yes_price: float
-    no_price: float
+    yes_price: float       # YES ask price (what you pay to buy YES)
+    no_price: float        # NO ask price (what you pay to buy NO)
     volume: float
     liquidity: float
     closes_at: Optional[datetime]
     category: str
     metadata: dict
     close_price: Optional[float] = None  # Settlement price: 1.0=YES, 0.0=NO, None=not settled
+    yes_bid: Optional[float] = None      # Best YES bid price
+    no_bid: Optional[float] = None       # Best NO bid price
 
 
 @dataclass

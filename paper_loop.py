@@ -58,9 +58,11 @@ def get_config():
             "min_confidence": float(os.getenv("MIN_CONFIDENCE", "0.50")),
             "news_weight": float(os.getenv("NEWS_WEIGHT", "0.15")),
             "ai_weight": float(os.getenv("AI_WEIGHT", "0.20")),
-            "enable_news": False,  # Force off - Google News blocked
-            "enable_ai": False,  # Force off - calls news
-            "enable_social": False,  # Force off - also calls Google News
+            # News uses fallback sources (Yahoo Finance RSS, Bing News RSS).
+            # If all fail, the strategy degrades gracefully to price+volume signals.
+            "enable_news": os.getenv("ENABLE_NEWS_FALLBACK", "true").lower() != "false",
+            "enable_ai": False,   # Still off — AI calls depend on external LLM quota
+            "enable_social": False,  # Still off — Twitter/X API not configured
         },
         "kelly_fraction": float(os.getenv("KELLY_FRACTION", "0.5")),
         "max_position_pct": float(os.getenv("MAX_POSITION_PCT", "0.10")),

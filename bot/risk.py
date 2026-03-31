@@ -61,6 +61,11 @@ class RiskState:
     current_balance: float = 100.0
     peak_balance: float = 100.0
 
+    # Session-level kill-switch tracking
+    session_starting_balance: float = 100.0  # Balance at bot startup
+    session_peak_balance: float = 100.0      # Highest balance this session
+    max_drawdown_halt: bool = False           # Permanently halted by drawdown kill-switch
+
     # Daily tracking
     daily_pnl: float = 0.0
     daily_trades: int = 0
@@ -185,15 +190,25 @@ class RiskManager:
         self.max_open_positions = resolve_int("max_open_positions", preset["max_open_positions"])
         self.cooldown_after_losses = resolve_int("cooldown_after_losses", preset["cooldown_after_losses"])
 
+        # Session-level kill-switch: halt permanently if balance falls this far below
+        # max(session_starting_balance, session_peak_balance).
+        # Requires manual reset (delete data/risk_state.json or set FORCE_RESUME=true).
+        self.max_session_drawdown_pct = float(
+            os.getenv("MAX_DRAWDOWN_PCT", config.get("max_session_drawdown_pct", 0.20))
+        )
+
         # Stress scaling — more lenient as bankroll grows
         self.stress_threshold = config.get("stress_threshold", 0.8)
         self.stress_reduction = config.get("stress_reduction", 0.3)
 
+        starting = config.get("starting_balance", 100.0)
         # State
         self.state = RiskState(
-            starting_balance=config.get("starting_balance", 100.0),
-            current_balance=config.get("starting_balance", 100.0),
-            peak_balance=config.get("starting_balance", 100.0),
+            starting_balance=starting,
+            current_balance=starting,
+            peak_balance=starting,
+            session_starting_balance=starting,
+            session_peak_balance=starting,
         )
 
         # Correlation groups (markets that move together)
@@ -202,6 +217,12 @@ class RiskManager:
         # Data path
         self.data_path = Path(config.get("data_dir", "data")) / "risk_state.json"
         self._load_state()
+
+        # Allow operator to clear the kill-switch without deleting the state file
+        if os.getenv("FORCE_RESUME", "").lower() in ("true", "1", "yes"):
+            if self.state.max_drawdown_halt:
+                logger.warning("FORCE_RESUME=true: clearing max-drawdown halt flag")
+                self.manual_reset_drawdown_halt()
 
         mode_label = "🔴 LIVE" if self.is_live else "🟡 PAPER"
         logger.info(
@@ -264,6 +285,14 @@ class RiskManager:
             )
 
         # === Hard stops (reject immediately) ===
+
+        # 0. Session-level kill-switch (permanent halt until manual reset)
+        if self.state.max_drawdown_halt:
+            return RiskDecision(
+                approved=False,
+                reason="Session max-drawdown kill-switch active — manual reset required",
+                risk_score=1.0,
+            )
 
         # 1. Daily loss limit — relative to CURRENT balance (dynamic)
         if self.state.daily_pnl < 0:
@@ -405,9 +434,14 @@ class RiskManager:
             self.state.daily_pnl += trade["pnl"]
             self.state.open_positions = max(0, self.state.open_positions - 1)
 
-            # Update peak
+            # Update all-time and session peaks
             if self.state.current_balance > self.state.peak_balance:
                 self.state.peak_balance = self.state.current_balance
+            if self.state.current_balance > self.state.session_peak_balance:
+                self.state.session_peak_balance = self.state.current_balance
+
+            # Check session-level max drawdown kill-switch
+            self._check_session_drawdown()
 
             # Update streaks
             if trade["pnl"] > 0:
@@ -430,6 +464,63 @@ class RiskManager:
                 self.state.consecutive_wins = 0
 
             self._save_state()
+
+    def _check_session_drawdown(self):
+        """Check session-level max drawdown and trigger kill-switch if breached."""
+        if self.state.max_drawdown_halt:
+            return  # Already halted
+
+        # Drawdown measured from max(session_start, session_peak) — whichever is higher
+        high_water = max(self.state.session_starting_balance, self.state.session_peak_balance)
+        if high_water <= 0:
+            return
+
+        drawdown = (high_water - self.state.current_balance) / high_water
+        threshold = self.max_session_drawdown_pct
+
+        if drawdown >= threshold:
+            self.state.max_drawdown_halt = True
+            logger.critical(
+                f"🚨 SESSION MAX DRAWDOWN KILL-SWITCH TRIGGERED! "
+                f"Balance dropped {drawdown:.1%} from high-water mark "
+                f"(${self.state.current_balance:.2f} vs ${high_water:.2f}). "
+                f"Threshold: {threshold:.0%}. All new trades HALTED. "
+                f"To resume: delete data/risk_state.json or set FORCE_RESUME=true"
+            )
+            # Send alert via Telegram
+            self._send_drawdown_alert(drawdown, high_water)
+            self._save_state()
+
+    def _send_drawdown_alert(self, drawdown: float, high_water: float):
+        """Send a Telegram alert for the drawdown kill-switch."""
+        try:
+            import subprocess
+            from pathlib import Path
+            msg = (
+                f"🚨 *MAX DRAWDOWN KILL-SWITCH TRIGGERED*\n\n"
+                f"Balance: ${self.state.current_balance:.2f}\n"
+                f"High-water mark: ${high_water:.2f}\n"
+                f"Drawdown: {drawdown:.1%} (limit: {self.max_session_drawdown_pct:.0%})\n\n"
+                f"All new trades are HALTED.\n"
+                f"To resume: delete `data/risk_state.json` or set `FORCE_RESUME=true`"
+            )
+            scripts_dir = Path(__file__).parent.parent / "scripts"
+            subprocess.run(
+                ["python3", "send_alert.py", "-m", msg],
+                cwd=str(scripts_dir),
+                capture_output=True,
+                timeout=30,
+            )
+        except Exception as e:
+            logger.debug(f"Failed to send drawdown alert: {e}")
+
+    def manual_reset_drawdown_halt(self):
+        """Clear the permanent halt flag. Requires explicit call or FORCE_RESUME=true."""
+        self.state.max_drawdown_halt = False
+        self.state.session_starting_balance = self.state.current_balance
+        self.state.session_peak_balance = self.state.current_balance
+        self._save_state()
+        logger.warning("⚠️  Max-drawdown halt manually cleared. Trading resumed.")
 
     def reset_daily(self):
         """Reset daily trackers. Call at start of each trading day."""

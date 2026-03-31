@@ -79,22 +79,62 @@ python main.py live      # Live trading (real money!)
 ## Strategy Details
 
 ### Signal Ensemble (weighted)
-- **Price signal (40%)** — Order book imbalance analysis
-- **News signal (30%)** — Google News RSS sentiment scoring
+- **Price signal (40%)** — Order book imbalance + longshot/volume bias
+- **Live data (50%)** — Real weather forecasts, crypto prices, forex rates (when applicable)
+- **News signal (15%)** — Yahoo Finance / Bing News RSS sentiment scoring with fallback chain
 - **Volume signal (15%)** — Market liquidity/efficiency
-- **Time signal (15%)** — Days to resolution factor
+- **Time signal (10%)** — Days to resolution factor
+
+When the news feed is unavailable, its weight is redistributed proportionally to the remaining active signals (not zeroed out).
 
 ### Position Sizing
 Uses **half-Kelly Criterion** for mathematically optimal bet sizing:
-- Calculates edge from model probability vs market price
-- Scales position by edge strength
-- Capped at 10% of balance per trade
+- Kalshi fee (7% on winnings) is deducted from expected value before computing Kelly fraction
+- Scales position by edge strength after fees
+- Capped at 10% of balance per trade (paper) / 5% (live)
 
 ### Risk Controls
-- Minimum 5% edge required
+- Minimum 5% edge required (configurable)
 - Minimum 50% confidence threshold
 - Maximum 10% portfolio per position
-- All trades logged to SQLite
+- **Session kill-switch**: permanently halts if balance drops >20% from high-water mark
+- Consecutive-loss cooldown, daily loss limit, max drawdown pause
+- All trades saved to JSON session files
+
+## Environment Variables Reference
+
+### Kalshi credentials
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `KALSHI_API_KEY_ID` | — | Your Kalshi API key ID |
+| `KALSHI_PRIVATE_KEY_PATH` | `kalshi_private_key` | Path to RSA private key file |
+| `KALSHI_USE_DEMO` | `true` | `true` = demo account, `false` = real money |
+| `KALSHI_FEE_RATE` | `0.07` | Kalshi fee on winnings (7%). Deducted from Kelly EV before sizing. |
+
+### Strategy
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MIN_EDGE` | `0.015` | Minimum edge to enter a trade (e.g. `0.05` = 5%) |
+| `MIN_CONFIDENCE` | `0.50` | Minimum composite signal confidence |
+| `NEWS_WEIGHT` | `0.15` | Weight of news signal in ensemble |
+| `ENABLE_NEWS_FALLBACK` | `true` | Enable Yahoo Finance / Bing News RSS fallback when primary news fails. If all sources fail, the bot degrades to price+volume signals only and redistributes the news weight. |
+
+### Risk management
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `KELLY_FRACTION` | `0.5` | Kelly multiplier (0.5 = half-Kelly) |
+| `MAX_POSITION_PCT` | `0.10` | Max % of balance per trade |
+| `DAILY_LOSS_LIMIT_PCT` | `20` | Stop new trades if down this % today |
+| `MAX_DRAWDOWN_PCT` | `0.20` | **Session kill-switch**: halt permanently if balance drops this fraction below `max(session_start, session_peak)`. Requires manual reset. |
+| `FORCE_RESUME` | `false` | Set to `true` to clear the max-drawdown halt without deleting `data/risk_state.json` |
+| `MAX_OPEN_POSITIONS` | `10` | Max concurrent open positions |
+
+### Paper trading
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PAPER_SCAN_INTERVAL` | `120` | Seconds between scan cycles |
+| `STARTING_BALANCE` | `100.0` | Virtual starting balance for paper trading |
+| `PAPER_LOG_FILE` | — | Override log file path (supports per-instance logging) |
 
 ## Getting Kalshi API Keys
 

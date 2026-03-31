@@ -114,7 +114,9 @@ class KalshiExchange(BaseExchange):
                                         "status": m.get('status', ''),
                                         "source": "daily_series",
                                         "series": series_ticker,
-                                    }
+                                    },
+                                    yes_bid=_dollars_from_raw(m, 'yes_bid'),
+                                    no_bid=_dollars_from_raw(m, 'no_bid'),
                                 )
                                 markets.append(market)
                         except Exception:
@@ -166,7 +168,9 @@ class KalshiExchange(BaseExchange):
                             metadata={
                                 "status": m.get('status', ''),
                                 "source": "direct",
-                            }
+                            },
+                            yes_bid=_dollars_from_raw(m, 'yes_bid'),
+                            no_bid=_dollars_from_raw(m, 'no_bid'),
                         )
                         markets.append(market)
                         direct_count += 1
