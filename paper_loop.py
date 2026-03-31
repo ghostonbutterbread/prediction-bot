@@ -13,15 +13,23 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Setup logging
-log_dir = Path(__file__).parent / "data"
-log_dir.mkdir(exist_ok=True)
+# Setup logging — allow per-instance override via PAPER_LOG_FILE env var
+_log_file = os.getenv("PAPER_LOG_FILE")
+if _log_file:
+    _log_path = Path(_log_file)
+    _log_path.parent.mkdir(parents=True, exist_ok=True)
+    _log_handler = logging.FileHandler(_log_path)
+else:
+    log_dir = Path(__file__).parent / "data"
+    log_dir.mkdir(exist_ok=True)
+    _log_handler = logging.FileHandler(log_dir / "paper_loop.log")
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
     handlers=[
-        logging.FileHandler(log_dir / "paper_loop.log"),
+        _log_handler,
         logging.StreamHandler(),
     ],
 )
