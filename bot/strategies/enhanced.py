@@ -248,35 +248,6 @@ class EnhancedStrategyEngine:
         except Exception as e:
             logger.debug(f"Live data signal error: {e}")
             return None
-        """Analyze news sentiment for the market."""
-        try:
-            news_items = self.news.get_news_for_market(market.question)
-
-            if not news_items:
-                return None
-
-            # Average sentiment weighted by relevance
-            total_weight = sum(n.relevance for n in news_items)
-            if total_weight == 0:
-                return None
-
-            avg_sentiment = sum(
-                n.sentiment * n.relevance for n in news_items
-            ) / total_weight
-
-            # Convert sentiment (-1 to 1) to probability shift
-            predicted = market.yes_price + avg_sentiment * 0.15
-
-            # More news = higher confidence
-            confidence = min(len(news_items) / 5, 1.0) * 0.8
-
-            return {
-                "predicted_prob": max(0.01, min(0.99, predicted)),
-                "confidence": confidence,
-            }
-        except Exception as e:
-            logger.debug(f"News signal error: {e}")
-            return None
 
     def _social_signal(self, market) -> Optional[dict]:
         """Analyze social media sentiment for the market."""

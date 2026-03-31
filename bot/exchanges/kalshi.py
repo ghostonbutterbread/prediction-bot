@@ -278,7 +278,7 @@ class KalshiExchange(BaseExchange):
                 closes_at=_parse_dt(getattr(m, 'close_time', None)),
                 category=getattr(m, 'market_type', 'binary'),
                 metadata={"status": getattr(m, 'status', '')},
-                close_price=_dollars(m, 'close_price_dollars'),
+                close_price=(_dollars(m, 'close_price_dollars') if getattr(m, 'close_price_dollars', None) is not None else None),
             )
         except Exception as e:
             logger.error(f"Error fetching market {market_id}: {e}")
@@ -363,7 +363,8 @@ class KalshiExchange(BaseExchange):
         try:
             price_cents = int(price * 100)
             action = "buy"
-            count = max(1, int(size))
+            # size is in dollars; each contract costs `price` dollars → convert to contract count
+            count = max(1, int(size / price)) if price > 0 else 1
 
             kwargs = {
                 "ticker": market_id,
