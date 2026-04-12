@@ -151,12 +151,10 @@ class EnhancedStrategyEngine:
                 adjusted["confidence"] = validation.adjusted_confidence
                 if validation.warnings:
                     adjusted.setdefault("warnings", []).extend(validation.warnings)
-                    for warning in validation.warnings:
-                        logger.warning(f"Signal warning [{name}]: {warning}")
                 validated_signals[name] = adjusted
                 validated_weights[name] = weights[name]
             else:
-                logger.warning(f"Signal REJECTED [{name}]: {validation.rejection_reason}")
+                logger.debug(f"Signal REJECTED [{name}]: {validation.rejection_reason}")
 
         if not validated_signals:
             return None
