@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,11 +43,31 @@ class ValidationResult:
 
 
 class SignalAuditLog:
-    """Append-only signal validation audit log."""
+    """Append-only signal validation audit log with backpressure controls."""
 
     def __init__(self, path: str = "data/signal_audit.jsonl"):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.enabled = os.getenv("SIGNAL_AUDIT_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+        self.log_rejections = os.getenv("SIGNAL_AUDIT_REJECTIONS", "false").lower() in {"1", "true", "yes", "on"}
+        self.max_bytes = int(os.getenv("SIGNAL_AUDIT_MAX_BYTES", str(50 * 1024 * 1024)))
+
+    def _should_write(self, validation: ValidationResult) -> bool:
+        if not self.enabled:
+            return False
+        if not validation.accepted and not self.log_rejections:
+            return False
+        return True
+
+    def _maybe_rotate(self):
+        try:
+            if self.path.exists() and self.path.stat().st_size >= self.max_bytes:
+                rotated = self.path.with_suffix(self.path.suffix + ".1")
+                if rotated.exists():
+                    rotated.unlink()
+                self.path.rename(rotated)
+        except OSError:
+            pass
 
     def write(
         self,
@@ -56,12 +77,13 @@ class SignalAuditLog:
         raw_predictions: dict[str, float],
         validation: ValidationResult,
     ):
+        if not self._should_write(validation):
+            return
+        self._maybe_rotate()
         record = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "market_id": getattr(market, "id", ""),
             "signal_type": signal_name,
-            "raw_signal": raw_signal,
-            "raw_predictions": raw_predictions,
             "accepted": validation.accepted,
             "warnings": validation.warnings,
             "rejection_reason": validation.rejection_reason,
@@ -69,6 +91,8 @@ class SignalAuditLog:
             if validation.accepted else None,
             "final_confidence": round(validation.adjusted_confidence, 4)
             if validation.accepted else None,
+            "raw_predictions": raw_predictions if validation.accepted else None,
+            "raw_signal": raw_signal if validation.accepted else None,
         }
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, default=str) + "\n")
