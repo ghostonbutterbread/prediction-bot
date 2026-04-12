@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""
-Strategy Analyzer — Programmatic analysis of simulation data.
-Outputs actionable insights as JSON so Ghost can make decisions without reading raw data.
-"""
+"""Analyze paper/live simulation sessions and emit actionable summaries."""
 
 import json
 import glob
@@ -13,6 +10,41 @@ from collections import defaultdict
 
 DATA_DIR = Path(__file__).parent.parent / "data"
 PACIFIC = timezone(timedelta(hours=-7))
+DEFAULT_SESSION_GLOBS = ("paper/sim_*.json", "live/sim_*.json", "sim_*.json")
+
+
+def _coerce_float(value, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _session_sort_key(session: dict) -> tuple[str, float]:
+    file_path = Path(session.get("_file", ""))
+    try:
+        mtime = file_path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    return (
+        str(session.get("session_id") or ""),
+        mtime,
+    )
+
+
+def _effective_trades(trades: list[dict]) -> tuple[list[dict], int]:
+    effective = []
+    ignored = 0
+    for trade in trades or []:
+        market_id = str(trade.get("market_id", "") or "").strip()
+        size = _coerce_float(trade.get("position_size"), -1.0)
+        if not market_id or size <= 0:
+            ignored += 1
+            continue
+        effective.append(trade)
+    return effective, ignored
 
 
 def analyze() -> dict:
@@ -21,6 +53,7 @@ def analyze() -> dict:
     sessions = load_sessions()
     latest = sessions[-1] if sessions else {}
     trades = latest.get("trades", [])
+    ignored_trades = latest.get("summary", {}).get("ignored_invalid_trades", 0)
     resolved = [t for t in trades if t.get("resolved")]
     
     result = {
@@ -29,9 +62,11 @@ def analyze() -> dict:
             "total_sessions": len(sessions),
             "total_trades_ever": sum(len(s.get("trades", [])) for s in sessions),
             "current_session": latest.get("session_id", "?"),
+            "current_session_file": latest.get("_file"),
             "current_trades": len(trades),
             "resolved": len(resolved),
             "scans": latest.get("scan_count", 0),
+            "ignored_invalid_trades": ignored_trades,
         },
         "performance": {},
         "signal_quality": {},
@@ -170,7 +205,16 @@ def detect_issues(trades: list, resolved: list, session: dict) -> list:
                 "message": f"Win rate {wr:.0%} is below 40% — losing money",
                 "suggestion": "Review strategy signals, consider disabling underperforming ones",
             })
-    
+
+    ignored_trades = session.get("summary", {}).get("ignored_invalid_trades")
+    if ignored_trades:
+        issues.append({
+            "severity": "warning",
+            "code": "INVALID_TRADES_IGNORED",
+            "message": f"Ignored {ignored_trades} zero-sized or malformed trade rows in reporting",
+            "suggestion": "Clean persisted sessions so accounting matches executed trades only",
+        })
+
     return issues
 
 
@@ -242,6 +286,10 @@ def format_report(analysis: dict) -> str:
         "",
         f"Session: {s['current_session']} | Scans: {s['scans']} | Trades: {s['current_trades']}",
     ]
+    if s.get("current_session_file"):
+        lines.append(f"Source: {s['current_session_file']}")
+    if s.get("ignored_invalid_trades"):
+        lines.append(f"Ignored invalid trade rows: {s['ignored_invalid_trades']}")
     
     if p:
         emoji = "🟢" if p.get("total_pnl", 0) > 0 else "🔴" if p.get("total_pnl", 0) < 0 else "⚪"
@@ -268,12 +316,31 @@ def format_report(analysis: dict) -> str:
 
 def load_sessions() -> list:
     sessions = []
-    for f in sorted(glob.glob(str(DATA_DIR / "sim_*.json"))):
-        try:
-            with open(f) as fp:
-                sessions.append(json.load(fp))
-        except:
-            pass
+    roots = []
+    env_data_dir = os.getenv("ANALYZE_DATA_DIR")
+    if env_data_dir:
+        roots.append(Path(env_data_dir))
+    roots.append(DATA_DIR)
+
+    seen_files = set()
+    for root in roots:
+        for pattern in DEFAULT_SESSION_GLOBS:
+            for f in sorted(glob.glob(str(root / pattern))):
+                if f in seen_files:
+                    continue
+                try:
+                    with open(f) as fp:
+                        session = json.load(fp)
+                        session["_file"] = f
+                        trade_rows, ignored = _effective_trades(session.get("trades", []))
+                        session["trades"] = trade_rows
+                        session.setdefault("summary", {})
+                        session["summary"]["ignored_invalid_trades"] = ignored
+                        sessions.append(session)
+                        seen_files.add(f)
+                except Exception:
+                    pass
+    sessions.sort(key=_session_sort_key)
     return sessions
 
 

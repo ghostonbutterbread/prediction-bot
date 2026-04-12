@@ -123,7 +123,7 @@ class SignalValidator:
                 rejection_reason=warnings[-1] if warnings else "Signal failed plausibility bounds",
             )
 
-        accepted, adjusted_confidence = self._apply_liquidity_floor(
+        accepted, adjusted_confidence, liquidity_reason = self._apply_liquidity_floor(
             market,
             adjusted_confidence,
             warnings,
@@ -134,7 +134,7 @@ class SignalValidator:
                 adjusted_confidence=0.0,
                 adjusted_prob=adjusted_prob,
                 warnings=warnings,
-                rejection_reason="Market volume below 100; signal discarded",
+                rejection_reason=liquidity_reason or "Market too thin",
             )
 
         accepted, adjusted_confidence = self._apply_staleness_penalty(
@@ -299,14 +299,29 @@ class SignalValidator:
         market,
         adjusted_confidence: float,
         warnings: list[str],
-    ) -> tuple[bool, float]:
+    ) -> tuple[bool, float, Optional[str]]:
         volume = float(getattr(market, "volume", 0) or 0)
-        if volume < 100:
-            return False, adjusted_confidence
-        if volume < 500 and adjusted_confidence > 0.40:
-            warnings.append(f"Low liquidity (volume={volume:.0f}) capped confidence at 0.40")
-            adjusted_confidence = 0.40
-        return True, adjusted_confidence
+        liquidity = float(getattr(market, "liquidity", 0) or 0)
+
+        # Ultra-thin books are not realistically tradable in our simulator.
+        # Reject them outright rather than confidence-capping into fake fills.
+        if volume < 100 or liquidity < 150:
+            return False, adjusted_confidence, (
+                f"Market too thin (volume={volume:.0f}, liquidity=${liquidity:.0f})"
+            )
+
+        # Moderately thin books can stay in play, but with a harder confidence cap.
+        if (volume < 300 or liquidity < 400) and adjusted_confidence > 0.50:
+            warnings.append(
+                f"Thin market (volume={volume:.0f}, liquidity=${liquidity:.0f}) capped confidence at 0.50"
+            )
+            adjusted_confidence = 0.50
+        elif (volume < 600 or liquidity < 750) and adjusted_confidence > 0.60:
+            warnings.append(
+                f"Low liquidity (volume={volume:.0f}, liquidity=${liquidity:.0f}) capped confidence at 0.60"
+            )
+            adjusted_confidence = 0.60
+        return True, adjusted_confidence, None
 
     def _apply_staleness_penalty(
         self,
