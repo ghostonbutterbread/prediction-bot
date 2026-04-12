@@ -66,7 +66,8 @@ class SignalValidatorTests(unittest.TestCase):
         self.assertIn("outside plausible bounds", result.rejection_reason)
 
     def test_liquidity_floor_caps_and_rejects(self):
-        cap_market = make_market("Will BTC be above $100000 tomorrow?", volume=400)
+        cap_market = make_market("Will BTC be above $100000 tomorrow?", volume=300)
+        cap_market.liquidity = 300
         cap_signal = {
             "signal_type": "crypto",
             "predicted_prob": 0.60,
@@ -82,12 +83,13 @@ class SignalValidatorTests(unittest.TestCase):
 
         capped = self.validator.validate(cap_signal, cap_market, "live")
         self.assertTrue(capped.accepted)
-        self.assertEqual(capped.adjusted_confidence, 0.40)
+        self.assertEqual(capped.adjusted_confidence, 0.50)
 
-        reject_market = make_market("Will BTC be above $100000 tomorrow?", volume=50)
+        reject_market = make_market("Will BTC be above $100000 tomorrow?", volume=40)
+        reject_market.liquidity = 50
         rejected = self.validator.validate(cap_signal, reject_market, "live")
         self.assertFalse(rejected.accepted)
-        self.assertIn("below 100", rejected.rejection_reason)
+        self.assertIn("too thin", rejected.rejection_reason)
 
     def test_cross_source_disagreement_reduces_both_confidences(self):
         market = make_market("Will the high temp in Austin be above 80°?", yes_price=0.50, volume=5000)

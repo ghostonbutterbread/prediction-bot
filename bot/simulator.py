@@ -2,6 +2,7 @@
 
 import json
 import logging
+from collections import Counter
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from dataclasses import dataclass, asdict
@@ -35,6 +36,10 @@ class SimTrade:
     outcome: Optional[str] = None  # "YES" or "NO"
     pnl: Optional[float] = None
     resolved_at: Optional[str] = None
+    resolution_type: Optional[str] = None
+    current_price: Optional[float] = None
+    unrealized_pnl: Optional[float] = None
+    price_delta: Optional[float] = None
 
 
 @dataclass
@@ -149,7 +154,11 @@ class Simulator:
 
             # Reconstruct SimTrade objects
             self.trades = []
+            discarded = 0
             for idx, t_data in enumerate(data.get("trades", []), start=1):
+                if not self._is_trade_row_effective(t_data):
+                    discarded += 1
+                    continue
                 self.trades.append(SimTrade(
                     id=t_data.get("id", f"sim_{self.session_id}_{idx:04d}"),
                     timestamp=t_data.get("timestamp", datetime.now(timezone.utc).isoformat()),
@@ -163,18 +172,30 @@ class Simulator:
                     confidence=t_data.get("confidence", 0),
                     position_size=t_data.get("position_size", 0),
                     signals=t_data.get("signals", {}),
+                    category=t_data.get("category", ""),
                     resolved=t_data.get("resolved", False),
                     outcome=t_data.get("outcome"),
                     pnl=t_data.get("pnl"),
                     resolved_at=t_data.get("resolved_at"),
+                    resolution_type=t_data.get("resolution_type"),
+                    current_price=self._coerce_float_or_none(t_data.get("current_price")),
+                    unrealized_pnl=self._coerce_float_or_none(t_data.get("unrealized_pnl")),
+                    price_delta=self._coerce_float_or_none(t_data.get("price_delta")),
                 ))
 
-            self.traded_markets = {t.market_id for t in self.trades}
+            self.traded_markets = {t.market_id for t in self._effective_trades()}
             self.rolling_win_rate = 0.0
             self.rolling_win_count = 0
             self.rolling_loss_count = 0
+            self.risk.sync_with_trades(
+                self.trades,
+                current_balance=self.balance,
+                starting_balance=self.starting_balance,
+            )
 
             logger.info(f"Loaded session {self.session_id} — {len(self.trades)} trades, balance ${self.balance:.2f}")
+            if discarded:
+                logger.warning(f"Discarded {discarded} zero-sized or malformed trade rows from session {self.session_id}")
             return True
 
         except Exception as e:
@@ -191,6 +212,7 @@ class Simulator:
         markets = exchange.get_markets(limit=100)
         if not markets:
             return {"markets": 0, "signals": 0, "trades": 0}
+        blockers = Counter()
         
         # === SPORTS MODE: Analyze sports markets + injury sniper ===
         # (sports_trades currently unused — populated but never consumed)
@@ -208,7 +230,7 @@ class Simulator:
                         continue
                     sig = qb.analyze_market(sm)
                     if sig and sig.get("should_trade"):
-                        trade = self._create_trade(sig)
+                        trade = self._create_trade(sig, blockers)
                         if trade:
                             self.trades.append(trade)
                             sports_trades.append(trade)
@@ -249,7 +271,7 @@ class Simulator:
                         if sig:
                             injury_signals.append(sig)
                     for sig in injury_signals:
-                        trade = self._create_trade(sig)
+                        trade = self._create_trade(sig, blockers)
                         if trade:
                             self.trades.append(trade)
                             sports_trades.append(trade)
@@ -284,7 +306,8 @@ class Simulator:
                     signal["question"] = market.question
                     signals_found.append(signal)
 
-                    should_trade = self._should_trade(signal)
+                    gate_reason = self._trade_gate_reason(signal)
+                    should_trade = gate_reason is None
                     # DEBUG: log every signal
                     logger.info(f"  Signal: {signal.get('direction','')} edge={signal.get('edge',0):.3f} conf={signal.get('confidence',0):.3f} -> {should_trade}")
 
@@ -292,6 +315,7 @@ class Simulator:
                         # Dedup: skip if we already traded this market
                         market_id = signal.get("market_id", "")
                         if market_id in self.traded_markets:
+                            blockers["duplicate_market"] += 1
                             logger.debug(f"  Skipping duplicate: {market_id}")
                             continue
                         # Attach market object for time-decay scoring
@@ -302,11 +326,14 @@ class Simulator:
                             logger.debug(f"  ⏳ Queued for time-decay ranking: {market_id}")
                         else:
                             # Legacy mode: trade immediately
-                            trade = self._create_trade(signal)
+                            trade = self._create_trade(signal, blockers)
                             if trade:
                                 self.trades.append(trade)
                                 trades_taken.append(trade)
                                 self.traded_markets.add(market_id)
+                    else:
+                        signal["_blocked"] = gate_reason
+                        blockers[gate_reason] += 1
 
             except Exception as e:
                 logger.debug(f"Error analyzing {market.id}: {e}")
@@ -318,10 +345,12 @@ class Simulator:
         if self.enable_time_decay_ranking:
             scored_signals = []
             for sig in signals_found:
-                if not self._should_trade(sig):
+                gate_reason = sig.get("_blocked") or self._trade_gate_reason(sig)
+                if gate_reason is not None:
                     continue
                 market_id = sig.get("market_id", "")
                 if market_id in self.traded_markets:
+                    blockers["duplicate_market"] += 1
                     continue
                 market = sig.get("_market")
                 if not market:
@@ -352,8 +381,9 @@ class Simulator:
                 for score, sig, market in scored_signals:
                     market_id = sig.get("market_id", "")
                     if market_id in self.traded_markets:
+                        blockers["duplicate_market"] += 1
                         continue
-                    trade = self._create_trade(sig)
+                    trade = self._create_trade(sig, blockers)
                     if trade:
                         self.trades.append(trade)
                         trades_taken.append(trade)
@@ -378,9 +408,12 @@ class Simulator:
                 )
         else:
             logger.info(f"  No trades this scan ({len(signals_found)} signals, none met thresholds)")
+            blocker_summary = self._format_blockers(blockers)
+            if blocker_summary:
+                logger.info(f"  Top blockers: {blocker_summary}")
 
         # Calculate rolling win rate from RESOLVED trades only
-        resolved_trades = [t for t in self.trades if t.resolved and t.pnl is not None]
+        resolved_trades = [t for t in self._effective_trades() if t.resolved and t.pnl is not None]
         if resolved_trades:
             recent = resolved_trades[-self.rolling_window:]
             wins = sum(1 for t in recent if t.pnl > 0)
@@ -425,30 +458,38 @@ class Simulator:
             "signals": len(signals_found),
             "trades": len(trades_taken),
             "balance": self.balance,
-            "total_trades": len(self.trades),
+            "total_trades": len(self._effective_trades()),
+            "blocked_reasons": dict(blockers),
         }
 
     def _should_trade(self, signal: dict) -> bool:
+        return self._trade_gate_reason(signal) is None
+
+    def _trade_gate_reason(self, signal: dict) -> Optional[str]:
         normalized = self._normalize_trade_terms(signal)
         if normalized is None:
-            return False
+            return "invalid_signal"
 
         try:
             edge = float(signal.get("edge", 0) or 0)
             confidence = float(signal.get("confidence", 0) or 0)
         except (TypeError, ValueError):
-            return False
+            return "invalid_signal"
 
         market_price = normalized["entry_price"]
-        return (
-            edge >= self.min_edge and
-            confidence >= self.min_confidence and
-            market_price <= self.max_entry_price  # entry price cap — no tail risk
-        )
+        if edge < self.min_edge:
+            return "edge_below_threshold"
+        if confidence < self.min_confidence:
+            return "confidence_below_threshold"
+        if market_price > self.max_entry_price:
+            return "entry_price_above_cap"
+        return None
 
-    def _create_trade(self, signal: dict) -> Optional[SimTrade]:
+    def _create_trade(self, signal: dict, blockers: Optional[Counter] = None) -> Optional[SimTrade]:
         normalized = self._normalize_trade_terms(signal)
         if normalized is None:
+            if blockers is not None:
+                blockers["invalid_signal"] += 1
             return None
 
         direction = normalized["direction"]
@@ -457,6 +498,8 @@ class Simulator:
 
         size = self.kelly.calculate(win_probability, entry_price, self.balance)
         if size <= 0:
+            if blockers is not None:
+                blockers["kelly_zero_size"] += 1
             logger.info(f"  🛑 Kelly rejected: size={size:.2f} (wp={win_probability:.3f}, ep={entry_price:.3f}, bal={self.balance})")
             return None
 
@@ -464,6 +507,8 @@ class Simulator:
         risk_decision = self.risk.check_trade(signal, size)
 
         if not risk_decision.approved:
+            if blockers is not None:
+                blockers[self._reason_key(risk_decision.reason)] += 1
             logger.info(f"  🛑 Risk rejected: {risk_decision.reason}")
             return None
 
@@ -516,6 +561,53 @@ class Simulator:
         })
 
         return trade
+
+    def _effective_trades(self) -> list[SimTrade]:
+        return [trade for trade in self.trades if self._is_trade_effective(trade)]
+
+    def _prune_ineffective_trades(self):
+        effective = self._effective_trades()
+        if len(effective) != len(self.trades):
+            logger.warning(f"Pruned {len(self.trades) - len(effective)} zero-sized or malformed trades from session {self.session_id}")
+            self.trades = effective
+
+    def _is_trade_effective(self, trade: SimTrade) -> bool:
+        return self._is_trade_row_effective(asdict(trade))
+
+    def _is_trade_row_effective(self, trade_data: dict) -> bool:
+        market_id = str(trade_data.get("market_id", "") or "").strip()
+        if not market_id:
+            return False
+        size = self._coerce_float_or_none(trade_data.get("position_size"))
+        return size is not None and size > 0
+
+    def _coerce_float_or_none(self, value) -> Optional[float]:
+        try:
+            if value is None:
+                return None
+            value = float(value)
+        except (TypeError, ValueError):
+            return None
+        return value if isfinite(value) else None
+
+    def _reason_key(self, reason: str) -> str:
+        cleaned = (reason or "risk_rejected").lower()
+        for old, new in (
+            ("%", "pct"),
+            ("$", "usd"),
+            ("/", "_"),
+            ("(", ""),
+            (")", ""),
+            ("-", "_"),
+        ):
+            cleaned = cleaned.replace(old, new)
+        cleaned = "".join(ch if ch.isalnum() else "_" for ch in cleaned)
+        return f"risk_{'_'.join(part for part in cleaned.split('_') if part)}"
+
+    def _format_blockers(self, blockers: Counter, limit: int = 4) -> str:
+        if not blockers:
+            return ""
+        return ", ".join(f"{key}={count}" for key, count in blockers.most_common(limit))
 
     def _normalize_trade_terms(self, signal: dict) -> Optional[dict]:
         """Normalize a signal into the purchased contract price and win probability.
@@ -678,7 +770,8 @@ class Simulator:
 
     def report(self) -> dict:
         """Generate performance report."""
-        total = len(self.trades)
+        effective_trades = self._effective_trades()
+        total = len(effective_trades)
         if total == 0:
             return {
                 "session": self.session_id,
@@ -687,21 +780,21 @@ class Simulator:
             }
 
         # Stats
-        edges = [t.edge for t in self.trades]
-        confidences = [t.confidence for t in self.trades]
-        sizes = [t.position_size for t in self.trades]
+        edges = [t.edge for t in effective_trades]
+        confidences = [t.confidence for t in effective_trades]
+        sizes = [t.position_size for t in effective_trades]
 
         by_direction = {}
-        for t in self.trades:
+        for t in effective_trades:
             by_direction[t.direction] = by_direction.get(t.direction, 0) + 1
 
         by_exchange = {}
-        for t in self.trades:
+        for t in effective_trades:
             by_exchange[t.exchange] = by_exchange.get(t.exchange, 0) + 1
 
         return {
             "session": self.session_id,
-            "started_at": self.trades[0].timestamp if self.trades else None,
+            "started_at": effective_trades[0].timestamp if effective_trades else None,
             "total_trades": total,
             "starting_balance": self.starting_balance,
             "current_balance": self.balance,
@@ -719,11 +812,11 @@ class Simulator:
 
     def get_open_trades(self) -> list[dict]:
         """Get all unresolved trades."""
-        return [asdict(t) for t in self.trades if not t.resolved]
+        return [asdict(t) for t in self._effective_trades() if not t.resolved]
 
     def get_all_trades(self) -> list[dict]:
         """Get all trades."""
-        return [asdict(t) for t in self.trades]
+        return [asdict(t) for t in self._effective_trades()]
 
     def print_report(self):
         """Print formatted report to console."""
@@ -764,6 +857,12 @@ Direction Breakdown:""")
 
     def _save_session(self):
         """Save session data to disk."""
+        self._prune_ineffective_trades()
+        self.risk.sync_with_trades(
+            self.trades,
+            current_balance=self.balance,
+            starting_balance=self.starting_balance,
+        )
         session_file = self.data_dir / f"sim_{self.session_id}.json"
         data = {
             "session_id": self.session_id,

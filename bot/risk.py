@@ -169,8 +169,12 @@ class RiskManager:
     def __init__(self, config: dict = None):
         config = config or {}
 
-        # Detect mode: live = not demo
-        self.is_live = os.getenv("KALSHI_USE_DEMO", "true").lower() == "false"
+        # Detect mode: PAPER_MODE env from paper_loop.py takes precedence.
+        # If PAPER_MODE=true → use paper limits even if KALSHI_USE_DEMO=false.
+        # KALSHI_USE_DEMO=false means real market data (not demo API), but that
+        # doesn't mean real-money trading — paper_loop.py handles that distinction.
+        paper_mode = os.getenv("PAPER_MODE", "true").lower() == "true"
+        self.is_live = not paper_mode
         preset = get_preset(self.is_live)
 
         # Resolve limits: env vars override preset, explicit config overrides both
@@ -200,6 +204,7 @@ class RiskManager:
         # Stress scaling — more lenient as bankroll grows
         self.stress_threshold = config.get("stress_threshold", 0.8)
         self.stress_reduction = config.get("stress_reduction", 0.3)
+        self.min_position_size = float(config.get("min_position_size", 1.0))
 
         starting = config.get("starting_balance", 100.0)
         # State
@@ -320,17 +325,7 @@ class RiskManager:
                 risk_score=0.8,
             )
 
-        # 4. Max exposure — total dollars at risk
-        projected_exposure = self.state.total_exposure + position_size
-        projected_exposure_pct = (projected_exposure / self.state.current_balance * 100) if self.state.current_balance > 0 else 0
-        if projected_exposure_pct > self.max_exposure_pct * 100:
-            return RiskDecision(
-                approved=False,
-                reason=f"Max exposure ({projected_exposure_pct:.1f}% / {self.max_exposure_pct * 100:.0f}% of ${self.state.current_balance:.2f})",
-                risk_score=1.0,
-            )
-
-        # 5. Cooldown
+        # 4. Cooldown
         if self.state.is_in_cooldown:
             return RiskDecision(
                 approved=False,
@@ -382,8 +377,41 @@ class RiskManager:
             position_size *= scale
             risk_score += 0.2
 
+        # 10. Max exposure — preserve the guardrail, but take a smaller trade if
+        # there is still meaningful headroom left.
+        max_exposure_dollars = self.state.current_balance * self.max_exposure_pct
+        remaining_headroom = max(0.0, max_exposure_dollars - self.state.total_exposure)
+        projected_exposure = self.state.total_exposure + position_size
+        projected_exposure_pct = (
+            projected_exposure / self.state.current_balance * 100
+            if self.state.current_balance > 0 else 0
+        )
+        if projected_exposure_pct > self.max_exposure_pct * 100:
+            if remaining_headroom < self.min_position_size:
+                return RiskDecision(
+                    approved=False,
+                    reason=(
+                        f"Max exposure ({projected_exposure_pct:.1f}% / "
+                        f"{self.max_exposure_pct * 100:.0f}% of ${self.state.current_balance:.2f})"
+                    ),
+                    risk_score=1.0,
+                )
+            clipped_size = round(min(position_size, remaining_headroom), 2)
+            if clipped_size < self.min_position_size:
+                return RiskDecision(
+                    approved=False,
+                    reason=f"Exposure headroom below minimum size (${remaining_headroom:.2f})",
+                    risk_score=1.0,
+                )
+            warnings.append(
+                f"Exposure headroom capped size to ${clipped_size:.2f} "
+                f"(${remaining_headroom:.2f} remaining)"
+            )
+            position_size = clipped_size
+            risk_score += 0.25
+
         # Minimum position size: $1
-        position_size = max(1.0, round(position_size, 2))
+        position_size = max(self.min_position_size, round(position_size, 2))
         risk_score = min(1.0, risk_score)
 
         return RiskDecision(
@@ -413,6 +441,64 @@ class RiskManager:
         self.state.open_positions += 1
         self.state.total_exposure += size
         self.state.daily_trades += 1
+        self._save_state()
+
+    def sync_with_trades(
+        self,
+        trades: list,
+        *,
+        current_balance: Optional[float] = None,
+        starting_balance: Optional[float] = None,
+    ):
+        """Rebuild exposure state from the session file so risk and simulator stay aligned."""
+        synced_history = []
+        open_positions = 0
+        total_exposure = 0.0
+
+        for trade in trades or []:
+            size = self._coerce_float(getattr(trade, "position_size", None))
+            market_id = getattr(trade, "market_id", "") or ""
+            if size <= 0 or not market_id:
+                continue
+
+            resolved = bool(getattr(trade, "resolved", False))
+            record = {
+                "trade_id": getattr(trade, "id", "") or market_id,
+                "timestamp": getattr(trade, "timestamp", datetime.now(timezone.utc).isoformat()),
+                "question": getattr(trade, "question", ""),
+                "direction": getattr(trade, "direction", ""),
+                "size": round(size, 2),
+                "market_price": self._coerce_float(getattr(trade, "market_price", None)),
+                "resolved": resolved,
+                "pnl": self._coerce_float(getattr(trade, "pnl", None)),
+            }
+            synced_history.append(record)
+
+            if not resolved:
+                open_positions += 1
+                total_exposure += size
+
+        if starting_balance is not None:
+            self.state.starting_balance = self._coerce_float(starting_balance, self.state.starting_balance)
+            if self.state.session_starting_balance <= 0:
+                self.state.session_starting_balance = self.state.starting_balance
+
+        if current_balance is not None:
+            self.state.current_balance = self._coerce_float(current_balance, self.state.current_balance)
+
+        self.state.trade_history = synced_history
+        self.state.open_positions = open_positions
+        self.state.total_exposure = round(total_exposure, 2)
+        self.state.peak_balance = max(
+            self.state.peak_balance,
+            self.state.current_balance,
+            self.state.starting_balance,
+        )
+        self.state.session_peak_balance = max(
+            self.state.session_peak_balance,
+            self.state.current_balance,
+            self.state.session_starting_balance,
+        )
         self._save_state()
 
     def record_outcome(self, trade_ref, pnl: float):
