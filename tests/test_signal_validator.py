@@ -83,13 +83,38 @@ class SignalValidatorTests(unittest.TestCase):
 
         capped = self.validator.validate(cap_signal, cap_market, "live")
         self.assertTrue(capped.accepted)
-        self.assertEqual(capped.adjusted_confidence, 0.50)
+        self.assertEqual(capped.adjusted_confidence, 0.60)
 
         reject_market = make_market("Will BTC be above $100000 tomorrow?", volume=40)
         reject_market.liquidity = 50
+        reject_market.yes_price = 0.0
+        reject_market.no_price = 0.0
+        reject_market.yes_bid = 0.0
+        reject_market.no_bid = 0.0
         rejected = self.validator.validate(cap_signal, reject_market, "live")
         self.assertFalse(rejected.accepted)
         self.assertIn("too thin", rejected.rejection_reason)
+
+    def test_zero_liquidity_with_real_quotes_is_soft_penalty_not_hard_reject(self):
+        market = make_market("Will the high temp in NYC be below 79° tomorrow?", yes_price=0.02, volume=1700)
+        market.liquidity = 0
+        market.yes_bid = 0.01
+        market.no_bid = 0.98
+        signal = {
+            "signal_type": "weather",
+            "predicted_prob": 0.85,
+            "confidence": 0.62,
+            "question_side": "below",
+            "data": {
+                "actual_temp_used": 78.0,
+                "predicted_temp": 78.0,
+            },
+        }
+
+        result = self.validator.validate(signal, market, "live")
+        self.assertTrue(result.accepted)
+        self.assertGreaterEqual(result.adjusted_confidence, 0.50)
+        self.assertTrue(any("reported $0 liquidity" in warning for warning in result.warnings))
 
     def test_cross_source_disagreement_reduces_both_confidences(self):
         market = make_market("Will the high temp in Austin be above 80°?", yes_price=0.50, volume=5000)

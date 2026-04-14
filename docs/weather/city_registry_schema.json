@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "City Weather Registry",
+  "type": "object",
+  "properties": {
+    "version": {"type": "integer"},
+    "cities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["city_id", "city", "state", "timezone", "status"],
+        "properties": {
+          "city_id": {"type": "string"},
+          "city": {"type": "string"},
+          "state": {"type": "string"},
+          "country": {"type": "string"},
+          "timezone": {"type": "string"},
+          "nws_office": {"type": ["string", "null"]},
+          "default_market_types": {"type": "array", "items": {"type": "string"}},
+          "resolution_notes": {"type": ["string", "null"]},
+          "status": {"type": "string", "enum": ["active", "watch", "inactive"]},
+          "trusted_primary": {"type": "array", "items": {"type": "string"}},
+          "trusted_secondary": {"type": "array", "items": {"type": "string"}},
+          "watch_only": {"type": "array", "items": {"type": "string"}},
+          "rejected": {"type": "array", "items": {"type": "string"}},
+          "updated_at": {"type": ["string", "null"]},
+          "notes": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    },
+    "sources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["source_id", "city_id", "name", "type", "role", "platform", "status", "trust_score"],
+        "properties": {
+          "source_id": {"type": "string"},
+          "city_id": {"type": "string"},
+          "name": {"type": "string"},
+          "type": {"type": "string", "enum": ["official", "local_met", "station", "community", "social"]},
+          "role": {"type": "string", "enum": ["forecast", "observation", "resolution_adjacent", "social_only"]},
+          "platform": {"type": "string"},
+          "url": {"type": "string"},
+          "coverage_area": {"type": "array", "items": {"type": "string"}},
+          "verified": {"type": "boolean"},
+          "status": {"type": "string", "enum": ["primary", "secondary", "watch_only", "rejected"]},
+          "trust_score": {"type": "number", "minimum": 0, "maximum": 100},
+          "metrics": {
+            "type": "object",
+            "properties": {
+              "accuracy": {"type": "number"},
+              "timeliness": {"type": "number"},
+              "specificity": {"type": "number"},
+              "consistency": {"type": "number"},
+              "resolution_alignment": {"type": "number"},
+              "hype_penalty": {"type": "number"},
+              "sample_size": {"type": "integer"}
+            }
+          },
+          "last_reviewed": {"type": ["string", "null"]},
+          "notes": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    }
+  },
+  "required": ["version", "cities", "sources"]
+}

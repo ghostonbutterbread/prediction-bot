@@ -13,6 +13,8 @@ Usage:
     dashboard.render(simulator, scan_num=5)
 """
 
+from collections import deque
+
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
@@ -23,6 +25,39 @@ from datetime import datetime, timezone
 from typing import Optional
 
 console = Console()
+DISPLAY_TRADE_CAP = 200
+DISPLAY_ROW_LIMIT = 10
+
+
+def _bounded_trade_windows(trades, limit: int = DISPLAY_TRADE_CAP):
+    """Count all trades while retaining only bounded display windows."""
+    open_trades = deque(maxlen=limit)
+    resolved_trades = deque(maxlen=limit)
+    open_count = 0
+    resolved_count = 0
+    wins = 0
+
+    for trade in trades:
+        if getattr(trade, "resolved", False):
+            resolved_count += 1
+            resolved_trades.append(trade)
+            if (getattr(trade, "pnl", 0) or 0) > 0:
+                wins += 1
+        else:
+            open_count += 1
+            open_trades.append(trade)
+
+    return open_count, resolved_count, wins, open_trades, resolved_trades
+
+
+def _cap_recent_trades(trades, limit: int = DISPLAY_TRADE_CAP) -> list:
+    """Clamp any externally supplied trade list to the most recent entries."""
+    return list(deque(trades, maxlen=limit))
+
+
+def _display_rows(trades, row_limit: int = DISPLAY_ROW_LIMIT) -> list:
+    """Render only the tail rows from an already bounded trade window."""
+    return list(trades)[-row_limit:]
 
 
 class LiveDashboard:
@@ -46,7 +81,7 @@ class LiveDashboard:
         Args:
             simulator: Simulator instance with .trades, .balance, .report()
             scan_num: Current scan number
-            resolved_recent: Optional list of recently resolved trades (max 10)
+            resolved_recent: Optional list of recently resolved trades (display cap 200)
 
         Returns:
             Rendered string (for logging)
@@ -58,35 +93,24 @@ class LiveDashboard:
         # Header
         session_id = getattr(simulator, "session_id", "unknown")
         balance = getattr(simulator, "balance", 0.0)
-        report = simulator.report()
+        starting_bal = getattr(simulator, "starting_balance", 100.0)
+        pnl = balance - starting_bal
+        pnl_pct = (pnl / starting_bal * 100) if starting_bal else 0.0
+        (
+            open_count,
+            resolved_count,
+            wins,
+            open_trades,
+            resolved_trades,
+        ) = _bounded_trade_windows(getattr(simulator, "trades", []))
+        total_trades = open_count + resolved_count
+        win_rate = (wins / resolved_count) if resolved_count else 0.0
 
         header = f"  PREDICTION BOT  |  Session: {session_id}  |  Scan #{scan_num}"
         lines.append("║" + header + " " * max(0, 78 - len(header)) + "║")
         lines.append("╠" + "═" * 78 + "╣")
 
         # Stats row
-        pnl = report.get("pnl", 0.0)
-        pnl_pct = report.get("pnl_pct", 0.0)
-        win_rate = report.get("win_rate", 0.0)
-        total_trades = report.get("total_trades", 0)
-        starting_bal = report.get("starting_balance", 100.0)
-
-        # Calculate resolved vs open
-        resolved_trades = [t for t in simulator.trades if getattr(t, "resolved", False)]
-        open_trades = [t for t in simulator.trades if not getattr(t, "resolved", False)]
-
-        # Win rate from resolved
-        if resolved_trades:
-            wins = sum(1 for t in resolved_trades if (getattr(t, "pnl", 0) or 0) > 0)
-            win_rate = wins / len(resolved_trades)
-        else:
-            win_rate = 0.0
-
-        # Average entry price (from all trades)
-        entries = [getattr(t, "market_price", 0) for t in simulator.trades]
-        avg_entry = sum(entries) / len(entries) if entries else 0.0
-
-        # Stats line
         pnl_str = f"${pnl:+.2f}"
         pnl_pct_str = f"({pnl_pct:+.1f}%)"
         wr_str = f"{win_rate:.0%}"
@@ -94,7 +118,7 @@ class LiveDashboard:
         stats = (
             f"  💰 ${balance:.2f}  |  P&L: {pnl_str} {pnl_pct_str}  |  "
             f"WR: {wr_str}  |  Entry ≤${simulator.max_entry_price:.2f}  |  "
-            f"Trades: {total_trades} ({len(open_trades)} open / {len(resolved_trades)} resolved)"
+            f"Trades: {total_trades} ({open_count} open / {resolved_count} resolved)"
         )
         lines.append("║" + stats + " " * max(0, 78 - len(stats)) + "║")
 
@@ -102,7 +126,7 @@ class LiveDashboard:
         lines.append("╠" + "═" * 78 + "╣")
 
         # ---- OPEN TRADES ----
-        open_label = f"  📋 OPEN TRADES  [{len(open_trades)}]"
+        open_label = f"  📋 OPEN TRADES  [{open_count}]"
         lines.append("║" + open_label + " " * max(0, 78 - len(open_label)) + "║")
 
         if open_trades:
@@ -113,7 +137,7 @@ class LiveDashboard:
             lines.append("║" + header_row + " " * max(0, 78 - len(header_row)) + "║")
             lines.append("║" + "─" * 78 + "║")
 
-            for t in open_trades[-10:]:  # Max 10
+            for t in _display_rows(open_trades):
                 question = (getattr(t, "question", "") or "")[:28]
                 direction = getattr(t, "direction", "UNKNOWN")
                 entry = getattr(t, "market_price", 0)
@@ -133,12 +157,14 @@ class LiveDashboard:
 
         # ---- RESOLVED TRADES ----
         if resolved_recent:
-            resolved_label = f"  ✅ RESOLVED TRADES (recent)  [{len(resolved_recent)}]"
+            recent_resolved = _cap_recent_trades(resolved_recent)
+            resolved_label = f"  ✅ RESOLVED TRADES (recent)  [{len(recent_resolved)}]"
         else:
-            resolved_label = f"  ✅ RESOLVED TRADES  [{len(resolved_trades)}]"
+            recent_resolved = resolved_trades
+            resolved_label = f"  ✅ RESOLVED TRADES  [{resolved_count}]"
         lines.append("║" + resolved_label + " " * max(0, 78 - len(resolved_label)) + "║")
 
-        display_resolved = (resolved_recent if resolved_recent else resolved_trades)[-10:]
+        display_resolved = _display_rows(recent_resolved)
 
         if display_resolved:
             # Table header
