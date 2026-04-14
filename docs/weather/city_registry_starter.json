@@ -1,0 +1,130 @@
+{
+  "version": 1,
+  "cities": [
+    {
+      "city_id": "miami_fl",
+      "city": "Miami",
+      "state": "FL",
+      "country": "US",
+      "timezone": "America/New_York",
+      "nws_office": "MFL",
+      "default_market_types": ["high_temp", "low_temp", "precip"],
+      "resolution_notes": null,
+      "status": "active",
+      "trusted_primary": ["src_nws_mfl"],
+      "trusted_secondary": [],
+      "watch_only": [],
+      "rejected": [],
+      "updated_at": null,
+      "notes": []
+    },
+    {
+      "city_id": "new_york_ny",
+      "city": "New York",
+      "state": "NY",
+      "country": "US",
+      "timezone": "America/New_York",
+      "nws_office": "OKX",
+      "default_market_types": ["high_temp", "low_temp", "precip"],
+      "resolution_notes": null,
+      "status": "active",
+      "trusted_primary": ["src_nws_okx"],
+      "trusted_secondary": [],
+      "watch_only": [],
+      "rejected": [],
+      "updated_at": null,
+      "notes": []
+    },
+    {
+      "city_id": "los_angeles_ca",
+      "city": "Los Angeles",
+      "state": "CA",
+      "country": "US",
+      "timezone": "America/Los_Angeles",
+      "nws_office": "LOX",
+      "default_market_types": ["high_temp", "low_temp", "precip"],
+      "resolution_notes": null,
+      "status": "active",
+      "trusted_primary": ["src_nws_lox"],
+      "trusted_secondary": [],
+      "watch_only": [],
+      "rejected": [],
+      "updated_at": null,
+      "notes": []
+    }
+  ],
+  "sources": [
+    {
+      "source_id": "src_nws_mfl",
+      "city_id": "miami_fl",
+      "name": "NWS Miami-South Florida",
+      "type": "official",
+      "role": "forecast",
+      "platform": "weather_gov",
+      "url": "https://www.weather.gov/mfl/",
+      "coverage_area": ["Miami", "South Florida"],
+      "verified": true,
+      "status": "primary",
+      "trust_score": 90,
+      "metrics": {
+        "accuracy": 0,
+        "timeliness": 0,
+        "specificity": 0,
+        "consistency": 0,
+        "resolution_alignment": 0,
+        "hype_penalty": 0,
+        "sample_size": 0
+      },
+      "last_reviewed": null,
+      "notes": []
+    },
+    {
+      "source_id": "src_nws_okx",
+      "city_id": "new_york_ny",
+      "name": "NWS New York, NY",
+      "type": "official",
+      "role": "forecast",
+      "platform": "weather_gov",
+      "url": "https://www.weather.gov/okx/",
+      "coverage_area": ["New York"],
+      "verified": true,
+      "status": "primary",
+      "trust_score": 90,
+      "metrics": {
+        "accuracy": 0,
+        "timeliness": 0,
+        "specificity": 0,
+        "consistency": 0,
+        "resolution_alignment": 0,
+        "hype_penalty": 0,
+        "sample_size": 0
+      },
+      "last_reviewed": null,
+      "notes": []
+    },
+    {
+      "source_id": "src_nws_lox",
+      "city_id": "los_angeles_ca",
+      "name": "NWS Los Angeles/Oxnard",
+      "type": "official",
+      "role": "forecast",
+      "platform": "weather_gov",
+      "url": "https://www.weather.gov/lox/",
+      "coverage_area": ["Los Angeles"],
+      "verified": true,
+      "status": "primary",
+      "trust_score": 90,
+      "metrics": {
+        "accuracy": 0,
+        "timeliness": 0,
+        "specificity": 0,
+        "consistency": 0,
+        "resolution_alignment": 0,
+        "hype_penalty": 0,
+        "sample_size": 0
+      },
+      "last_reviewed": null,
+      "notes": []
+    }
+  ]
+}

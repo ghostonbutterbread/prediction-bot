@@ -326,23 +326,60 @@ class SignalValidator:
     ) -> tuple[bool, float, Optional[str]]:
         volume = float(getattr(market, "volume", 0) or 0)
         liquidity = float(getattr(market, "liquidity", 0) or 0)
+        yes_bid = self._float_or_none(getattr(market, "yes_bid", None)) or 0.0
+        yes_ask = self._float_or_none(getattr(market, "yes_price", None)) or 0.0
+        no_bid = self._float_or_none(getattr(market, "no_bid", None)) or 0.0
+        no_ask = self._float_or_none(getattr(market, "no_price", None)) or 0.0
 
-        # Ultra-thin books are not realistically tradable in our simulator.
-        # Reject them outright rather than confidence-capping into fake fills.
-        if volume < 100 or liquidity < 150:
-            return False, adjusted_confidence, (
-                f"Market too thin (volume={volume:.0f}, liquidity=${liquidity:.0f})"
+        # Derive market quality from quoted prices/spread when the exchange's
+        # liquidity field is missing or uninformative (Kalshi often reports 0.0
+        # liquidity_dollars even for actively quoted markets).
+        has_yes_book = yes_bid > 0 and yes_ask > 0 and yes_ask >= yes_bid
+        has_no_book = no_bid > 0 and no_ask > 0 and no_ask >= no_bid
+        has_quoted_book = has_yes_book or has_no_book
+
+        spreads = []
+        if has_yes_book:
+            spreads.append(max(0.0, yes_ask - yes_bid))
+        if has_no_book:
+            spreads.append(max(0.0, no_ask - no_bid))
+        min_spread = min(spreads) if spreads else None
+
+        liquidity_missing = liquidity <= 0
+        effective_liquidity = liquidity
+
+        # If there is a real quoted book but reported liquidity is zero, treat
+        # liquidity as unknown rather than dead. Use spread/volume as the softer
+        # proxy for tradability.
+        if liquidity_missing and has_quoted_book:
+            effective_liquidity = 500.0 if (min_spread is not None and min_spread <= 0.02) else 250.0
+            warnings.append(
+                f"Exchange reported $0 liquidity; inferred usable book from quotes (spread=${(min_spread or 0):.02f})"
             )
 
-        # Moderately thin books can stay in play, but with a harder confidence cap.
-        if (volume < 300 or liquidity < 400) and adjusted_confidence > 0.50:
+        # Hard reject only truly dead markets: low volume and no quoted book.
+        if volume < 100 and not has_quoted_book:
+            return False, adjusted_confidence, (
+                f"Market too thin (volume={volume:.0f}, no usable quoted book)"
+            )
+
+        # Very wide books are technically quotable but poor fills for paper/live.
+        if has_quoted_book and min_spread is not None and min_spread >= 0.15 and adjusted_confidence > 0.45:
             warnings.append(
-                f"Thin market (volume={volume:.0f}, liquidity=${liquidity:.0f}) capped confidence at 0.50"
+                f"Wide spread market (spread=${min_spread:.02f}) capped confidence at 0.45"
+            )
+            adjusted_confidence = 0.45
+
+        # Soft penalties for thin markets. Liquidity is advisory unless supported
+        # by quotes; volume remains a stronger signal than raw liquidity_dollars.
+        if (volume < 300 or effective_liquidity < 250) and adjusted_confidence > 0.50:
+            warnings.append(
+                f"Thin market (volume={volume:.0f}, effective_liquidity=${effective_liquidity:.0f}) capped confidence at 0.50"
             )
             adjusted_confidence = 0.50
-        elif (volume < 600 or liquidity < 750) and adjusted_confidence > 0.60:
+        elif (volume < 600 or effective_liquidity < 500) and adjusted_confidence > 0.60:
             warnings.append(
-                f"Low liquidity (volume={volume:.0f}, liquidity=${liquidity:.0f}) capped confidence at 0.60"
+                f"Low liquidity (volume={volume:.0f}, effective_liquidity=${effective_liquidity:.0f}) capped confidence at 0.60"
             )
             adjusted_confidence = 0.60
         return True, adjusted_confidence, None
