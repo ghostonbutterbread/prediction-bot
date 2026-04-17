@@ -2,14 +2,15 @@
 
 import logging
 import math
-from typing import Optional
 from datetime import datetime, timezone, timedelta
+from typing import Any, Optional
 
 from bot.feeds.news import NewsFeed
 from bot.feeds.twitter import SocialFeed
 from bot.feeds.ai_signal import AISignalFeed
 from bot.feeds.live_data import LiveFeedAggregator
 from bot.strategies.signal_validator import SignalAuditLog, SignalValidator
+from bot.weather import ObservationLog, WeatherMarketCityMapper
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,20 @@ class EnhancedStrategyEngine:
         self.live_feeds = LiveFeedAggregator()
         self.validator = SignalValidator()
         self.signal_audit = SignalAuditLog()
+        self.enable_weather_observation_log = bool(config.get("enable_weather_observation_log", False))
+        self.weather_market_mapper = None
+        self.weather_observation_log = None
+        if self.enable_weather_observation_log:
+            try:
+                self.weather_market_mapper = WeatherMarketCityMapper()
+                self.weather_observation_log = ObservationLog(
+                    config.get("weather_observation_log_path", "data/weather_observations.jsonl"),
+                    identical_cooldown_seconds=int(config.get("weather_observation_cooldown_seconds", 6 * 60 * 60)),
+                    max_bytes=int(config.get("weather_observation_log_max_bytes", 10 * 1024 * 1024)),
+                )
+            except Exception as exc:
+                logger.warning("Weather observation logging disabled: %s", exc)
+                self.enable_weather_observation_log = False
 
     def analyze_market(self, market, order_book: dict = None) -> Optional[dict]:
         """
@@ -146,6 +161,7 @@ class EnhancedStrategyEngine:
             validation = validation_results[name]
             self.signal_audit.write(market, name, sig, raw_predictions, validation)
             if validation.accepted:
+                self._record_weather_observation(market, name, sig)
                 adjusted = dict(sig)
                 adjusted["predicted_prob"] = validation.adjusted_prob
                 adjusted["confidence"] = validation.adjusted_confidence
@@ -195,6 +211,103 @@ class EnhancedStrategyEngine:
             "signals": {k: s["predicted_prob"] for k, s in validated_signals.items()},
             "question": market.question,
         }
+
+    def _record_weather_observation(self, market, signal_name: str, signal: dict) -> None:
+        if not self.enable_weather_observation_log or self.weather_observation_log is None:
+            return
+        if not self._is_weather_signal(signal_name, signal):
+            return
+        if self.weather_market_mapper is None:
+            return
+
+        context = self.weather_market_mapper.resolve(
+            getattr(market, "question", ""),
+            getattr(market, "category", ""),
+        )
+        if context is None:
+            return
+
+        record = self._build_weather_observation_record(market, context, signal)
+        if record is None:
+            return
+
+        try:
+            self.weather_observation_log.append(record)
+        except Exception as exc:
+            logger.debug("Weather observation logging error for %s: %s", getattr(market, "id", ""), exc)
+
+    def _build_weather_observation_record(self, market, context, signal: dict) -> Optional[dict]:
+        data = signal.get("data", {}) or {}
+        if not isinstance(data, dict):
+            return None
+
+        value = {}
+        for key in ("forecast_high", "forecast_low", "current_temp", "actual_temp_used", "predicted_temp", "threshold"):
+            metric = self._compact_number(data.get(key))
+            if metric is not None:
+                value[key] = metric
+
+        agreement = self._compact_number(data.get("agreement"), digits=4)
+        if agreement is not None:
+            value["agreement"] = agreement
+
+        question_side = signal.get("question_side") or data.get("question_side")
+        if question_side:
+            value["question_side"] = str(question_side)
+
+        sources = data.get("sources") or []
+        if not isinstance(sources, list):
+            sources = [sources]
+        normalized_sources = sorted({str(source).lower() for source in sources if source})
+        if normalized_sources:
+            value["sources"] = normalized_sources
+
+        if not value:
+            return None
+
+        timestamp = signal.get("source_timestamp") or datetime.now(timezone.utc).isoformat()
+        return {
+            "ts": self._normalize_timestamp(timestamp),
+            "kind": "forecast_update",
+            "market_id": getattr(market, "id", ""),
+            "city_id": context.city_id,
+            "market_type": self._weather_market_type(getattr(market, "question", "")),
+            "source_id": context.primary_source_id or "weather_registry_unassigned",
+            "value": value,
+        }
+
+    def _is_weather_signal(self, signal_name: str, signal: dict) -> bool:
+        signal_type = str(signal.get("signal_type") or signal_name or "").lower()
+        if signal_type == "weather":
+            return True
+        if signal_type != "live":
+            return False
+        data = signal.get("data", {}) or {}
+        return any(field in data for field in ("forecast_high", "forecast_low", "current_temp", "actual_temp_used"))
+
+    def _weather_market_type(self, question: str) -> str:
+        q = str(question or "").lower()
+        if " high " in f" {q} ":
+            return "high_temp"
+        if " low " in f" {q} ":
+            return "low_temp"
+        return "temperature"
+
+    def _normalize_timestamp(self, value: Any) -> str:
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=timezone.utc)
+            return value.isoformat()
+        return str(value)
+
+    def _compact_number(self, value: Any, *, digits: int = 2) -> float | int | None:
+        if value is None or isinstance(value, bool):
+            return None
+        if not isinstance(value, (int, float)):
+            return None
+        if isinstance(value, int):
+            return value
+        return round(float(value), digits)
 
     def _price_signal(self, market, order_book: dict = None) -> Optional[dict]:
         """Detect mispricing using market microstructure + known biases."""

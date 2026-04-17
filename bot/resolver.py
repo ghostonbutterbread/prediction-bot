@@ -17,6 +17,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from bot.trade_audit import (
+    calculate_realized_accounting,
+    calculate_unrealized_pnl,
+    enrich_trade_audit_fields,
+    summarize_event_performance,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -73,6 +80,7 @@ class TradeResolver:
 
         for trade in trades:
             if trade.get("resolved"):
+                enrich_trade_audit_fields(trade, fee_rate=self.KALSHI_FEE_RATE)
                 continue  # Already resolved
 
             market_id = trade.get("market_id", "")
@@ -83,14 +91,20 @@ class TradeResolver:
                 trade.get("model_probability"),
             )
             position_size = self._coerce_float(trade.get("position_size"))
+            reserved_capital = self._reserved_capital_for_trade(trade)
 
             if not market_id or entry_price is None or position_size <= 0:
+                enrich_trade_audit_fields(trade, fee_rate=self.KALSHI_FEE_RATE)
                 continue
+
+            trade["market_price"] = round(entry_price, 4)
+            trade["reserved_capital"] = round(reserved_capital, 2)
 
             try:
                 # Fetch current market state
                 market = exchange.get_market(market_id)
                 if market is None:
+                    enrich_trade_audit_fields(trade, fee_rate=self.KALSHI_FEE_RATE)
                     still_open_count += 1
                     continue
 
@@ -120,6 +134,8 @@ class TradeResolver:
                     trade["resolved_at"] = datetime.now(timezone.utc).isoformat()
                     trade["resolution_type"] = "settled"
                     trade["market_price"] = round(entry_price, 4)
+                    trade["exit_price"] = 1.0 if outcome == "YES" else 0.0
+                    trade["settlement_value"] = round(reserved_capital + pnl, 4)
 
                     resolved_count += 1
 
@@ -177,8 +193,10 @@ class TradeResolver:
                     trade["market_price"] = round(entry_price, 4)
                     still_open_count += 1
 
+                enrich_trade_audit_fields(trade, fee_rate=self.KALSHI_FEE_RATE)
             except Exception as e:
                 logger.debug(f"Error resolving {market_id}: {e}")
+                enrich_trade_audit_fields(trade, fee_rate=self.KALSHI_FEE_RATE)
                 still_open_count += 1
                 continue
 
@@ -186,11 +204,19 @@ class TradeResolver:
         data["trades"] = trades
         data["last_resolved_at"] = datetime.now(timezone.utc).isoformat()
 
-        # Recalculate balance
+        # Recalculate capital state
         total_realized_pnl = sum(
-            self._coerce_float(t.get("pnl")) for t in trades if t.get("resolved")
+            self._coerce_float(t.get("net_pnl", t.get("pnl")))
+            for t in trades
+            if t.get("resolved") and t.get("integrity_status") == "ok"
+        )
+        total_reserved_capital = round(
+            sum(self._reserved_capital_for_trade(t) for t in trades if not t.get("resolved")),
+            2,
         )
         data["balance"] = round(data.get("starting_balance", 100) + total_realized_pnl, 2)
+        data["reserved_capital"] = total_reserved_capital
+        data["available_cash"] = round(data["balance"] - total_reserved_capital, 2)
 
         # Recalculate report
         data["report"] = self._build_report(data)
@@ -204,9 +230,14 @@ class TradeResolver:
             "resolved_this_pass": resolved_count,
             "still_open": still_open_count,
             "total_resolved": sum(1 for t in trades if t.get("resolved")),
+            "trusted_resolved": sum(
+                1 for t in trades if t.get("resolved") and t.get("integrity_status") == "ok"
+            ),
             "total_trades": len(trades),
             "session_pnl": round(total_realized_pnl, 4),
             "balance": data["balance"],
+            "available_cash": data["available_cash"],
+            "reserved_capital": data["reserved_capital"],
         }
 
         logger.info(
@@ -214,7 +245,9 @@ class TradeResolver:
             f"{resolved_count} newly resolved, "
             f"{still_open_count} still open | "
             f"Session P&L: ${total_realized_pnl:+.4f} | "
-            f"Balance: ${data['balance']:.2f}"
+            f"Equity: ${data['balance']:.2f} | "
+            f"Available: ${data['available_cash']:.2f} | "
+            f"Reserved: ${data['reserved_capital']:.2f}"
         )
 
         return summary
@@ -262,29 +295,14 @@ class TradeResolver:
         If you win: gross profit = contracts * (1 - entry_price), fee = 7% of gross
         If you lose: you paid entry_price per contract, so loss = -size
         """
-        if size <= 0 or not (0 < entry_price < 1):
-            return 0.0
-
-        contracts = size / entry_price if entry_price > 0 else 0
-
-        if direction == "BUY_YES":
-            if outcome == "YES":
-                gross = contracts * (1 - entry_price)
-                fee = gross * self.KALSHI_FEE_RATE
-                return gross - fee
-            elif outcome == "NO":
-                return -size  # Lost entire position
-            else:
-                return 0  # Unknown outcome
-        else:  # BUY_NO
-            if outcome == "NO":
-                gross = contracts * (1 - entry_price)
-                fee = gross * self.KALSHI_FEE_RATE
-                return gross - fee
-            elif outcome == "YES":
-                return -size  # Lost entire position
-            else:
-                return 0
+        accounting = calculate_realized_accounting(
+            direction=direction,
+            entry_price=entry_price,
+            position_size=size,
+            outcome=outcome,
+            fee_rate=self.KALSHI_FEE_RATE,
+        )
+        return accounting["net_pnl"]
 
     def _calculate_unrealized_pnl(
         self, direction: str, entry_price: float, current_price: float, size: float
@@ -297,15 +315,12 @@ class TradeResolver:
         P&L = contracts * ((1 - current_price) - (1 - entry_price)) for BUY_NO
              = contracts * (entry_price - current_price) for BUY_NO
         """
-        if size <= 0 or not (0 < entry_price < 1) or current_price is None:
-            return 0.0
-
-        contracts = size / entry_price if entry_price > 0 else 0
-
-        if direction == "BUY_YES":
-            return contracts * (current_price - entry_price)
-        else:  # BUY_NO
-            return contracts * (entry_price - current_price)
+        return calculate_unrealized_pnl(
+            direction=direction,
+            entry_price=entry_price,
+            current_price=current_price,
+            position_size=size,
+        )
 
     def _build_report(self, data: dict) -> dict:
         """Rebuild the session report from current trade data."""
@@ -315,13 +330,17 @@ class TradeResolver:
             return {"session": data.get("session_id", ""), "total_trades": 0}
 
         resolved_trades = [t for t in trades if t.get("resolved")]
-        wins = [t for t in resolved_trades if (t.get("pnl") or 0) > 0]
-        losses = [t for t in resolved_trades if (t.get("pnl") or 0) < 0]
+        trusted_resolved = [
+            t for t in resolved_trades if t.get("integrity_status") == "ok"
+        ]
+        wins = [t for t in trusted_resolved if self._coerce_float(t.get("net_pnl", t.get("pnl"))) > 0]
+        losses = [t for t in trusted_resolved if self._coerce_float(t.get("net_pnl", t.get("pnl"))) < 0]
 
         edges = [t.get("edge", 0) for t in trades]
         confidences = [t.get("confidence", 0) for t in trades]
         sizes = [t.get("position_size", 0) for t in trades]
-        pnls = [self._coerce_float(t.get("pnl")) for t in resolved_trades]
+        pnls = [self._coerce_float(t.get("net_pnl", t.get("pnl"))) for t in trusted_resolved]
+        event_summary = summarize_event_performance(trusted_resolved)
 
         by_direction = {}
         for t in trades:
@@ -332,12 +351,17 @@ class TradeResolver:
             "session": data.get("session_id", ""),
             "total_trades": total,
             "resolved_trades": len(resolved_trades),
+            "trusted_resolved_trades": len(trusted_resolved),
+            "invalid_resolved_trades": len(resolved_trades) - len(trusted_resolved),
             "open_trades": total - len(resolved_trades),
             "wins": len(wins),
             "losses": len(losses),
-            "win_rate": round(len(wins) / len(resolved_trades), 4) if resolved_trades else 0,
+            "win_rate": round(len(wins) / len(trusted_resolved), 4) if trusted_resolved else 0,
             "starting_balance": data.get("starting_balance", 100),
             "current_balance": data.get("balance", 100),
+            "total_equity": data.get("balance", 100),
+            "available_cash": data.get("available_cash", data.get("balance", 100)),
+            "reserved_capital": data.get("reserved_capital", 0.0),
             "pnl": round(data.get("balance", 100) - data.get("starting_balance", 100), 2),
             "pnl_pct": round(
                 (data.get("balance", 100) - data.get("starting_balance", 100))
@@ -347,9 +371,13 @@ class TradeResolver:
             "max_edge": round(max(edges), 4) if edges else 0,
             "avg_confidence": round(sum(confidences) / len(confidences), 4) if confidences else 0,
             "avg_position_size": round(sum(sizes) / len(sizes), 2) if sizes else 0,
-            "total_exposure": round(sum(sizes), 2),
+            "total_exposure": data.get("reserved_capital", 0.0),
             "total_realized_pnl": round(sum(pnls), 4) if pnls else 0,
             "avg_pnl_per_trade": round(sum(pnls) / len(pnls), 4) if pnls else 0,
+            "resolved_events": event_summary["resolved_events"],
+            "event_wins": event_summary["wins"],
+            "event_losses": event_summary["losses"],
+            "event_win_rate": round(event_summary["win_rate"] / 100, 4) if event_summary["resolved_events"] else 0,
             "by_direction": by_direction,
         }
 
@@ -384,6 +412,12 @@ class TradeResolver:
             return float(value)
         except (TypeError, ValueError):
             return default
+
+    def _reserved_capital_for_trade(self, trade: dict) -> float:
+        reserved = self._coerce_float(trade.get("reserved_capital"), default=None)
+        if reserved is None:
+            reserved = self._coerce_float(trade.get("position_size"), 0.0)
+        return round(max(0.0, reserved), 2)
 
     def _extract_market_prices(self, market) -> tuple[Optional[float], Optional[float]]:
         yes_price = self._coerce_float(getattr(market, "yes_price", None), default=None)

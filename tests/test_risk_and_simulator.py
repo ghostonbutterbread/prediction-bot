@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from bot.risk import RiskManager
@@ -26,8 +27,69 @@ class RiskManagerTests(unittest.TestCase):
             self.assertEqual(decision.adjusted_size, 1.0)
             self.assertTrue(any("Exposure headroom capped size" in warning for warning in decision.warnings))
 
+    def test_available_cash_caps_size(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            risk = RiskManager(
+                {
+                    "data_dir": tmpdir,
+                    "starting_balance": 100.0,
+                }
+            )
+            risk.state.current_balance = 100.0
+            risk.state.available_cash = 3.5
+
+            decision = risk.check_trade({"question": "Will BTC rise?"}, 5.0, available_cash=3.5)
+
+            self.assertTrue(decision.approved)
+            self.assertEqual(decision.adjusted_size, 3.5)
+            self.assertTrue(any("Available cash capped size" in warning for warning in decision.warnings))
+
 
 class SimulatorSessionTests(unittest.TestCase):
+    def test_create_trade_sizes_from_available_cash_and_reserves_it(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = Simulator(
+                {
+                    "data_dir": tmpdir,
+                    "enable_social": False,
+                    "strategy": {
+                        "enable_news": False,
+                        "enable_social": False,
+                        "enable_ai": False,
+                    },
+                }
+            )
+            sim.available_cash = 25.0
+            sim.reserved_capital = 75.0
+            sim.risk.state.available_cash = 25.0
+            sim.risk.state.reserved_capital = 75.0
+
+            signal = {
+                "market_id": "test-market",
+                "question": "Will test settle YES?",
+                "exchange": "kalshi",
+                "direction": "BUY_YES",
+                "model_probability": 0.7,
+                "market_price": 0.4,
+                "edge": 0.3,
+                "confidence": 0.9,
+                "signals": {},
+            }
+
+            with patch.object(sim.kelly, "calculate", return_value=10.0) as mock_calculate:
+                trade = sim._create_trade(signal)
+
+            self.assertIsNotNone(trade)
+            mock_calculate.assert_called_once_with(0.7, 0.4, 25.0)
+            self.assertEqual(trade.position_size, 10.0)
+            self.assertEqual(trade.reserved_capital, 10.0)
+            self.assertEqual(trade.available_cash_before, 25.0)
+            self.assertEqual(trade.available_cash_after_entry, 15.0)
+            self.assertEqual(sim.available_cash, 15.0)
+            self.assertEqual(sim.reserved_capital, 85.0)
+            self.assertEqual(sim.risk.state.available_cash, 15.0)
+            self.assertEqual(sim.risk.state.reserved_capital, 85.0)
+
     def test_load_session_discards_zero_sized_trade_rows(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir)
@@ -90,6 +152,11 @@ class SimulatorSessionTests(unittest.TestCase):
             self.assertEqual(sim.trades[0].id, "good-1")
             self.assertEqual(sim.risk.state.open_positions, 1)
             self.assertEqual(sim.risk.state.total_exposure, 5.0)
+            self.assertEqual(sim.balance, 105.0)
+            self.assertEqual(sim.available_cash, 100.0)
+            self.assertEqual(sim.reserved_capital, 5.0)
+            self.assertEqual(sim.risk.state.available_cash, 100.0)
+            self.assertEqual(sim.risk.state.reserved_capital, 5.0)
 
 
 if __name__ == "__main__":

@@ -16,6 +16,8 @@
           "country": {"type": "string"},
           "timezone": {"type": "string"},
           "nws_office": {"type": ["string", "null"]},
+          "aliases": {"type": "array", "items": {"type": "string"}},
+          "ticker_aliases": {"type": "array", "items": {"type": "string"}},
           "default_market_types": {"type": "array", "items": {"type": "string"}},
           "resolution_notes": {"type": ["string", "null"]},
           "status": {"type": "string", "enum": ["active", "watch", "inactive"]},
