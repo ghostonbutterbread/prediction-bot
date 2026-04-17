@@ -63,6 +63,12 @@ def _apply_env_overrides(config: dict) -> dict:
         strategy["social_weight"] = float(os.getenv("SOCIAL_WEIGHT"))
     if os.getenv("AI_WEIGHT"):
         strategy["ai_weight"] = float(os.getenv("AI_WEIGHT"))
+    if os.getenv("ENABLE_WEATHER_OBSERVATION_LOG"):
+        strategy["enable_weather_observation_log"] = (
+            os.getenv("ENABLE_WEATHER_OBSERVATION_LOG").lower() == "true"
+        )
+    if os.getenv("WEATHER_OBSERVATION_LOG_PATH"):
+        strategy["weather_observation_log_path"] = os.getenv("WEATHER_OBSERVATION_LOG_PATH")
     if strategy:
         overrides["strategy"] = strategy
 
@@ -153,6 +159,9 @@ def _default_config() -> dict:
         "strategy": {
             "min_edge": 0.015,
             "min_confidence": 0.50,
+            "enable_weather_observation_log": False,
+            "weather_observation_log_path": "data/weather_observations.jsonl",
+            "weather_observation_cooldown_seconds": 21600,
         },
         "risk": {
             "kelly_fraction": 0.75,

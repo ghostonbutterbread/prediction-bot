@@ -8,6 +8,13 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from collections import defaultdict
 
+from bot.trade_audit import (
+    coerce_float as audit_coerce_float,
+    enrich_trade_audit_fields,
+    is_trade_effective_row,
+    summarize_event_performance,
+)
+
 DATA_DIR = Path(__file__).parent.parent / "data"
 PACIFIC = timezone(timedelta(hours=-7))
 DEFAULT_SESSION_GLOBS = ("paper/sim_*.json", "live/sim_*.json", "sim_*.json")
@@ -38,13 +45,43 @@ def _effective_trades(trades: list[dict]) -> tuple[list[dict], int]:
     effective = []
     ignored = 0
     for trade in trades or []:
-        market_id = str(trade.get("market_id", "") or "").strip()
-        size = _coerce_float(trade.get("position_size"), -1.0)
-        if not market_id or size <= 0:
+        enrich_trade_audit_fields(trade)
+        if not is_trade_effective_row(trade):
             ignored += 1
             continue
         effective.append(trade)
     return effective, ignored
+
+
+def _build_position_performance(trades: list[dict]) -> dict:
+    if not trades:
+        return {}
+
+    wins = [t for t in trades if audit_coerce_float(t.get("net_pnl", t.get("pnl")), 0.0) > 0]
+    losses = [t for t in trades if audit_coerce_float(t.get("net_pnl", t.get("pnl")), 0.0) < 0]
+    total_pnl = sum(audit_coerce_float(t.get("net_pnl", t.get("pnl")), 0.0) for t in trades)
+    loss_total = sum(audit_coerce_float(t.get("net_pnl", t.get("pnl")), 0.0) for t in losses)
+
+    return {
+        "basis": "trusted_resolved_positions",
+        "win_rate": round(len(wins) / len(trades) * 100, 1),
+        "total_pnl": round(total_pnl, 2),
+        "wins": len(wins),
+        "losses": len(losses),
+        "avg_win": round(
+            sum(audit_coerce_float(t.get("net_pnl", t.get("pnl")), 0.0) for t in wins) / len(wins),
+            2,
+        ) if wins else 0,
+        "avg_loss": round(
+            sum(audit_coerce_float(t.get("net_pnl", t.get("pnl")), 0.0) for t in losses) / len(losses),
+            2,
+        ) if losses else 0,
+        "profit_factor": round(
+            sum(audit_coerce_float(t.get("net_pnl", t.get("pnl")), 0.0) for t in wins) / abs(loss_total)
+            if losses and loss_total != 0 else 0,
+            2,
+        ),
+    }
 
 
 def analyze() -> dict:
@@ -55,6 +92,12 @@ def analyze() -> dict:
     trades = latest.get("trades", [])
     ignored_trades = latest.get("summary", {}).get("ignored_invalid_trades", 0)
     resolved = [t for t in trades if t.get("resolved")]
+    trusted_resolved = [t for t in resolved if t.get("integrity_status") == "ok"]
+    event_performance = summarize_event_performance(trusted_resolved)
+    integrity_issue_counts = defaultdict(int)
+    for trade in resolved:
+        for issue in trade.get("integrity_errors", []) or []:
+            integrity_issue_counts[issue] += 1
     
     result = {
         "timestamp": datetime.now(PACIFIC).isoformat(),
@@ -65,32 +108,32 @@ def analyze() -> dict:
             "current_session_file": latest.get("_file"),
             "current_trades": len(trades),
             "resolved": len(resolved),
+            "trusted_resolved_positions": len(trusted_resolved),
+            "invalid_resolved_positions": len(resolved) - len(trusted_resolved),
+            "resolved_events": event_performance["resolved_events"],
             "scans": latest.get("scan_count", 0),
+            "total_equity": latest.get("balance"),
+            "available_cash": latest.get("available_cash"),
+            "reserved_capital": latest.get("reserved_capital"),
             "ignored_invalid_trades": ignored_trades,
         },
         "performance": {},
+        "event_performance": {},
         "signal_quality": {},
         "strategy_breakdown": {},
+        "integrity": {
+            "invalid_resolved_positions": len(resolved) - len(trusted_resolved),
+            "issue_counts": dict(sorted(integrity_issue_counts.items())),
+        },
         "issues": [],
         "actions": [],
     }
     
-    if resolved:
-        wins = [t for t in resolved if (t.get("pnl") or 0) > 0]
-        losses = [t for t in resolved if (t.get("pnl") or 0) < 0]
-        total_pnl = sum(t.get("pnl", 0) for t in resolved)
-        
-        result["performance"] = {
-            "win_rate": round(len(wins) / len(resolved) * 100, 1),
-            "total_pnl": round(total_pnl, 2),
-            "wins": len(wins),
-            "losses": len(losses),
-            "avg_win": round(sum(t.get("pnl", 0) for t in wins) / len(wins), 2) if wins else 0,
-            "avg_loss": round(sum(t.get("pnl", 0) for t in losses) / len(losses), 2) if losses else 0,
-            "profit_factor": round(
-                sum(t.get("pnl", 0) for t in wins) / abs(sum(t.get("pnl", 0) for t in losses))
-                if losses and sum(t.get("pnl", 0) for t in losses) != 0 else 0, 2
-            ),
+    if trusted_resolved:
+        result["performance"] = _build_position_performance(trusted_resolved)
+        result["event_performance"] = {
+            "basis": "trusted_resolved_events",
+            **event_performance,
         }
     
     if trades:
@@ -123,7 +166,7 @@ def analyze() -> dict:
     }
     
     # === ISSUE DETECTION ===
-    issues = detect_issues(trades, resolved, latest)
+    issues = detect_issues(trades, resolved, trusted_resolved, latest)
     result["issues"] = issues
     
     # === ACTIONABLE RECOMMENDATIONS ===
@@ -133,7 +176,7 @@ def analyze() -> dict:
     return result
 
 
-def detect_issues(trades: list, resolved: list, session: dict) -> list:
+def detect_issues(trades: list, resolved: list, trusted_resolved: list, session: dict) -> list:
     """Detect issues programmatically."""
     issues = []
     
@@ -194,10 +237,12 @@ def detect_issues(trades: list, resolved: list, session: dict) -> list:
             })
     
     # 6. Win rate too low (if we have resolutions)
-    resolved_trades = [t for t in trades if t.get("resolved")]
-    if len(resolved_trades) >= 10:
-        wins = sum(1 for t in resolved_trades if (t.get("pnl") or 0) > 0)
-        wr = wins / len(resolved_trades)
+    if len(trusted_resolved) >= 10:
+        wins = sum(
+            1 for t in trusted_resolved
+            if audit_coerce_float(t.get("net_pnl", t.get("pnl")), 0.0) > 0
+        )
+        wr = wins / len(trusted_resolved)
         if wr < 0.40:
             issues.append({
                 "severity": "critical",
@@ -205,6 +250,15 @@ def detect_issues(trades: list, resolved: list, session: dict) -> list:
                 "message": f"Win rate {wr:.0%} is below 40% — losing money",
                 "suggestion": "Review strategy signals, consider disabling underperforming ones",
             })
+
+    invalid_resolved = len(resolved) - len(trusted_resolved)
+    if invalid_resolved > 0:
+        issues.append({
+            "severity": "error",
+            "code": "UNTRUSTED_RESOLVED_ROWS",
+            "message": f"{invalid_resolved} resolved rows failed accounting integrity checks",
+            "suggestion": "Inspect integrity_errors on resolved rows before trusting paper P&L",
+        })
 
     ignored_trades = session.get("summary", {}).get("ignored_invalid_trades")
     if ignored_trades:
@@ -263,6 +317,13 @@ def generate_actions(issues: list, result: dict) -> list:
                 "file": "bot/simulator.py",
                 "status": "already_fixed",
             })
+
+        elif code == "UNTRUSTED_RESOLVED_ROWS":
+            actions.append({
+                "priority": 1,
+                "action": "Re-run resolution or clean malformed resolved rows before using paper P&L",
+                "file": "bot/resolver.py",
+            })
     
     # Always suggest focusing on short-term
     if result["summary"]["total_trades_ever"] > 500:
@@ -279,21 +340,42 @@ def format_report(analysis: dict) -> str:
     """Format analysis into a concise report."""
     s = analysis["summary"]
     p = analysis.get("performance", {})
+    ep = analysis.get("event_performance", {})
     sq = analysis.get("signal_quality", {})
     
     lines = [
         f"📊 **Bot Report** — {analysis['timestamp'][:16]}",
         "",
-        f"Session: {s['current_session']} | Scans: {s['scans']} | Trades: {s['current_trades']}",
+        (
+            f"Session: {s['current_session']} | Scans: {s['scans']} | Trades: {s['current_trades']} | "
+            f"Resolved: {s.get('resolved', 0)} raw / {s.get('trusted_resolved_positions', 0)} trusted / "
+            f"{s.get('resolved_events', 0)} events"
+        ),
     ]
     if s.get("current_session_file"):
         lines.append(f"Source: {s['current_session_file']}")
     if s.get("ignored_invalid_trades"):
         lines.append(f"Ignored invalid trade rows: {s['ignored_invalid_trades']}")
+    if s.get("invalid_resolved_positions"):
+        lines.append(f"Untrusted resolved rows: {s['invalid_resolved_positions']}")
+    if s.get("total_equity") is not None:
+        lines.append(
+            f"Capital: equity ${s.get('total_equity', 0):.2f} | "
+            f"available ${s.get('available_cash', s.get('total_equity', 0)):.2f} | "
+            f"reserved ${s.get('reserved_capital', 0):.2f}"
+        )
     
     if p:
         emoji = "🟢" if p.get("total_pnl", 0) > 0 else "🔴" if p.get("total_pnl", 0) < 0 else "⚪"
-        lines.append(f"{emoji} Win Rate: {p.get('win_rate', 0)}% | P&L: ${p.get('total_pnl', 0):+.2f} | PF: {p.get('profit_factor', 0)}")
+        lines.append(
+            f"{emoji} Position Win Rate: {p.get('win_rate', 0)}% | "
+            f"P&L: ${p.get('total_pnl', 0):+.2f} | PF: {p.get('profit_factor', 0)}"
+        )
+    if ep:
+        lines.append(
+            f"📍 Event Win Rate: {ep.get('win_rate', 0)}% | "
+            f"Events: {ep.get('resolved_events', 0)} | Avg/Event: ${ep.get('avg_pnl_per_event', 0):+.2f}"
+        )
     
     if sq:
         lines.append(f"Edge: {sq.get('avg_edge', 0)}% avg, {sq.get('max_edge', 0)}% max | Conf: {sq.get('avg_confidence', 0)}%")
