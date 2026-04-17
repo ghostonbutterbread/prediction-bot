@@ -38,10 +38,22 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _resolve_path(path_str: str) -> Path:
+    path = Path(path_str)
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
+def _display_path(path: Path) -> str:
+    try:
+        return str(path.relative_to(PROJECT_ROOT))
+    except ValueError:
+        return str(path)
+
+
 def main() -> int:
     args = parse_args()
-    input_path = PROJECT_ROOT / args.input
-    output_path = PROJECT_ROOT / args.output
+    input_path = _resolve_path(args.input)
+    output_path = _resolve_path(args.output)
 
     records = load_historical_weather_records(input_path, one_per_series=not args.full_history)
     report = build_historical_city_coverage(records)
@@ -50,7 +62,7 @@ def main() -> int:
     output_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
 
     summary = report["summary"]
-    print(f"Wrote {output_path.relative_to(PROJECT_ROOT)}")
+    print(f"Wrote {_display_path(output_path)}")
     print(
         "Historical weather coverage "
         f"records={summary['records_examined']} "
