@@ -58,8 +58,10 @@ class RiskState:
     """Tracks current risk exposure across all positions."""
     # Bankroll tracking
     starting_balance: float = 100.0
-    current_balance: float = 100.0
+    current_balance: float = 100.0  # Total equity = available_cash + reserved_capital
     peak_balance: float = 100.0
+    available_cash: float = 100.0
+    reserved_capital: float = 0.0
 
     # Session-level kill-switch tracking
     session_starting_balance: float = 100.0  # Balance at bot startup
@@ -262,7 +264,13 @@ class RiskManager:
                 return group
         return None
 
-    def check_trade(self, signal: dict, position_size: float) -> RiskDecision:
+    def check_trade(
+        self,
+        signal: dict,
+        position_size: float,
+        *,
+        available_cash: Optional[float] = None,
+    ) -> RiskDecision:
         """
         Check if a trade should be approved.
 
@@ -288,6 +296,11 @@ class RiskManager:
                 original_size=original_size,
                 risk_score=1.0,
             )
+
+        spendable_cash = self._coerce_float(
+            self.state.available_cash if available_cash is None else available_cash,
+            self.state.available_cash,
+        )
 
         # === Hard stops (reject immediately) ===
 
@@ -410,6 +423,28 @@ class RiskManager:
             position_size = clipped_size
             risk_score += 0.25
 
+        if spendable_cash < self.min_position_size:
+            return RiskDecision(
+                approved=False,
+                reason=f"Available cash below minimum size (${spendable_cash:.2f})",
+                risk_score=1.0,
+            )
+
+        if position_size > spendable_cash:
+            clipped_size = round(min(position_size, spendable_cash), 2)
+            if clipped_size < self.min_position_size:
+                return RiskDecision(
+                    approved=False,
+                    reason=f"Available cash below minimum size (${spendable_cash:.2f})",
+                    risk_score=1.0,
+                )
+            warnings.append(
+                f"Available cash capped size to ${clipped_size:.2f} "
+                f"(${spendable_cash:.2f} spendable)"
+            )
+            position_size = clipped_size
+            risk_score += 0.2
+
         # Minimum position size: $1
         position_size = max(self.min_position_size, round(position_size, 2))
         risk_score = min(1.0, risk_score)
@@ -428,18 +463,22 @@ class RiskManager:
         size = self._coerce_float(trade.get("position_size"))
         if size <= 0:
             return
+        reserved_capital = self._coerce_float(trade.get("reserved_capital"), size)
         self.state.trade_history.append({
             "trade_id": trade.get("id", ""),
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "question": trade.get("question", ""),
             "direction": trade.get("direction", ""),
             "size": size,
+            "reserved_capital": round(reserved_capital, 2),
             "market_price": self._coerce_float(trade.get("market_price")),
             "resolved": False,
             "pnl": 0,
         })
         self.state.open_positions += 1
         self.state.total_exposure += size
+        self.state.available_cash = round(self.state.available_cash - reserved_capital, 2)
+        self.state.reserved_capital = round(self.state.reserved_capital + reserved_capital, 2)
         self.state.daily_trades += 1
         self._save_state()
 
@@ -449,11 +488,14 @@ class RiskManager:
         *,
         current_balance: Optional[float] = None,
         starting_balance: Optional[float] = None,
+        available_cash: Optional[float] = None,
+        reserved_capital: Optional[float] = None,
     ):
         """Rebuild exposure state from the session file so risk and simulator stay aligned."""
         synced_history = []
         open_positions = 0
         total_exposure = 0.0
+        derived_reserved_capital = 0.0
 
         for trade in trades or []:
             size = self._coerce_float(getattr(trade, "position_size", None))
@@ -462,12 +504,14 @@ class RiskManager:
                 continue
 
             resolved = bool(getattr(trade, "resolved", False))
+            reserved_amount = self._coerce_float(getattr(trade, "reserved_capital", None), size)
             record = {
                 "trade_id": getattr(trade, "id", "") or market_id,
                 "timestamp": getattr(trade, "timestamp", datetime.now(timezone.utc).isoformat()),
                 "question": getattr(trade, "question", ""),
                 "direction": getattr(trade, "direction", ""),
                 "size": round(size, 2),
+                "reserved_capital": round(reserved_amount, 2),
                 "market_price": self._coerce_float(getattr(trade, "market_price", None)),
                 "resolved": resolved,
                 "pnl": self._coerce_float(getattr(trade, "pnl", None)),
@@ -477,18 +521,34 @@ class RiskManager:
             if not resolved:
                 open_positions += 1
                 total_exposure += size
+                derived_reserved_capital += reserved_amount
 
         if starting_balance is not None:
             self.state.starting_balance = self._coerce_float(starting_balance, self.state.starting_balance)
             if self.state.session_starting_balance <= 0:
                 self.state.session_starting_balance = self.state.starting_balance
 
+        balance_value = self.state.current_balance
         if current_balance is not None:
-            self.state.current_balance = self._coerce_float(current_balance, self.state.current_balance)
+            balance_value = self._coerce_float(current_balance, self.state.current_balance)
+            self.state.current_balance = balance_value
+
+        reserved_value = (
+            round(self._coerce_float(reserved_capital, derived_reserved_capital), 2)
+            if reserved_capital is not None
+            else round(derived_reserved_capital, 2)
+        )
+        available_value = (
+            round(self._coerce_float(available_cash, balance_value - reserved_value), 2)
+            if available_cash is not None
+            else round(balance_value - reserved_value, 2)
+        )
 
         self.state.trade_history = synced_history
         self.state.open_positions = open_positions
         self.state.total_exposure = round(total_exposure, 2)
+        self.state.reserved_capital = reserved_value
+        self.state.available_cash = available_value
         self.state.peak_balance = max(
             self.state.peak_balance,
             self.state.current_balance,
@@ -511,9 +571,18 @@ class RiskManager:
 
             trade["resolved"] = True
             trade["pnl"] = self._coerce_float(pnl)
+            reserved_capital = self._coerce_float(trade.get("reserved_capital"), trade.get("size", 0))
 
             # Release exposure (approximate — full size released on resolve)
             self.state.total_exposure = max(0, self.state.total_exposure - trade.get("size", 0))
+            self.state.reserved_capital = round(
+                max(0, self.state.reserved_capital - reserved_capital),
+                2,
+            )
+            self.state.available_cash = round(
+                self.state.available_cash + reserved_capital + trade["pnl"],
+                2,
+            )
 
             # Update balance
             self.state.current_balance += trade["pnl"]
@@ -623,6 +692,8 @@ class RiskManager:
         return {
             "mode": "🔴 LIVE" if self.is_live else "🟡 PAPER",
             "balance": f"${self.state.current_balance:.2f}",
+            "available_cash": f"${self.state.available_cash:.2f}",
+            "reserved_capital": f"${self.state.reserved_capital:.2f}",
             "pnl": f"${self.state.total_pnl:+.2f} ({self.state.total_pnl_pct:+.1f}%)",
             "drawdown": f"{self.state.drawdown_pct:.1f}%",
             "daily_pnl": f"${self.state.daily_pnl:+.2f} ({self.state.daily_pnl_pct:.1f}%)",

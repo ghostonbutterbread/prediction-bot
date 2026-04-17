@@ -5,11 +5,17 @@ import logging
 from collections import Counter
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from math import isfinite
 from typing import Optional
 
 from bot.strategies.enhanced import EnhancedStrategyEngine, KellySizer
+from bot.trade_audit import (
+    calculate_contracts,
+    enrich_trade_audit_fields,
+    is_trade_effective_row,
+    summarize_event_performance,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +36,10 @@ class SimTrade:
     position_size: float    # dollars
     signals: dict           # individual signal breakdown
     category: str = ""      # market category (e.g., KXSHIBA, KXNFLX) for correlation tracking
+    reserved_capital: Optional[float] = None
+    available_cash_before: Optional[float] = None
+    available_cash_after_entry: Optional[float] = None
+    settlement_value: Optional[float] = None
 
     # Resolution (filled in later)
     resolved: bool = False
@@ -40,6 +50,15 @@ class SimTrade:
     current_price: Optional[float] = None
     unrealized_pnl: Optional[float] = None
     price_delta: Optional[float] = None
+    contracts: Optional[float] = None
+    gross_pnl: Optional[float] = None
+    fee_paid: Optional[float] = None
+    net_pnl: Optional[float] = None
+    expected_pnl: Optional[float] = None
+    exit_price: Optional[float] = None
+    event_key: str = ""
+    integrity_status: str = "ok"
+    integrity_errors: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -84,7 +103,9 @@ class Simulator:
         self.risk = RiskManager(config)
 
         self.starting_balance = config.get("starting_balance", 100.0)
-        self.balance = self.starting_balance
+        self.balance = self.starting_balance  # Total equity = available cash + reserved capital
+        self.available_cash = self.starting_balance
+        self.reserved_capital = 0.0
         strategy_cfg = config.get("strategy", {})
         self.min_edge = config.get("min_edge", strategy_cfg.get("min_edge", 0.01))
         self.min_confidence = config.get("min_confidence", strategy_cfg.get("min_confidence", 0.50))
@@ -147,6 +168,8 @@ class Simulator:
             self.session_id = data.get("session_id", datetime.now().strftime("%Y%m%d_%H%M%S"))
             self.starting_balance = data.get("starting_balance", 100.0)
             self.balance = data.get("balance", self.starting_balance)
+            raw_available_cash = self._coerce_float_or_none(data.get("available_cash"))
+            raw_reserved_capital = self._coerce_float_or_none(data.get("reserved_capital"))
             self.scan_count = data.get("scan_count", 0)
             self.max_entry_price = data.get("max_entry_price", 0.70)
             self.consecutive_daily_losses = data.get("consecutive_daily_losses", 0)
@@ -156,6 +179,7 @@ class Simulator:
             self.trades = []
             discarded = 0
             for idx, t_data in enumerate(data.get("trades", []), start=1):
+                enrich_trade_audit_fields(t_data)
                 if not self._is_trade_row_effective(t_data):
                     discarded += 1
                     continue
@@ -173,6 +197,10 @@ class Simulator:
                     position_size=t_data.get("position_size", 0),
                     signals=t_data.get("signals", {}),
                     category=t_data.get("category", ""),
+                    reserved_capital=self._coerce_float_or_none(t_data.get("reserved_capital")),
+                    available_cash_before=self._coerce_float_or_none(t_data.get("available_cash_before")),
+                    available_cash_after_entry=self._coerce_float_or_none(t_data.get("available_cash_after_entry")),
+                    settlement_value=self._coerce_float_or_none(t_data.get("settlement_value")),
                     resolved=t_data.get("resolved", False),
                     outcome=t_data.get("outcome"),
                     pnl=t_data.get("pnl"),
@@ -181,7 +209,27 @@ class Simulator:
                     current_price=self._coerce_float_or_none(t_data.get("current_price")),
                     unrealized_pnl=self._coerce_float_or_none(t_data.get("unrealized_pnl")),
                     price_delta=self._coerce_float_or_none(t_data.get("price_delta")),
+                    contracts=self._coerce_float_or_none(t_data.get("contracts")),
+                    gross_pnl=self._coerce_float_or_none(t_data.get("gross_pnl")),
+                    fee_paid=self._coerce_float_or_none(t_data.get("fee_paid")),
+                    net_pnl=self._coerce_float_or_none(t_data.get("net_pnl")),
+                    expected_pnl=self._coerce_float_or_none(t_data.get("expected_pnl")),
+                    exit_price=self._coerce_float_or_none(t_data.get("exit_price")),
+                    event_key=t_data.get("event_key", ""),
+                    integrity_status=t_data.get("integrity_status", "ok"),
+                    integrity_errors=list(t_data.get("integrity_errors", []) or []),
                 ))
+
+            if raw_reserved_capital is None:
+                raw_reserved_capital = round(
+                    sum(self._trade_reserved_amount(trade) for trade in self.trades if not trade.resolved),
+                    2,
+                )
+            self.reserved_capital = round(raw_reserved_capital, 2)
+
+            if raw_available_cash is None:
+                raw_available_cash = self.balance - self.reserved_capital
+            self.available_cash = round(raw_available_cash, 2)
 
             self.traded_markets = {t.market_id for t in self._effective_trades()}
             self.rolling_win_rate = 0.0
@@ -191,9 +239,15 @@ class Simulator:
                 self.trades,
                 current_balance=self.balance,
                 starting_balance=self.starting_balance,
+                available_cash=self.available_cash,
+                reserved_capital=self.reserved_capital,
             )
 
-            logger.info(f"Loaded session {self.session_id} — {len(self.trades)} trades, balance ${self.balance:.2f}")
+            logger.info(
+                f"Loaded session {self.session_id} — {len(self.trades)} trades, "
+                f"equity ${self.balance:.2f} | available ${self.available_cash:.2f} | "
+                f"reserved ${self.reserved_capital:.2f}"
+            )
             if discarded:
                 logger.warning(f"Discarded {discarded} zero-sized or malformed trade rows from session {self.session_id}")
             return True
@@ -413,11 +467,14 @@ class Simulator:
                 logger.info(f"  Top blockers: {blocker_summary}")
 
         # Calculate rolling win rate from RESOLVED trades only
-        resolved_trades = [t for t in self._effective_trades() if t.resolved and t.pnl is not None]
+        resolved_trades = [
+            t for t in self._effective_trades()
+            if t.resolved and t.pnl is not None and t.integrity_status == "ok"
+        ]
         if resolved_trades:
             recent = resolved_trades[-self.rolling_window:]
             wins = sum(1 for t in recent if t.pnl > 0)
-            self.rolling_win_rate = wins / len(recent) if recent else 0.0
+            self.rolling_win_rate = wins / len(recent) * 100 if recent else 0.0
         else:
             self.rolling_win_rate = 0.0
 
@@ -425,6 +482,7 @@ class Simulator:
         status = self.risk.get_status()
         logger.info(
             f"📊 Risk: balance={status['balance']} pnl={status['pnl']} "
+            f"available={status['available_cash']} reserved={status['reserved_capital']} "
             f"drawdown={status['drawdown']} positions={status['open_positions']} "
             f"streak={self.risk.state.consecutive_losses}L/{self.risk.state.consecutive_wins}W "
             f"Rolling Win Rate = {self.rolling_win_rate:.1f}%"
@@ -496,15 +554,19 @@ class Simulator:
         entry_price = normalized["entry_price"]
         win_probability = normalized["win_probability"]
 
-        size = self.kelly.calculate(win_probability, entry_price, self.balance)
+        sizing_cash = max(0.0, self.available_cash)
+        size = self.kelly.calculate(win_probability, entry_price, sizing_cash)
         if size <= 0:
             if blockers is not None:
                 blockers["kelly_zero_size"] += 1
-            logger.info(f"  🛑 Kelly rejected: size={size:.2f} (wp={win_probability:.3f}, ep={entry_price:.3f}, bal={self.balance})")
+            logger.info(
+                f"  🛑 Kelly rejected: size={size:.2f} "
+                f"(wp={win_probability:.3f}, ep={entry_price:.3f}, cash={sizing_cash:.2f})"
+            )
             return None
 
         # === Risk Management Check ===
-        risk_decision = self.risk.check_trade(signal, size)
+        risk_decision = self.risk.check_trade(signal, size, available_cash=self.available_cash)
 
         if not risk_decision.approved:
             if blockers is not None:
@@ -549,7 +611,12 @@ class Simulator:
             position_size=round(size, 2),
             category=raw_category,
             signals=signal.get("signals", {}),
+            contracts=round(calculate_contracts(fill_price, size), 4),
+            reserved_capital=round(size, 2),
+            available_cash_before=round(self.available_cash, 2),
+            available_cash_after_entry=round(self.available_cash - size, 2),
         )
+        enrich_trade_audit_fields(trade.__dict__)
 
         # Record with risk manager
         self.risk.record_trade({
@@ -557,8 +624,12 @@ class Simulator:
             "question": trade.question,
             "direction": trade.direction,
             "position_size": trade.position_size,
+            "reserved_capital": trade.reserved_capital,
             "market_price": trade.market_price,
         })
+
+        self.available_cash = round(self.available_cash - trade.position_size, 2)
+        self.reserved_capital = round(self.reserved_capital + trade.reserved_capital, 2)
 
         return trade
 
@@ -575,11 +646,7 @@ class Simulator:
         return self._is_trade_row_effective(asdict(trade))
 
     def _is_trade_row_effective(self, trade_data: dict) -> bool:
-        market_id = str(trade_data.get("market_id", "") or "").strip()
-        if not market_id:
-            return False
-        size = self._coerce_float_or_none(trade_data.get("position_size"))
-        return size is not None and size > 0
+        return is_trade_effective_row(trade_data)
 
     def _coerce_float_or_none(self, value) -> Optional[float]:
         try:
@@ -589,6 +656,22 @@ class Simulator:
         except (TypeError, ValueError):
             return None
         return value if isfinite(value) else None
+
+    def _trade_reserved_amount(self, trade: SimTrade) -> float:
+        reserved = self._coerce_float_or_none(getattr(trade, "reserved_capital", None))
+        if reserved is not None and reserved >= 0:
+            return round(reserved, 2)
+        size = self._coerce_float_or_none(getattr(trade, "position_size", None))
+        if size is not None and size > 0:
+            return round(size, 2)
+        return 0.0
+
+    def _refresh_capital_state(self):
+        self.reserved_capital = round(
+            sum(self._trade_reserved_amount(trade) for trade in self.trades if not trade.resolved),
+            2,
+        )
+        self.available_cash = round(self.balance - self.reserved_capital, 2)
 
     def _reason_key(self, reason: str) -> str:
         cleaned = (reason or "risk_rejected").lower()
@@ -770,6 +853,7 @@ class Simulator:
 
     def report(self) -> dict:
         """Generate performance report."""
+        self._refresh_capital_state()
         effective_trades = self._effective_trades()
         total = len(effective_trades)
         if total == 0:
@@ -792,21 +876,35 @@ class Simulator:
         for t in effective_trades:
             by_exchange[t.exchange] = by_exchange.get(t.exchange, 0) + 1
 
+        resolved_positions = [t for t in effective_trades if t.resolved]
+        trusted_resolved = [
+            t for t in resolved_positions if t.integrity_status == "ok" and t.pnl is not None
+        ]
+        event_summary = summarize_event_performance([asdict(t) for t in trusted_resolved])
+
         return {
             "session": self.session_id,
             "started_at": effective_trades[0].timestamp if effective_trades else None,
             "total_trades": total,
+            "resolved_trades": len(resolved_positions),
+            "trusted_resolved_trades": len(trusted_resolved),
+            "invalid_resolved_trades": len(resolved_positions) - len(trusted_resolved),
             "starting_balance": self.starting_balance,
             "current_balance": self.balance,
+            "total_equity": self.balance,
+            "available_cash": round(self.available_cash, 2),
+            "reserved_capital": round(self.reserved_capital, 2),
             "pnl": round(self.balance - self.starting_balance, 2),
             "pnl_pct": round((self.balance - self.starting_balance) / self.starting_balance * 100, 2),
             "avg_edge": round(sum(edges) / len(edges), 4),
             "max_edge": round(max(edges), 4),
             "avg_confidence": round(sum(confidences) / len(confidences), 4),
             "avg_position_size": round(sum(sizes) / len(sizes), 2),
-            "total_exposure": round(sum(sizes), 2),
+            "total_exposure": round(self.reserved_capital, 2),
             "by_direction": by_direction,
             "by_exchange": by_exchange,
+            "resolved_events": event_summary["resolved_events"],
+            "event_win_rate": event_summary["win_rate"],
             "scans_run": self.scan_count,
         }
 
@@ -832,7 +930,9 @@ class Simulator:
 
         print(f"""
 Starting Balance:  ${r['starting_balance']:.2f}
-Current Balance:   ${r['current_balance']:.2f}
+Total Equity:      ${r['current_balance']:.2f}
+Available Cash:    ${r['available_cash']:.2f}
+Reserved Capital:  ${r['reserved_capital']:.2f}
 P&L:               ${r['pnl']:+.2f} ({r['pnl_pct']:+.1f}%)
 
 Total Trades:      {r['total_trades']}
@@ -858,16 +958,23 @@ Direction Breakdown:""")
     def _save_session(self):
         """Save session data to disk."""
         self._prune_ineffective_trades()
+        for trade in self.trades:
+            enrich_trade_audit_fields(trade.__dict__)
+        self._refresh_capital_state()
         self.risk.sync_with_trades(
             self.trades,
             current_balance=self.balance,
             starting_balance=self.starting_balance,
+            available_cash=self.available_cash,
+            reserved_capital=self.reserved_capital,
         )
         session_file = self.data_dir / f"sim_{self.session_id}.json"
         data = {
             "session_id": self.session_id,
             "starting_balance": self.starting_balance,
             "balance": self.balance,
+            "available_cash": self.available_cash,
+            "reserved_capital": self.reserved_capital,
             "scan_count": self.scan_count,
             "max_entry_price": self.max_entry_price,
             "trades": [asdict(t) for t in self.trades],
