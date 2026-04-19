@@ -125,13 +125,46 @@ class WeatherReplayTests(unittest.TestCase):
             fee_model=ReplayFeeModel(0.10),
         )
 
+        self.assertAlmostEqual(sized["quoted_entry_price"], 0.25)
         self.assertAlmostEqual(sized["entry_price"], 0.25)
         self.assertAlmostEqual(sized["contracts"], 40.0)
         self.assertAlmostEqual(sized["position_size"], 10.0)
         self.assertAlmostEqual(sized["gross_pnl"], 30.0)
         self.assertAlmostEqual(sized["fees_paid"], 3.0)
+        self.assertAlmostEqual(sized["fee_breakdown"]["profit_fee"], 3.0)
+        self.assertAlmostEqual(sized["fee_breakdown"]["notional_fee"], 0.0)
         self.assertAlmostEqual(sized["net_pnl"], 27.0)
         self.assertAlmostEqual(sized["fee_rate"], 0.10)
+
+    def test_score_replay_answer_supports_slippage_late_entry_and_notional_fees(self):
+        answer_key = {
+            "replay_id": "wxr_costs",
+            "market_id": "mkt-costs",
+            "outcome": "YES",
+            "prices": {"yes_price": 0.40, "no_price": 0.60},
+        }
+
+        sized = score_replay_answer(
+            "BUY_YES",
+            answer_key,
+            position_size=10.0,
+            fee_model=ReplayFeeModel(
+                profit_fee_rate=0.10,
+                notional_fee_rate=0.02,
+                slippage_bps=50,
+                late_entry_penalty_rate=0.10,
+            ),
+        )
+
+        self.assertAlmostEqual(sized["quoted_entry_price"], 0.40)
+        self.assertAlmostEqual(sized["entry_price"], 0.4618)
+        self.assertAlmostEqual(sized["contracts"], 21.6544, places=4)
+        self.assertAlmostEqual(sized["position_size"], 10.0)
+        self.assertAlmostEqual(sized["gross_pnl"], 11.6544, places=4)
+        self.assertAlmostEqual(sized["fee_breakdown"]["notional_fee"], 0.2)
+        self.assertAlmostEqual(sized["fee_breakdown"]["profit_fee"], 1.1654)
+        self.assertAlmostEqual(sized["fees_paid"], 1.3654)
+        self.assertAlmostEqual(sized["net_pnl"], 10.289, places=4)
 
     def test_score_replay_answers_matches_replay_or_market_id_and_aggregates_pnl(self):
         answer_keys = [
@@ -264,6 +297,12 @@ class WeatherReplayScriptTests(unittest.TestCase):
                     str(score_path),
                     "--fee-rate",
                     "0.10",
+                    "--notional-fee-rate",
+                    "0.01",
+                    "--slippage-bps",
+                    "25",
+                    "--late-entry-penalty-rate",
+                    "0.05",
                     "--max-records",
                     "5",
                 ]
@@ -286,9 +325,12 @@ class WeatherReplayScriptTests(unittest.TestCase):
             self.assertEqual(score_report["summary"]["answers_scored"], 1)
             self.assertEqual(score_report["summary"]["correct"], 1)
             self.assertAlmostEqual(score_report["summary"]["position_size_total"], 4.2)
-            self.assertAlmostEqual(score_report["summary"]["fees_total"], 0.58)
-            self.assertAlmostEqual(score_report["summary"]["fee_adjusted_pnl"], 5.22)
+            self.assertAlmostEqual(score_report["summary"]["fees_total"], 0.5553)
+            self.assertAlmostEqual(score_report["summary"]["fee_adjusted_pnl"], 4.578)
             self.assertAlmostEqual(score_report["summary"]["fee_model"]["profit_fee_rate"], 0.10)
+            self.assertAlmostEqual(score_report["summary"]["fee_model"]["notional_fee_rate"], 0.01)
+            self.assertAlmostEqual(score_report["summary"]["fee_model"]["slippage_bps"], 25)
+            self.assertAlmostEqual(score_report["summary"]["fee_model"]["late_entry_penalty_rate"], 0.05)
 
 
 if __name__ == "__main__":

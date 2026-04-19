@@ -47,7 +47,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--fee-rate",
         type=float,
         default=DEFAULT_REPLAY_FEE_RATE,
-        help="Fee rate charged on profitable replay trades only (default: 0.07).",
+        help="Fee rate charged on positive gross replay profit (default: 0.07).",
+    )
+    parser.add_argument(
+        "--notional-fee-rate",
+        type=float,
+        default=0.0,
+        help="Optional fee rate charged on entry notional for every filled replay trade.",
+    )
+    parser.add_argument(
+        "--slippage-bps",
+        type=float,
+        default=0.0,
+        help="Optional entry slippage in basis points applied against the replayed trade.",
+    )
+    parser.add_argument(
+        "--late-entry-penalty-rate",
+        type=float,
+        default=0.0,
+        help="Optional conservative penalty applied to remaining upside to approximate later entry.",
     )
     parser.add_argument(
         "--max-records",
@@ -96,7 +114,12 @@ def main(argv: list[str] | None = None) -> int:
         scored = score_replay_answers(
             answers,
             dataset["answer_keys"],
-            fee_model=ReplayFeeModel(args.fee_rate),
+            fee_model=ReplayFeeModel(
+                profit_fee_rate=args.fee_rate,
+                notional_fee_rate=args.notional_fee_rate,
+                slippage_bps=args.slippage_bps,
+                late_entry_penalty_rate=args.late_entry_penalty_rate,
+            ),
         )
         score_output_path.parent.mkdir(parents=True, exist_ok=True)
         score_output_path.write_text(json.dumps(scored, indent=2) + "\n", encoding="utf-8")

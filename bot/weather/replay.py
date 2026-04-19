@@ -18,18 +18,53 @@ DEFAULT_REPLAY_FEE_RATE = 0.07
 
 @dataclass(frozen=True)
 class ReplayFeeModel:
-    """Simple replay fee model: charge a fixed rate on positive gross profit only."""
+    """Conservative replay execution model for weather trades.
+
+    profit_fee_rate:
+        Fee charged on positive gross profit.
+    notional_fee_rate:
+        Fee charged on entry notional for every filled trade.
+    slippage_bps:
+        Entry slippage in basis points applied against the trader.
+    late_entry_penalty_rate:
+        Conservative penalty applied to the remaining upside when replaying a
+        trade as if entry happened later than the captured quote.
+    """
 
     profit_fee_rate: float = DEFAULT_REPLAY_FEE_RATE
+    notional_fee_rate: float = 0.0
+    slippage_bps: float = 0.0
+    late_entry_penalty_rate: float = 0.0
 
     def __post_init__(self) -> None:
         if self.profit_fee_rate < 0:
             raise ValueError("profit_fee_rate must be non-negative")
+        if self.notional_fee_rate < 0:
+            raise ValueError("notional_fee_rate must be non-negative")
+        if self.slippage_bps < 0:
+            raise ValueError("slippage_bps must be non-negative")
+        if not 0 <= self.late_entry_penalty_rate < 1:
+            raise ValueError("late_entry_penalty_rate must be between 0 and 1")
 
-    def calculate_fee(self, gross_profit: float) -> float:
-        if gross_profit <= 0:
-            return 0.0
-        return round(gross_profit * self.profit_fee_rate, 4)
+    def apply_entry_adjustments(self, entry_price: float) -> float:
+        adjusted_price = float(entry_price)
+        if self.slippage_bps:
+            adjusted_price += adjusted_price * (self.slippage_bps / 10_000)
+        if self.late_entry_penalty_rate:
+            adjusted_price += (1 - adjusted_price) * self.late_entry_penalty_rate
+        return round(min(max(adjusted_price, 0.0001), 0.9999), 4)
+
+    def calculate_fees(self, gross_profit: float, position_size: float) -> dict[str, float]:
+        notional_fee = round(max(position_size, 0.0) * self.notional_fee_rate, 4)
+        profit_fee = 0.0
+        if gross_profit > 0:
+            profit_fee = round(gross_profit * self.profit_fee_rate, 4)
+        total_fee = round(notional_fee + profit_fee, 4)
+        return {
+            "notional_fee": notional_fee,
+            "profit_fee": profit_fee,
+            "total_fee": total_fee,
+        }
 
 
 @dataclass(frozen=True)
@@ -170,23 +205,30 @@ def score_replay_answer(
             "correct_action": correct_action,
             "is_correct": None,
             "points": 0,
+            "quoted_entry_price": None,
             "entry_price": None,
             "contracts": 0.0,
             "position_size": 0.0,
             "fee_rate": fee_model.profit_fee_rate,
+            "notional_fee_rate": fee_model.notional_fee_rate,
+            "slippage_bps": fee_model.slippage_bps,
+            "late_entry_penalty_rate": fee_model.late_entry_penalty_rate,
             "realized_return": 0.0,
             "gross_pnl": 0.0,
             "fees_paid": 0.0,
+            "fee_breakdown": {"notional_fee": 0.0, "profit_fee": 0.0, "total_fee": 0.0},
             "net_pnl": 0.0,
         }
 
-    entry_price = yes_price if normalized_action == "BUY_YES" else no_price
+    quoted_entry_price = yes_price if normalized_action == "BUY_YES" else no_price
+    entry_price = fee_model.apply_entry_adjustments(quoted_entry_price) if quoted_entry_price is not None else None
     is_correct = normalized_action == correct_action
     realized_return = None
     resolved_contracts = None
     resolved_position_size = None
     gross_pnl = None
     fees_paid = 0.0
+    fee_breakdown = {"notional_fee": 0.0, "profit_fee": 0.0, "total_fee": 0.0}
     net_pnl = None
     if entry_price is not None:
         resolved_contracts, resolved_position_size = _resolve_position(
@@ -196,7 +238,8 @@ def score_replay_answer(
         )
         realized_return = round((1 - entry_price) if is_correct else -entry_price, 4)
         gross_pnl = round(realized_return * resolved_contracts, 4)
-        fees_paid = fee_model.calculate_fee(gross_pnl)
+        fee_breakdown = fee_model.calculate_fees(gross_pnl, resolved_position_size)
+        fees_paid = fee_breakdown["total_fee"]
         net_pnl = round(gross_pnl - fees_paid, 4)
 
     return {
@@ -207,13 +250,18 @@ def score_replay_answer(
         "correct_action": correct_action,
         "is_correct": is_correct,
         "points": 1 if is_correct else -1,
+        "quoted_entry_price": quoted_entry_price,
         "entry_price": entry_price,
         "contracts": resolved_contracts,
         "position_size": resolved_position_size,
         "fee_rate": fee_model.profit_fee_rate,
+        "notional_fee_rate": fee_model.notional_fee_rate,
+        "slippage_bps": fee_model.slippage_bps,
+        "late_entry_penalty_rate": fee_model.late_entry_penalty_rate,
         "realized_return": realized_return,
         "gross_pnl": gross_pnl,
         "fees_paid": fees_paid,
+        "fee_breakdown": fee_breakdown,
         "net_pnl": net_pnl,
     }
 
@@ -317,7 +365,10 @@ def score_replay_answers(
             "contracts_total": round(sum(result["contracts"] or 0.0 for result in scored), 4),
             "fee_model": {
                 "profit_fee_rate": fee_model.profit_fee_rate,
-                "notes": "Conservative MVP: charge fee only on positive gross profit, no fee on losses or skips.",
+                "notional_fee_rate": fee_model.notional_fee_rate,
+                "slippage_bps": fee_model.slippage_bps,
+                "late_entry_penalty_rate": fee_model.late_entry_penalty_rate,
+                "notes": "Conservative replay model: optional entry-notional fees, entry slippage, late-entry penalty, plus profit fees on positive gross profit.",
             },
             "side_counts": side_counts,
             "by_action": side_counts,
