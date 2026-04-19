@@ -1,19 +1,34 @@
 """Simulation engine — paper trades with full audit trail."""
 
-import json
 import logging
 from collections import Counter
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from dataclasses import dataclass, asdict, field
-from math import isfinite
 from typing import Optional
 
+from bot.paper_adapters import (
+    LoadedPaperSession,
+    SimulatorPaperExecutionAdapter,
+    SimulatorPaperResolutionAdapter,
+    SimulatorPaperSessionStore,
+    SimulatorPaperStateAdapter,
+)
+from bot.shared_core import (
+    AccountState,
+    ExecutionResult,
+    PaperSessionState,
+    PositionState,
+    ResolutionEvent,
+    TradeContext,
+    TradeDecision,
+    build_trade_decision,
+    normalize_trade_context,
+    reason_to_key,
+)
 from bot.strategies.enhanced import EnhancedStrategyEngine, KellySizer
 from bot.trade_audit import (
-    calculate_contracts,
     enrich_trade_audit_fields,
-    is_trade_effective_row,
     summarize_event_performance,
 )
 
@@ -35,6 +50,7 @@ class SimTrade:
     confidence: float
     position_size: float    # dollars
     signals: dict           # individual signal breakdown
+    decision_trace: dict = field(default_factory=dict)
     category: str = ""      # market category (e.g., KXSHIBA, KXNFLX) for correlation tracking
     reserved_capital: Optional[float] = None
     available_cash_before: Optional[float] = None
@@ -114,6 +130,10 @@ class Simulator:
 
         self.data_dir = Path(config.get("data_dir", "data"))
         self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.state_adapter = SimulatorPaperStateAdapter(self)
+        self.session_store = SimulatorPaperSessionStore(self, self.state_adapter)
+        self.execution_adapter = SimulatorPaperExecutionAdapter(self)
+        self.resolution_adapter = SimulatorPaperResolutionAdapter(self, self.state_adapter, self.session_store)
 
         # Storage
         self.traded_markets: set = set()
@@ -151,110 +171,93 @@ class Simulator:
         Load a session from disk. If session_id is None, loads the most recent session.
         Returns True if a session was loaded, False if none found.
         """
-        if session_id:
-            session_files = [self.data_dir / f"sim_{session_id}.json"]
-            if not session_files[0].exists():
-                return False
-        else:
-            session_files = sorted(self.data_dir.glob("sim_*.json"), reverse=True)
-            if not session_files:
-                return False
-
-        session_file = session_files[0]
         try:
-            with open(session_file) as f:
-                data = json.load(f)
-
-            self.session_id = data.get("session_id", datetime.now().strftime("%Y%m%d_%H%M%S"))
-            self.starting_balance = data.get("starting_balance", 100.0)
-            self.balance = data.get("balance", self.starting_balance)
-            raw_available_cash = self._coerce_float_or_none(data.get("available_cash"))
-            raw_reserved_capital = self._coerce_float_or_none(data.get("reserved_capital"))
-            self.scan_count = data.get("scan_count", 0)
-            self.max_entry_price = data.get("max_entry_price", 0.70)
-            self.consecutive_daily_losses = data.get("consecutive_daily_losses", 0)
-            self.last_loss_date = data.get("last_loss_date")
-
-            # Reconstruct SimTrade objects
-            self.trades = []
-            discarded = 0
-            for idx, t_data in enumerate(data.get("trades", []), start=1):
-                enrich_trade_audit_fields(t_data)
-                if not self._is_trade_row_effective(t_data):
-                    discarded += 1
-                    continue
-                self.trades.append(SimTrade(
-                    id=t_data.get("id", f"sim_{self.session_id}_{idx:04d}"),
-                    timestamp=t_data.get("timestamp", datetime.now(timezone.utc).isoformat()),
-                    exchange=t_data.get("exchange", "unknown"),
-                    market_id=t_data.get("market_id", ""),
-                    question=t_data.get("question", ""),
-                    direction=t_data.get("direction", "BUY_YES"),
-                    model_probability=t_data.get("model_probability", 0.5),
-                    market_price=t_data.get("market_price", 0.5),
-                    edge=t_data.get("edge", 0),
-                    confidence=t_data.get("confidence", 0),
-                    position_size=t_data.get("position_size", 0),
-                    signals=t_data.get("signals", {}),
-                    category=t_data.get("category", ""),
-                    reserved_capital=self._coerce_float_or_none(t_data.get("reserved_capital")),
-                    available_cash_before=self._coerce_float_or_none(t_data.get("available_cash_before")),
-                    available_cash_after_entry=self._coerce_float_or_none(t_data.get("available_cash_after_entry")),
-                    settlement_value=self._coerce_float_or_none(t_data.get("settlement_value")),
-                    resolved=t_data.get("resolved", False),
-                    outcome=t_data.get("outcome"),
-                    pnl=t_data.get("pnl"),
-                    resolved_at=t_data.get("resolved_at"),
-                    resolution_type=t_data.get("resolution_type"),
-                    current_price=self._coerce_float_or_none(t_data.get("current_price")),
-                    unrealized_pnl=self._coerce_float_or_none(t_data.get("unrealized_pnl")),
-                    price_delta=self._coerce_float_or_none(t_data.get("price_delta")),
-                    contracts=self._coerce_float_or_none(t_data.get("contracts")),
-                    gross_pnl=self._coerce_float_or_none(t_data.get("gross_pnl")),
-                    fee_paid=self._coerce_float_or_none(t_data.get("fee_paid")),
-                    net_pnl=self._coerce_float_or_none(t_data.get("net_pnl")),
-                    expected_pnl=self._coerce_float_or_none(t_data.get("expected_pnl")),
-                    exit_price=self._coerce_float_or_none(t_data.get("exit_price")),
-                    event_key=t_data.get("event_key", ""),
-                    integrity_status=t_data.get("integrity_status", "ok"),
-                    integrity_errors=list(t_data.get("integrity_errors", []) or []),
-                ))
-
-            if raw_reserved_capital is None:
-                raw_reserved_capital = round(
-                    sum(self._trade_reserved_amount(trade) for trade in self.trades if not trade.resolved),
-                    2,
-                )
-            self.reserved_capital = round(raw_reserved_capital, 2)
-
-            if raw_available_cash is None:
-                raw_available_cash = self.balance - self.reserved_capital
-            self.available_cash = round(raw_available_cash, 2)
-
-            self.traded_markets = {t.market_id for t in self._effective_trades()}
-            self.rolling_win_rate = 0.0
-            self.rolling_win_count = 0
-            self.rolling_loss_count = 0
-            self.risk.sync_with_trades(
-                self.trades,
-                current_balance=self.balance,
-                starting_balance=self.starting_balance,
-                available_cash=self.available_cash,
-                reserved_capital=self.reserved_capital,
+            loaded = self.session_store.load_session(
+                session_id,
+                trade_factory=self._hydrate_trade,
+                max_entry_price_default=self.max_entry_price,
             )
+            if loaded is None:
+                return False
+
+            self._apply_loaded_session(loaded)
 
             logger.info(
                 f"Loaded session {self.session_id} — {len(self.trades)} trades, "
                 f"equity ${self.balance:.2f} | available ${self.available_cash:.2f} | "
                 f"reserved ${self.reserved_capital:.2f}"
             )
-            if discarded:
-                logger.warning(f"Discarded {discarded} zero-sized or malformed trade rows from session {self.session_id}")
+            if loaded.discarded_rows:
+                logger.warning(
+                    f"Discarded {loaded.discarded_rows} zero-sized or malformed trade rows from session {self.session_id}"
+                )
             return True
 
         except Exception as e:
-            logger.error(f"Failed to load session {session_file}: {e}")
+            logger.error(f"Failed to load session {session_id or 'latest'}: {e}")
             return False
+
+    def _apply_loaded_session(self, loaded: LoadedPaperSession) -> None:
+        self.session_id = loaded.session_id
+        self.starting_balance = loaded.starting_balance
+        self.balance = loaded.balance
+        self.available_cash = loaded.available_cash
+        self.reserved_capital = loaded.reserved_capital
+        self.scan_count = loaded.scan_count
+        self.max_entry_price = loaded.max_entry_price
+        self.consecutive_daily_losses = loaded.consecutive_daily_losses
+        self.last_loss_date = loaded.last_loss_date
+        self.trades = loaded.trades
+        self.traded_markets = loaded.traded_markets
+        self.rolling_win_rate = 0.0
+        self.rolling_win_count = 0
+        self.rolling_loss_count = 0
+        self.risk.sync_with_trades(
+            self.trades,
+            current_balance=self.balance,
+            starting_balance=self.starting_balance,
+            available_cash=self.available_cash,
+            reserved_capital=self.reserved_capital,
+        )
+
+    def _hydrate_trade(self, t_data: dict, index: int) -> SimTrade:
+        return SimTrade(
+            id=t_data.get("id", f"sim_loaded_{index:04d}"),
+            timestamp=t_data.get("timestamp", datetime.now(timezone.utc).isoformat()),
+            exchange=t_data.get("exchange", "unknown"),
+            market_id=t_data.get("market_id", ""),
+            question=t_data.get("question", ""),
+            direction=t_data.get("direction", "BUY_YES"),
+            model_probability=t_data.get("model_probability", 0.5),
+            market_price=t_data.get("market_price", 0.5),
+            edge=t_data.get("edge", 0),
+            confidence=t_data.get("confidence", 0),
+            position_size=t_data.get("position_size", 0),
+            signals=t_data.get("signals", {}),
+            decision_trace=dict(t_data.get("decision_trace", {}) or {}),
+            category=t_data.get("category", ""),
+            reserved_capital=self._coerce_float_or_none(t_data.get("reserved_capital")),
+            available_cash_before=self._coerce_float_or_none(t_data.get("available_cash_before")),
+            available_cash_after_entry=self._coerce_float_or_none(t_data.get("available_cash_after_entry")),
+            settlement_value=self._coerce_float_or_none(t_data.get("settlement_value")),
+            resolved=t_data.get("resolved", False),
+            outcome=t_data.get("outcome"),
+            pnl=t_data.get("pnl"),
+            resolved_at=t_data.get("resolved_at"),
+            resolution_type=t_data.get("resolution_type"),
+            current_price=self._coerce_float_or_none(t_data.get("current_price")),
+            unrealized_pnl=self._coerce_float_or_none(t_data.get("unrealized_pnl")),
+            price_delta=self._coerce_float_or_none(t_data.get("price_delta")),
+            contracts=self._coerce_float_or_none(t_data.get("contracts")),
+            gross_pnl=self._coerce_float_or_none(t_data.get("gross_pnl")),
+            fee_paid=self._coerce_float_or_none(t_data.get("fee_paid")),
+            net_pnl=self._coerce_float_or_none(t_data.get("net_pnl")),
+            expected_pnl=self._coerce_float_or_none(t_data.get("expected_pnl")),
+            exit_price=self._coerce_float_or_none(t_data.get("exit_price")),
+            event_key=t_data.get("event_key", ""),
+            integrity_status=t_data.get("integrity_status", "ok"),
+            integrity_errors=list(t_data.get("integrity_errors", []) or []),
+        )
 
     def scan(self, exchange) -> dict:
         """Run a simulation scan on an exchange."""
@@ -494,17 +497,12 @@ class Simulator:
         open_count = sum(1 for t in self.trades if not t.resolved)
         if open_count > 0:
             try:
-                # Persist current state before resolution so the resolver works on the
-                # full trade set, then reload the updated session into memory.
-                self._save_session()
-                from bot.resolver import TradeResolver
-                resolver = TradeResolver(str(self.data_dir))
-                resolve_result = resolver.resolve_session(self.session_id, exchange, self.risk)
-                self._load_session(self.session_id)
-                if resolve_result.get("resolved_this_pass", 0) > 0:
+                resolution_events = self.resolve_open_positions(exchange)
+                if resolution_events:
+                    resolve_result = dict(self.resolution_adapter.last_summary)
                     logger.info(
-                        f"🔄 Resolved {resolve_result['resolved_this_pass']} trades | "
-                        f"Session P&L: ${resolve_result['session_pnl']:+.4f}"
+                        f"🔄 Resolved {len(resolution_events)} trades | "
+                        f"Session P&L: ${resolve_result.get('session_pnl', self.balance - self.starting_balance):+.4f}"
                     )
             except Exception as e:
                 logger.debug(f"Resolution pass error: {e}")
@@ -544,148 +542,83 @@ class Simulator:
         return None
 
     def _create_trade(self, signal: dict, blockers: Optional[Counter] = None) -> Optional[SimTrade]:
-        normalized = self._normalize_trade_terms(signal)
-        if normalized is None:
+        context = self.state_adapter.build_trade_context(signal)
+        decision = build_trade_decision(
+            context,
+            kelly_sizer=self.kelly,
+            risk_policy=self.risk,
+            min_edge=self.min_edge,
+            min_confidence=self.min_confidence,
+            max_entry_price=self.max_entry_price,
+        )
+
+        if not decision.approved:
             if blockers is not None:
-                blockers["invalid_signal"] += 1
+                blockers[decision.reason_code] += 1
+            logger.info(f"  🛑 Shared decision skipped: {decision.reason}")
             return None
 
-        direction = normalized["direction"]
-        entry_price = normalized["entry_price"]
-        win_probability = normalized["win_probability"]
-
-        sizing_cash = max(0.0, self.available_cash)
-        size = self.kelly.calculate(win_probability, entry_price, sizing_cash)
-        if size <= 0:
-            if blockers is not None:
-                blockers["kelly_zero_size"] += 1
-            logger.info(
-                f"  🛑 Kelly rejected: size={size:.2f} "
-                f"(wp={win_probability:.3f}, ep={entry_price:.3f}, cash={sizing_cash:.2f})"
-            )
-            return None
-
-        # === Risk Management Check ===
-        risk_decision = self.risk.check_trade(signal, size, available_cash=self.available_cash)
-
-        if not risk_decision.approved:
-            if blockers is not None:
-                blockers[self._reason_key(risk_decision.reason)] += 1
-            logger.info(f"  🛑 Risk rejected: {risk_decision.reason}")
-            return None
-
-        if risk_decision.warnings:
-            for w in risk_decision.warnings:
+        if decision.warnings:
+            for w in decision.warnings:
                 logger.debug(f"⚠️  {w}")
 
-        # Use risk-adjusted size
-        size = risk_decision.adjusted_size
+        result = self.execute(decision, context)
+        if not result.accepted:
+            if blockers is not None:
+                blockers[result.metadata.get("reason_code", "execution_rejected")] += 1
+            logger.info(f"  🛑 Paper execution skipped: {result.message or result.status}")
+            return None
 
-        # Extract category: use signal's category, or derive from market ID
-        # Weather markets: KXHIGHNY-26MAR19-T43 -> KXHIGHNY
-        # Split market ID to get the base ticker (city+type prefix)
-        raw_category = signal.get("category", "") or ""
-        if not raw_category:
-            market_id = signal.get("market_id", "")
-            # Pattern: KXHIGHNY-26MAR19-T43 -> KXHIGHNY
-            parts = market_id.split("-")
-            if len(parts) >= 2:
-                raw_category = parts[0]  # e.g. KXHIGHNY, KXLOWTCHI
-
-        # === Partial fill / slippage simulation ===
-        # If our position size is large relative to available liquidity,
-        # model a worse fill price (we walk up/down the book).
-        fill_price = self._apply_fill_slippage(entry_price, size, signal, direction)
-
-        trade = SimTrade(
-            id=f"sim_{self.session_id}_{len(self.trades)+1:04d}",
-            timestamp=datetime.now(timezone.utc).isoformat(),
-            exchange=signal.get("exchange", "unknown"),
-            market_id=signal.get("market_id", ""),
-            question=signal.get("question", ""),
-            direction=direction,
-            model_probability=round(win_probability, 4),
-            market_price=round(fill_price, 4),
-            edge=signal.get("edge", 0),
-            confidence=signal.get("confidence", 0),
-            position_size=round(size, 2),
-            category=raw_category,
-            signals=signal.get("signals", {}),
-            contracts=round(calculate_contracts(fill_price, size), 4),
-            reserved_capital=round(size, 2),
-            available_cash_before=round(self.available_cash, 2),
-            available_cash_after_entry=round(self.available_cash - size, 2),
-        )
+        trade = self._trade_from_execution_result(result)
         enrich_trade_audit_fields(trade.__dict__)
-
-        # Record with risk manager
-        self.risk.record_trade({
-            "id": trade.id,
-            "question": trade.question,
-            "direction": trade.direction,
-            "position_size": trade.position_size,
-            "reserved_capital": trade.reserved_capital,
-            "market_price": trade.market_price,
-        })
-
-        self.available_cash = round(self.available_cash - trade.position_size, 2)
-        self.reserved_capital = round(self.reserved_capital + trade.reserved_capital, 2)
-
         return trade
 
+    def _trade_from_execution_result(self, result: ExecutionResult) -> SimTrade:
+        metadata = dict(result.metadata or {})
+        return SimTrade(
+            id=result.trade_id,
+            timestamp=metadata.get("timestamp", datetime.now(timezone.utc).isoformat()),
+            exchange=metadata.get("exchange", "unknown"),
+            market_id=metadata.get("market_id", ""),
+            question=metadata.get("question", ""),
+            direction=result.action,
+            model_probability=metadata.get("model_probability", 0.5),
+            market_price=round(result.fill_price or 0.0, 4),
+            edge=metadata.get("edge", 0),
+            confidence=metadata.get("confidence", 0),
+            position_size=round(result.filled_size, 2),
+            signals=metadata.get("signals", {}),
+            decision_trace=dict(metadata.get("decision_trace", {}) or {}),
+            category=metadata.get("category", ""),
+            reserved_capital=self._coerce_float_or_none(metadata.get("reserved_capital")),
+            available_cash_before=self._coerce_float_or_none(metadata.get("available_cash_before")),
+            available_cash_after_entry=self._coerce_float_or_none(metadata.get("available_cash_after_entry")),
+            contracts=self._coerce_float_or_none(metadata.get("contracts")),
+        )
+
     def _effective_trades(self) -> list[SimTrade]:
-        return [trade for trade in self.trades if self._is_trade_effective(trade)]
+        return self.state_adapter.effective_trades()
 
     def _prune_ineffective_trades(self):
-        effective = self._effective_trades()
-        if len(effective) != len(self.trades):
-            logger.warning(f"Pruned {len(self.trades) - len(effective)} zero-sized or malformed trades from session {self.session_id}")
-            self.trades = effective
+        self.state_adapter.prune_ineffective_trades()
 
     def _is_trade_effective(self, trade: SimTrade) -> bool:
-        return self._is_trade_row_effective(asdict(trade))
+        return self.state_adapter.is_trade_effective(trade)
 
     def _is_trade_row_effective(self, trade_data: dict) -> bool:
-        return is_trade_effective_row(trade_data)
+        return self.state_adapter.is_trade_row_effective(trade_data)
 
     def _coerce_float_or_none(self, value) -> Optional[float]:
-        try:
-            if value is None:
-                return None
-            value = float(value)
-        except (TypeError, ValueError):
-            return None
-        return value if isfinite(value) else None
+        return self.state_adapter.coerce_float_or_none(value)
 
     def _trade_reserved_amount(self, trade: SimTrade) -> float:
-        reserved = self._coerce_float_or_none(getattr(trade, "reserved_capital", None))
-        if reserved is not None and reserved >= 0:
-            return round(reserved, 2)
-        size = self._coerce_float_or_none(getattr(trade, "position_size", None))
-        if size is not None and size > 0:
-            return round(size, 2)
-        return 0.0
+        return self.state_adapter.trade_reserved_amount(trade)
 
     def _refresh_capital_state(self):
-        self.reserved_capital = round(
-            sum(self._trade_reserved_amount(trade) for trade in self.trades if not trade.resolved),
-            2,
-        )
-        self.available_cash = round(self.balance - self.reserved_capital, 2)
+        self.state_adapter.refresh_capital_state()
 
     def _reason_key(self, reason: str) -> str:
-        cleaned = (reason or "risk_rejected").lower()
-        for old, new in (
-            ("%", "pct"),
-            ("$", "usd"),
-            ("/", "_"),
-            ("(", ""),
-            (")", ""),
-            ("-", "_"),
-        ):
-            cleaned = cleaned.replace(old, new)
-        cleaned = "".join(ch if ch.isalnum() else "_" for ch in cleaned)
-        return f"risk_{'_'.join(part for part in cleaned.split('_') if part)}"
+        return reason_to_key(reason, prefix="risk")
 
     def _format_blockers(self, blockers: Counter, limit: int = 4) -> str:
         if not blockers:
@@ -693,100 +626,37 @@ class Simulator:
         return ", ".join(f"{key}={count}" for key, count in blockers.most_common(limit))
 
     def _normalize_trade_terms(self, signal: dict) -> Optional[dict]:
-        """Normalize a signal into the purchased contract price and win probability.
+        return normalize_trade_context(self.state_adapter.build_trade_context(signal))
 
-        Uses the actual ask price for each side:
-        - BUY_YES: entry = yes_ask (market_price)
-        - BUY_NO:  entry = no_ask  (no_market_price when available, else 1 - yes_ask)
-        """
-        try:
-            yes_ask = float(signal.get("market_price", 0) or 0)
-            model_prob = float(signal.get("model_probability", 0.5) or 0.5)
-        except (TypeError, ValueError):
-            return None
+    def get_account_state(self) -> AccountState:
+        """Return the current paper account snapshot for the shared core."""
+        return self.state_adapter.get_account_state()
 
-        if not (isfinite(yes_ask) and isfinite(model_prob)):
-            return None
-        if not (0 < yes_ask < 1):
-            return None
-        if not (0 <= model_prob <= 1):
-            return None
+    def list_open_positions(self) -> list[PositionState]:
+        """Return paper positions in a mode-agnostic adapter shape."""
+        return self.state_adapter.list_open_positions()
 
-        direction = str(signal.get("direction", "BUY_YES") or "BUY_YES").upper()
-        if direction == "BUY_NO":
-            # Use actual NO ask price if provided, else fall back to complement of YES ask
-            try:
-                no_ask_raw = signal.get("no_market_price")
-                no_ask = float(no_ask_raw) if no_ask_raw is not None else None
-            except (TypeError, ValueError):
-                no_ask = None
+    def get_paper_session_state(self) -> PaperSessionState:
+        """Return paper-only session metadata for adapter consumers."""
+        return self.state_adapter.get_paper_session_state()
 
-            if no_ask is not None and 0 < no_ask < 1:
-                entry_price = no_ask
-            else:
-                entry_price = 1 - yes_ask
+    def _build_trade_context(self, signal: dict) -> TradeContext:
+        """Map the current paper signal into the shared trade context."""
+        return self.state_adapter.build_trade_context(signal)
 
-            win_probability = 1 - model_prob
-        else:
-            direction = "BUY_YES"
-            entry_price = yes_ask
-            win_probability = model_prob
+    def execute(self, decision: TradeDecision, context: TradeContext) -> ExecutionResult:
+        """Execute a shared decision through the paper execution adapter."""
 
-        if not (0 < entry_price < 1):
-            return None
-        if not (0 <= win_probability <= 1):
-            return None
+        return self.execution_adapter.execute(decision, context)
 
-        return {
-            "direction": direction,
-            "entry_price": entry_price,
-            "win_probability": win_probability,
-        }
+    def resolve_open_positions(self, settlement_source=None) -> list[ResolutionEvent]:
+        """Resolve paper positions through the paper resolution adapter."""
+
+        return self.resolution_adapter.resolve_open_positions(settlement_source)
 
     def _apply_fill_slippage(self, entry_price: float, size: float,
                               signal: dict, direction: str) -> float:
-        """
-        Model realistic fill price based on position size vs liquidity.
-
-        When position_size is small relative to liquidity, fill at best ask/bid.
-        As size grows relative to liquidity, simulate walking up the book
-        by adding a slippage factor proportional to size / liquidity.
-
-        Kalshi order books are shallow — even modest sizes can move the fill price.
-        """
-        # Get liquidity from the market signal (dollars at best level)
-        market = signal.get("_market")
-        liquidity = getattr(market, "liquidity", 0) if market else 0
-
-        if liquidity <= 0 or size <= 0:
-            return entry_price
-
-        # What fraction of available liquidity are we consuming?
-        consumption_pct = size / max(liquidity, 1.0)
-
-        if consumption_pct < 0.05:
-            # Small relative to book — no meaningful slippage
-            return entry_price
-
-        # Linear slippage model: each percent of liquidity consumed adds ~0.1% to price
-        # Cap slippage at 3 cents (prevents absurd fill prices on thin books)
-        slippage = min(consumption_pct * 0.10, 0.03)
-
-        if direction == "BUY_YES":
-            # Buying YES → slippage makes price worse (higher)
-            fill_price = min(entry_price + slippage, 0.99)
-        else:
-            # Buying NO → slippage makes price worse (higher for NO contracts)
-            fill_price = min(entry_price + slippage, 0.99)
-
-        if fill_price != entry_price:
-            logger.debug(
-                f"  📉 Slippage: {entry_price:.3f} → {fill_price:.3f} "
-                f"(size=${size:.2f}, liquidity=${liquidity:.2f}, "
-                f"consumption={consumption_pct:.1%})"
-            )
-
-        return round(fill_price, 4)
+        return self.execution_adapter.apply_fill_slippage(entry_price, size, signal, direction)
 
     def _compute_time_adjusted_score(self, signal: dict, market) -> float:
         """
@@ -957,33 +827,7 @@ Direction Breakdown:""")
 
     def _save_session(self):
         """Save session data to disk."""
-        self._prune_ineffective_trades()
-        for trade in self.trades:
-            enrich_trade_audit_fields(trade.__dict__)
-        self._refresh_capital_state()
-        self.risk.sync_with_trades(
-            self.trades,
-            current_balance=self.balance,
-            starting_balance=self.starting_balance,
-            available_cash=self.available_cash,
-            reserved_capital=self.reserved_capital,
-        )
-        session_file = self.data_dir / f"sim_{self.session_id}.json"
-        data = {
-            "session_id": self.session_id,
-            "starting_balance": self.starting_balance,
-            "balance": self.balance,
-            "available_cash": self.available_cash,
-            "reserved_capital": self.reserved_capital,
-            "scan_count": self.scan_count,
-            "max_entry_price": self.max_entry_price,
-            "trades": [asdict(t) for t in self.trades],
-            "report": self.report(),
-            "consecutive_daily_losses": self.consecutive_daily_losses,
-            "last_loss_date": self.last_loss_date,
-        }
-        with open(session_file, "w") as f:
-            json.dump(data, f, indent=2, default=str)
+        self.session_store.save_session()
 
     def check_daily_loss_streak(self) -> tuple[bool, int]:
         """

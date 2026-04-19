@@ -1,0 +1,45 @@
+"""Shared core interfaces and thin decision path."""
+
+from .decision import build_trade_decision, normalize_trade_context, reason_to_key
+from .interfaces import (
+    AccountState,
+    AccountStateProvider,
+    CancelOrderResult,
+    ExecutionAdapter,
+    ExecutionResult,
+    LiveExecutionAdapter,
+    LiveStateAdapter,
+    TradeContext,
+    TradeDecision,
+    OrderState,
+    PaperExecutionAdapter,
+    PaperSessionState,
+    PaperStateAdapter,
+    PositionState,
+    ResolutionAdapter,
+    ResolutionEvent,
+    StateAdapter,
+)
+
+__all__ = [
+    "AccountState",
+    "AccountStateProvider",
+    "CancelOrderResult",
+    "ExecutionAdapter",
+    "ExecutionResult",
+    "LiveExecutionAdapter",
+    "LiveStateAdapter",
+    "OrderState",
+    "PaperExecutionAdapter",
+    "PaperSessionState",
+    "PaperStateAdapter",
+    "PositionState",
+    "ResolutionAdapter",
+    "ResolutionEvent",
+    "StateAdapter",
+    "TradeContext",
+    "TradeDecision",
+    "build_trade_decision",
+    "normalize_trade_context",
+    "reason_to_key",
+]

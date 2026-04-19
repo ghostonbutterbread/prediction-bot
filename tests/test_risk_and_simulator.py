@@ -89,6 +89,91 @@ class SimulatorSessionTests(unittest.TestCase):
             self.assertEqual(sim.reserved_capital, 85.0)
             self.assertEqual(sim.risk.state.available_cash, 15.0)
             self.assertEqual(sim.risk.state.reserved_capital, 85.0)
+            self.assertEqual(trade.decision_trace["normalized"]["direction"], "BUY_YES")
+            self.assertEqual(trade.decision_trace["account_state"]["available_cash"], 25.0)
+
+    def test_create_trade_routes_buy_no_through_shared_decision_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = Simulator(
+                {
+                    "data_dir": tmpdir,
+                    "enable_social": False,
+                    "strategy": {
+                        "enable_news": False,
+                        "enable_social": False,
+                        "enable_ai": False,
+                    },
+                }
+            )
+            sim.available_cash = 25.0
+            sim.reserved_capital = 75.0
+            sim.risk.state.available_cash = 25.0
+            sim.risk.state.reserved_capital = 75.0
+
+            signal = {
+                "market_id": "test-market-no",
+                "question": "Will test settle NO?",
+                "exchange": "kalshi",
+                "direction": "BUY_NO",
+                "model_probability": 0.3,
+                "market_price": 0.4,
+                "no_market_price": 0.62,
+                "edge": 0.3,
+                "confidence": 0.9,
+                "signals": {},
+            }
+
+            with patch.object(sim.kelly, "calculate", return_value=10.0) as mock_calculate:
+                trade = sim._create_trade(signal)
+
+            self.assertIsNotNone(trade)
+            mock_calculate.assert_called_once_with(0.7, 0.62, 25.0)
+            self.assertEqual(trade.direction, "BUY_NO")
+            self.assertEqual(trade.market_price, 0.62)
+            self.assertEqual(trade.model_probability, 0.7)
+            self.assertEqual(trade.decision_trace["normalized"]["direction"], "BUY_NO")
+            self.assertEqual(trade.decision_trace["normalized"]["entry_price"], 0.62)
+
+    def test_create_trade_uses_side_specific_buy_no_market_price_when_no_no_quote_is_provided(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = Simulator(
+                {
+                    "data_dir": tmpdir,
+                    "enable_social": False,
+                    "strategy": {
+                        "enable_news": False,
+                        "enable_social": False,
+                        "enable_ai": False,
+                    },
+                }
+            )
+            sim.available_cash = 25.0
+            sim.reserved_capital = 75.0
+            sim.risk.state.available_cash = 25.0
+            sim.risk.state.reserved_capital = 75.0
+
+            signal = {
+                "market_id": "test-market-no-side-price",
+                "question": "Will test settle NO?",
+                "exchange": "kalshi",
+                "direction": "BUY_NO",
+                "model_probability": 0.3,
+                "market_price": 0.24,
+                "edge": 0.3,
+                "confidence": 0.9,
+                "signals": {},
+            }
+
+            with patch.object(sim.kelly, "calculate", return_value=10.0) as mock_calculate:
+                trade = sim._create_trade(signal)
+
+            self.assertIsNotNone(trade)
+            mock_calculate.assert_called_once_with(0.7, 0.24, 25.0)
+            self.assertEqual(trade.direction, "BUY_NO")
+            self.assertEqual(trade.market_price, 0.24)
+            self.assertEqual(trade.model_probability, 0.7)
+            self.assertEqual(trade.decision_trace["normalized"]["direction"], "BUY_NO")
+            self.assertEqual(trade.decision_trace["normalized"]["entry_price"], 0.24)
 
     def test_load_session_discards_zero_sized_trade_rows(self):
         with tempfile.TemporaryDirectory() as tmpdir:
