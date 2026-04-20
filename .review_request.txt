@@ -1,0 +1,29 @@
+Review the current implementation of the shared status/notification refactor and adjacent trading-control changes.
+
+Repo: /home/ryushe/projects/prediction-bot
+Branch: shared-core-adapters
+
+Focus on these files and their interactions:
+- bot/status.py
+- paper_loop.py
+- main.py
+- bot/simulator.py
+- bot/risk.py
+- bot/shared_core/decision.py
+- bot/shared_core/interfaces.py
+- bot/paper_adapters.py
+- tests/test_status_module.py
+- tests/test_risk_and_simulator.py
+
+What I want from you:
+1. Concrete findings, not fluff.
+2. What looks good architecturally.
+3. Bugs, edge cases, or design mistakes that should be fixed before live usage.
+4. Any config drift or boundary mistakes between paper and live paths.
+5. A short “remaining v1 checklist” for a working first live version.
+
+Important constraints:
+- REVIEW ONLY. Do not modify files.
+- Be pragmatic. Prefer real risks over hypothetical style nits.
+- If something is acceptable for v1, say that clearly.
+- If a concern is only future hardening, separate it from must-fix items.
