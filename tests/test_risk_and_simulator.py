@@ -42,7 +42,60 @@ class RiskManagerTests(unittest.TestCase):
 
             self.assertTrue(decision.approved)
             self.assertEqual(decision.adjusted_size, 3.5)
-            self.assertTrue(any("Available cash capped size" in warning for warning in decision.warnings))
+            self.assertEqual(decision.metadata["effective_tradable_cash"], 3.5)
+
+    def test_trading_pause_rejects_new_trades(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            risk = RiskManager(
+                {
+                    "data_dir": tmpdir,
+                    "starting_balance": 100.0,
+                    "trading_enabled": False,
+                }
+            )
+
+            decision = risk.check_trade({"question": "Will BTC rise?"}, 5.0)
+
+            self.assertFalse(decision.approved)
+            self.assertEqual(decision.reason, "Trading paused by operator")
+            self.assertEqual(decision.metadata["reason_code"], "trading_disabled")
+
+    def test_max_tradable_balance_caps_size_before_available_cash(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            risk = RiskManager(
+                {
+                    "data_dir": tmpdir,
+                    "starting_balance": 100.0,
+                    "max_tradable_balance_usd": 10.0,
+                }
+            )
+            risk.state.current_balance = 100.0
+            risk.state.available_cash = 50.0
+
+            decision = risk.check_trade({"question": "Will BTC rise?"}, 18.0, available_cash=50.0)
+
+            self.assertTrue(decision.approved)
+            self.assertEqual(decision.adjusted_size, 10.0)
+            self.assertTrue(any("Tradable balance capped size" in warning for warning in decision.warnings))
+            self.assertEqual(decision.metadata["effective_tradable_cash"], 10.0)
+
+    def test_hard_position_cap_clips_size(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            risk = RiskManager(
+                {
+                    "data_dir": tmpdir,
+                    "starting_balance": 100.0,
+                    "max_position_size_usd": 4.0,
+                }
+            )
+            risk.state.current_balance = 100.0
+            risk.state.available_cash = 20.0
+
+            decision = risk.check_trade({"question": "Will BTC rise?"}, 8.0, available_cash=20.0)
+
+            self.assertTrue(decision.approved)
+            self.assertEqual(decision.adjusted_size, 4.0)
+            self.assertTrue(any("Hard position cap clipped size" in warning for warning in decision.warnings))
 
 
 class SimulatorSessionTests(unittest.TestCase):
@@ -91,6 +144,7 @@ class SimulatorSessionTests(unittest.TestCase):
             self.assertEqual(sim.risk.state.reserved_capital, 85.0)
             self.assertEqual(trade.decision_trace["normalized"]["direction"], "BUY_YES")
             self.assertEqual(trade.decision_trace["account_state"]["available_cash"], 25.0)
+            self.assertEqual(trade.decision_trace["kelly"]["bankroll"], 25.0)
 
     def test_create_trade_routes_buy_no_through_shared_decision_path(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -133,6 +187,44 @@ class SimulatorSessionTests(unittest.TestCase):
             self.assertEqual(trade.model_probability, 0.7)
             self.assertEqual(trade.decision_trace["normalized"]["direction"], "BUY_NO")
             self.assertEqual(trade.decision_trace["normalized"]["entry_price"], 0.62)
+
+    def test_create_trade_uses_tradable_balance_for_kelly_bankroll(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = Simulator(
+                {
+                    "data_dir": tmpdir,
+                    "enable_social": False,
+                    "max_tradable_balance_usd": 10.0,
+                    "strategy": {
+                        "enable_news": False,
+                        "enable_social": False,
+                        "enable_ai": False,
+                    },
+                }
+            )
+            sim.available_cash = 25.0
+            sim.reserved_capital = 75.0
+            sim.risk.state.available_cash = 25.0
+            sim.risk.state.reserved_capital = 75.0
+
+            signal = {
+                "market_id": "test-market-cap",
+                "question": "Will test settle YES?",
+                "exchange": "kalshi",
+                "direction": "BUY_YES",
+                "model_probability": 0.7,
+                "market_price": 0.4,
+                "edge": 0.3,
+                "confidence": 0.9,
+                "signals": {},
+            }
+
+            with patch.object(sim.kelly, "calculate", return_value=10.0) as mock_calculate:
+                trade = sim._create_trade(signal)
+
+            self.assertIsNotNone(trade)
+            mock_calculate.assert_called_once_with(0.7, 0.4, 10.0)
+            self.assertEqual(trade.decision_trace["kelly"]["bankroll"], 10.0)
 
     def test_create_trade_uses_side_specific_buy_no_market_price_when_no_no_quote_is_provided(self):
         with tempfile.TemporaryDirectory() as tmpdir:

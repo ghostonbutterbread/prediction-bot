@@ -106,11 +106,14 @@ def build_trade_decision(
             reasoning=reasoning,
         )
 
-    sizing_cash = max(0.0, context.account_state.available_cash)
+    account_metadata = dict(context.account_state.metadata or {})
+    effective_tradable_cash = account_metadata.get("effective_tradable_cash", context.account_state.available_cash)
+    sizing_cash = max(0.0, float(effective_tradable_cash))
     requested_size = float(kelly_sizer.calculate(win_probability, entry_price, sizing_cash) or 0.0)
     reasoning["kelly"] = {
         "bankroll": round(sizing_cash, 2),
         "requested_size": requested_size,
+        "available_cash": round(context.account_state.available_cash, 2),
     }
 
     if not isfinite(requested_size) or requested_size <= 0:
