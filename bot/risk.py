@@ -529,12 +529,13 @@ class RiskManager:
 
     def record_trade(self, trade: dict):
         """Record a trade for risk tracking."""
-        size = self._coerce_float(trade.get("position_size"))
+        size = self._coerce_float(trade.get("position_size", trade.get("size")))
         if size <= 0:
             return
         reserved_capital = self._coerce_float(trade.get("reserved_capital"), size)
+        trade_id = trade.get("id") or trade.get("trade_id") or ""
         self.state.trade_history.append({
-            "trade_id": trade.get("id", ""),
+            "trade_id": trade_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "question": trade.get("question", ""),
             "direction": trade.get("direction", ""),
@@ -549,6 +550,31 @@ class RiskManager:
         self.state.available_cash = round(self.state.available_cash - reserved_capital, 2)
         self.state.reserved_capital = round(self.state.reserved_capital + reserved_capital, 2)
         self.state.daily_trades += 1
+        self._save_state()
+
+    def sync_account_state(
+        self,
+        *,
+        current_balance: Optional[float] = None,
+        available_cash: Optional[float] = None,
+        reserved_capital: Optional[float] = None,
+        total_exposure: Optional[float] = None,
+        open_positions: Optional[int] = None,
+    ):
+        """Synchronize risk state with a live account snapshot before shared checks."""
+        if current_balance is not None:
+            self.state.current_balance = self._coerce_float(current_balance, self.state.current_balance)
+        if available_cash is not None:
+            self.state.available_cash = round(self._coerce_float(available_cash, self.state.available_cash), 2)
+        if reserved_capital is not None:
+            self.state.reserved_capital = round(self._coerce_float(reserved_capital, self.state.reserved_capital), 2)
+        if total_exposure is not None:
+            self.state.total_exposure = round(self._coerce_float(total_exposure, self.state.total_exposure), 2)
+        if open_positions is not None:
+            self.state.open_positions = max(0, int(open_positions))
+
+        self.state.peak_balance = max(self.state.peak_balance, self.state.current_balance)
+        self.state.session_peak_balance = max(self.state.session_peak_balance, self.state.current_balance)
         self._save_state()
 
     def sync_with_trades(

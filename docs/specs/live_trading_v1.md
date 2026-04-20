@@ -9,6 +9,7 @@ Scope: first controlled live rollout after paper trading baseline is committed a
 - keep Kelly sizing, but bound it with wallet and position caps
 - prioritize weather-market risk containment over realized-P&L-only controls
 - add operator visibility through periodic status logging and alerts
+- make core trading controls and operator visibility shared between paper and live wherever possible
 
 ## Non-goals for v1
 - automatic cancellation of open orders on pause
@@ -113,6 +114,39 @@ Notes:
 - `max_exposure_pct_live` should still exist as a portfolio backstop
 - `max_daily_realized_loss_usd_live` should exist even if not the main control for weather
 
+## Shared-core requirement
+The long-term direction for v1 is not separate paper logic and live logic that merely look similar.
+
+Instead:
+- trade gating should be decided in one shared decision path
+- risk controls should be computed in one shared risk path
+- status snapshots and status formatting should be produced from one shared status path
+- paper and live should differ mainly at the adapter boundaries that provide state and execute orders
+
+Desired split:
+- shared core:
+  - signal normalization
+  - entry-price normalization
+  - Kelly sizing input calculation
+  - `trading_enabled` gate
+  - effective tradable bankroll cap
+  - hard position cap
+  - exposure cap / open-position cap checks
+  - stable skip/block reason codes
+  - status snapshot structure
+  - status message formatting
+- paper adapter:
+  - paper account state
+  - simulated fill/reserve/release behavior
+  - paper session metadata
+- live adapter:
+  - exchange-backed account state
+  - order placement / order status / cancellation behavior
+  - live open-order and partial-fill state
+
+Rule for implementation going forward:
+- if a new control or status field is intended to exist in both paper and live, implement it in shared logic first unless there is a concrete reason it must be adapter-specific
+
 ## Sizing logic
 For every candidate trade in live mode:
 1. check `trading_enabled`
@@ -213,27 +247,36 @@ Future tuning can reduce noise without changing core logic.
 - avoid mixing live-trading work into unreviewed paper edits
 - keep a clean branch point for live work
 
-### Phase 2: add structured status logging while still in paper mode
-- startup/shutdown messages
-- hourly summaries
-- trade and skip reason aggregation
-- error aggregation
-
-This gives immediate visibility and tests the reporting layer before live orders exist.
+### Phase 2: finish shared status + shared decision direction in paper
+- keep `bot/status.py` as the shared status/notification formatting layer
+- keep shared decision and risk evaluation in the shared path
+- ensure new fields added for operator visibility are defined once and reusable by both modes
+- continue using paper as the first proving ground, but do not let it become a paper-only architecture
 
 ### Phase 3: add explicit live-mode config surface
 - add `trading.mode`
 - add `trading_enabled`
 - add new live risk fields
 - ensure old env behavior does not silently override the new config in confusing ways
+- make mode/config source of truth explicit instead of relying mainly on `PAPER_MODE`
 
-### Phase 4: wire live sizing safeguards
-- effective tradable bankroll cap
-- hard per-position cap
-- portfolio exposure cap integration
-- pause gate before order placement
+### Phase 4: wire the actual live runner into the shared path
+- route live trade evaluation through the same shared decision + risk path used by simulator/paper adapters
+- route live status output through shared snapshot + formatter logic
+- add a real `main.py status` command for the main runner
+- ensure the current live/runner path does not bypass tradable-balance or position-cap protections
 
-### Phase 5: controlled live rollout
+### Phase 5: complete operator lifecycle visibility
+- startup/shutdown messages
+- hourly summaries
+- trade and skip reason aggregation
+- risk block events
+- error aggregation
+- pause/resume visibility
+
+This gives the same operator-facing surface in both paper and live.
+
+### Phase 6: controlled live rollout
 - fund small amount
 - set low tradable cap
 - run for about a week
@@ -253,11 +296,35 @@ At time of drafting, the repo already appears to have:
 - paper/live risk presets in config and `bot/risk.py`
 - a session-level drawdown halt
 - persistent paper simulator state
+- shared status formatting in `bot/status.py`
+- shared decision/adapters groundwork for the simulator path
 - hourly summary logging in `paper_loop.py`
 
 That means v1 is not starting from zero. The main missing pieces seem to be:
 - a clean explicit live config surface
-- wallet-level tradable balance cap
-- hard live position cap in dollars
-- clearer operator-facing status/alert delivery
-- a clean branch/commit boundary from current paper work into live work
+- live runner integration with the same shared decision/risk path already protecting simulator flow
+- `main.py status` implementation for the main runner
+- fuller shared lifecycle/status event coverage across paper and live
+- a clean commit boundary once the working slice is actually solid
+
+## Known architecture gap to close
+Previous behavior was asymmetric:
+- simulator/shared-core paper flow got the new `trading_enabled`, tradable-balance, and max-position protections
+- the existing main/live runner path still had legacy direct execution behavior and could bypass those protections
+
+Current status after the latest implementation slice:
+- the main runner now routes live trade approval through the same shared decision + risk path before order placement
+- the main runner now exposes a shared-formatted `main.py status` view
+- the main runner now tracks shared blocker reasons in scan results/logs
+
+Still not done yet:
+- live account/order state is still a thin in-runner implementation, not a dedicated live adapter module
+- open live positions are tracked in-memory only in the runner, not yet reconciled from exchange truth on restart
+- partial fills / resting orders / cancellations are not yet modeled through a true `LiveExecutionAdapter`
+- live settlement/result reconciliation is still behind the paper flow in maturity
+
+Definition of done for this gap:
+- paper and live both derive trade approvals from the same shared decision/risk logic
+- paper and live both populate the same core status snapshot fields
+- paper and live both expose operator status through the same formatter
+- adapter-specific differences stay confined to environment state, order execution, and settlement mechanics

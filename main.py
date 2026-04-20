@@ -22,8 +22,9 @@ import json
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from pathlib import Path
 from dotenv import load_dotenv
+
+from bot.status import format_status_message
 
 load_dotenv()
 
@@ -137,6 +138,8 @@ def cmd_live(interval: int = 120):
     from bot.runner import PredictionBot
 
     config = get_config()
+    config.setdefault("trading", {})["mode"] = "live"
+    os.environ["PAPER_MODE"] = "false"
     bot = PredictionBot(config)
 
     api_key = os.getenv("KALSHI_API_KEY_ID")
@@ -158,6 +161,19 @@ def cmd_live(interval: int = 120):
         bot.stop()
     finally:
         bot.close()
+
+
+def cmd_status():
+    """Show current runner status using the shared formatter."""
+    from bot.runner import PredictionBot
+
+    config = get_config()
+    mode = config.get("trading", {}).get("mode", os.getenv("TRADING_MODE", "paper")).lower()
+    os.environ["PAPER_MODE"] = "false" if mode == "live" else "true"
+    bot = PredictionBot(config)
+
+    snapshot = bot.build_status_snapshot(reason="manual status")
+    print(format_status_message(snapshot, reason="manual status"))
 
 
 def cmd_markets():
@@ -487,6 +503,8 @@ def main():
     elif cmd == "live":
         interval = int(sys.argv[2]) if len(sys.argv) > 2 else 120
         cmd_live(interval)
+    elif cmd == "status":
+        cmd_status()
     elif cmd == "markets":
         cmd_markets()
     elif cmd == "simulate":
