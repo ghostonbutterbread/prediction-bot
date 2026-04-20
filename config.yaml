@@ -158,11 +158,25 @@ strategy:
 # Override with KALSHI_FEE_RATE env var.
 kalshi_fee_rate: 0.07   # 7% — Kalshi standard
 
+# === Trading Runtime Controls ===
+# This is the canonical operator-facing control section.
+# Keep live/paper mode and pause/resume here so one quick edit controls runtime behavior.
+#
+# Intended live-reload semantics:
+# - mode: selects paper vs live risk preset and execution behavior
+# - enabled: universal runtime switch, false means pause/hold fire
+# - send_startup / send_shutdown / send_pause_resume: operator lifecycle visibility toggles
+trading:
+  mode: paper
+  enabled: true
+  send_startup: true
+  send_shutdown: true
+  send_pause_resume: true
+
 # === Kelly / Risk ===
 # Two presets: PAPER (aggressive for simulation) and LIVE (conservative for real money)
-# Mode auto-detected from KALSHI_USE_DEMO env var:
-#   KALSHI_USE_DEMO=true  → PAPER limits (Half-Kelly, 10% max bet, 20% daily loss)
-#   KALSHI_USE_DEMO=false → LIVE limits (Quarter-Kelly, 5% max bet, 10% daily loss)
+# If trading.mode is explicitly set, it is the source of truth.
+# Legacy env fallback remains for backward compatibility when config mode is absent.
 #
 # Override individual values with env vars (e.g. KELLY_FRACTION=0.3)
 risk:

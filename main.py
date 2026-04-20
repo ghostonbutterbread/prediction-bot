@@ -33,6 +33,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("prediction-bot")
 
 
@@ -74,6 +75,7 @@ def get_config():
         "trading_enabled": trading_enabled,
         "trading": {
             "mode": mode,
+            "enabled": trading_enabled,
             "trading_enabled": trading_enabled,
         },
         "log_dir": os.getenv("LOG_DIR", "data"),
@@ -139,6 +141,7 @@ def cmd_live(interval: int = 120):
 
     config = get_config()
     config.setdefault("trading", {})["mode"] = "live"
+    config.setdefault("trading", {})["enabled"] = config.get("trading_enabled", True)
     os.environ["PAPER_MODE"] = "false"
     bot = PredictionBot(config)
 

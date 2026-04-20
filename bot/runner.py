@@ -53,9 +53,26 @@ class PredictionBot:
         self.last_block_reasons: dict[str, int] = {}
         self.open_positions: list[LivePosition] = []
         self.trade_history: list[dict] = []
+        self.lifecycle_counters = {
+            "signals_considered": 0,
+            "trades_executed": 0,
+            "blocked_total": 0,
+            "errors": 0,
+        }
+        self.lifecycle_block_reasons: dict[str, int] = {}
+        self.lifecycle_started_at = datetime.now(timezone.utc)
+        self._last_hourly_summary_key: str | None = None
 
         self.log_dir = Path(config.get("log_dir", "data"))
         self.log_dir.mkdir(parents=True, exist_ok=True)
+        self._log_lifecycle_event(
+            "startup",
+            {
+                "mode": self.config.get("trading", {}).get("mode", "paper"),
+                "trading_enabled": bool(self.config.get("trading_enabled", self.config.get("trading", {}).get("trading_enabled", True))),
+                "exchange_count": len(self.exchanges),
+            },
+        )
 
     def add_kalshi(self, api_key_id: str, private_key_path: str, demo: bool = True):
         from bot.exchanges.kalshi import KalshiExchange
@@ -130,6 +147,7 @@ class PredictionBot:
             if result.get("blocked_reason"):
                 blocked_reasons[result["blocked_reason"]] = blocked_reasons.get(result["blocked_reason"], 0) + 1
                 self.stats["blocked"] += 1
+                self._log_risk_block_event(sig, result)
             elif result.get("order"):
                 trades += 1
 
@@ -137,8 +155,15 @@ class PredictionBot:
         self.stats["signals"] += len(all_signals)
         self.stats["trades"] += trades
         self.last_block_reasons = blocked_reasons
+        self.lifecycle_counters["signals_considered"] += len(all_signals)
+        self.lifecycle_counters["trades_executed"] += trades
+        blocked_total = sum(blocked_reasons.values())
+        self.lifecycle_counters["blocked_total"] += blocked_total
+        for reason, count in blocked_reasons.items():
+            self.lifecycle_block_reasons[reason] = self.lifecycle_block_reasons.get(reason, 0) + count
 
         self._log_scan(all_signals, trades, blocked_reasons)
+        self._emit_hourly_summary_if_due()
 
         return {
             "markets_scanned": sum(len(exchange.get_markets(limit=5)) for exchange in self.exchanges.values()),
@@ -166,6 +191,7 @@ class PredictionBot:
                 break
             except Exception as e:
                 self.stats["errors"] += 1
+                self.lifecycle_counters["errors"] += 1
                 logger.error(f"Scan error: {e}", exc_info=True)
                 time.sleep(interval_seconds)
 
@@ -183,6 +209,10 @@ class PredictionBot:
         extra = {
             "source": self.config.get("trading", {}).get("mode", "paper"),
             "blocked_last_scan": sum(self.last_block_reasons.values()),
+            "signals_considered": self.lifecycle_counters.get("signals_considered", 0),
+            "trades_executed": self.lifecycle_counters.get("trades_executed", 0),
+            "blocked_total": self.lifecycle_counters.get("blocked_total", 0),
+            "runner_errors": self.lifecycle_counters.get("errors", 0),
         }
         if self.last_block_reasons:
             extra["top_blockers"] = ", ".join(
@@ -388,10 +418,79 @@ class PredictionBot:
                 "size": size,
             }) + "\n")
 
+    def _log_risk_block_event(self, signal: dict, result: dict):
+        decision = result.get("decision")
+        payload = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "market_id": signal.get("market_id", ""),
+            "question": signal.get("question", ""),
+            "exchange": signal.get("exchange", ""),
+            "direction": signal.get("direction", ""),
+            "blocked_reason": result.get("blocked_reason", "unknown"),
+            "decision_reason": getattr(decision, "reason", ""),
+            "decision_reason_code": getattr(decision, "reason_code", ""),
+        }
+        log_file = self.log_dir / "risk_blocks.jsonl"
+        with open(log_file, "a") as f:
+            f.write(json.dumps(payload) + "\n")
+
+    def _emit_hourly_summary_if_due(self):
+        now = datetime.now(timezone.utc)
+        hour_key = now.strftime("%Y-%m-%dT%H")
+        if self._last_hourly_summary_key == hour_key:
+            return
+        self._last_hourly_summary_key = hour_key
+
+        summary = {
+            "timestamp": now.isoformat(),
+            "started_at": self.lifecycle_started_at.isoformat(),
+            "mode": self.config.get("trading", {}).get("mode", "paper"),
+            "scans": self.stats.get("scans", 0),
+            "signals_considered": self.lifecycle_counters.get("signals_considered", 0),
+            "trades_executed": self.lifecycle_counters.get("trades_executed", 0),
+            "blocked_total": self.lifecycle_counters.get("blocked_total", 0),
+            "top_blockers": dict(sorted(self.lifecycle_block_reasons.items(), key=lambda item: item[1], reverse=True)[:5]),
+            "errors": self.lifecycle_counters.get("errors", 0),
+            "open_positions": len(self.open_positions),
+        }
+        log_file = self.log_dir / "hourly_summary.jsonl"
+        with open(log_file, "a") as f:
+            f.write(json.dumps(summary) + "\n")
+
+    def _log_lifecycle_event(self, event_type: str, details: dict | None = None):
+        payload = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "event": event_type,
+            "details": details or {},
+        }
+        log_file = self.log_dir / "lifecycle.jsonl"
+        with open(log_file, "a") as f:
+            f.write(json.dumps(payload) + "\n")
+
     def stop(self):
         self.running = False
+        self._log_lifecycle_event(
+            "stop_requested",
+            {
+                "mode": self.config.get("trading", {}).get("mode", "paper"),
+                "scans": self.stats.get("scans", 0),
+                "trades": self.stats.get("trades", 0),
+            },
+        )
 
     def close(self):
+        self._log_lifecycle_event(
+            "shutdown",
+            {
+                "mode": self.config.get("trading", {}).get("mode", "paper"),
+                "scans": self.stats.get("scans", 0),
+                "signals": self.stats.get("signals", 0),
+                "trades": self.stats.get("trades", 0),
+                "errors": self.stats.get("errors", 0),
+                "blocked": self.stats.get("blocked", 0),
+                "open_positions": len(self.open_positions),
+            },
+        )
         if hasattr(self.strategy, 'news'):
             self.strategy.news.close()
         for exchange in self.exchanges.values():

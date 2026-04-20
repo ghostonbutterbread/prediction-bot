@@ -175,12 +175,13 @@ class RiskManager:
     def __init__(self, config: dict = None):
         config = config or {}
 
-        # Detect mode: PAPER_MODE env from paper_loop.py takes precedence.
-        # If PAPER_MODE=true → use paper limits even if KALSHI_USE_DEMO=false.
-        # KALSHI_USE_DEMO=false means real market data (not demo API), but that
-        # doesn't mean real-money trading — paper_loop.py handles that distinction.
-        paper_mode = os.getenv("PAPER_MODE", "true").lower() == "true"
-        self.is_live = not paper_mode
+        trading_cfg = config.get("trading", {}) or {}
+        configured_mode = str(trading_cfg.get("mode", config.get("mode", "")) or "").strip().lower()
+        if configured_mode in ("live", "paper"):
+            self.is_live = configured_mode == "live"
+        else:
+            paper_mode = os.getenv("PAPER_MODE", "true").lower() == "true"
+            self.is_live = not paper_mode
         preset = get_preset(self.is_live)
 
         # Resolve limits: env vars override preset, explicit config overrides both
@@ -201,7 +202,12 @@ class RiskManager:
         self.cooldown_after_losses = resolve_int("cooldown_after_losses", preset["cooldown_after_losses"])
         self.max_tradable_balance = resolve_float("max_tradable_balance_usd", config.get("max_tradable_balance", 0.0))
         self.max_position_size_usd = resolve_float("max_position_size_usd", config.get("max_position_size_usd", 0.0))
-        self.trading_enabled = bool(config.get("trading_enabled", True))
+        if "enabled" in trading_cfg:
+            self.trading_enabled = bool(trading_cfg.get("enabled"))
+        elif "trading_enabled" in trading_cfg:
+            self.trading_enabled = bool(trading_cfg.get("trading_enabled"))
+        else:
+            self.trading_enabled = bool(config.get("trading_enabled", True))
 
         # Session-level kill-switch: halt permanently if balance falls this far below
         # max(session_starting_balance, session_peak_balance).

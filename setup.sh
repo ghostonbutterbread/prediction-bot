@@ -1,119 +1,37 @@
 #!/usr/bin/env bash
-# setup.sh — Initialize prediction bot on a new machine
-# Usage: bash setup.sh
-#
-# This script:
-# 1. Checks dependencies
-# 2. Installs Python packages
-# 3. Creates .env from template if missing
-# 4. Verifies the setup
+set -euo pipefail
 
-set -e
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV_DIR="${ROOT_DIR}/.venv"
+PYTHON_BIN="${PYTHON:-python3}"
 
-echo "🎰 Prediction Bot Setup"
-echo "========================"
-echo ""
+echo "[setup] project root: ${ROOT_DIR}"
+echo "[setup] python: ${PYTHON_BIN}"
 
-# --- Python version check ---
-PYTHON=""
-for cmd in python3.12 python3.11 python3; do
-    if command -v "$cmd" &>/dev/null; then
-        ver=$($cmd -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-        major=$(echo "$ver" | cut -d. -f1)
-        minor=$(echo "$ver" | cut -d. -f2)
-        if [ "$major" -eq 3 ] && [ "$minor" -ge 11 ]; then
-            PYTHON="$cmd"
-            echo "✅ Python: $cmd ($ver)"
-            break
-        fi
-    fi
-done
-
-if [ -z "$PYTHON" ]; then
-    echo "❌ Python 3.11+ required. Install it and re-run."
-    exit 1
+if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
+  echo "[setup] error: ${PYTHON_BIN} not found" >&2
+  exit 1
 fi
 
-# --- Check for system package manager restrictions ---
-echo ""
-echo "📦 Installing dependencies..."
-
-# Check if key packages are already installed
-MISSING=$($PYTHON -c "
-import importlib
-missing = []
-for mod in ['httpx', 'dotenv', 'yaml', 'kalshi_python_sync']:
-    try:
-        importlib.import_module(mod if mod != 'dotenv' else 'dotenv')
-    except ImportError:
-        missing.append(mod)
-print(' '.join(missing))" 2>/dev/null)
-
-if [ -z "$MISSING" ]; then
-    echo "  All packages already installed"
+if [ ! -d "${VENV_DIR}" ]; then
+  echo "[setup] creating virtual environment at ${VENV_DIR}"
+  "${PYTHON_BIN}" -m venv "${VENV_DIR}"
 else
-    echo "  Missing: $MISSING"
-    # Try install methods in order
-    if $PYTHON -m pip install --break-system-packages -r requirements.txt 2>/dev/null; then
-        echo "  ✅ Installed (--break-system-packages)"
-    elif $PYTHON -m pip install --user -r requirements.txt 2>/dev/null; then
-        echo "  ✅ Installed (--user)"
-    else
-        echo "  ⚠️  Auto-install failed. Try manually:"
-        echo "     $PYTHON -m pip install --break-system-packages -r requirements.txt"
-        echo "     OR: python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt"
-    fi
+  echo "[setup] reusing existing virtual environment at ${VENV_DIR}"
 fi
 
-echo "✅ Dependencies installed"
+# shellcheck disable=SC1091
+source "${VENV_DIR}/bin/activate"
 
-# --- .env setup ---
-echo ""
-if [ -f .env ]; then
-    echo "✅ .env already exists"
-else
-    if [ -f .env.example ]; then
-        cp .env.example .env
-        echo "📝 Created .env from .env.example — EDIT IT with your keys!"
-    else
-        echo "⚠️  No .env or .env.example found"
-    fi
-fi
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install -r "${ROOT_DIR}/requirements.txt"
 
-# --- Verify imports ---
-echo ""
-echo "🔍 Verifying modules..."
-$PYTHON -c "
-from bot.config import load_config
-from bot.scheduler import ScanScheduler
-from bot.researcher import OpenRouterClient, FeedbackTracker
-print('  ✅ All modules importable')
-" 2>/dev/null || echo "  ⚠️  Some modules failed (may need config.yaml)"
+echo
+cat <<'EOF'
+[setup] done.
 
-# --- Config check ---
-echo ""
-if [ -f config.yaml ]; then
-    echo "✅ config.yaml found"
-else
-    echo "⚠️  config.yaml not found — using built-in defaults"
-fi
-
-# --- Data directory ---
-mkdir -p data
-echo "✅ Data directory ready"
-
-# --- Summary ---
-echo ""
-echo "========================"
-echo "✅ Setup complete!"
-echo ""
-echo "Next steps:"
-echo "  1. Edit .env with your API keys"
-echo "  2. (Optional) Edit config.yaml for strategy tuning"
-echo "  3. Run: $PYTHON main.py simulate 10 60"
-echo ""
-echo "Modes:"
-echo "  $PYTHON main.py demo       # Live demo trading"
-echo "  $PYTHON main.py simulate   # Paper trading simulation"
-echo "  $PYTHON main.py markets    # List active markets"
-echo "  $PYTHON main.py status     # Bot status"
+Next steps:
+  source .venv/bin/activate
+  cp .env.example .env   # if needed
+  python main.py paper
+EOF

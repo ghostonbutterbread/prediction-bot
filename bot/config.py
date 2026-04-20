@@ -72,6 +72,15 @@ def _apply_env_overrides(config: dict) -> dict:
     if strategy:
         overrides["strategy"] = strategy
 
+    # Trading runtime controls
+    trading = {}
+    if os.getenv("TRADING_MODE"):
+        trading["mode"] = os.getenv("TRADING_MODE").strip().lower()
+    if os.getenv("TRADING_ENABLED"):
+        trading["enabled"] = os.getenv("TRADING_ENABLED").lower() == "true"
+    if trading:
+        overrides["trading"] = trading
+
     # Risk
     risk = {}
     if os.getenv("KELLY_FRACTION"):
