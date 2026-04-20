@@ -20,25 +20,32 @@ Multi-exchange prediction market trading bot with news sentiment analysis, Kelly
 
 ## Quick Start
 
-```bash
-# 1. Install dependencies
-pip install -r requirements.txt
+This repo uses a project-local virtual environment at `.venv`.
 
-# 2. Copy and configure
+```bash
+# 1. Create/update the virtual environment and install dependencies
+./setup.sh
+
+# 2. Activate the virtual environment
+source .venv/bin/activate
+
+# 3. Copy and configure
 cp .env.example .env
 # Edit .env with your Kalshi API credentials
 
-# 3. Place your Kalshi private key
+# 4. Place your Kalshi private key
 # Download from Kalshi → Settings → API
 # Save as `kalshi_private_key` (no extension) in project root
 
-# 4. Run
+# 5. Run
 python main.py demo      # Demo mode (safe, test data)
 python main.py paper     # Paper trading (live data, no real orders)
 python main.py live      # Live trading (real money!)
 ```
 
 ## Commands
+
+Run commands from the activated `.venv`.
 
 | Command | Description |
 |---------|-------------|
@@ -156,6 +163,15 @@ Uses **half-Kelly Criterion** for mathematically optimal bet sizing:
 ## Risk Warning
 
 ⚠️ This is experimental software. Prediction market trading involves risk of loss. Start with demo mode, then paper trade, then tiny real positions. Never trade more than you can afford to lose.
+
+## Environment Setup
+
+- Canonical environment: project-local virtual environment in `.venv`
+- Bootstrap command: `./setup.sh`
+- Dependency source of truth: `requirements.txt`
+- Config loader now supports `config.yaml`, and PyYAML is installed through the setup script
+
+For future agents and contributors: start with `./setup.sh`, then `source .venv/bin/activate` before running tests or the bot.
 
 ## Project Structure
 

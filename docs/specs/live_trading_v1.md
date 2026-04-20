@@ -316,8 +316,26 @@ Current status after the latest implementation slice:
 - the main runner now routes live trade approval through the same shared decision + risk path before order placement
 - the main runner now exposes a shared-formatted `main.py status` view
 - the main runner now tracks shared blocker reasons in scan results/logs
+- the analyzer path now works when invoked directly from cron or scripts without needing manual `PYTHONPATH=.` bootstrapping
+- noisy `httpx` request logging is now suppressed at the main runner entrypoint so operator logs stay readable
+- the daily paper-trading cron has been patched to degrade gracefully when direct posting is unavailable instead of failing hard
+- runner lifecycle visibility now includes:
+  - hourly summary logging in `hourly_summary.jsonl`
+  - startup / stop-requested / shutdown events in `lifecycle.jsonl`
+  - per-block risk event logging in `risk_blocks.jsonl`
+- runtime control/config resolution is cleaner:
+  - `trading.mode` is now the preferred source of truth for paper vs live
+  - canonical operator pause/resume control is now `trading.enabled`
+  - legacy `trading.trading_enabled` and top-level `trading_enabled` still fall back for backward compatibility
+  - env fallback still exists when explicit config is absent
+- the repo now has a standard local-environment bootstrap path:
+  - `./setup.sh` creates or reuses `.venv`
+  - dependencies install into the repo-local virtual environment
+  - README now documents `.venv` as the expected execution environment for future agents/operators
 
 Still not done yet:
+- pause/resume visibility is not yet modeled as an explicit lifecycle event stream tied to a single canonical runtime control section
+- live config still needs a clearer, more operator-friendly universal control block for start/stop/pause/resume semantics and live-reload behavior
 - live account/order state is still a thin in-runner implementation, not a dedicated live adapter module
 - open live positions are tracked in-memory only in the runner, not yet reconciled from exchange truth on restart
 - partial fills / resting orders / cancellations are not yet modeled through a true `LiveExecutionAdapter`
