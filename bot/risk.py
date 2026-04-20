@@ -67,6 +67,9 @@ class RiskState:
     session_starting_balance: float = 100.0  # Balance at bot startup
     session_peak_balance: float = 100.0      # Highest balance this session
     max_drawdown_halt: bool = False           # Permanently halted by drawdown kill-switch
+    trading_enabled: bool = True              # Operator pause/resume flag
+    max_tradable_balance: float = 0.0         # 0 means unlimited/use available cash
+    max_position_size_usd: float = 0.0        # 0 means no explicit hard dollar cap
 
     # Daily tracking
     daily_pnl: float = 0.0
@@ -144,6 +147,7 @@ class RiskDecision:
     original_size: float = 0.0
     risk_score: float = 0.0  # 0 = safe, 1 = very risky
     warnings: list = field(default_factory=list)
+    metadata: dict = field(default_factory=dict)
 
     def __bool__(self):
         return self.approved
@@ -195,6 +199,9 @@ class RiskManager:
         self.max_drawdown_pct = resolve_float("max_drawdown_pct", preset["max_drawdown_pct"])
         self.max_open_positions = resolve_int("max_open_positions", preset["max_open_positions"])
         self.cooldown_after_losses = resolve_int("cooldown_after_losses", preset["cooldown_after_losses"])
+        self.max_tradable_balance = resolve_float("max_tradable_balance_usd", config.get("max_tradable_balance", 0.0))
+        self.max_position_size_usd = resolve_float("max_position_size_usd", config.get("max_position_size_usd", 0.0))
+        self.trading_enabled = bool(config.get("trading_enabled", True))
 
         # Session-level kill-switch: halt permanently if balance falls this far below
         # max(session_starting_balance, session_peak_balance).
@@ -216,6 +223,9 @@ class RiskManager:
             peak_balance=starting,
             session_starting_balance=starting,
             session_peak_balance=starting,
+            trading_enabled=self.trading_enabled,
+            max_tradable_balance=self.max_tradable_balance,
+            max_position_size_usd=self.max_position_size_usd,
         )
 
         # Correlation groups (markets that move together)
@@ -230,6 +240,10 @@ class RiskManager:
             if self.state.max_drawdown_halt:
                 logger.warning("FORCE_RESUME=true: clearing max-drawdown halt flag")
                 self.manual_reset_drawdown_halt()
+
+        self.state.trading_enabled = self.trading_enabled
+        self.state.max_tradable_balance = self.max_tradable_balance
+        self.state.max_position_size_usd = self.max_position_size_usd
 
         mode_label = "🔴 LIVE" if self.is_live else "🟡 PAPER"
         logger.info(
@@ -301,8 +315,20 @@ class RiskManager:
             self.state.available_cash if available_cash is None else available_cash,
             self.state.available_cash,
         )
+        effective_tradable_cash = spendable_cash
+        if self.max_tradable_balance and self.max_tradable_balance > 0:
+            effective_tradable_cash = min(effective_tradable_cash, self.max_tradable_balance)
 
         # === Hard stops (reject immediately) ===
+
+        if not self.state.trading_enabled:
+            return RiskDecision(
+                approved=False,
+                reason="Trading paused by operator",
+                original_size=original_size,
+                risk_score=1.0,
+                metadata={"reason_code": "trading_disabled"},
+            )
 
         # 0. Session-level kill-switch (permanent halt until manual reset)
         if self.state.max_drawdown_halt:
@@ -349,6 +375,19 @@ class RiskManager:
         # === Soft limits (reduce size) ===
 
         risk_score = 0.0
+
+        if self.max_position_size_usd and self.max_position_size_usd > 0 and position_size > self.max_position_size_usd:
+            clipped_size = round(self.max_position_size_usd, 2)
+            if clipped_size < self.min_position_size:
+                return RiskDecision(
+                    approved=False,
+                    reason=f"Max position size below minimum (${clipped_size:.2f})",
+                    risk_score=1.0,
+                    metadata={"reason_code": "max_position_below_minimum"},
+                )
+            warnings.append(f"Hard position cap clipped size to ${clipped_size:.2f}")
+            position_size = clipped_size
+            risk_score += 0.2
 
         # 6. Correlation check
         question = signal.get("question", "")
@@ -423,6 +462,30 @@ class RiskManager:
             position_size = clipped_size
             risk_score += 0.25
 
+        if effective_tradable_cash < self.min_position_size:
+            return RiskDecision(
+                approved=False,
+                reason=f"Tradable balance below minimum size (${effective_tradable_cash:.2f})",
+                risk_score=1.0,
+                metadata={"reason_code": "tradable_balance_below_minimum"},
+            )
+
+        if position_size > effective_tradable_cash:
+            clipped_size = round(min(position_size, effective_tradable_cash), 2)
+            if clipped_size < self.min_position_size:
+                return RiskDecision(
+                    approved=False,
+                    reason=f"Tradable balance below minimum size (${effective_tradable_cash:.2f})",
+                    risk_score=1.0,
+                    metadata={"reason_code": "tradable_balance_below_minimum"},
+                )
+            warnings.append(
+                f"Tradable balance capped size to ${clipped_size:.2f} "
+                f"(${effective_tradable_cash:.2f} tradable)"
+            )
+            position_size = clipped_size
+            risk_score += 0.2
+
         if spendable_cash < self.min_position_size:
             return RiskDecision(
                 approved=False,
@@ -456,6 +519,12 @@ class RiskManager:
             original_size=original_size,
             risk_score=risk_score,
             warnings=warnings,
+            metadata={
+                "spendable_cash": round(spendable_cash, 2),
+                "effective_tradable_cash": round(effective_tradable_cash, 2),
+                "max_position_size_usd": round(self.max_position_size_usd, 2),
+                "trading_enabled": self.state.trading_enabled,
+            },
         )
 
     def record_trade(self, trade: dict):
@@ -691,6 +760,9 @@ class RiskManager:
         """Get current risk status summary."""
         return {
             "mode": "🔴 LIVE" if self.is_live else "🟡 PAPER",
+            "trading_enabled": self.state.trading_enabled,
+            "max_tradable_balance": f"${self.max_tradable_balance:.2f}" if self.max_tradable_balance > 0 else "unlimited",
+            "max_position_size_usd": f"${self.max_position_size_usd:.2f}" if self.max_position_size_usd > 0 else "unlimited",
             "balance": f"${self.state.current_balance:.2f}",
             "available_cash": f"${self.state.available_cash:.2f}",
             "reserved_capital": f"${self.state.reserved_capital:.2f}",

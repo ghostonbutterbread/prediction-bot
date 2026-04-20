@@ -207,6 +207,10 @@ class SimulatorPaperStateAdapter:
             sum(self.trade_reserved_amount(trade) for trade in self.host.trades if not getattr(trade, "resolved", False)),
             2,
         )
+        tradable_cash = round(self.host.available_cash, 2)
+        if self.host.risk.max_tradable_balance and self.host.risk.max_tradable_balance > 0:
+            tradable_cash = round(min(tradable_cash, self.host.risk.max_tradable_balance), 2)
+
         return AccountState(
             starting_balance=round(self.host.starting_balance, 2),
             current_balance=round(self.host.balance, 2),
@@ -221,6 +225,10 @@ class SimulatorPaperStateAdapter:
             metadata={
                 "mode": "paper",
                 "session_id": self.host.session_id,
+                "effective_tradable_cash": tradable_cash,
+                "trading_enabled": self.host.risk.state.trading_enabled,
+                "max_tradable_balance": round(self.host.risk.max_tradable_balance, 2),
+                "max_position_size_usd": round(self.host.risk.max_position_size_usd, 2),
             },
         )
 

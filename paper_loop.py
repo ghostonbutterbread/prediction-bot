@@ -90,6 +90,11 @@ def get_config():
     paper_mode = os.getenv("PAPER_MODE", "true").lower() == "true"
     mode_dir = "paper" if paper_mode else "live"
 
+    trading_enabled = os.getenv("TRADING_ENABLED", "true").lower() == "true"
+    max_tradable_balance = float(os.getenv("MAX_TRADABLE_BALANCE_USD", "0"))
+    max_position_size_usd = float(os.getenv("MAX_POSITION_SIZE_USD", "0"))
+    status_update_interval_minutes = int(os.getenv("STATUS_UPDATE_INTERVAL_MINUTES", "60"))
+
     return {
         "strategy": {
             "min_edge": float(os.getenv("MIN_EDGE", "0.05")),
@@ -110,6 +115,18 @@ def get_config():
         "starting_balance": float(os.getenv("STARTING_BALANCE", "100.0")),
         "enable_time_decay_ranking": os.getenv("TIME_DECAY_RANKING", "true").lower() == "true",
         "paper_mode": paper_mode,
+        "trading_enabled": trading_enabled,
+        "max_tradable_balance_usd": max_tradable_balance,
+        "max_position_size_usd": max_position_size_usd,
+        "status_update_interval_minutes": status_update_interval_minutes,
+        "trading": {
+            "mode": "paper" if paper_mode else "live",
+            "trading_enabled": trading_enabled,
+        },
+        "alerts": {
+            "enabled": os.getenv("STATUS_ALERTS_ENABLED", "true").lower() == "true",
+            "status_update_interval_minutes": status_update_interval_minutes,
+        },
     }
 
 
@@ -170,11 +187,19 @@ def _log_summary(simulator, scan_num: int, reason: str):
             open_count += 1
 
     win_rate = (wins / resolved_count) if resolved_count else 0.0
+    risk_status = simulator.risk.get_status()
     logger.info(
-        "SUMMARY [%s] scan=%s balance=$%.2f pnl=%+.2f (%+.1f%%) win_rate=%.0f%% trades=%s (%s open / %s resolved)",
+        "SUMMARY [%s] scan=%s mode=%s enabled=%s tradable_cap=%s max_pos=%s balance=$%.2f avail=%s reserved=%s exposure=%s pnl=%+.2f (%+.1f%%) win_rate=%.0f%% trades=%s (%s open / %s resolved)",
         reason,
         scan_num,
+        risk_status.get("mode"),
+        risk_status.get("trading_enabled"),
+        risk_status.get("max_tradable_balance"),
+        risk_status.get("max_position_size_usd"),
         balance,
+        risk_status.get("available_cash"),
+        risk_status.get("reserved_capital"),
+        risk_status.get("exposure"),
         pnl,
         pnl_pct,
         win_rate * 100,
