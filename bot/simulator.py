@@ -111,6 +111,7 @@ class Simulator:
                        If no session found, starts fresh.
         """
         config = config or {}
+        self.config = config
         self.strategy = EnhancedStrategyEngine(config.get("strategy", {}))
         self.kelly = KellySizer()
 

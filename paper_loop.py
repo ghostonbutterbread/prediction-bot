@@ -79,6 +79,7 @@ load_dotenv()
 from bot.runner import PredictionBot
 from bot.simulator import Simulator
 from bot.dashboard import render_simple
+from bot.status import build_snapshot, format_status_message, send_status_update
 
 INTERVAL = int(os.getenv("PAPER_SCAN_INTERVAL", "120"))  # 2 min default
 SIMULATE_ONLY = os.getenv("SIMULATE_ONLY", "true").lower() == "true"
@@ -86,14 +87,35 @@ SUMMARY_SCAN_INTERVAL = int(os.getenv("PAPER_SUMMARY_SCAN_INTERVAL", "100"))
 SUMMARY_LOG_SECONDS = int(os.getenv("PAPER_SUMMARY_LOG_SECONDS", "3600"))
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.lower() in ("1", "true", "yes", "on")
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    return float(raw)
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    return int(raw)
+
+
 def get_config():
     paper_mode = os.getenv("PAPER_MODE", "true").lower() == "true"
     mode_dir = "paper" if paper_mode else "live"
 
-    trading_enabled = os.getenv("TRADING_ENABLED", "true").lower() == "true"
-    max_tradable_balance = float(os.getenv("MAX_TRADABLE_BALANCE_USD", "0"))
-    max_position_size_usd = float(os.getenv("MAX_POSITION_SIZE_USD", "0"))
-    status_update_interval_minutes = int(os.getenv("STATUS_UPDATE_INTERVAL_MINUTES", "60"))
+    trading_enabled = _env_bool("TRADING_ENABLED", True)
+    max_tradable_balance = _env_float("MAX_TRADABLE_BALANCE_USD", 0.0)
+    max_position_size_usd = _env_float("MAX_POSITION_SIZE_USD", 0.0)
+    status_update_interval_minutes = _env_int("STATUS_UPDATE_INTERVAL_MINUTES", 60)
 
     return {
         "strategy": {
@@ -124,8 +146,9 @@ def get_config():
             "trading_enabled": trading_enabled,
         },
         "alerts": {
-            "enabled": os.getenv("STATUS_ALERTS_ENABLED", "true").lower() == "true",
+            "enabled": _env_bool("STATUS_ALERTS_ENABLED", True),
             "status_update_interval_minutes": status_update_interval_minutes,
+            "send_hourly_status": _env_bool("SEND_HOURLY_STATUS", False),
         },
     }
 
@@ -168,12 +191,12 @@ def _log_trade_decisions(new_trades, balance: float):
         )
 
 
-def _log_summary(simulator, scan_num: int, reason: str):
-    """Emit a concise portfolio summary on a fixed cadence."""
+def _build_status_snapshot(simulator, scan_num: int):
     balance = getattr(simulator, "balance", 0.0)
     starting_balance = getattr(simulator, "starting_balance", 0.0)
     pnl = balance - starting_balance
     pnl_pct = (pnl / starting_balance * 100) if starting_balance else 0.0
+    risk_status = simulator.risk.get_status()
 
     resolved_count = 0
     open_count = 0
@@ -187,6 +210,29 @@ def _log_summary(simulator, scan_num: int, reason: str):
             open_count += 1
 
     win_rate = (wins / resolved_count) if resolved_count else 0.0
+    return build_snapshot(
+        mode=risk_status.get("mode"),
+        trading_enabled=bool(risk_status.get("trading_enabled")),
+        tradable_cap=risk_status.get("max_tradable_balance"),
+        max_position_size=risk_status.get("max_position_size_usd"),
+        balance=balance,
+        available_cash=risk_status.get("available_cash"),
+        reserved_capital=risk_status.get("reserved_capital"),
+        exposure=risk_status.get("exposure"),
+        pnl=pnl,
+        pnl_pct=pnl_pct,
+        win_rate_pct=win_rate * 100,
+        total_trades=open_count + resolved_count,
+        open_trades=open_count,
+        resolved_trades=resolved_count,
+        scan_num=scan_num,
+        session_id=getattr(simulator, "session_id", ""),
+    )
+
+
+def _log_summary(simulator, scan_num: int, reason: str):
+    """Emit a concise portfolio summary on a fixed cadence."""
+    snapshot = _build_status_snapshot(simulator, scan_num=scan_num)
     risk_status = simulator.risk.get_status()
     logger.info(
         "SUMMARY [%s] scan=%s mode=%s enabled=%s tradable_cap=%s max_pos=%s balance=$%.2f avail=%s reserved=%s exposure=%s pnl=%+.2f (%+.1f%%) win_rate=%.0f%% trades=%s (%s open / %s resolved)",
@@ -196,17 +242,20 @@ def _log_summary(simulator, scan_num: int, reason: str):
         risk_status.get("trading_enabled"),
         risk_status.get("max_tradable_balance"),
         risk_status.get("max_position_size_usd"),
-        balance,
+        snapshot.balance,
         risk_status.get("available_cash"),
         risk_status.get("reserved_capital"),
         risk_status.get("exposure"),
-        pnl,
-        pnl_pct,
-        win_rate * 100,
-        open_count + resolved_count,
-        open_count,
-        resolved_count,
+        snapshot.pnl,
+        snapshot.pnl_pct,
+        snapshot.win_rate_pct,
+        snapshot.total_trades,
+        snapshot.open_trades,
+        snapshot.resolved_trades,
     )
+
+    if simulator.config.get("alerts", {}).get("enabled") and simulator.config.get("alerts", {}).get("send_hourly_status"):
+        send_status_update(format_status_message(snapshot, reason=reason), project_root=Path(__file__).parent)
 
 
 def _log_blockers(scan_num: int, blocked_reasons: dict):
@@ -302,12 +351,7 @@ def run():
                         f"Session: `{sim.session_id}`\n\n"
                         f"Review your strategy."
                     )
-                    import subprocess
-                    subprocess.run(
-                        ["python3", "scripts/send_alert.py", "-m", alert_msg],
-                        cwd=Path(__file__).parent,
-                        capture_output=True,
-                    )
+                    send_status_update(alert_msg, project_root=Path(__file__).parent)
                     logger.warning("Sent 2-day loss streak alert (streak=%s)", streak)
 
             else:

@@ -35,7 +35,26 @@ logging.basicConfig(
 logger = logging.getLogger("prediction-bot")
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.lower() in ("1", "true", "yes", "on")
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    return float(raw)
+
+
 def get_config():
+    trading_enabled = _env_bool("TRADING_ENABLED", True)
+    max_tradable_balance = _env_float("MAX_TRADABLE_BALANCE_USD", 0.0)
+    max_position_size_usd = _env_float("MAX_POSITION_SIZE_USD", 0.0)
+    mode = os.getenv("TRADING_MODE", "paper")
+
     return {
         "strategy": {
             "min_edge": float(os.getenv("MIN_EDGE", "0.05")),
@@ -43,12 +62,19 @@ def get_config():
             "news_weight": float(os.getenv("NEWS_WEIGHT", "0.15")),
             "social_weight": float(os.getenv("SOCIAL_WEIGHT", "0.10")),
             "ai_weight": float(os.getenv("AI_WEIGHT", "0.20")),
-            "enable_news": os.getenv("ENABLE_NEWS", "true").lower() == "true",
-            "enable_social": os.getenv("ENABLE_SOCIAL", "true").lower() == "true",
-            "enable_ai": os.getenv("ENABLE_AI", "true").lower() == "true",
+            "enable_news": _env_bool("ENABLE_NEWS", True),
+            "enable_social": _env_bool("ENABLE_SOCIAL", True),
+            "enable_ai": _env_bool("ENABLE_AI", True),
         },
         "kelly_fraction": float(os.getenv("KELLY_FRACTION", "0.5")),
         "max_position_pct": float(os.getenv("MAX_POSITION_PCT", "0.10")),
+        "max_tradable_balance_usd": max_tradable_balance,
+        "max_position_size_usd": max_position_size_usd,
+        "trading_enabled": trading_enabled,
+        "trading": {
+            "mode": mode,
+            "trading_enabled": trading_enabled,
+        },
         "log_dir": os.getenv("LOG_DIR", "data"),
     }
 
