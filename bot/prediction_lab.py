@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Optional
 
+from bot.file_ops import append_jsonl, atomic_write_json, load_jsonl, locked_file, rewrite_jsonl
 from bot.strategies.enhanced import EnhancedStrategyEngine
 from bot.market_classification import apply_classification_metadata, classify_market_object
 from bot.weather import WeatherMarketCityMapper
@@ -46,6 +46,12 @@ class PredictionLab:
         self.record_all_scored = bool(self.lab_cfg.get("record_all_scored", True))
         self.seed_daily_temp_first = bool(self.lab_cfg.get("seed_daily_temp_first", True))
         self.allow_non_weather = bool(self.lab_cfg.get("allow_non_weather", False))
+        self.score_only = bool(self.lab_cfg.get("score_only", True))
+        self.use_sizing_logic = bool(self.lab_cfg.get("use_sizing_logic", False))
+        self.collector_record_market_snapshots = bool(self.lab_cfg.get("collector_record_market_snapshots", True))
+        self.collector_record_predictions = bool(self.lab_cfg.get("collector_record_predictions", True))
+        self.send_telegram_updates = bool(self.lab_cfg.get("send_telegram_updates", False))
+        self.telegram_summary_on_pause = bool(self.lab_cfg.get("telegram_summary_on_pause", False))
         self.min_confidence_to_record = float(self.lab_cfg.get("min_confidence_to_record", 0.0) or 0.0)
         self.min_edge_to_record = float(self.lab_cfg.get("min_edge_to_record", 0.0) or 0.0)
         self.hypothetical_mode = str(self.lab_cfg.get("hypothetical_notional_mode", "flat") or "flat").lower()
@@ -77,7 +83,7 @@ class PredictionLab:
         for market in markets:
             classification = apply_classification_metadata(market)
             market_group = classification.market_group if classification else "unknown"
-            if not self.allow_non_weather and market_group != "weather":
+            if not self._group_allowed(market_group):
                 continue
             group_counts[market_group] += 1
             series = str((getattr(market, "metadata", {}) or {}).get("series") or getattr(market, "category", "unknown"))
@@ -105,11 +111,20 @@ class PredictionLab:
             if confidence < self.min_confidence_to_record or edge < self.min_edge_to_record:
                 continue
 
-            row = self._build_prediction_row(run_id, market, signal)
-            self._append_jsonl(self.predictions_path, row)
-            recorded += 1
-            if self.mode == "collector":
-                self._append_jsonl(self.market_snapshots_path, self._build_market_snapshot_row(run_id, market, signal))
+            decision_type = self._decision_type(signal)
+            if self.mode == "collector" and self.collector_record_market_snapshots:
+                append_jsonl(self.market_snapshots_path, self._build_market_snapshot_row(run_id, market, signal, decision_type=decision_type))
+
+            should_record_prediction = (
+                decision_type in {"buy_yes", "buy_no"}
+                and (self.mode != "collector" or self.collector_record_predictions)
+                and not self.score_only
+            )
+            if should_record_prediction:
+                row = self._build_prediction_row(run_id, market, signal, decision_type=decision_type)
+                append_jsonl(self.predictions_path, row)
+                recorded += 1
+
             if self.mode == "seed_and_watch" and recorded >= self.max_new_predictions_per_seed:
                 break
 
@@ -132,65 +147,70 @@ class PredictionLab:
         )
 
     def resolve_open_predictions(self, exchange) -> dict[str, Any]:
-        rows = self._load_jsonl(self.predictions_path)
-        unresolved = [row for row in rows if row.get("status") == "open"]
-        resolved_count = 0
-        correct = 0
-        incorrect = 0
-        skipped = 0
-        pnl_total = 0.0
+        with self._prediction_ledger_lock():
+            rows = load_jsonl(self.predictions_path)
+            unresolved = [row for row in rows if row.get("status") == "open"]
+            resolved_count = 0
+            correct = 0
+            incorrect = 0
+            skipped = 0
+            pnl_total = 0.0
 
-        for row in unresolved:
-            market_id = row.get("market_id")
-            if not market_id:
-                continue
-            outcome = self._fetch_market_outcome(exchange, market_id)
-            if outcome not in {"YES", "NO"}:
-                continue
-            action = row.get("direction", "SKIP")
-            fee_model = ReplayFeeModel(profit_fee_rate=float(self.config.get("kalshi_fee_rate", 0.07) or 0.07))
-            scored = score_replay_answer(
-                action,
-                {
-                    "replay_id": row.get("prediction_id"),
-                    "market_id": market_id,
-                    "outcome": outcome,
-                    "prices": {
-                        "yes_price": row.get("yes_market_price"),
-                        "no_price": row.get("no_market_price"),
+            for row in unresolved:
+                market_id = row.get("market_id")
+                if not market_id:
+                    continue
+                outcome = self._fetch_market_outcome(exchange, market_id)
+                if outcome not in {"YES", "NO"}:
+                    continue
+                action = row.get("direction", "SKIP")
+                fee_model = ReplayFeeModel(profit_fee_rate=float(self.config.get("kalshi_fee_rate", 0.07) or 0.07))
+                position_size = float((row.get("hypothetical") or {}).get("notional_usd", self.flat_notional_usd) or self.flat_notional_usd)
+                if self.use_sizing_logic:
+                    position_size = position_size
+                scored = score_replay_answer(
+                    action,
+                    {
+                        "replay_id": row.get("prediction_id"),
+                        "market_id": market_id,
+                        "outcome": outcome,
+                        "prices": {
+                            "yes_price": row.get("yes_market_price"),
+                            "no_price": row.get("no_market_price"),
+                        },
                     },
-                },
-                position_size=float((row.get("hypothetical") or {}).get("notional_usd", self.flat_notional_usd) or self.flat_notional_usd),
-                fee_model=fee_model,
-            )
-            row["status"] = "resolved"
-            row["resolution"] = {
-                "outcome": outcome,
-                "resolved_at": datetime.now(timezone.utc).isoformat(),
-                "is_correct": scored.get("is_correct"),
-                "net_pnl": scored.get("net_pnl"),
-                "gross_pnl": scored.get("gross_pnl"),
-                "entry_price": scored.get("entry_price"),
-                "quoted_entry_price": scored.get("quoted_entry_price"),
-            }
-            self._append_jsonl(self.resolutions_path, row)
-            resolved_count += 1
-            if scored.get("is_correct") is True:
-                correct += 1
-            elif scored.get("is_correct") is False:
-                incorrect += 1
-            else:
-                skipped += 1
-            pnl_total += float(scored.get("net_pnl") or 0.0)
+                    position_size=position_size,
+                    fee_model=fee_model,
+                )
+                row["status"] = "resolved"
+                row["resolution"] = {
+                    "outcome": outcome,
+                    "resolved_at": datetime.now(timezone.utc).isoformat(),
+                    "is_correct": scored.get("is_correct"),
+                    "net_pnl": scored.get("net_pnl"),
+                    "gross_pnl": scored.get("gross_pnl"),
+                    "entry_price": scored.get("entry_price"),
+                    "quoted_entry_price": scored.get("quoted_entry_price"),
+                }
+                append_jsonl(self.resolutions_path, row)
+                resolved_count += 1
+                if scored.get("is_correct") is True:
+                    correct += 1
+                elif scored.get("is_correct") is False:
+                    incorrect += 1
+                else:
+                    skipped += 1
+                pnl_total += float(scored.get("net_pnl") or 0.0)
 
-        if resolved_count:
-            self._rewrite_jsonl(self.predictions_path, rows)
-        self._update_state(
-            mode=self.mode,
-            open_prediction_count=self._count_open_predictions(rows),
-            resolved_prediction_count=self._count_resolved_predictions(rows),
-            paused_reason=None if self._count_open_predictions(rows) else "no_open_predictions",
-        )
+            if resolved_count:
+                rewrite_jsonl(self.predictions_path, rows)
+            open_prediction_count = self._count_open_predictions(rows)
+            self._update_state(
+                mode=self.mode,
+                open_prediction_count=open_prediction_count,
+                resolved_prediction_count=self._count_resolved_predictions(rows),
+                paused_reason=None if open_prediction_count else "no_open_predictions",
+            )
 
         return {
             "resolved": resolved_count,
@@ -201,7 +221,7 @@ class PredictionLab:
         }
 
     def summarize(self) -> dict[str, Any]:
-        rows = self._load_jsonl(self.predictions_path)
+        rows = load_jsonl(self.predictions_path)
         resolved = [row for row in rows if row.get("status") == "resolved" and isinstance(row.get("resolution"), dict)]
         open_rows = [row for row in rows if row.get("status") == "open"]
         group_counts = Counter(row.get("group", "unknown") for row in rows)
@@ -235,7 +255,7 @@ class PredictionLab:
             "confidence_buckets": dict(confidence_buckets),
         }
 
-    def _build_prediction_row(self, run_id: str, market, signal: dict[str, Any]) -> dict[str, Any]:
+    def _build_prediction_row(self, run_id: str, market, signal: dict[str, Any], *, decision_type: str) -> dict[str, Any]:
         metadata = dict(getattr(market, "metadata", {}) or {})
         context = None
         if metadata.get("market_group") == "weather":
@@ -259,6 +279,7 @@ class PredictionLab:
             "market_id": market.id,
             "question": getattr(market, "question", ""),
             "direction": signal.get("direction", "SKIP"),
+            "decision_type": decision_type,
             "confidence": float(signal.get("confidence", 0.0) or 0.0),
             "edge": float(signal.get("edge", 0.0) or 0.0),
             "model_probability": signal.get("model_probability"),
@@ -273,7 +294,7 @@ class PredictionLab:
             },
         }
 
-    def _build_market_snapshot_row(self, run_id: str, market, signal: dict[str, Any]) -> dict[str, Any]:
+    def _build_market_snapshot_row(self, run_id: str, market, signal: dict[str, Any], *, decision_type: str) -> dict[str, Any]:
         metadata = dict(getattr(market, "metadata", {}) or {})
         return {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -287,7 +308,8 @@ class PredictionLab:
             "confidence": signal.get("confidence"),
             "edge": signal.get("edge"),
             "direction": signal.get("direction"),
-            "recorded_prediction": signal.get("direction") not in {None, "SKIP"},
+            "decision_type": decision_type,
+            "recorded_prediction": decision_type in {"buy_yes", "buy_no"},
         }
 
     def _prioritize_markets(self, markets: list[Any]) -> list[Any]:
@@ -301,7 +323,7 @@ class PredictionLab:
             close_score = 0.0
             if hasattr(close_ts, "timestamp"):
                 close_score = -close_ts.timestamp()
-            if not self.allow_non_weather and group == "weather":
+            if self._group_allowed(group) and group == "weather":
                 return (2 if is_daily_temp and self.seed_daily_temp_first else 1, close_score)
             return (0, close_score)
 
@@ -317,7 +339,8 @@ class PredictionLab:
                 "resolved_prediction_count": 0,
             }
         try:
-            return json.loads(self.state_path.read_text())
+            with locked_file(self.state_path, "r") as fh:
+                return json.load(fh)
         except Exception:
             return {
                 "mode": self.mode,
@@ -329,14 +352,14 @@ class PredictionLab:
 
     def _update_state(self, **updates: Any) -> None:
         self.state = {**self.state, **updates}
-        self.state_path.write_text(json.dumps(self.state, indent=2))
+        atomic_write_json(self.state_path, self.state)
 
     def _count_open_predictions(self, rows: Optional[list[dict[str, Any]]] = None) -> int:
-        rows = rows if rows is not None else self._load_jsonl(self.predictions_path)
+        rows = rows if rows is not None else load_jsonl(self.predictions_path)
         return sum(1 for row in rows if row.get("status") == "open")
 
     def _count_resolved_predictions(self, rows: Optional[list[dict[str, Any]]] = None) -> int:
-        rows = rows if rows is not None else self._load_jsonl(self.predictions_path)
+        rows = rows if rows is not None else load_jsonl(self.predictions_path)
         return sum(1 for row in rows if row.get("status") == "resolved")
 
     def _fetch_market_outcome(self, exchange, market_id: str) -> Optional[str]:
@@ -361,30 +384,22 @@ class PredictionLab:
                 return "YES"
         return None
 
-    @staticmethod
-    def _append_jsonl(path: Path, row: dict[str, Any]) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(row) + "\n")
+    def _group_allowed(self, group: str) -> bool:
+        normalized = str(group or "unknown").lower()
+        if normalized in self.groups:
+            return True
+        if normalized != "weather" and not self.allow_non_weather:
+            return False
+        return normalized in self.groups
+
+    def _prediction_ledger_lock(self):
+        return locked_file(self.predictions_path.with_suffix(".lock"), "a+")
 
     @staticmethod
-    def _load_jsonl(path: Path) -> list[dict[str, Any]]:
-        if not path.exists():
-            return []
-        rows = []
-        with path.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rows.append(json.loads(line))
-                except json.JSONDecodeError:
-                    logger.warning("Skipping malformed Prediction Lab row in %s", path)
-        return rows
-
-    @staticmethod
-    def _rewrite_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
-        with path.open("w", encoding="utf-8") as fh:
-            for row in rows:
-                fh.write(json.dumps(row) + "\n")
+    def _decision_type(signal: dict[str, Any]) -> str:
+        direction = str(signal.get("direction") or "SKIP").upper()
+        if direction == "BUY_YES":
+            return "buy_yes"
+        if direction == "BUY_NO":
+            return "buy_no"
+        return "skip"

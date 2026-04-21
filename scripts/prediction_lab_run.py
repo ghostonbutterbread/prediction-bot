@@ -12,7 +12,7 @@ load_dotenv(PROJECT_ROOT / '.env')
 
 from bot.config import load_config
 from bot.prediction_lab import PredictionLab
-from bot.runner import PredictionBot
+from bot.prediction_lab_support import build_prediction_lab_exchange
 
 
 def main() -> int:
@@ -24,15 +24,8 @@ def main() -> int:
     config = load_config(PROJECT_ROOT / args.config)
     config['_config_path'] = str(PROJECT_ROOT / args.config)
 
-    bot = PredictionBot(config)
+    bot, exchange = build_prediction_lab_exchange(config, demo=args.demo)
     try:
-        api_key = os.getenv('KALSHI_API_KEY_ID')
-        private_key_path = os.getenv('KALSHI_PRIVATE_KEY_PATH', 'kalshi_private_key')
-        bot.add_kalshi(api_key, private_key_path, demo=args.demo)
-        connections = bot.connect_all()
-        if not any(connections.values()):
-            raise SystemExit('No exchanges connected')
-        exchange = next(iter(bot.exchanges.values()))
         lab = PredictionLab(config)
         result = lab.run(exchange)
         print({
