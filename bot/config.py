@@ -43,6 +43,13 @@ def _default_storage_config() -> dict[str, Any]:
     }
 
 
+def _default_scan_config() -> dict[str, Any]:
+    return {
+        "markets_per_exchange": 30,
+        "summary_sample_per_exchange": 5,
+    }
+
+
 def _normalize_storage_config(config: dict) -> dict:
     storage = _deep_merge(_default_storage_config(), config.get("storage", {}) or {})
     logs = storage.get("logs", {}) or {}
@@ -57,6 +64,11 @@ def _normalize_storage_config(config: dict) -> dict:
     logs["exclude_paths"] = [str(p) for p in (logs.get("exclude_paths") or [])]
     storage["logs"] = logs
     config["storage"] = storage
+
+    scan = _deep_merge(_default_scan_config(), config.get("scan", {}) or {})
+    scan["markets_per_exchange"] = max(1, int(scan.get("markets_per_exchange", 30) or 30))
+    scan["summary_sample_per_exchange"] = max(1, int(scan.get("summary_sample_per_exchange", 5) or 5))
+    config["scan"] = scan
     return config
 
 try:
@@ -169,6 +181,10 @@ def _apply_env_overrides(config: dict) -> dict:
         overrides.setdefault("storage", {}).setdefault("logs", {})["warning_threshold_pct"] = float(os.getenv("LOG_STORAGE_WARNING_THRESHOLD_PCT"))
     if os.getenv("LOG_STORAGE_AUTO_PRUNE"):
         overrides.setdefault("storage", {}).setdefault("logs", {})["auto_prune"] = os.getenv("LOG_STORAGE_AUTO_PRUNE").lower() == "true"
+    if os.getenv("MARKETS_PER_EXCHANGE"):
+        overrides.setdefault("scan", {})["markets_per_exchange"] = int(os.getenv("MARKETS_PER_EXCHANGE"))
+    if os.getenv("SCAN_SUMMARY_SAMPLE_PER_EXCHANGE"):
+        overrides.setdefault("scan", {})["summary_sample_per_exchange"] = int(os.getenv("SCAN_SUMMARY_SAMPLE_PER_EXCHANGE"))
 
     if overrides:
         config = _deep_merge(config, overrides)
