@@ -157,8 +157,11 @@ runtime:
   base_dir: data
 
 scan:
-  markets_per_exchange: 60
-  summary_sample_per_exchange: 10
+  markets_per_exchange: 300
+  summary_sample_per_exchange: 25
+  allowed_market_groups:
+    - weather
+    - sports
 
 trade_economics:
   min_position_size_usd: 1.0

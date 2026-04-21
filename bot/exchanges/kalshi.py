@@ -47,6 +47,32 @@ class KalshiExchange(BaseExchange):
         self.host = KALSHI_DEMO if demo else KALSHI_PROD
         self.client = None
         self._daily_series_tickers: list[str] = []
+        self._allowed_market_groups: set[str] = {"weather", "sports"}
+
+    def set_allowed_market_groups(self, groups: list[str] | set[str] | tuple[str, ...] | None):
+        normalized = {str(group).strip().lower() for group in (groups or []) if str(group).strip()}
+        self._allowed_market_groups = normalized or {"weather", "sports"}
+
+    def _normalize_market_group(self, market: Market) -> str | None:
+        category = (getattr(market, "category", "") or "").lower()
+        question = (getattr(market, "question", "") or "").lower()
+        series = str((getattr(market, "metadata", {}) or {}).get("series", "")).lower()
+        event_ticker = str((getattr(market, "metadata", {}) or {}).get("event_ticker", "")).lower()
+        combined = " ".join(part for part in [category, question, series, event_ticker, market.id.lower()] if part)
+
+        if "weather" in category or any(token in combined for token in ["temp", "temperature", "forecast", "rain", "snow", "wind", "hurricane", "high temp", "low temp"]):
+            return "weather"
+        if any(token in combined for token in ["nba", "nfl", "mlb", "nhl", "soccer", "wnba", "ncaa", "game", "match", "player", "points", "rebounds", "assists", "touchdown", "goal"]):
+            return "sports"
+        return None
+
+    def _market_allowed(self, market: Market) -> bool:
+        group = self._normalize_market_group(market)
+        if group is None:
+            return False
+        market.metadata = dict(market.metadata or {})
+        market.metadata["market_group"] = group
+        return group in self._allowed_market_groups
 
     def connect(self) -> bool:
         try:
@@ -119,7 +145,8 @@ class KalshiExchange(BaseExchange):
                                     yes_bid=_dollars_from_raw(m, 'yes_bid'),
                                     no_bid=_dollars_from_raw(m, 'no_bid'),
                                 )
-                                markets.append(market)
+                                if self._market_allowed(market):
+                                    markets.append(market)
                         except Exception:
                             continue
                     logger.info(f"Daily series pass: {len(markets)} markets from {len(self._daily_series_tickers)} series")
@@ -173,8 +200,9 @@ class KalshiExchange(BaseExchange):
                             yes_bid=_dollars_from_raw(m, 'yes_bid'),
                             no_bid=_dollars_from_raw(m, 'no_bid'),
                         )
-                        markets.append(market)
-                        direct_count += 1
+                        if self._market_allowed(market):
+                            markets.append(market)
+                            direct_count += 1
 
                     cursor = data.get('cursor')
                     if not cursor:
@@ -256,7 +284,8 @@ class KalshiExchange(BaseExchange):
                         if yes_price <= 0 or yes_price >= 1:
                             continue
 
-                        markets.append(market)
+                        if self._market_allowed(market):
+                            markets.append(market)
 
                         if len(markets) >= limit:
                             break
