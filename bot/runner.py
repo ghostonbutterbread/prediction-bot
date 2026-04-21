@@ -169,6 +169,7 @@ class PredictionBot:
 
         all_signals = []
         blocked_reasons: dict[str, int] = {}
+        markets_scanned = 0
         scan_cfg = self.config.get("scan", {}) or {}
         markets_per_exchange = int(scan_cfg.get("markets_per_exchange", 30) or 30)
         summary_sample_per_exchange = int(scan_cfg.get("summary_sample_per_exchange", 5) or 5)
@@ -184,6 +185,7 @@ class PredictionBot:
                 if not markets:
                     continue
 
+                markets_scanned += len(markets)
                 logger.info(f"\n{exchange_name}: {len(markets)} markets")
 
                 for market in markets:
@@ -259,7 +261,7 @@ class PredictionBot:
         self._emit_hourly_summary_if_due()
 
         return {
-            "markets_scanned": sum(len(exchange.get_markets(limit=summary_sample_per_exchange)) for exchange in self.exchanges.values()),
+            "markets_scanned": markets_scanned,
             "signals": len(all_signals),
             "trades": trades,
             "blocked_reasons": blocked_reasons,

@@ -137,7 +137,8 @@ def http_get_with_retry(
         try:
             resp = httpx.get(url, headers=headers, timeout=timeout)
             if resp.status_code == 429:
-                wait = 2 ** attempt
+                retry_after = resp.headers.get("Retry-After")
+                wait = float(retry_after) if retry_after else float(2 ** attempt)
                 logger.warning("Rate limited (429). Waiting %ss before retry %s/%s", wait, attempt + 1, max_retries)
                 time.sleep(wait)
                 continue

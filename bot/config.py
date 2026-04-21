@@ -112,6 +112,10 @@ def _normalize_storage_config(config: dict) -> dict:
     if isinstance(groups, str):
         groups = [part.strip() for part in groups.split(",") if part.strip()]
     prediction_lab["groups"] = [str(group).strip().lower() for group in groups if str(group).strip()]
+    if "weather_only_daily_temp_first" in prediction_lab and "seed_daily_temp_first" not in prediction_lab:
+        prediction_lab["seed_daily_temp_first"] = prediction_lab.get("weather_only_daily_temp_first")
+    prediction_lab.pop("weather_only_daily_temp_first", None)
+
     prediction_lab["enabled"] = bool(prediction_lab.get("enabled", True))
     prediction_lab["mode"] = str(prediction_lab.get("mode", "seed_and_watch") or "seed_and_watch").lower()
     prediction_lab["max_markets_per_run"] = max(1, int(prediction_lab.get("max_markets_per_run", 1000) or 1000))

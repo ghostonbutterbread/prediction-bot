@@ -179,7 +179,7 @@ prediction_lab:
   min_confidence_to_record: 0.0
   min_edge_to_record: 0.0
   record_all_scored: true
-  weather_only_daily_temp_first: true
+  seed_daily_temp_first: true
   disable_news: true
   disable_social: true
   disable_ai: true
