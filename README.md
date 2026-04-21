@@ -45,6 +45,11 @@ python main.py live      # Live trading (real money!)
 
 ## Commands
 
+## Notes
+
+- Worker launch scripts now live under `workers/` as the first worker-session implementation. In the future, this could evolve into a cleaner session-based orchestration model instead of standalone worker scripts.
+
+
 Run commands from the activated `.venv`.
 
 | Command | Description |
