@@ -2,6 +2,7 @@
 
 import os
 import logging
+import httpx
 from typing import Optional
 from datetime import datetime, timezone, timedelta
 
