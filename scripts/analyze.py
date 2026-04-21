@@ -20,7 +20,7 @@ from bot.trade_audit import (
     summarize_event_performance,
 )
 from bot.config import load_config
-from bot.status import summarize_log_storage
+from bot.status import prune_log_storage, summarize_log_storage
 
 DATA_DIR = Path(__file__).parent.parent / "data"
 PACIFIC = timezone(timedelta(hours=-7))
@@ -137,6 +137,7 @@ def analyze() -> dict:
     }
 
     config = load_config(PROJECT_ROOT / "config.yaml")
+    prune_result = prune_log_storage(config, project_root=PROJECT_ROOT)
     storage_summary = summarize_log_storage(config, project_root=PROJECT_ROOT)
     if storage_summary:
         result["storage"] = {
@@ -150,6 +151,17 @@ def analyze() -> dict:
             "over_warning": storage_summary["over_warning"],
             "over_hard_stop": storage_summary["over_hard_stop"],
         }
+        if prune_result and prune_result.get("performed"):
+            result["storage"]["prune_result"] = prune_result
+            result["issues"].append({
+                "severity": "warning",
+                "code": "LOG_STORAGE_PRUNED",
+                "message": (
+                    f"Auto-pruned {len(prune_result.get('pruned_files', []))} files and reclaimed "
+                    f"{round(prune_result.get('bytes_reclaimed', 0) / (1024 ** 3), 2)} GB"
+                ),
+                "suggestion": "Review prune_history.jsonl and raise storage cap if pruning is too frequent",
+            })
         if storage_summary["over_hard_stop"]:
             result["issues"].append({
                 "severity": "critical",
@@ -422,6 +434,22 @@ def format_report(analysis: dict) -> str:
     if sq:
         lines.append(f"Edge: {sq.get('avg_edge', 0)}% avg, {sq.get('max_edge', 0)}% max | Conf: {sq.get('avg_confidence', 0)}%")
     
+    storage = analysis.get("storage", {})
+    if storage:
+        lines.append(
+            f"Storage: {storage.get('log_audit_usage_gb', 0)} GB / {storage.get('log_audit_cap_gb', 0)} GB ({storage.get('usage_pct', 0)}%)"
+        )
+        if storage.get("largest_files"):
+            largest = storage["largest_files"][0]
+            lines.append(
+                f"Largest tracked log: {largest.get('path')} ({round(largest.get('bytes', 0) / (1024 ** 3), 2)} GB)"
+            )
+        prune_result = storage.get("prune_result")
+        if prune_result and prune_result.get("performed"):
+            lines.append(
+                f"Auto-pruned: reclaimed {round(prune_result.get('bytes_reclaimed', 0) / (1024 ** 3), 2)} GB from {len(prune_result.get('pruned_files', []))} files"
+            )
+
     if analysis["issues"]:
         lines.append("")
         lines.append("⚠️ **Issues:**")

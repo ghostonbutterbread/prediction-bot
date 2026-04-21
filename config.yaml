@@ -171,7 +171,7 @@ storage:
     max_total_gb: 50
     warning_threshold_pct: 90
     hard_stop_threshold_pct: 105
-    auto_prune: false
+    auto_prune: true
     prune_policy: oldest_first
     report_in_status: true
     include_paths:

@@ -133,12 +133,11 @@ alerts:
   telegram_silent: false
 verbosity:
   level: verbose
-max_tradable_balance: 1.0
-max_position_size_usd: 1.0
-
+max_tradable_balance: 0.0
+max_position_size_usd: 0.0
 trade_economics:
   min_position_size_usd: 1.0
-  min_expected_net_profit_usd: 0.10
+  min_expected_net_profit_usd: 0.1
 risk:
   kelly_fraction_paper: 0.5
   max_bet_pct_paper: 0.1
@@ -160,9 +159,27 @@ risk:
   max_open_positions: 15
 runtime:
   base_dir: data
-
 logging:
   log_dir: data
   level: INFO
   save_snapshots: true
   snapshot_interval_scans: 5
+storage:
+  logs:
+    enabled: true
+    max_total_gb: 50
+    warning_threshold_pct: 90
+    hard_stop_threshold_pct: 105
+    auto_prune: true
+    prune_policy: oldest_first
+    report_in_status: true
+    include_paths:
+    - data/paper_loop.log
+    - data/paper_loop_runtime.log
+    - data/watchdog.log
+    - data/watchdog_cron.log
+    - logs/
+    - data/archive/ops/
+    exclude_paths:
+    - data/historical/
+    - .venv/
