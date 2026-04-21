@@ -6,10 +6,11 @@ from collections import defaultdict
 from math import isfinite
 from typing import Optional
 
+from bot.market_classification import is_weather_market
+
 
 VALID_DIRECTIONS = {"BUY_YES", "BUY_NO"}
 VALID_OUTCOMES = {"YES", "NO"}
-WEATHER_SERIES_PREFIXES = ("KXHIGH", "KXLOW")
 
 
 def coerce_float(value, default: Optional[float] = 0.0) -> Optional[float]:
@@ -124,16 +125,9 @@ def trade_event_key(trade: dict) -> str:
     if not market_id:
         return "unknown"
 
-    category = str(trade.get("category", "") or "").upper()
-    question = str(trade.get("question", "") or "").lower()
-    is_weather = (
-        category.startswith(WEATHER_SERIES_PREFIXES)
-        or market_id.startswith(WEATHER_SERIES_PREFIXES)
-        or "temperature" in question
-        or "temp" in question
-        or "degrees" in question
-    )
-    if is_weather:
+    category = str(trade.get("category", "") or "")
+    question = str(trade.get("question", "") or "")
+    if is_weather_market(market_id=market_id, question=question, category=category):
         parts = market_id.split("-")
         if len(parts) >= 3:
             return "-".join(parts[:2])

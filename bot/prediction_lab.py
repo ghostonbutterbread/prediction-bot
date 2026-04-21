@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from bot.strategies.enhanced import EnhancedStrategyEngine
+from bot.market_classification import apply_classification_metadata, classify_market_object
 from bot.weather import WeatherMarketCityMapper
 from bot.weather.replay import ReplayFeeModel, score_replay_answer
 
@@ -74,7 +75,8 @@ class PredictionLab:
         recorded = 0
 
         for market in markets:
-            market_group = str((getattr(market, "metadata", {}) or {}).get("market_group", "unknown"))
+            classification = apply_classification_metadata(market)
+            market_group = classification.market_group if classification else "unknown"
             if not self.allow_non_weather and market_group != "weather":
                 continue
             group_counts[market_group] += 1
@@ -291,10 +293,10 @@ class PredictionLab:
     def _prioritize_markets(self, markets: list[Any]) -> list[Any]:
         def score(market: Any) -> tuple[int, float]:
             metadata = dict(getattr(market, "metadata", {}) or {})
-            group = metadata.get("market_group", "unknown")
-            question = str(getattr(market, "question", "") or "").lower()
-            series = str(metadata.get("series") or getattr(market, "category", "") or "").lower()
-            is_daily_temp = any(token in question or token in series for token in ["high temp", "low temp", "temperature", "kxhigh", "kxlow"])
+            classification = classify_market_object(market)
+            group = classification.market_group if classification else metadata.get("market_group", "unknown")
+            family = classification.family if classification else metadata.get("market_family", "")
+            is_daily_temp = family == "daily_temperature"
             close_ts = getattr(market, "closes_at", None)
             close_score = 0.0
             if hasattr(close_ts, "timestamp"):
