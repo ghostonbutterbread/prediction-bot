@@ -173,8 +173,13 @@ class PredictionBot:
         markets_per_exchange = int(scan_cfg.get("markets_per_exchange", 30) or 30)
         summary_sample_per_exchange = int(scan_cfg.get("summary_sample_per_exchange", 5) or 5)
 
+        allowed_market_groups = [str(group).strip().lower() for group in (scan_cfg.get("allowed_market_groups") or []) if str(group).strip()]
+
         for exchange_name, exchange in self.exchanges.items():
             try:
+                setter = getattr(exchange, "set_allowed_market_groups", None)
+                if callable(setter):
+                    setter(allowed_market_groups)
                 markets = exchange.get_markets(limit=markets_per_exchange)
                 if not markets:
                     continue
@@ -190,6 +195,7 @@ class PredictionBot:
                             signal["question"] = getattr(market, "question", signal.get("question", ""))
                             signal["yes_price"] = getattr(market, "yes_price", signal.get("market_price"))
                             signal["no_price"] = getattr(market, "no_price", None)
+                            signal["market_group"] = (getattr(market, "metadata", {}) or {}).get("market_group", "unknown")
                             all_signals.append(signal)
                     except Exception as e:
                         logger.debug(f"Error analyzing {market.id}: {e}")
@@ -395,12 +401,17 @@ class PredictionBot:
 
     def _log_scan(self, signals: list, trades: int, blocked_reasons: dict[str, int]):
         log_file = self.log_dir / f"scans_{datetime.now().strftime('%Y-%m-%d')}.jsonl"
+        market_groups: dict[str, int] = {}
+        for signal in signals:
+            group = str(signal.get("market_group") or "unknown")
+            market_groups[group] = market_groups.get(group, 0) + 1
         with open(log_file, "a") as f:
             f.write(json.dumps({
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "signals": len(signals),
                 "trades": trades,
                 "blocked_reasons": blocked_reasons,
+                "market_groups": market_groups,
                 "top_signals": signals[:3],
             }) + "\n")
 

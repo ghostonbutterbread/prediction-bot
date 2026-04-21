@@ -47,6 +47,7 @@ def _default_scan_config() -> dict[str, Any]:
     return {
         "markets_per_exchange": 30,
         "summary_sample_per_exchange": 5,
+        "allowed_market_groups": ["weather", "sports"],
     }
 
 
@@ -68,6 +69,10 @@ def _normalize_storage_config(config: dict) -> dict:
     scan = _deep_merge(_default_scan_config(), config.get("scan", {}) or {})
     scan["markets_per_exchange"] = max(1, int(scan.get("markets_per_exchange", 30) or 30))
     scan["summary_sample_per_exchange"] = max(1, int(scan.get("summary_sample_per_exchange", 5) or 5))
+    allowed_groups = scan.get("allowed_market_groups") or []
+    if isinstance(allowed_groups, str):
+        allowed_groups = [part.strip() for part in allowed_groups.split(",") if part.strip()]
+    scan["allowed_market_groups"] = [str(group).strip().lower() for group in allowed_groups if str(group).strip()]
     config["scan"] = scan
     return config
 
@@ -185,6 +190,8 @@ def _apply_env_overrides(config: dict) -> dict:
         overrides.setdefault("scan", {})["markets_per_exchange"] = int(os.getenv("MARKETS_PER_EXCHANGE"))
     if os.getenv("SCAN_SUMMARY_SAMPLE_PER_EXCHANGE"):
         overrides.setdefault("scan", {})["summary_sample_per_exchange"] = int(os.getenv("SCAN_SUMMARY_SAMPLE_PER_EXCHANGE"))
+    if os.getenv("ALLOWED_MARKET_GROUPS"):
+        overrides.setdefault("scan", {})["allowed_market_groups"] = os.getenv("ALLOWED_MARKET_GROUPS")
 
     if overrides:
         config = _deep_merge(config, overrides)
