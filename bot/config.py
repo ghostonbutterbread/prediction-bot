@@ -11,9 +11,53 @@ compatibility with the existing setup.
 import os
 import logging
 from copy import deepcopy
+from typing import Any
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+
+def _default_storage_config() -> dict[str, Any]:
+    return {
+        "logs": {
+            "enabled": True,
+            "max_total_gb": 50,
+            "warning_threshold_pct": 90,
+            "hard_stop_threshold_pct": 105,
+            "auto_prune": False,
+            "prune_policy": "oldest_first",
+            "report_in_status": True,
+            "include_paths": [
+                "data/paper_loop.log",
+                "data/paper_loop_runtime.log",
+                "data/watchdog.log",
+                "data/watchdog_cron.log",
+                "logs/",
+                "data/archive/ops/",
+            ],
+            "exclude_paths": [
+                "data/historical/",
+                ".venv/",
+            ],
+        }
+    }
+
+
+def _normalize_storage_config(config: dict) -> dict:
+    storage = _deep_merge(_default_storage_config(), config.get("storage", {}) or {})
+    logs = storage.get("logs", {}) or {}
+    logs["enabled"] = bool(logs.get("enabled", True))
+    logs["max_total_gb"] = float(logs.get("max_total_gb", 50) or 50)
+    logs["warning_threshold_pct"] = float(logs.get("warning_threshold_pct", 90) or 90)
+    logs["hard_stop_threshold_pct"] = float(logs.get("hard_stop_threshold_pct", 105) or 105)
+    logs["auto_prune"] = bool(logs.get("auto_prune", False))
+    logs["report_in_status"] = bool(logs.get("report_in_status", True))
+    logs["prune_policy"] = str(logs.get("prune_policy", "oldest_first") or "oldest_first")
+    logs["include_paths"] = [str(p) for p in (logs.get("include_paths") or [])]
+    logs["exclude_paths"] = [str(p) for p in (logs.get("exclude_paths") or [])]
+    storage["logs"] = logs
+    config["storage"] = storage
+    return config
 
 try:
     import yaml
@@ -119,6 +163,12 @@ def _apply_env_overrides(config: dict) -> dict:
     # Logging
     if os.getenv("LOG_DIR"):
         overrides["logging"] = {"log_dir": os.getenv("LOG_DIR")}
+    if os.getenv("LOG_STORAGE_MAX_GB"):
+        overrides.setdefault("storage", {}).setdefault("logs", {})["max_total_gb"] = float(os.getenv("LOG_STORAGE_MAX_GB"))
+    if os.getenv("LOG_STORAGE_WARNING_THRESHOLD_PCT"):
+        overrides.setdefault("storage", {}).setdefault("logs", {})["warning_threshold_pct"] = float(os.getenv("LOG_STORAGE_WARNING_THRESHOLD_PCT"))
+    if os.getenv("LOG_STORAGE_AUTO_PRUNE"):
+        overrides.setdefault("storage", {}).setdefault("logs", {})["auto_prune"] = os.getenv("LOG_STORAGE_AUTO_PRUNE").lower() == "true"
 
     if overrides:
         config = _deep_merge(config, overrides)
@@ -178,6 +228,7 @@ def load_config(config_path: str | Path | None = None) -> dict:
 
     # Apply .env overrides
     config = _apply_env_overrides(config)
+    config = _normalize_storage_config(config)
     config = _apply_runtime_paths(config)
 
     return config
@@ -212,6 +263,7 @@ def _default_config() -> dict:
         "runtime": {
             "base_dir": "data",
         },
+        "storage": _default_storage_config(),
         "risk": {
             "kelly_fraction": 0.75,
             "max_position_pct": 0.20,
