@@ -165,3 +165,22 @@ logging:
   level: INFO
   save_snapshots: true
   snapshot_interval_scans: 5
+storage:
+  logs:
+    enabled: true
+    max_total_gb: 50
+    warning_threshold_pct: 90
+    hard_stop_threshold_pct: 105
+    auto_prune: false
+    prune_policy: oldest_first
+    report_in_status: true
+    include_paths:
+    - data/paper_loop.log
+    - data/paper_loop_runtime.log
+    - data/watchdog.log
+    - data/watchdog_cron.log
+    - logs/
+    - data/archive/ops/
+    exclude_paths:
+    - data/historical/
+    - .venv/

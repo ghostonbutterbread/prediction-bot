@@ -19,6 +19,8 @@ from bot.trade_audit import (
     is_trade_effective_row,
     summarize_event_performance,
 )
+from bot.config import load_config
+from bot.status import summarize_log_storage
 
 DATA_DIR = Path(__file__).parent.parent / "data"
 PACIFIC = timezone(timedelta(hours=-7))
@@ -133,6 +135,41 @@ def analyze() -> dict:
         "issues": [],
         "actions": [],
     }
+
+    config = load_config(PROJECT_ROOT / "config.yaml")
+    storage_summary = summarize_log_storage(config, project_root=PROJECT_ROOT)
+    if storage_summary:
+        result["storage"] = {
+            "log_audit_usage_gb": round(storage_summary["total_bytes"] / (1024 ** 3), 2),
+            "log_audit_cap_gb": round(storage_summary["max_bytes"] / (1024 ** 3), 2),
+            "usage_pct": storage_summary["usage_pct"],
+            "tracked_files": storage_summary["tracked_files"],
+            "largest_files": storage_summary["largest_files"],
+            "warning_threshold_pct": storage_summary["warning_threshold_pct"],
+            "hard_stop_threshold_pct": storage_summary["hard_stop_threshold_pct"],
+            "over_warning": storage_summary["over_warning"],
+            "over_hard_stop": storage_summary["over_hard_stop"],
+        }
+        if storage_summary["over_hard_stop"]:
+            result["issues"].append({
+                "severity": "critical",
+                "code": "LOG_STORAGE_HARD_STOP",
+                "message": (
+                    f"Log/Audit storage {storage_summary['usage_pct']:.1f}% exceeds hard stop threshold "
+                    f"({storage_summary['hard_stop_threshold_pct']:.0f}%)"
+                ),
+                "suggestion": "Prune archived logs or raise configured storage.logs.max_total_gb",
+            })
+        elif storage_summary["over_warning"]:
+            result["issues"].append({
+                "severity": "warning",
+                "code": "LOG_STORAGE_WARNING",
+                "message": (
+                    f"Log/Audit storage {storage_summary['usage_pct']:.1f}% exceeds warning threshold "
+                    f"({storage_summary['warning_threshold_pct']:.0f}%)"
+                ),
+                "suggestion": "Prepare to prune older audit logs or raise configured log budget",
+            })
     
     if trusted_resolved:
         result["performance"] = _build_position_performance(trusted_resolved)
