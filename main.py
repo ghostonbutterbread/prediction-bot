@@ -10,6 +10,7 @@ Usage:
     python main.py resolve [session] # Resolve open trades — check outcomes, compute P&L
     python main.py backtest [n] [m]  # Backtest on n markets
     python main.py live              # Live trading (real money!)
+    python main.py live --config path/to/config.yaml
     python main.py status            # Show bot status
     python main.py markets           # List active markets
     python main.py news <query>      # Test news feed
@@ -135,13 +136,23 @@ def cmd_paper():
     bot.close()
 
 
-def cmd_live(interval: int = 120):
+def cmd_live(interval: int = 120, single_trade: bool = False, verbosity_override: str | None = None, config_path: str = "config.yaml"):
     """Live trading mode."""
     from bot.runner import PredictionBot
 
-    config = get_config()
+    try:
+        from bot.config import load_config as load_yaml_config
+        config = load_yaml_config(config_path)
+        config["_config_path"] = config_path
+    except Exception:
+        config = get_config()
     config.setdefault("trading", {})["mode"] = "live"
-    config.setdefault("trading", {})["enabled"] = config.get("trading_enabled", True)
+    if "enabled" not in config.setdefault("trading", {}):
+        config["trading"]["enabled"] = config.get("trading_enabled", True)
+    if single_trade:
+        config["trading"]["single_trade_mode"] = True
+    if verbosity_override:
+        config.setdefault("verbosity", {})["level"] = verbosity_override
     os.environ["PAPER_MODE"] = "false"
     bot = PredictionBot(config)
 
@@ -170,7 +181,12 @@ def cmd_status():
     """Show current runner status using the shared formatter."""
     from bot.runner import PredictionBot
 
-    config = get_config()
+    try:
+        from bot.config import load_config as load_yaml_config
+        config = load_yaml_config("config.yaml")
+        config["_config_path"] = "config.yaml"
+    except Exception:
+        config = get_config()
     mode = config.get("trading", {}).get("mode", os.getenv("TRADING_MODE", "paper")).lower()
     os.environ["PAPER_MODE"] = "false" if mode == "live" else "true"
     bot = PredictionBot(config)
@@ -210,7 +226,7 @@ def cmd_markets():
     bot.close()
 
 
-def cmd_simulate(scans: int = 10, interval: int = 60, use_scheduler: bool = True):
+def cmd_simulate(scans: int = 10, interval: int = 60, use_scheduler: bool = True, single_trade: bool = False, verbosity_override: str | None = None, config_path: str = "config.yaml"):
     """Run simulation mode — paper trades with full audit trail.
 
     With --use-scheduler (default), scan interval adapts dynamically based
@@ -225,8 +241,13 @@ def cmd_simulate(scans: int = 10, interval: int = 60, use_scheduler: bool = True
     # Load config (config.yaml + .env overrides)
     try:
         from bot.config import load_config as load_yaml_config
-        config = load_yaml_config()
+        config = load_yaml_config(config_path)
+        config["_config_path"] = config_path
         logger.info("📋 Loaded config.yaml")
+        if single_trade:
+            config.setdefault("trading", {})["single_trade_mode"] = True
+        if verbosity_override:
+            config.setdefault("verbosity", {})["level"] = verbosity_override
     except Exception:
         config = get_config()
         logger.info("📋 Using .env config (config.yaml not available)")
@@ -499,21 +520,53 @@ def main():
 
     cmd = sys.argv[1].lower()
 
+    single_trade = "--single-trade" in sys.argv
+    verbosity_override = "double_verbose" if "-vv" in sys.argv else "verbose" if "-v" in sys.argv else None
+    config_path = "config.yaml"
+    if "--config" in sys.argv:
+        idx = sys.argv.index("--config")
+        if idx + 1 < len(sys.argv):
+            config_path = sys.argv[idx + 1]
+
     if cmd == "demo":
         cmd_demo()
     elif cmd == "paper":
         cmd_paper()
     elif cmd == "live":
-        interval = int(sys.argv[2]) if len(sys.argv) > 2 else 120
-        cmd_live(interval)
+        skip_next = False
+        args = []
+        for arg in sys.argv[2:]:
+            if skip_next:
+                skip_next = False
+                continue
+            if arg == "--config":
+                skip_next = True
+                continue
+            if arg in {"--single-trade", "-v", "-vv"}:
+                continue
+            args.append(arg)
+        interval = int(args[0]) if args else 120
+        cmd_live(interval, single_trade=single_trade, verbosity_override=verbosity_override, config_path=config_path)
     elif cmd == "status":
         cmd_status()
     elif cmd == "markets":
         cmd_markets()
     elif cmd == "simulate":
-        scans = int(sys.argv[2]) if len(sys.argv) > 2 else 10
-        interval = int(sys.argv[3]) if len(sys.argv) > 3 else 30
-        cmd_simulate(scans, interval)
+        skip_next = False
+        args = []
+        for arg in sys.argv[2:]:
+            if skip_next:
+                skip_next = False
+                continue
+            if arg == "--config":
+                skip_next = True
+                continue
+            if arg in {"--single-trade", "-v", "-vv"}:
+                continue
+            args.append(arg)
+        scans = int(args[0]) if len(args) > 0 else 10
+        interval = int(args[1]) if len(args) > 1 else 30
+        cmd_simulate(scans, interval, single_trade=single_trade, verbosity_override=verbosity_override, config_path=config_path)
     elif cmd == "audit":
         session_id = sys.argv[2] if len(sys.argv) > 2 else None
         cmd_audit(session_id)

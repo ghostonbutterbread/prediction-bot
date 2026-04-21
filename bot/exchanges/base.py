@@ -2,7 +2,7 @@
 
 from abc import ABC, abstractmethod
 from typing import Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 
@@ -49,6 +49,25 @@ class Position:
     current_price: float
     pnl: float
     opened_at: datetime
+    metadata: dict = field(default_factory=dict)
+
+
+@dataclass
+class RestingOrder:
+    """Represents an open or partially-filled order."""
+    order_id: str
+    market_id: str
+    exchange: str
+    side: str
+    requested_size: float
+    filled_size: float
+    remaining_size: float
+    price: float
+    status: str
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+    question: str = ""
+    metadata: dict = field(default_factory=dict)
 
 
 class BaseExchange(ABC):
@@ -96,6 +115,10 @@ class BaseExchange(ABC):
     def get_balance(self) -> float:
         """Get account balance."""
         pass
+
+    def get_resting_orders(self) -> list[RestingOrder]:
+        """Get currently open or partially-filled orders."""
+        return []
 
     @abstractmethod
     def close(self):

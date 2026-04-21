@@ -112,11 +112,12 @@ strategy:
   weather_observation_cooldown_seconds: 21600
 kalshi_fee_rate: 0.07
 trading:
-  mode: paper
+  mode: live
   enabled: true
   send_startup: true
   send_shutdown: true
   send_pause_resume: true
+  single_trade_mode: true
 alerts:
   enabled: true
   trade_events: true
@@ -131,9 +132,13 @@ alerts:
   telegram_thread_id: '8'
   telegram_silent: false
 verbosity:
-  level: normal
-max_tradable_balance: 0.0
-max_position_size_usd: 0.0
+  level: verbose
+max_tradable_balance: 1.0
+max_position_size_usd: 1.0
+
+trade_economics:
+  min_position_size_usd: 1.0
+  min_expected_net_profit_usd: 0.10
 risk:
   kelly_fraction_paper: 0.5
   max_bet_pct_paper: 0.1
@@ -155,10 +160,6 @@ risk:
   max_open_positions: 15
 runtime:
   base_dir: data
-
-trade_economics:
-  min_position_size_usd: 1.0
-  min_expected_net_profit_usd: 0.10
 
 logging:
   log_dir: data

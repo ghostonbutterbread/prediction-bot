@@ -25,3 +25,6 @@ researcher_recommendations.jsonl
 # OS
 .DS_Store
 Thumbs.db
+logs/
+.codex_prompt.txt
+2x

@@ -1,0 +1,163 @@
+import tempfile
+import unittest
+from datetime import datetime, timezone
+
+from bot.exchanges.base import Market, Position, RestingOrder
+from bot.live_adapters import RunnerLiveReconciliationAdapter, RunnerLiveStateAdapter
+from bot.runner import PredictionBot, LivePosition
+
+
+class FakeExchange:
+    def __init__(self, positions=None, orders=None, balance=25.0, market_map=None):
+        self._positions = positions or []
+        self._orders = orders or []
+        self._balance = balance
+        self._market_map = market_map or {}
+
+    def get_positions(self):
+        return list(self._positions)
+
+    def get_resting_orders(self):
+        return list(self._orders)
+
+    def get_balance(self):
+        return self._balance
+
+    def get_market(self, market_id):
+        return self._market_map.get(market_id)
+
+
+class LiveAdaptersTests(unittest.TestCase):
+    def _make_bot(self, tmpdir):
+        return PredictionBot(
+            {
+                "log_dir": tmpdir,
+                "data_dir": tmpdir,
+                "trading": {"mode": "live", "enabled": True},
+                "strategy": {
+                    "enable_news": False,
+                    "enable_social": False,
+                    "enable_ai": False,
+                },
+            }
+        )
+
+    def test_reconciliation_adapter_builds_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = self._make_bot(tmpdir)
+            adapter = RunnerLiveReconciliationAdapter(bot)
+            exchange = FakeExchange(
+                positions=[
+                    Position(
+                        market_id="M1",
+                        exchange="kalshi",
+                        question="Will it rain?",
+                        side="YES",
+                        entry_price=0.40,
+                        size=2.0,
+                        current_price=0.44,
+                        pnl=0.0,
+                        opened_at=datetime(2026, 4, 20, 18, 0, tzinfo=timezone.utc),
+                    )
+                ],
+                orders=[
+                    RestingOrder(
+                        order_id="ord-1",
+                        market_id="M2",
+                        exchange="kalshi",
+                        side="NO",
+                        requested_size=4.0,
+                        filled_size=1.0,
+                        remaining_size=3.0,
+                        price=0.61,
+                        status="open",
+                        created_at=datetime(2026, 4, 20, 18, 1, tzinfo=timezone.utc),
+                    )
+                ],
+                balance=15.0,
+            )
+
+            snapshot = adapter.reconcile("kalshi", exchange)
+            self.assertEqual(len(snapshot.open_positions), 1)
+            self.assertEqual(len(snapshot.open_orders), 1)
+            self.assertEqual(snapshot.reserved_capital, 5.0)
+            self.assertEqual(snapshot.available_cash, 10.0)
+            self.assertEqual(snapshot.partial_fills, 1)
+
+    def test_state_adapter_exposes_positions_and_orders(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = self._make_bot(tmpdir)
+            bot.open_positions = [
+                LivePosition(
+                    market_id="M1",
+                    question="Will it rain?",
+                    direction="BUY_YES",
+                    price=0.4,
+                    size=2.0,
+                    order_id="ord-pos",
+                    created_at=datetime.now(timezone.utc).isoformat(),
+                )
+            ]
+            bot.open_orders = [
+                {
+                    "order_id": "ord-open",
+                    "market_id": "M2",
+                    "question": "Will it snow?",
+                    "direction": "BUY_NO",
+                    "status": "open",
+                    "requested_size": 4.0,
+                    "filled_size": 1.0,
+                    "remaining_size": 3.0,
+                    "price": 0.61,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }
+            ]
+            bot.risk.state.current_balance = 20.0
+
+            adapter = RunnerLiveStateAdapter(bot)
+            account = adapter.get_account_state()
+            self.assertEqual(account.reserved_capital, 5.0)
+            self.assertEqual(len(adapter.list_open_positions()), 1)
+            self.assertEqual(len(adapter.list_resting_orders()), 1)
+
+    def test_settle_emits_resolution_events(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = self._make_bot(tmpdir)
+            adapter = RunnerLiveReconciliationAdapter(bot)
+            exchange = FakeExchange(
+                market_map={
+                    "M1": Market(
+                        id="M1",
+                        exchange="kalshi",
+                        question="Will it rain?",
+                        yes_price=0.4,
+                        no_price=0.6,
+                        volume=0,
+                        liquidity=0,
+                        closes_at=datetime.now(timezone.utc),
+                        category="weather",
+                        metadata={"result": "YES"},
+                        close_price=1.0,
+                    )
+                }
+            )
+            open_positions = [
+                LivePosition(
+                    market_id="M1",
+                    question="Will it rain?",
+                    direction="BUY_YES",
+                    price=0.4,
+                    size=2.0,
+                    order_id="ord-pos",
+                    created_at=datetime.now(timezone.utc).isoformat(),
+                )
+            ]
+
+            events = adapter.settle("kalshi", exchange, open_positions)
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0].outcome, "won")
+            self.assertEqual(events[0].pnl, 1.2)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -10,8 +10,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from bot.config import load_config
 from bot.exchanges.base import BaseExchange
+from bot.live_adapters import RunnerLiveReconciliationAdapter, RunnerLiveStateAdapter
+from bot.live_execution import RunnerLiveExecutionAdapter
+from bot.live_sync import RunnerLiveSync
+from bot.notifications import build_notification, normalize_verbosity
 from bot.risk import RiskManager
+from bot.telegram_notifier import TelegramNotifier
 from bot.shared_core import AccountState, TradeContext, build_trade_decision
 from bot.status import build_snapshot
 from bot.strategies.enhanced import EnhancedStrategyEngine, KellySizer
@@ -36,10 +42,21 @@ class PredictionBot:
     def __init__(self, config: dict = None):
         config = config or {}
         self.config = config
+        self._config_path = Path(config.get("_config_path", "config.yaml")) if config.get("_config_path") else None
+        self._config_last_mtime: float | None = None
 
         self.exchanges: dict[str, BaseExchange] = {}
         self.strategy = EnhancedStrategyEngine(config.get("strategy", {}))
-        self.kelly = KellySizer()
+        self.live_state = RunnerLiveStateAdapter(self)
+        self.live_reconciliation = RunnerLiveReconciliationAdapter(self)
+        self.live_sync = RunnerLiveSync(self)
+        self.live_execution = RunnerLiveExecutionAdapter(self)
+        economics_cfg = config.get("trade_economics", {}) or {}
+        self.kelly = KellySizer(
+            fee_rate=config.get("kalshi_fee_rate"),
+            min_position_size_usd=economics_cfg.get("min_position_size_usd", 1.0),
+            min_expected_net_profit_usd=economics_cfg.get("min_expected_net_profit_usd", 0.0),
+        )
         self.risk = RiskManager(config)
 
         self.running = False
@@ -52,6 +69,7 @@ class PredictionBot:
         }
         self.last_block_reasons: dict[str, int] = {}
         self.open_positions: list[LivePosition] = []
+        self.open_orders: list[dict] = []
         self.trade_history: list[dict] = []
         self.lifecycle_counters = {
             "signals_considered": 0,
@@ -62,14 +80,27 @@ class PredictionBot:
         self.lifecycle_block_reasons: dict[str, int] = {}
         self.lifecycle_started_at = datetime.now(timezone.utc)
         self._last_hourly_summary_key: str | None = None
+        self.single_trade_mode = bool(config.get("trading", {}).get("single_trade_mode", False))
+        self.single_trade_completed = False
+        self.alerts = config.get("alerts", {}) or {}
+        self.verbosity_level = normalize_verbosity((config.get("verbosity", {}) or {}).get("level", "normal"))
+        self.telegram_notifier = TelegramNotifier(self.alerts)
 
         self.log_dir = Path(config.get("log_dir", "data"))
         self.log_dir.mkdir(parents=True, exist_ok=True)
+        if self._config_path and self._config_path.exists():
+            self._config_last_mtime = self._config_path.stat().st_mtime
+
         self._log_lifecycle_event(
             "startup",
             {
                 "mode": self.config.get("trading", {}).get("mode", "paper"),
-                "trading_enabled": bool(self.config.get("trading_enabled", self.config.get("trading", {}).get("trading_enabled", True))),
+                "trading_enabled": bool(
+                    self.config.get("trading", {}).get(
+                        "enabled",
+                        self.config.get("trading_enabled", self.config.get("trading", {}).get("trading_enabled", True)),
+                    )
+                ),
                 "exchange_count": len(self.exchanges),
             },
         )
@@ -86,10 +117,50 @@ class PredictionBot:
         for name, exchange in self.exchanges.items():
             try:
                 results[name] = exchange.connect()
+                if results[name]:
+                    self._reconcile_exchange_state(name, exchange)
             except Exception as e:
                 logger.error(f"Failed to connect to {name}: {e}")
                 results[name] = False
         return results
+
+    def _reconcile_exchange_state(self, exchange_name: str, exchange: BaseExchange) -> dict:
+        try:
+            snapshot = self.live_reconciliation.reconcile(exchange_name, exchange)
+        except Exception as e:
+            logger.error(f"Failed to fetch exchange state for reconciliation from {exchange_name}: {e}")
+            self._log_lifecycle_event(
+                "reconciliation_failed",
+                {"exchange": exchange_name, "error": str(e)},
+            )
+            return {"exchange": exchange_name, "open_positions": 0, "open_orders": 0, "trade_history_loaded": 0, "status": "error"}
+
+        self.open_positions = snapshot.open_positions
+        self.open_orders = snapshot.open_orders
+        self.trade_history = [trade for trade in self.trade_history if not trade.get("reconciled")] + snapshot.trade_history_rows
+
+        balance = self._coerce_float(getattr(exchange, "get_balance", lambda: 0.0)(), default=self.risk.state.current_balance)
+        self.risk.sync_account_state(
+            current_balance=balance,
+            available_cash=snapshot.available_cash,
+            reserved_capital=snapshot.reserved_capital,
+            total_exposure=snapshot.reserved_capital,
+            open_positions=len(self.open_positions),
+        )
+
+        summary = {
+            "exchange": exchange_name,
+            "open_positions": len(snapshot.open_positions),
+            "open_orders": len(snapshot.open_orders),
+            "trade_history_loaded": len(snapshot.trade_history_rows),
+            "reserved_capital": snapshot.reserved_capital,
+            "available_cash": snapshot.available_cash,
+            "partial_fills": snapshot.partial_fills,
+            "status": "ok",
+        }
+        self._log_lifecycle_event("reconciliation_completed", summary)
+        return summary
+
 
     def scan_once(self) -> dict:
         logger.info(f"\n{'='*60}")
@@ -139,8 +210,9 @@ class PredictionBot:
         else:
             logger.info("  No signals this cycle")
 
+        max_candidates = 1 if self.single_trade_mode else 3
         trades = 0
-        for sig in all_signals[:3]:
+        for sig in all_signals[:max_candidates]:
             result = self._process_signal(sig)
             if result is None:
                 continue
@@ -150,6 +222,8 @@ class PredictionBot:
                 self._log_risk_block_event(sig, result)
             elif result.get("order"):
                 trades += 1
+                if self.single_trade_mode:
+                    self.single_trade_completed = True
 
         self.stats["scans"] += 1
         self.stats["signals"] += len(all_signals)
@@ -162,6 +236,16 @@ class PredictionBot:
         for reason, count in blocked_reasons.items():
             self.lifecycle_block_reasons[reason] = self.lifecycle_block_reasons.get(reason, 0) + count
 
+        self._sync_resolved_positions()
+        if self.single_trade_mode and self.single_trade_completed:
+            self._log_lifecycle_event(
+                "single_trade_completed",
+                {
+                    "open_positions": len(self.open_positions),
+                    "open_orders": len(self.open_orders),
+                    "behavior": "no_new_entries_continue_resolution_tracking",
+                },
+            )
         self._log_scan(all_signals, trades, blocked_reasons)
         self._emit_hourly_summary_if_due()
 
@@ -179,6 +263,7 @@ class PredictionBot:
         count = 0
         while self.running:
             try:
+                self.reload_runtime_controls_if_needed()
                 self.scan_once()
                 count += 1
 
@@ -243,7 +328,10 @@ class PredictionBot:
         if not exchange:
             return None
 
-        context = self._build_trade_context(signal, exchange)
+        if self.single_trade_mode and self.single_trade_completed:
+            return {"blocked_reason": "single_trade_mode_completed"}
+
+        context = self.live_execution.build_trade_context(signal, exchange, self.config)
         strategy_cfg = self.config.get("strategy", {})
         decision = build_trade_decision(
             context,
@@ -258,137 +346,46 @@ class PredictionBot:
             logger.info(f"🛑 Shared decision skipped: {decision.reason}")
             return {"blocked_reason": decision.reason_code, "decision": decision}
 
-        result = self._execute_signal(signal, decision)
+        result = self.live_execution.execute(signal, decision, exchange)
         if result:
             return {"order": result, "decision": decision}
         return {"blocked_reason": "execution_failed", "decision": decision}
 
-    def _build_trade_context(self, signal: dict, exchange: BaseExchange) -> TradeContext:
-        balance = self._coerce_float(getattr(exchange, "get_balance", lambda: 0.0)(), default=0.0)
-        available_cash = balance
-        reserved_capital = sum(position.size for position in self.open_positions)
-        total_exposure = reserved_capital
-        effective_tradable_cash = available_cash
-        if self.risk.max_tradable_balance and self.risk.max_tradable_balance > 0:
-            effective_tradable_cash = min(effective_tradable_cash, self.risk.max_tradable_balance)
 
-        account_state = AccountState(
-            starting_balance=self.risk.state.starting_balance,
-            current_balance=balance,
-            available_cash=available_cash,
-            reserved_capital=reserved_capital,
-            total_exposure=total_exposure,
-            open_positions=len(self.open_positions),
-            daily_pnl=self.risk.state.daily_pnl,
-            drawdown_pct=self.risk.state.drawdown_pct,
-            consecutive_losses=self.risk.state.consecutive_losses,
-            consecutive_wins=self.risk.state.consecutive_wins,
-            metadata={
-                "effective_tradable_cash": round(effective_tradable_cash, 2),
-                "mode": self.config.get("trading", {}).get("mode", "paper"),
-            },
-        )
+    def _sync_resolved_positions(self):
+        for exchange_name, exchange in self.exchanges.items():
+            try:
+                resolution_events = self.live_reconciliation.settle(exchange_name, exchange, self.open_positions)
+            except Exception as e:
+                logger.debug(f"Resolution sync failed for {exchange_name}: {e}")
+                continue
+            if not resolution_events:
+                continue
 
-        self.risk.sync_account_state(
-            current_balance=balance,
-            available_cash=available_cash,
-            reserved_capital=reserved_capital,
-            total_exposure=total_exposure,
-            open_positions=len(self.open_positions),
-        )
-
-        return TradeContext(
-            exchange=signal.get("exchange", "unknown"),
-            market_id=signal.get("market_id", ""),
-            question=signal.get("question", ""),
-            direction=signal.get("direction", "BUY_YES"),
-            market_price=signal.get("market_price"),
-            yes_price=signal.get("yes_price", signal.get("market_price")),
-            no_price=signal.get("no_price"),
-            model_probability=signal.get("model_probability"),
-            edge=signal.get("edge"),
-            confidence=signal.get("confidence"),
-            account_state=account_state,
-            source_context=dict(signal),
-            metadata={"runner": "live"},
-        )
-
-    def _execute_signal(self, signal: dict, decision) -> Optional[dict]:
-        exchange = self.exchanges.get(signal["exchange"])
-        if not exchange:
-            return None
-
-        market_id = signal["market_id"]
-        side = "YES" if decision.action == "BUY_YES" else "NO"
-
-        try:
-            market_bid_ask = exchange.get_market_bid_ask(market_id)
-            if market_bid_ask and market_bid_ask.get("best_yes_ask", 0) > 0:
-                yes_ask = market_bid_ask.get("best_yes_ask", 0)
-                no_ask = market_bid_ask.get("best_no_ask", 0)
-            else:
-                logger.warning(f"No market price data for {market_id} - skipping")
-                return None
-        except Exception as e:
-            logger.debug(f"Could not fetch market bid/ask for {market_id}: {e}")
-            yes_ask = signal.get("market_price", 0.50)
-            if yes_ask <= 0 or yes_ask >= 1:
-                logger.warning(f"No valid market price for {market_id} - skipping")
-                return None
-            no_ask = 1 - yes_ask
-
-        price = yes_ask if side == "YES" else no_ask
-        price = max(0.01, min(price, 0.99))
-        size = float(decision.position_size or 0.0)
-
-        if size < 1:
-            logger.info(f"Position too small after shared risk controls: ${size:.2f}")
-            return None
-
-        order = exchange.place_order(market_id, side, price, size)
-        if not order:
-            return None
-
-        order_id = order.id if hasattr(order, "id") else str(order)
-        self.open_positions.append(
-            LivePosition(
-                market_id=market_id,
-                question=signal.get("question", ""),
-                direction=decision.action,
-                price=price,
-                size=size,
-                order_id=order_id,
-                created_at=datetime.now(timezone.utc).isoformat(),
+            resolved_ids = {event.position_id for event in resolution_events}
+            self.open_positions = [position for position in self.open_positions if position.order_id not in resolved_ids]
+            for trade in self.trade_history:
+                if trade.get("order_id") in resolved_ids and not trade.get("resolved"):
+                    event = next((evt for evt in resolution_events if evt.position_id == trade.get("order_id")), None)
+                    if event is None:
+                        continue
+                    trade["resolved"] = True
+                    trade["resolved_at"] = event.resolved_at
+                    trade["pnl"] = event.pnl
+                    trade["settlement_value"] = event.settlement_value
+                    trade["resolution_outcome"] = event.outcome
+                    self.risk.record_trade_result(trade.get("order_id"), event.pnl or 0.0)
+            total_pnl = sum(float(event.pnl or 0.0) for event in resolution_events)
+            self._log_lifecycle_event(
+                "positions_resolved",
+                {
+                    "exchange": exchange_name,
+                    "count": len(resolution_events),
+                    "markets": [event.market_id for event in resolution_events],
+                    "realized_pnl": total_pnl,
+                    "balance_after": self.risk.state.current_balance,
+                },
             )
-        )
-        self.trade_history.append(
-            {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "market_id": market_id,
-                "question": signal.get("question", ""),
-                "direction": decision.action,
-                "size": size,
-                "price": price,
-                "resolved": False,
-                "order_id": order_id,
-                "decision_reason": decision.reason,
-            }
-        )
-        self.risk.record_trade(
-            {
-                "trade_id": order_id,
-                "question": signal.get("question", ""),
-                "size": size,
-                "reserved_capital": size,
-                "resolved": False,
-            }
-        )
-
-        logger.info(
-            f"✅ Trade executed: {side} ${size:.2f} @ ${price:.4f} on {signal['exchange']}/{market_id}"
-        )
-        self._log_trade(signal, order, decision, size, price)
-        return {"order": order, "signal": signal, "decision": decision}
 
     def _log_scan(self, signals: list, trades: int, blocked_reasons: dict[str, int]):
         log_file = self.log_dir / f"scans_{datetime.now().strftime('%Y-%m-%d')}.jsonl"
@@ -456,6 +453,103 @@ class PredictionBot:
         log_file = self.log_dir / "hourly_summary.jsonl"
         with open(log_file, "a") as f:
             f.write(json.dumps(summary) + "\n")
+        self._log_lifecycle_event("hourly_summary", summary)
+
+    def reload_runtime_controls_if_needed(self) -> bool:
+        if not self._config_path or not self._config_path.exists():
+            return False
+
+        try:
+            mtime = self._config_path.stat().st_mtime
+        except OSError:
+            return False
+
+        if self._config_last_mtime is not None and mtime <= self._config_last_mtime:
+            return False
+
+        previous_mode = str(self.config.get("trading", {}).get("mode", "paper")).lower()
+        previous_enabled = bool(
+            self.config.get("trading", {}).get(
+                "enabled",
+                self.config.get("trading_enabled", self.config.get("trading", {}).get("trading_enabled", True)),
+            )
+        )
+
+        reloaded = load_config(self._config_path)
+        if self._config_path:
+            reloaded["_config_path"] = str(self._config_path)
+        if "trading" not in reloaded:
+            reloaded["trading"] = {}
+        if "enabled" in reloaded["trading"]:
+            reloaded["trading_enabled"] = bool(reloaded["trading"]["enabled"])
+        self.config = reloaded
+        self._config_last_mtime = mtime
+
+        self.risk = RiskManager(self.config)
+
+        self.single_trade_mode = bool(self.config.get("trading", {}).get("single_trade_mode", self.single_trade_mode))
+        self.alerts = self.config.get("alerts", {}) or {}
+        self.verbosity_level = normalize_verbosity((self.config.get("verbosity", {}) or {}).get("level", self.verbosity_level))
+        self.telegram_notifier = TelegramNotifier(self.alerts)
+
+        current_mode = str(self.config.get("trading", {}).get("mode", previous_mode)).lower()
+        current_enabled = bool(
+            self.config.get("trading", {}).get(
+                "enabled",
+                self.config.get("trading_enabled", self.config.get("trading", {}).get("trading_enabled", True)),
+            )
+        )
+
+        if current_mode != previous_mode:
+            self._log_lifecycle_event(
+                "mode_changed",
+                {"from": previous_mode, "to": current_mode},
+            )
+
+        if current_enabled != previous_enabled:
+            self._log_lifecycle_event(
+                "trading_resumed" if current_enabled else "trading_paused",
+                {
+                    "mode": current_mode,
+                    "open_positions": len(self.open_positions),
+                    "open_orders": len(self.open_orders),
+                    "behavior": "leave_resting_orders_untouched",
+                },
+            )
+
+        logger.info(
+            "Reloaded runtime controls: mode=%s enabled=%s",
+            current_mode,
+            current_enabled,
+        )
+        return True
+
+    def _notify_event(self, event_type: str, details: dict | None = None):
+        if not self.alerts.get("enabled", True):
+            return
+        category_map = {
+            "trade_placed": "trade_events",
+            "single_trade_completed": "single_trade_events",
+            "positions_resolved": "resolution_events",
+            "reconciliation_completed": "reconciliation_events",
+            "hourly_summary": "status_events",
+        }
+        category = category_map.get(event_type)
+        if category and not self.alerts.get(category, False):
+            return
+        message = build_notification(event_type, details or {}, verbosity=self.verbosity_level)
+        if not message:
+            return
+        notifications_file = self.log_dir / "notifications.jsonl"
+        payload = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "event": event_type,
+            "verbosity": self.verbosity_level,
+            "message": message,
+        }
+        with open(notifications_file, "a") as f:
+            f.write(json.dumps(payload) + "\n")
+        self.telegram_notifier.send(message)
 
     def _log_lifecycle_event(self, event_type: str, details: dict | None = None):
         payload = {
@@ -466,6 +560,7 @@ class PredictionBot:
         log_file = self.log_dir / "lifecycle.jsonl"
         with open(log_file, "a") as f:
             f.write(json.dumps(payload) + "\n")
+        self._notify_event(event_type, details)
 
     def stop(self):
         self.running = False
