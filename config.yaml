@@ -156,6 +156,10 @@ risk:
 runtime:
   base_dir: data
 
+scan:
+  markets_per_exchange: 60
+  summary_sample_per_exchange: 10
+
 trade_economics:
   min_position_size_usd: 1.0
   min_expected_net_profit_usd: 0.10
