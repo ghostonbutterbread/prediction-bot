@@ -13,6 +13,9 @@ Usage:
     python main.py live --config path/to/config.yaml
     python main.py status            # Show bot status
     python main.py markets           # List active markets
+    python main.py prediction-lab-run       # Score hypothetical Prediction Lab positions
+    python main.py prediction-lab-resolve   # Resolve matured Prediction Lab positions
+    python main.py prediction-lab-report    # Show Prediction Lab summary
     python main.py news <query>      # Test news feed
 """
 
@@ -493,6 +496,27 @@ def cmd_resolve():
     bot.close()
 
 
+def cmd_prediction_lab_run(config_path: str = 'config.yaml'):
+    from scripts.prediction_lab_run import main as prediction_lab_main
+    import sys
+    sys.argv = ['prediction_lab_run', '--config', config_path]
+    prediction_lab_main()
+
+
+def cmd_prediction_lab_resolve(config_path: str = 'config.yaml'):
+    from scripts.prediction_lab_resolve import main as prediction_lab_resolve_main
+    import sys
+    sys.argv = ['prediction_lab_resolve', '--config', config_path]
+    prediction_lab_resolve_main()
+
+
+def cmd_prediction_lab_report(config_path: str = 'config.yaml'):
+    from scripts.prediction_lab_report import main as prediction_lab_report_main
+    import sys
+    sys.argv = ['prediction_lab_report', '--config', config_path]
+    prediction_lab_report_main()
+
+
 def cmd_news(query: str = None):
     """Test news feed."""
     from bot.feeds.news import NewsFeed
@@ -576,6 +600,12 @@ def main():
         cmd_backtest(days, limit)
     elif cmd == "resolve":
         cmd_resolve()
+    elif cmd == "prediction-lab-run":
+        cmd_prediction_lab_run(config_path)
+    elif cmd == "prediction-lab-resolve":
+        cmd_prediction_lab_resolve(config_path)
+    elif cmd == "prediction-lab-report":
+        cmd_prediction_lab_report(config_path)
     elif cmd == "news":
         query = " ".join(sys.argv[2:]) if len(sys.argv) > 2 else None
         cmd_news(query)

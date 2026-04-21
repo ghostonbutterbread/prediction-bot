@@ -167,6 +167,23 @@ trade_economics:
   min_position_size_usd: 1.0
   min_expected_net_profit_usd: 0.10
 
+prediction_lab:
+  enabled: true
+  groups:
+    - weather
+  max_markets_per_run: 500
+  score_only: true
+  hypothetical_notional_mode: flat
+  flat_notional_usd: 10
+  use_sizing_logic: false
+  min_confidence_to_record: 0.0
+  min_edge_to_record: 0.0
+  record_all_scored: true
+  weather_only_daily_temp_first: true
+  disable_news: true
+  disable_social: true
+  disable_ai: true
+
 logging:
   log_dir: data
   level: INFO

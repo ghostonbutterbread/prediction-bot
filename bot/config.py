@@ -51,6 +51,38 @@ def _default_scan_config() -> dict[str, Any]:
     }
 
 
+def _default_prediction_lab_config() -> dict[str, Any]:
+    return {
+        "enabled": True,
+        "mode": "seed_and_watch",
+        "groups": ["weather"],
+        "max_markets_per_run": 1000,
+        "max_new_predictions_per_seed": 500,
+        "score_only": True,
+        "hypothetical_notional_mode": "flat",
+        "flat_notional_usd": 10.0,
+        "use_sizing_logic": False,
+        "min_confidence_to_record": 0.0,
+        "min_edge_to_record": 0.0,
+        "record_all_scored": True,
+        "seed_daily_temp_first": True,
+        "allow_non_weather": False,
+        "disable_news": True,
+        "disable_social": True,
+        "disable_ai": True,
+        "continue_collecting": False,
+        "collector_interval_seconds": 900,
+        "collector_record_market_snapshots": True,
+        "collector_record_predictions": True,
+        "collection_storage_cap_gb": 5,
+        "collection_warning_threshold_pct": 90,
+        "auto_pause_collection_on_storage_cap": True,
+        "resolve_interval_seconds": 1800,
+        "send_telegram_updates": True,
+        "telegram_summary_on_pause": True,
+    }
+
+
 def _normalize_storage_config(config: dict) -> dict:
     storage = _deep_merge(_default_storage_config(), config.get("storage", {}) or {})
     logs = storage.get("logs", {}) or {}
@@ -74,6 +106,36 @@ def _normalize_storage_config(config: dict) -> dict:
         allowed_groups = [part.strip() for part in allowed_groups.split(",") if part.strip()]
     scan["allowed_market_groups"] = [str(group).strip().lower() for group in allowed_groups if str(group).strip()]
     config["scan"] = scan
+
+    prediction_lab = _deep_merge(_default_prediction_lab_config(), config.get("prediction_lab", {}) or {})
+    groups = prediction_lab.get("groups") or []
+    if isinstance(groups, str):
+        groups = [part.strip() for part in groups.split(",") if part.strip()]
+    prediction_lab["groups"] = [str(group).strip().lower() for group in groups if str(group).strip()]
+    prediction_lab["enabled"] = bool(prediction_lab.get("enabled", True))
+    prediction_lab["mode"] = str(prediction_lab.get("mode", "seed_and_watch") or "seed_and_watch").lower()
+    prediction_lab["max_markets_per_run"] = max(1, int(prediction_lab.get("max_markets_per_run", 1000) or 1000))
+    prediction_lab["max_new_predictions_per_seed"] = max(1, int(prediction_lab.get("max_new_predictions_per_seed", 500) or 500))
+    prediction_lab["flat_notional_usd"] = float(prediction_lab.get("flat_notional_usd", 10.0) or 10.0)
+    prediction_lab["min_confidence_to_record"] = float(prediction_lab.get("min_confidence_to_record", 0.0) or 0.0)
+    prediction_lab["min_edge_to_record"] = float(prediction_lab.get("min_edge_to_record", 0.0) or 0.0)
+    prediction_lab["record_all_scored"] = bool(prediction_lab.get("record_all_scored", True))
+    prediction_lab["seed_daily_temp_first"] = bool(prediction_lab.get("seed_daily_temp_first", True))
+    prediction_lab["allow_non_weather"] = bool(prediction_lab.get("allow_non_weather", False))
+    prediction_lab["disable_news"] = bool(prediction_lab.get("disable_news", True))
+    prediction_lab["disable_social"] = bool(prediction_lab.get("disable_social", True))
+    prediction_lab["disable_ai"] = bool(prediction_lab.get("disable_ai", True))
+    prediction_lab["continue_collecting"] = bool(prediction_lab.get("continue_collecting", False))
+    prediction_lab["collector_interval_seconds"] = max(1, int(prediction_lab.get("collector_interval_seconds", 900) or 900))
+    prediction_lab["collector_record_market_snapshots"] = bool(prediction_lab.get("collector_record_market_snapshots", True))
+    prediction_lab["collector_record_predictions"] = bool(prediction_lab.get("collector_record_predictions", True))
+    prediction_lab["collection_storage_cap_gb"] = float(prediction_lab.get("collection_storage_cap_gb", 5.0) or 5.0)
+    prediction_lab["collection_warning_threshold_pct"] = float(prediction_lab.get("collection_warning_threshold_pct", 90) or 90)
+    prediction_lab["auto_pause_collection_on_storage_cap"] = bool(prediction_lab.get("auto_pause_collection_on_storage_cap", True))
+    prediction_lab["resolve_interval_seconds"] = max(1, int(prediction_lab.get("resolve_interval_seconds", 1800) or 1800))
+    prediction_lab["send_telegram_updates"] = bool(prediction_lab.get("send_telegram_updates", True))
+    prediction_lab["telegram_summary_on_pause"] = bool(prediction_lab.get("telegram_summary_on_pause", True))
+    config["prediction_lab"] = prediction_lab
     return config
 
 try:
@@ -192,6 +254,10 @@ def _apply_env_overrides(config: dict) -> dict:
         overrides.setdefault("scan", {})["summary_sample_per_exchange"] = int(os.getenv("SCAN_SUMMARY_SAMPLE_PER_EXCHANGE"))
     if os.getenv("ALLOWED_MARKET_GROUPS"):
         overrides.setdefault("scan", {})["allowed_market_groups"] = os.getenv("ALLOWED_MARKET_GROUPS")
+    if os.getenv("PREDICTION_LAB_GROUPS"):
+        overrides.setdefault("prediction_lab", {})["groups"] = os.getenv("PREDICTION_LAB_GROUPS")
+    if os.getenv("PREDICTION_LAB_MAX_MARKETS"):
+        overrides.setdefault("prediction_lab", {})["max_markets_per_run"] = int(os.getenv("PREDICTION_LAB_MAX_MARKETS"))
 
     if overrides:
         config = _deep_merge(config, overrides)

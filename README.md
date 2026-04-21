@@ -17,6 +17,26 @@ Multi-exchange prediction market trading bot with news sentiment analysis, Kelly
 - **Multi-exchange** — trade the same market across platforms
 - **Risk management** — edge thresholds, confidence gates, position limits
 - **SQLite logging** — every scan, signal, and trade recorded
+- **Shared API throttling** — reusable read/write rate limiting for Kalshi-bound pull, resolve, and trade paths
+
+## Kalshi rate limiting
+
+Kalshi request throttling is shared through `bot/http_rate_limit.py` and used by the exchange adapter for both reads and writes.
+
+Current behavior:
+- adapter attempts to auto-detect limits via `GET /account/limits`
+- if needed, account tier can still be hard-set with `KALSHI_ACCOUNT_TIER`
+- supported tiers:
+  - `basic` → 20 reads/s, 10 writes/s
+  - `advanced` → 30 reads/s, 30 writes/s
+  - `premier` → 100 reads/s, 100 writes/s
+  - `prime` → 400 reads/s, 400 writes/s
+- optional hard overrides:
+  - `KALSHI_READS_PER_SECOND`
+  - `KALSHI_WRITES_PER_SECOND`
+- if detection and overrides are unavailable, the adapter defaults to `basic`
+
+This is shared infrastructure so pull, resolve, and live/paper-adjacent Kalshi flows can reuse the same throttling behavior instead of duplicating it.
 
 ## Quick Start
 
