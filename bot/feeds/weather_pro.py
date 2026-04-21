@@ -194,6 +194,43 @@ class NWSFeed:
 
     def __init__(self):
         self.http = httpx.Client(timeout=10)
+        self._points_cache: dict[str, tuple[datetime, tuple[str, int, int]]] = {}
+        self._points_cache_ttl = timedelta(hours=6)
+
+    def _resolve_forecast_grid(self, city: str) -> Optional[tuple[str, int, int, str]]:
+        city_key = city.lower().strip()
+        station_data = CITY_NWS.get(city_key)
+        coords = CITY_COORDS.get(city_key)
+        if not station_data or not coords:
+            return None
+
+        _, _, _, station = station_data
+        cached = self._points_cache.get(city_key)
+        now = datetime.now(timezone.utc)
+        if cached and (now - cached[0]) < self._points_cache_ttl:
+            office, grid_x, grid_y = cached[1]
+            return office, grid_x, grid_y, station
+
+        lat, lon = coords
+        try:
+            resp = self.http.get(
+                f"https://api.weather.gov/points/{lat},{lon}",
+                headers={"User-Agent": "PredictionBot/1.0"},
+            )
+            resp.raise_for_status()
+            props = resp.json().get("properties", {})
+            office = props.get("gridId")
+            grid_x = props.get("gridX")
+            grid_y = props.get("gridY")
+            if office and grid_x is not None and grid_y is not None:
+                resolved = (str(office), int(grid_x), int(grid_y))
+                self._points_cache[city_key] = (now, resolved)
+                return resolved[0], resolved[1], resolved[2], station
+        except Exception as e:
+            logger.debug(f"NWS points lookup error for {city}: {e}")
+
+        office, grid_x, grid_y, station = station_data
+        return office, grid_x, grid_y, station
 
     def get_station_observation(self, city: str) -> Optional[dict]:
         """
@@ -239,7 +276,7 @@ class NWSFeed:
             return None
 
     def get_forecast(self, city: str) -> Optional[WeatherSnapshot]:
-        grid = CITY_NWS.get(city.lower())
+        grid = self._resolve_forecast_grid(city)
         if not grid:
             return None
 
