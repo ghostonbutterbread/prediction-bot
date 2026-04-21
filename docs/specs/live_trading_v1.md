@@ -18,6 +18,19 @@ Scope: first controlled live rollout after paper trading baseline is committed a
 - autonomous capital scaling
 - remote admin command surface
 
+## Production-readiness gap list
+Before calling live trading production-ready for unattended real-money operation, we still want:
+- strict paper/live runtime state isolation so simulated history cannot contaminate live drawdown, P&L, restart state, or audit trails
+- fuller live order lifecycle handling
+  - open-order status refresh hardening
+  - partial-fill progression handling
+  - clearer cancel/requery/replace behavior when needed
+- stronger live settlement and reconciliation hardening against exchange edge cases
+- stronger operator-facing observability and alerts for important lifecycle events
+- small supervised real-money validation runs that confirm exchange truth matches internal logs/account state
+- continued extraction of live-specific API-backed behavior into dedicated modules while keeping shared decision/risk/status logic centralized
+- first-class operator verbosity controls so normal usage stays concise while supervised/debug modes expose full context
+
 ## Operating assumptions
 - first live rollout starts with a small funded wallet, for example $10
 - Kelly sizing remains the primary sizing engine
@@ -75,6 +88,12 @@ trading_enabled: true
 Behavior:
 - true: bot may open new positions
 - false: bot does not open new positions
+
+Important pause semantics:
+- pause does **not** cancel existing resting orders
+- pause does **not** ignore already-live positions
+- while paused, reconciliation, settlement checks, and resolution logging should continue
+- pause means "stop opening new trades", not "stop observing current exposure"
 
 Future:
 - later add `cancel_open_orders_on_pause`
@@ -240,6 +259,208 @@ alerts:
 
 Future tuning can reduce noise without changing core logic.
 
+Minimum important lifecycle alerts for supervised single-trade mode:
+- trade placed
+- single-trade completed (no further entries)
+- resolved market / settlement event
+
+These events provide an operator-readable state trail even when the user is not actively watching logs in real time.
+
+## Operator alerts + verbosity model
+Separate two concerns:
+- `alerts`: which event categories should be emitted
+- `verbosity`: how much detail emitted alerts should contain
+
+### Configuration
+Suggested config shape:
+
+```yaml
+alerts:
+  enabled: true
+  trade_events: true
+  single_trade_events: true
+  resolution_events: true
+  reconciliation_events: false
+  scan_summaries: false
+
+verbosity:
+  level: normal   # normal | verbose | double_verbose
+```
+
+### CLI overrides
+- default: normal
+- `-v` = verbose
+- `-vv` = double verbose
+
+CLI flags should override the configured verbosity level for the current run only.
+
+### Telegram delivery design
+- lifecycle/log events remain the source of truth
+- a Telegram formatter layer shapes those events for user-facing delivery
+- this lets us refine message formatting over time without changing core bot logic
+- formatter output should be designed so another supervising agent can understand what happened without reading raw log files
+- delivery should support routing to a dedicated Telegram group topic, not only DMs
+- Telegram delivery is expected to be enabled by default for operator visibility during active runs
+
+Suggested routing fields:
+```yaml
+alerts:
+  telegram_enabled: true
+  telegram_channel: telegram
+  telegram_target: "-1003763915138"
+  telegram_thread_id: "8"
+```
+
+Current intended destination:
+- Ghost's Home
+- topic: `bot-status`
+- topic id: `8`
+
+### Normal-mode notifications
+Normal alert content should stay concise but informative.
+
+Important: periodic lifecycle/status logs, including hourly summaries, should flow through the same Telegram notification path. A separate parallel periodic-status system is not required if the existing lifecycle/hourly event stream is already being mirrored to Telegram cleanly.
+
+Required design behavior:
+- hourly summaries should be emitted as normal lifecycle/status events
+- those events should be formatted by the same formatter layer
+- those formatted messages should be delivered by the same Telegram notifier path
+- alert-category filtering should still apply, using a dedicated `status_events` category
+
+Required normal payloads:
+- **trade placed**
+  - side / direction
+  - market question or compact label
+  - amount committed
+  - confidence
+  - entry price
+  - updated balance snapshot
+  - reserved / in-market amount when relevant
+- **single-trade completed**
+  - confirm no further new entries will be taken
+  - confirm monitoring/resolution will continue
+- **resolved market**
+  - market label
+  - outcome
+  - realized P&L
+  - updated balance snapshot
+
+### Verbosity levels
+- `normal`: key user-facing status only
+- `verbose`: adds more decision/risk/reconciliation context
+- `double_verbose`: adds deeper scan/dependency/lifecycle detail for supervision and debugging
+
+### Verbose content expectations
+`verbose` may include:
+- why this trade was selected
+- compact risk-clipping context
+- reconciliation summary
+- pause/resume/mode-change events
+- available cash / reserved capital / tradable cap snapshot
+
+`double_verbose` may include:
+- top candidate comparisons
+- blocker reasons for skipped trades
+- deeper lifecycle details
+- richer reconciliation/account-state details
+- per-scan summaries when enabled
+
+### Design rule
+The formatter layer should be the place where message shape evolves.
+Do not hardcode Telegram-specific prose deep in the trading logic.
+The trading system should emit stable lifecycle/status events, and the formatter should decide how to present them for each verbosity level.
+
+## Runtime data isolation
+Paper and live must not share mutable runtime state.
+
+Required structure:
+```text
+data/
+  paper/
+    risk_state.json
+    lifecycle.jsonl
+    notifications.jsonl
+    hourly_summary.jsonl
+    scans_*.jsonl
+    ...
+  live/
+    risk_state.json
+    lifecycle.jsonl
+    notifications.jsonl
+    hourly_summary.jsonl
+    scans_*.jsonl
+    ...
+```
+
+This isolation applies to at least:
+- risk state
+- trade history / execution logs
+- lifecycle logs
+- notification logs
+- scan summaries
+- restart/reconciliation artifacts
+
+Reason:
+- paper simulations must never create fake live drawdowns or fake live P&L
+- live state must never inherit simulated history
+- audit trails must remain mode-correct and trustworthy
+
+## Config posture
+The committed default config should be safe and neutral.
+
+Recommended default posture:
+- `config.yaml` = paper-first baseline
+- optional supervised live config in a separate file, for example `config.live_supervised.yaml`
+- operator intentionally opts into that file via explicit config-path selection, for example `--config config.live_supervised.yaml`
+
+## Runtime supervising-agent todo
+Future work: define a runtime supervising agent that watches active runs and improves operator leverage without becoming noisy or dangerous.
+
+Questions to answer:
+- what it should observe during paper vs live runs
+- what it should summarize into operator-facing updates
+- what it may recommend vs what it may change automatically
+- how it should help tune thresholds/verbosity/alerts over time
+- what hard safety boundaries it must never cross during live trading
+
+## Minimum trade economics
+Exchange-valid is not enough. A trade should also be economically meaningful.
+
+Recommended controls:
+```yaml
+trade_economics:
+  min_position_size_usd: 1.0
+  min_expected_net_profit_usd: 0.10
+```
+
+Meaning:
+- reject trades below exchange/practical size floor
+- reject trades whose expected net profit after fees is too small to matter
+- this prevents technically valid but economically pointless low-dollar trades
+
+### Supervised single-trade live test mode
+A useful pre-production mode is a supervised one-trade run:
+- scan markets
+- choose the best approved candidate
+- place at most one trade
+- then stop opening any further trades
+- continue reconciliation / settlement / logging for that exposure afterward
+
+This mode should be available as a first-class CLI flag for both paper and live so the same operator habit works in both environments.
+
+This is useful for validating:
+- order placement
+- post-trade balance refresh
+- reconciliation on later checks
+- settlement/result logging
+- cron-driven operational flow
+
+Intent:
+- this is not full live automation
+- this is a controlled bridge between paper confidence and unattended live trading
+- paper single-trade mode validates selection and single-entry behavior
+- live single-trade mode validates API placement, balance refresh, reconciliation, and later settlement logging
+
 ## Suggested implementation phases
 
 ### Phase 1: stabilize current paper state
@@ -334,12 +555,47 @@ Current status after the latest implementation slice:
   - README now documents `.venv` as the expected execution environment for future agents/operators
 
 Still not done yet:
-- pause/resume visibility is not yet modeled as an explicit lifecycle event stream tied to a single canonical runtime control section
-- live config still needs a clearer, more operator-friendly universal control block for start/stop/pause/resume semantics and live-reload behavior
-- live account/order state is still a thin in-runner implementation, not a dedicated live adapter module
-- open live positions are tracked in-memory only in the runner, not yet reconciled from exchange truth on restart
-- partial fills / resting orders / cancellations are not yet modeled through a true `LiveExecutionAdapter`
-- live settlement/result reconciliation is still behind the paper flow in maturity
+- pause/resume visibility now exists through config-driven runtime events:
+  - runner watches the configured `config.yaml` path during the live loop
+  - changes to `trading.enabled` emit `trading_paused` / `trading_resumed`
+  - changes to `trading.mode` emit `mode_changed`
+  - pause behavior explicitly leaves existing resting orders untouched and only stops new trade approvals
+- live reload now targets the canonical runtime control section instead of relying on env-only changes
+- live account/order state has started moving into a dedicated live adapter boundary:
+  - `bot/live_adapters.py` now holds live state snapshots and reconciliation logic
+  - `bot/live_execution.py` now holds live execution-specific account-context building and order placement flow
+  - runner now delegates reconciliation/state shaping/execution instead of owning all live normalization directly
+  - this is not finished yet, but the live module boundary now exists and is under test
+- live position reconciliation now exists as a first startup pass:
+  - `connect_all()` reconciles exchange-reported open positions into runner memory
+  - reconciled positions are mirrored into `trade_history` with `reconciled: true`
+  - risk/account state is resynced from reconciled open exposure
+  - lifecycle logs now emit `reconciliation_completed` or `reconciliation_failed`
+- live reconciliation now also covers open orders:
+  - exchange-reported resting orders are loaded into runner `open_orders`
+  - reserved capital now includes both open positions and remaining resting-order size
+  - reconciliation summary reports open-order count and partial-fill count
+- remaining reconciliation gaps:
+  - no order-cancel / replace workflow tied to reconciliation findings yet, by design resting orders are currently left alone on pause
+  - deeper partial-fill handling has started through adapter-level resting-order state plus remaining-size accounting, but it is not a full execution lifecycle yet
+  - reconciled entry price quality still depends on exchange position/order data fidelity
+  - no persistence layer beyond the fresh exchange snapshot on connect
+- live settlement/result reconciliation has started:
+  - adapter-level settlement checks now emit resolution events from exchange market truth
+  - runner removes resolved positions and records P&L into trade history/risk state
+  - this still needs broader real-exchange hardening to match paper maturity
+- live post-trade accounting is moving toward exchange truth instead of paper-style simulation:
+  - after live execution, runner refreshes account state from the exchange-backed balance
+  - reserved capital is derived from reconciled positions plus resting-order remainder, not handcrafted simulated wallet math
+  - this keeps live behavior lighter and more API-native than paper mode
+- paused-state semantics are now an explicit production requirement:
+  - paused must still allow reconciliation and market resolution handling
+  - paused must still keep logs/status current for already-open exposure
+  - paused only disables new entries
+- architectural direction is now explicit:
+  - shared decision/risk/status logic stays centralized in runner/shared core
+  - live-specific API-backed behavior is being extracted into dedicated modules that build on that shared logic
+  - paper and live are intended to look structurally similar at the boundaries, not duplicate the core decision engine
 
 Definition of done for this gap:
 - paper and live both derive trade approvals from the same shared decision/risk logic

@@ -8,7 +8,7 @@ from datetime import datetime, timezone, timedelta
 from kalshi_python_sync import Configuration, KalshiClient
 from kalshi_python_sync.auth import KalshiAuth
 
-from .base import BaseExchange, Market, Order, Position
+from .base import BaseExchange, Market, Order, Position, RestingOrder
 
 logger = logging.getLogger(__name__)
 
@@ -551,11 +551,43 @@ class KalshiExchange(BaseExchange):
                     current_price=0,
                     pnl=(getattr(p, 'realized_pnl', 0) or 0) / 100,
                     opened_at=datetime.now(timezone.utc),
+                    metadata={
+                        "raw_position": pos,
+                    },
                 ))
             return result
         except Exception as e:
             logger.error(f"Error getting positions: {e}")
             return []
+
+    def get_resting_orders(self) -> list[RestingOrder]:
+        if not self.client:
+            return []
+
+        raw_orders = []
+        try:
+            resp = self.client.get_orders(status="open", limit=200)
+            raw_orders = getattr(resp, "orders", []) or []
+        except Exception as sdk_error:
+            logger.debug(f"SDK open-orders fetch failed, trying raw API: {sdk_error}")
+            try:
+                auth_headers = self.client.kalshi_auth.create_auth_headers(
+                    'GET', '/trade-api/v2/portfolio/orders'
+                )
+                url = f"{self.host}/portfolio/orders?status=open&limit=200"
+                resp = _http_get_with_retry(url, auth_headers, timeout=10)
+                if resp and resp.status_code == 200:
+                    raw_orders = resp.json().get("orders", []) or []
+            except Exception as raw_error:
+                logger.error(f"Error getting resting orders: {raw_error}")
+                return []
+
+        normalized = []
+        for order in raw_orders:
+            normalized_order = self._normalize_resting_order(order)
+            if normalized_order is not None:
+                normalized.append(normalized_order)
+        return normalized
 
     def get_balance(self) -> float:
         try:
@@ -564,6 +596,58 @@ class KalshiExchange(BaseExchange):
         except Exception as e:
             logger.error(f"Error getting balance: {e}")
             return 0
+
+    def _normalize_resting_order(self, order) -> Optional[RestingOrder]:
+        if isinstance(order, dict):
+            order_id = order.get("order_id") or order.get("id") or ""
+            market_id = order.get("ticker") or order.get("market_ticker") or ""
+            side = str(order.get("side") or "YES").upper()
+            status = str(order.get("status") or "open")
+            requested = float(order.get("count") or order.get("requested_size") or 0)
+            filled = float(order.get("filled_count") or order.get("filled_size") or 0)
+            remaining = float(order.get("remaining_count") or order.get("remaining_size") or max(0.0, requested - filled))
+            price_cents = order.get("yes_price") if side == "YES" else order.get("no_price")
+            if price_cents is None:
+                price_cents = order.get("price")
+            price = float(price_cents or 0) / 100 if float(price_cents or 0) > 1 else float(price_cents or 0)
+            created_at = _parse_dt_raw(order.get("created_time")) or datetime.now(timezone.utc)
+            updated_at = _parse_dt_raw(order.get("updated_time"))
+            question = order.get("title") or order.get("question") or market_id
+        else:
+            order_id = getattr(order, "order_id", "") or getattr(order, "id", "")
+            market_id = getattr(order, "ticker", "") or getattr(order, "market_ticker", "")
+            side = str(getattr(order, "side", "YES") or "YES").upper()
+            status = str(getattr(order, "status", "open") or "open")
+            requested = float(getattr(order, "count", 0) or getattr(order, "requested_size", 0) or 0)
+            filled = float(getattr(order, "filled_count", 0) or getattr(order, "filled_size", 0) or 0)
+            remaining = float(getattr(order, "remaining_count", 0) or getattr(order, "remaining_size", max(0.0, requested - filled)) or 0)
+            price_cents = getattr(order, "yes_price", None) if side == "YES" else getattr(order, "no_price", None)
+            if price_cents is None:
+                price_cents = getattr(order, "price", None)
+            price = float(price_cents or 0) / 100 if float(price_cents or 0) > 1 else float(price_cents or 0)
+            created_at = _parse_dt(getattr(order, "created_time", None)) or datetime.now(timezone.utc)
+            updated_at = _parse_dt(getattr(order, "updated_time", None))
+            question = getattr(order, "title", "") or getattr(order, "question", "") or market_id
+
+        if not order_id or not market_id or requested <= 0:
+            return None
+
+        direction = "YES" if side == "YES" else "NO"
+        return RestingOrder(
+            order_id=order_id,
+            market_id=market_id,
+            exchange="kalshi",
+            side=direction,
+            requested_size=requested,
+            filled_size=filled,
+            remaining_size=remaining,
+            price=price,
+            status=status,
+            created_at=created_at,
+            updated_at=updated_at,
+            question=question,
+            metadata={"raw_status": status},
+        )
 
     def close(self):
         pass

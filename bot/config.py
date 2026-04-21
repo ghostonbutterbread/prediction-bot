@@ -10,6 +10,7 @@ compatibility with the existing setup.
 
 import os
 import logging
+from copy import deepcopy
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -122,12 +123,47 @@ def _apply_env_overrides(config: dict) -> dict:
     if overrides:
         config = _deep_merge(config, overrides)
 
+    trading_cfg = config.get("trading", {}) or {}
+    if "enabled" in trading_cfg:
+        config["trading_enabled"] = bool(trading_cfg.get("enabled"))
+    elif "trading_enabled" in trading_cfg:
+        config["trading_enabled"] = bool(trading_cfg.get("trading_enabled"))
+
     return config
 
 
-def load_config() -> dict:
+def _runtime_mode(config: dict) -> str:
+    trading = config.get("trading", {}) or {}
+    mode = str(trading.get("mode") or config.get("TRADING_MODE") or os.getenv("TRADING_MODE") or "paper").strip().lower()
+    return "live" if mode == "live" else "paper"
+
+
+def _apply_runtime_paths(config: dict) -> dict:
+    config = deepcopy(config)
+    mode = _runtime_mode(config)
+    runtime = config.setdefault("runtime", {})
+    base_dir = Path(runtime.get("base_dir", config.get("data_dir", "data")))
+    mode_dir = base_dir / mode
+    runtime["mode"] = mode
+    runtime["base_dir"] = str(base_dir)
+    runtime["mode_dir"] = str(mode_dir)
+    config["data_dir"] = str(mode_dir)
+    config["log_dir"] = str(mode_dir)
+    logging_cfg = config.setdefault("logging", {})
+    logging_cfg["log_dir"] = str(mode_dir)
+    strategy = config.get("strategy", {}) or {}
+    if strategy.get("weather_observation_log_path", "").startswith("data/"):
+        strategy["weather_observation_log_path"] = str(mode_dir / "weather_observations.jsonl")
+    config["strategy"] = strategy
+    return config
+
+
+def load_config(config_path: str | Path | None = None) -> dict:
     """Load config from config.yaml with .env overrides."""
-    config_path = _find_config()
+    if config_path is not None:
+        config_path = Path(config_path)
+    else:
+        config_path = _find_config()
 
     if config_path and yaml:
         try:
@@ -142,6 +178,7 @@ def load_config() -> dict:
 
     # Apply .env overrides
     config = _apply_env_overrides(config)
+    config = _apply_runtime_paths(config)
 
     return config
 
@@ -171,6 +208,9 @@ def _default_config() -> dict:
             "enable_weather_observation_log": False,
             "weather_observation_log_path": "data/weather_observations.jsonl",
             "weather_observation_cooldown_seconds": 21600,
+        },
+        "runtime": {
+            "base_dir": "data",
         },
         "risk": {
             "kelly_fraction": 0.75,

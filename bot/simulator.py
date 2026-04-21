@@ -113,7 +113,12 @@ class Simulator:
         config = config or {}
         self.config = config
         self.strategy = EnhancedStrategyEngine(config.get("strategy", {}))
-        self.kelly = KellySizer()
+        economics_cfg = config.get("trade_economics", {}) or {}
+        self.kelly = KellySizer(
+            fee_rate=config.get("kalshi_fee_rate"),
+            min_position_size_usd=economics_cfg.get("min_position_size_usd", 1.0),
+            min_expected_net_profit_usd=economics_cfg.get("min_expected_net_profit_usd", 0.0),
+        )
 
         # Risk management
         from bot.risk import RiskManager
@@ -128,6 +133,8 @@ class Simulator:
         self.min_confidence = config.get("min_confidence", strategy_cfg.get("min_confidence", 0.50))
         self.max_entry_price = config.get("max_entry_price", 0.70)
         self.enable_time_decay_ranking = config.get("enable_time_decay_ranking", True)
+        self.single_trade_mode = bool(config.get("trading", {}).get("single_trade_mode", False))
+        self.single_trade_completed = False
 
         self.data_dir = Path(config.get("data_dir", "data"))
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -370,6 +377,9 @@ class Simulator:
                     logger.info(f"  Signal: {signal.get('direction','')} edge={signal.get('edge',0):.3f} conf={signal.get('confidence',0):.3f} -> {should_trade}")
 
                     if should_trade:
+                        if self.single_trade_mode and self.single_trade_completed:
+                            blockers["single_trade_mode_completed"] += 1
+                            continue
                         # Dedup: skip if we already traded this market
                         market_id = signal.get("market_id", "")
                         if market_id in self.traded_markets:
@@ -389,6 +399,9 @@ class Simulator:
                                 self.trades.append(trade)
                                 trades_taken.append(trade)
                                 self.traded_markets.add(market_id)
+                                if self.single_trade_mode:
+                                    self.single_trade_completed = True
+                                    break
                     else:
                         signal["_blocked"] = gate_reason
                         blockers[gate_reason] += 1
@@ -437,6 +450,8 @@ class Simulator:
 
                 # Take trades from top-ranked signals (Kelly + risk decides if we actually can)
                 for score, sig, market in scored_signals:
+                    if self.single_trade_mode and self.single_trade_completed:
+                        break
                     market_id = sig.get("market_id", "")
                     if market_id in self.traded_markets:
                         blockers["duplicate_market"] += 1
@@ -452,6 +467,9 @@ class Simulator:
                             f"Score: {score:.6f} | Edge: {trade.edge:.2%} | "
                             f"Size: ${trade.position_size:.2f}"
                         )
+                        if self.single_trade_mode:
+                            self.single_trade_completed = True
+                            break
 
         # Log results
         if trades_taken:
@@ -543,6 +561,11 @@ class Simulator:
         return None
 
     def _create_trade(self, signal: dict, blockers: Optional[Counter] = None) -> Optional[SimTrade]:
+        if self.single_trade_mode and self.single_trade_completed:
+            if blockers is not None:
+                blockers["single_trade_mode_completed"] += 1
+            return None
+
         context = self.state_adapter.build_trade_context(signal)
         decision = build_trade_decision(
             context,
@@ -572,6 +595,8 @@ class Simulator:
 
         trade = self._trade_from_execution_result(result)
         enrich_trade_audit_fields(trade.__dict__)
+        if self.single_trade_mode:
+            self.single_trade_completed = True
         return trade
 
     def _trade_from_execution_result(self, result: ExecutionResult) -> SimTrade:

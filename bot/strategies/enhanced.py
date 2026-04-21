@@ -190,22 +190,34 @@ class EnhancedStrategyEngine:
             for k, s in validated_signals.items()
         ) / total_weight
 
-        edge = abs(weighted_prob - market.yes_price)
+        yes_price = market.yes_price
+        no_price = getattr(market, "no_price", None)
+        no_prob = 1 - weighted_prob
+        yes_edge = weighted_prob - yes_price
+        no_edge = no_prob - no_price if no_price is not None else -yes_edge
+
+        if yes_edge >= no_edge:
+            direction = "BUY_YES"
+            edge = yes_edge
+            entry_price = yes_price
+        else:
+            direction = "BUY_NO"
+            edge = no_edge
+            entry_price = no_price if no_price is not None else yes_price
 
         if edge < self.min_edge:
             return None
         if weighted_confidence < self.min_confidence:
             return None
 
-        direction = "BUY_YES" if weighted_prob > market.yes_price else "BUY_NO"
-
         return {
             "market_id": market.id,
             "exchange": market.exchange,
             "direction": direction,
             "model_probability": round(weighted_prob, 4),
-            "market_price": market.yes_price,
-            "no_market_price": market.no_price,
+            "market_price": round(entry_price, 4),
+            "yes_market_price": yes_price,
+            "no_market_price": no_price,
             "edge": round(edge, 4),
             "confidence": round(weighted_confidence, 4),
             "signals": {k: s["predicted_prob"] for k, s in validated_signals.items()},
@@ -537,7 +549,9 @@ class KellySizer:
     DEFAULT_FEE_RATE = 0.07  # 7% on winnings — Kalshi standard
 
     def __init__(self, fraction: float = None, max_bet_pct: float = None,
-                 kelly_fraction: float = None, fee_rate: float = None):
+                 kelly_fraction: float = None, fee_rate: float = None,
+                 min_position_size_usd: float = 1.0,
+                 min_expected_net_profit_usd: float = 0.0):
         import os
         is_live = os.getenv("KALSHI_USE_DEMO", "true").lower() == "false"
         preset = self.LIVE if is_live else self.PAPER
@@ -557,6 +571,8 @@ class KellySizer:
             self.fee_rate = float(env_fee)
         else:
             self.fee_rate = self.DEFAULT_FEE_RATE
+        self.min_position_size_usd = float(min_position_size_usd)
+        self.min_expected_net_profit_usd = float(min_expected_net_profit_usd)
 
     def calculate(self, model_prob: float, market_price: float,
                   bankroll: float) -> float:
@@ -587,6 +603,15 @@ class KellySizer:
         # Cap at max bet percentage (of current bankroll)
         max_size = bankroll * self.max_bet_pct
         size = min(size, max_size)
+        size = round(size, 2)
+        if size <= 0:
+            return 0
 
-        # Minimum $1
-        return max(1.0, round(size, 2))
+        gross_profit_if_win = size * ((1 - market_price) / market_price)
+        net_profit_if_win = gross_profit_if_win * (1 - self.fee_rate)
+        expected_net_profit = (p * net_profit_if_win) - ((1 - p) * size)
+        if expected_net_profit < self.min_expected_net_profit_usd:
+            return 0
+        if size < self.min_position_size_usd:
+            return 0
+        return size
