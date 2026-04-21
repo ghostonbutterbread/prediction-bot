@@ -19,7 +19,7 @@ from bot.notifications import build_notification, normalize_verbosity
 from bot.risk import RiskManager
 from bot.telegram_notifier import TelegramNotifier
 from bot.shared_core import AccountState, TradeContext, build_trade_decision
-from bot.status import build_snapshot
+from bot.status import build_snapshot, summarize_log_storage
 from bot.strategies.enhanced import EnhancedStrategyEngine, KellySizer
 
 logger = logging.getLogger(__name__)
@@ -303,6 +303,9 @@ class PredictionBot:
             extra["top_blockers"] = ", ".join(
                 f"{name}:{count}" for name, count in sorted(self.last_block_reasons.items(), key=lambda item: item[1], reverse=True)[:3]
             )
+        storage_summary = summarize_log_storage(self.config, project_root=Path(__file__).resolve().parent.parent)
+        if storage_summary and ((self.config.get("storage", {}) or {}).get("logs", {}) or {}).get("report_in_status", True):
+            extra["log_storage"] = storage_summary
         return build_snapshot(
             mode=status.get("mode", "unknown"),
             trading_enabled=bool(status.get("trading_enabled")),

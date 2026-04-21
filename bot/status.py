@@ -5,9 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+import json
 import logging
 import os
 import subprocess
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -33,14 +35,11 @@ class BotStatusSnapshot:
     extra: dict[str, Any] | None = None
 
 
-def summarize_log_storage(config: dict[str, Any], *, project_root: str | Path) -> dict[str, Any] | None:
+def _collect_log_storage_entries(config: dict[str, Any], *, project_root: str | Path) -> tuple[dict[str, Any], Path, list[tuple[Path, int, float]]]:
     storage_cfg = ((config or {}).get("storage", {}) or {}).get("logs", {}) or {}
-    if not storage_cfg.get("enabled", True):
-        return None
-
-    root = Path(project_root)
+    root = Path(project_root).resolve()
     include_paths = [root / Path(p) for p in storage_cfg.get("include_paths", [])]
-    exclude_paths = [root / Path(p) for p in storage_cfg.get("exclude_paths", [])]
+    exclude_paths = [(root / Path(p)).resolve() for p in storage_cfg.get("exclude_paths", [])]
 
     def _is_excluded(path: Path) -> bool:
         for excluded in exclude_paths:
@@ -69,7 +68,15 @@ def summarize_log_storage(config: dict[str, Any], *, project_root: str | Path) -
                 continue
             seen.add(path)
             tracked.append((path, stat.st_size, stat.st_mtime))
+    return storage_cfg, root, tracked
 
+
+def summarize_log_storage(config: dict[str, Any], *, project_root: str | Path) -> dict[str, Any] | None:
+    storage_cfg = ((config or {}).get("storage", {}) or {}).get("logs", {}) or {}
+    if not storage_cfg.get("enabled", True):
+        return None
+
+    storage_cfg, root, tracked = _collect_log_storage_entries(config, project_root=project_root)
     total_bytes = sum(size for _, size, _ in tracked)
     max_total_gb = float(storage_cfg.get("max_total_gb", 50) or 50)
     max_bytes = int(max_total_gb * 1024 * 1024 * 1024)
@@ -93,6 +100,81 @@ def summarize_log_storage(config: dict[str, Any], *, project_root: str | Path) -
             for path, size, _ in tracked[:5]
         ],
     }
+
+
+def prune_log_storage(config: dict[str, Any], *, project_root: str | Path) -> dict[str, Any] | None:
+    storage_cfg = ((config or {}).get("storage", {}) or {}).get("logs", {}) or {}
+    if not storage_cfg.get("enabled", True) or not storage_cfg.get("auto_prune", False):
+        return None
+
+    storage_cfg, root, tracked = _collect_log_storage_entries(config, project_root=project_root)
+    max_total_gb = float(storage_cfg.get("max_total_gb", 50) or 50)
+    max_bytes = int(max_total_gb * 1024 * 1024 * 1024)
+    total_bytes = sum(size for _, size, _ in tracked)
+    if max_bytes <= 0 or total_bytes <= max_bytes:
+        return {
+            "performed": False,
+            "before_bytes": total_bytes,
+            "after_bytes": total_bytes,
+            "bytes_reclaimed": 0,
+            "pruned_files": [],
+        }
+
+    archive_preferred: list[tuple[Path, int, float]] = []
+    other_candidates: list[tuple[Path, int, float]] = []
+    for path, size, mtime in tracked:
+        rel = os.path.relpath(str(path), str(root))
+        if rel == "data/paper_loop.log":
+            continue
+        if rel == "data/paper_loop_runtime.log":
+            continue
+        if rel.startswith("data/archive/ops/") and rel != "data/archive/ops/prune_history.jsonl":
+            archive_preferred.append((path, size, mtime))
+        elif rel.startswith("logs/") or rel in {"data/watchdog.log", "data/watchdog_cron.log"}:
+            other_candidates.append((path, size, mtime))
+
+    policy = str(storage_cfg.get("prune_policy", "oldest_first") or "oldest_first")
+    reverse = policy == "newest_first"
+    archive_preferred.sort(key=lambda item: item[2], reverse=reverse)
+    other_candidates.sort(key=lambda item: item[2], reverse=reverse)
+    candidates = archive_preferred + other_candidates
+
+    pruned_files: list[str] = []
+    bytes_reclaimed = 0
+    for path, size, _ in candidates:
+        if total_bytes - bytes_reclaimed <= max_bytes:
+            break
+        try:
+            path.unlink()
+        except OSError:
+            continue
+        pruned_files.append(os.path.relpath(str(path), str(root)))
+        bytes_reclaimed += size
+
+    after_bytes = max(total_bytes - bytes_reclaimed, 0)
+    result = {
+        "performed": bool(pruned_files),
+        "before_bytes": total_bytes,
+        "after_bytes": after_bytes,
+        "bytes_reclaimed": bytes_reclaimed,
+        "pruned_files": pruned_files,
+    }
+
+    if pruned_files:
+        history_path = root / "data/archive/ops/prune_history.jsonl"
+        history_path.parent.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "reason": "over_budget_auto_prune",
+            "before_bytes": total_bytes,
+            "after_bytes": after_bytes,
+            "bytes_reclaimed": bytes_reclaimed,
+            "files": pruned_files,
+        }
+        with history_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry) + "\n")
+
+    return result
 
 
 def _format_gb(num_bytes: int) -> str:
