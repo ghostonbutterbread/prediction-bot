@@ -10,6 +10,7 @@ from kalshi_python_sync import Configuration, KalshiClient
 from kalshi_python_sync.auth import KalshiAuth
 
 from ..http_rate_limit import RateLimitProfile, RequestThrottle, call_with_retry, http_get_with_retry
+from ..market_classification import apply_classification_metadata, classify_market_object
 from .base import BaseExchange, Market, Order, Position, RestingOrder
 
 logger = logging.getLogger(__name__)
@@ -85,25 +86,14 @@ class KalshiExchange(BaseExchange):
             return None
 
     def _normalize_market_group(self, market: Market) -> str | None:
-        category = (getattr(market, "category", "") or "").lower()
-        question = (getattr(market, "question", "") or "").lower()
-        series = str((getattr(market, "metadata", {}) or {}).get("series", "")).lower()
-        event_ticker = str((getattr(market, "metadata", {}) or {}).get("event_ticker", "")).lower()
-        combined = " ".join(part for part in [category, question, series, event_ticker, market.id.lower()] if part)
-
-        if "weather" in category or any(token in combined for token in ["temp", "temperature", "forecast", "rain", "snow", "wind", "hurricane", "high temp", "low temp"]):
-            return "weather"
-        if any(token in combined for token in ["nba", "nfl", "mlb", "nhl", "soccer", "wnba", "ncaa", "game", "match", "player", "points", "rebounds", "assists", "touchdown", "goal"]):
-            return "sports"
-        return None
+        classification = classify_market_object(market)
+        return classification.market_group if classification else None
 
     def _market_allowed(self, market: Market) -> bool:
-        group = self._normalize_market_group(market)
-        if group is None:
+        classification = apply_classification_metadata(market)
+        if classification is None:
             return False
-        market.metadata = dict(market.metadata or {})
-        market.metadata["market_group"] = group
-        return group in self._allowed_market_groups
+        return classification.market_group in self._allowed_market_groups
 
     def connect(self) -> bool:
         try:
