@@ -9,6 +9,7 @@ from datetime import datetime, timezone, timedelta
 from kalshi_python_sync import Configuration, KalshiClient
 from kalshi_python_sync.auth import KalshiAuth
 
+from ..http_rate_limit import RateLimitProfile, RequestThrottle, call_with_retry, http_get_with_retry
 from .base import BaseExchange, Market, Order, Position, RestingOrder
 
 logger = logging.getLogger(__name__)
@@ -16,26 +17,6 @@ logger = logging.getLogger(__name__)
 KALSHI_DEMO = "https://demo-api.kalshi.co/trade-api/v2"
 KALSHI_PROD = "https://api.elections.kalshi.com/trade-api/v2"
 
-
-def _http_get_with_retry(url: str, headers: dict, timeout: int = 10, max_retries: int = 3) -> Optional[httpx.Response]:
-    """Fetch a URL with exponential backoff on rate limiting."""
-    import time
-    import httpx
-    for attempt in range(max_retries):
-        try:
-            resp = httpx.get(url, headers=headers, timeout=timeout)
-            if resp.status_code == 429:
-                wait = 2 ** attempt
-                logger.warning(f"Rate limited (429). Waiting {wait}s before retry {attempt+1}/{max_retries}")
-                time.sleep(wait)
-                continue
-            return resp
-        except httpx.RequestError as e:
-            if attempt == max_retries - 1:
-                logger.error(f"HTTP request failed after {max_retries} attempts: {e}")
-                return None
-            time.sleep(2 ** attempt)
-    return None
 
 
 class KalshiExchange(BaseExchange):
@@ -48,10 +29,60 @@ class KalshiExchange(BaseExchange):
         self.client = None
         self._daily_series_tickers: list[str] = []
         self._allowed_market_groups: set[str] = {"weather", "sports"}
+        self._account_tier = os.getenv("KALSHI_ACCOUNT_TIER", "basic")
+        self._throttle = RequestThrottle(RateLimitProfile.from_account_tier(self._account_tier))
 
     def set_allowed_market_groups(self, groups: list[str] | set[str] | tuple[str, ...] | None):
         normalized = {str(group).strip().lower() for group in (groups or []) if str(group).strip()}
         self._allowed_market_groups = normalized or {"weather", "sports"}
+
+    def _refresh_rate_limit_profile(self) -> None:
+        env_reads = os.getenv("KALSHI_READS_PER_SECOND")
+        env_writes = os.getenv("KALSHI_WRITES_PER_SECOND")
+        if env_reads or env_writes:
+            reads = float(env_reads or 20)
+            writes = float(env_writes or 10)
+            tier = os.getenv("KALSHI_ACCOUNT_TIER", "custom")
+            self._account_tier = tier
+            self._throttle.update_profile(RateLimitProfile.from_values(reads, writes, tier))
+            return
+
+        profile = self._fetch_account_limit_profile()
+        if profile is not None:
+            self._account_tier = profile.account_tier
+            self._throttle.update_profile(profile)
+            return
+
+        tier = self._fetch_account_tier() or self._account_tier
+        self._account_tier = tier
+        self._throttle.update_profile(RateLimitProfile.from_account_tier(tier))
+
+    def _fetch_account_tier(self) -> str | None:
+        env_tier = os.getenv("KALSHI_ACCOUNT_TIER")
+        if env_tier:
+            return str(env_tier).strip().lower()
+        return None
+
+    def _fetch_account_limit_profile(self) -> Optional[RateLimitProfile]:
+        if not self.client:
+            return None
+        try:
+            auth_headers = self.client.kalshi_auth.create_auth_headers('GET', '/trade-api/v2/account/limits')
+            url = f"{self.host}/account/limits"
+            resp = http_get_with_retry(url, auth_headers, throttle=self._throttle, timeout=8)
+            if not resp or resp.status_code != 200:
+                return None
+            data = resp.json() if hasattr(resp, 'json') else {}
+            usage_tier = str(data.get('usage_tier') or self._account_tier or 'basic').strip().lower()
+            read_limit = float(data.get('read_limit') or 0)
+            write_limit = float(data.get('write_limit') or 0)
+            if read_limit <= 0 or write_limit <= 0:
+                return None
+            logger.info("Kalshi API limits detected: tier=%s reads/s=%s writes/s=%s", usage_tier, read_limit, write_limit)
+            return RateLimitProfile.from_values(read_limit, write_limit, usage_tier)
+        except Exception as e:
+            logger.debug(f"Could not fetch Kalshi account limits: {e}")
+            return None
 
     def _normalize_market_group(self, market: Market) -> str | None:
         category = (getattr(market, "category", "") or "").lower()
@@ -83,8 +114,10 @@ class KalshiExchange(BaseExchange):
             self.client = KalshiClient(config)
             self.client.kalshi_auth = KalshiAuth(self.api_key_id, private_key_pem)
 
+            self._refresh_rate_limit_profile()
+
             # Test connection
-            balance = self.client.get_balance()
+            balance = call_with_retry(self.client.get_balance, throttle=self._throttle, kind="read")
             bal = (balance.balance or 0) / 100
             logger.info(f"Kalshi connected! Balance: ${bal:.2f}")
 
@@ -115,7 +148,7 @@ class KalshiExchange(BaseExchange):
                             break
                         try:
                             url = f'{self.host}/markets?status=open&limit=5&series_ticker={series_ticker}'
-                            resp = httpx.get(url, headers=auth_headers, timeout=5)
+                            resp = http_get_with_retry(url, auth_headers, throttle=self._throttle, timeout=5)
                             if resp.status_code != 200:
                                 continue
                             data = resp.json()
@@ -166,7 +199,7 @@ class KalshiExchange(BaseExchange):
                     if cursor:
                         params += f'&cursor={cursor}'
                     url = f'{self.host}/markets{params}'
-                    resp = _http_get_with_retry(url, auth_headers, timeout=10)
+                    resp = http_get_with_retry(url, auth_headers, throttle=self._throttle, timeout=10)
                     if not resp or resp.status_code != 200:
                         break
                     data = resp.json()
@@ -220,7 +253,7 @@ class KalshiExchange(BaseExchange):
                     kwargs = {"limit": 50, "status": "open"}
                     if cursor:
                         kwargs["cursor"] = cursor
-                    events_resp = self.client.get_events(**kwargs)
+                    events_resp = call_with_retry(lambda: self.client.get_events(**kwargs), throttle=self._throttle, kind="read")
                     events = getattr(events_resp, 'events', []) or []
                     if not events:
                         break
@@ -240,7 +273,7 @@ class KalshiExchange(BaseExchange):
                         continue
 
                     try:
-                        mresp = self.client.get_markets(event_ticker=event_ticker, limit=20)
+                        mresp = call_with_retry(lambda: self.client.get_markets(event_ticker=event_ticker, limit=20), throttle=self._throttle, kind="read")
                         raw_markets = getattr(mresp, 'markets', []) or []
                     except Exception as e:
                         logger.debug(f"SDK event market fetch failed for {event_ticker}: {e}")
@@ -351,7 +384,7 @@ class KalshiExchange(BaseExchange):
 
     def get_market(self, market_id: str) -> Optional[Market]:
         try:
-            resp = self.client.get_market(ticker=market_id)
+            resp = call_with_retry(lambda: self.client.get_market(ticker=market_id), throttle=self._throttle, kind="read")
             m = getattr(resp, 'market', None)
             if m:
                 return Market(
@@ -397,7 +430,7 @@ class KalshiExchange(BaseExchange):
                 if cursor:
                     params += f'&cursor={cursor}'
                 url = f'{self.host}/series{params}'
-                resp = _http_get_with_retry(url, auth_headers, timeout=15)
+                resp = http_get_with_retry(url, auth_headers, throttle=self._throttle, timeout=15)
                 if not resp or resp.status_code != 200:
                     break
                 data = resp.json()
@@ -432,7 +465,9 @@ class KalshiExchange(BaseExchange):
                 'GET', f'/trade-api/v2/markets/{market_id}'
             )
             url = f"{self.host}/markets/{market_id}"
-            resp = httpx.get(url, headers=auth_headers, timeout=5)
+            resp = http_get_with_retry(url, auth_headers, throttle=self._throttle, timeout=5)
+            if not resp:
+                return None
             resp.raise_for_status()
             data = resp.json()
 
@@ -463,7 +498,7 @@ class KalshiExchange(BaseExchange):
                 'GET', f'/trade-api/v2/markets/{market_id}'
             )
             url = f"{self.host}/markets/{market_id}"
-            resp = _http_get_with_retry(url, auth_headers, timeout=8)
+            resp = http_get_with_retry(url, auth_headers, throttle=self._throttle, timeout=8)
             if not resp or resp.status_code != 200:
                 return None
             data = resp.json()
@@ -479,7 +514,7 @@ class KalshiExchange(BaseExchange):
                 'GET', '/trade-api/v2/markets'
             )
             url = f"{self.host}/markets?event_ticker={event_ticker}&limit={limit}"
-            resp = _http_get_with_retry(url, auth_headers, timeout=8)
+            resp = http_get_with_retry(url, auth_headers, throttle=self._throttle, timeout=8)
             if not resp or resp.status_code != 200:
                 return []
             data = resp.json()
@@ -512,7 +547,7 @@ class KalshiExchange(BaseExchange):
                 kwargs["side"] = "no"
                 kwargs["no_price"] = price_cents
 
-            resp = self.client.create_order(**kwargs)
+            resp = call_with_retry(lambda: self.client.create_order(**kwargs), throttle=self._throttle, kind="write")
             order_data = getattr(resp, 'order', None)
             order_id = getattr(order_data, 'order_id', '') if order_data else ''
 
@@ -558,7 +593,7 @@ class KalshiExchange(BaseExchange):
 
     def cancel_order(self, order_id: str) -> bool:
         try:
-            self.client.cancel_order(order_id=order_id)
+            call_with_retry(lambda: self.client.cancel_order(order_id=order_id), throttle=self._throttle, kind="write")
             return True
         except Exception as e:
             logger.error(f"Cancel failed: {e}")
@@ -566,7 +601,7 @@ class KalshiExchange(BaseExchange):
 
     def get_positions(self) -> list[Position]:
         try:
-            resp = self.client.get_positions()
+            resp = call_with_retry(self.client.get_positions, throttle=self._throttle, kind="read")
             positions = getattr(resp, 'positions', []) or []
             result = []
             for p in positions:
@@ -596,7 +631,7 @@ class KalshiExchange(BaseExchange):
 
         raw_orders = []
         try:
-            resp = self.client.get_orders(status="open", limit=200)
+            resp = call_with_retry(lambda: self.client.get_orders(status="open", limit=200), throttle=self._throttle, kind="read")
             raw_orders = getattr(resp, "orders", []) or []
         except Exception as sdk_error:
             logger.debug(f"SDK open-orders fetch failed, trying raw API: {sdk_error}")
@@ -605,7 +640,7 @@ class KalshiExchange(BaseExchange):
                     'GET', '/trade-api/v2/portfolio/orders'
                 )
                 url = f"{self.host}/portfolio/orders?status=open&limit=200"
-                resp = _http_get_with_retry(url, auth_headers, timeout=10)
+                resp = http_get_with_retry(url, auth_headers, throttle=self._throttle, timeout=10)
                 if resp and resp.status_code == 200:
                     raw_orders = resp.json().get("orders", []) or []
             except Exception as raw_error:
@@ -621,7 +656,7 @@ class KalshiExchange(BaseExchange):
 
     def get_balance(self) -> float:
         try:
-            resp = self.client.get_balance()
+            resp = call_with_retry(self.client.get_balance, throttle=self._throttle, kind="read")
             return (getattr(resp, 'balance', 0) or 0) / 100
         except Exception as e:
             logger.error(f"Error getting balance: {e}")
