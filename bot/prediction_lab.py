@@ -70,12 +70,17 @@ class PredictionLab:
 
     def run(self, exchange) -> PredictionLabRunResult:
         run_id = datetime.now(timezone.utc).strftime("plab_%Y%m%dT%H%M%SZ")
+        if not bool(self.lab_cfg.get("enabled", True)):
+            self._update_state(mode=self.mode, last_run_id=run_id, paused_reason="disabled")
+            return PredictionLabRunResult(run_id=run_id, scanned_markets=0, recorded_predictions=0, group_counts={}, series_counts={}, ledger_path=str(self.predictions_path))
+
         if self.mode == "resolve_only":
             self._update_state(mode=self.mode, last_run_id=run_id, paused_reason="resolve_only")
             return PredictionLabRunResult(run_id=run_id, scanned_markets=0, recorded_predictions=0, group_counts={}, series_counts={}, ledger_path=str(self.predictions_path))
 
         markets = exchange.get_markets(limit=self.max_markets_per_run)
         markets = self._prioritize_markets(markets)
+        existing_open_market_ids = self._existing_open_market_ids()
         group_counts = Counter()
         series_counts = Counter()
         recorded = 0
@@ -113,16 +118,20 @@ class PredictionLab:
 
             decision_type = self._decision_type(signal)
             if self.mode == "collector" and self.collector_record_market_snapshots:
-                append_jsonl(self.market_snapshots_path, self._build_market_snapshot_row(run_id, market, signal, decision_type=decision_type))
+                with self._prediction_ledger_lock():
+                    append_jsonl(self.market_snapshots_path, self._build_market_snapshot_row(run_id, market, signal, decision_type=decision_type))
 
             should_record_prediction = (
                 decision_type in {"buy_yes", "buy_no"}
                 and (self.mode != "collector" or self.collector_record_predictions)
                 and not self.score_only
+                and market.id not in existing_open_market_ids
             )
             if should_record_prediction:
                 row = self._build_prediction_row(run_id, market, signal, decision_type=decision_type)
-                append_jsonl(self.predictions_path, row)
+                with self._prediction_ledger_lock():
+                    append_jsonl(self.predictions_path, row)
+                existing_open_market_ids.add(market.id)
                 recorded += 1
 
             if self.mode == "seed_and_watch" and recorded >= self.max_new_predictions_per_seed:
@@ -221,7 +230,8 @@ class PredictionLab:
         }
 
     def summarize(self) -> dict[str, Any]:
-        rows = load_jsonl(self.predictions_path)
+        with self._prediction_ledger_lock():
+            rows = load_jsonl(self.predictions_path)
         resolved = [row for row in rows if row.get("status") == "resolved" and isinstance(row.get("resolution"), dict)]
         open_rows = [row for row in rows if row.get("status") == "open"]
         group_counts = Counter(row.get("group", "unknown") for row in rows)
@@ -393,7 +403,12 @@ class PredictionLab:
         return normalized in self.groups
 
     def _prediction_ledger_lock(self):
-        return locked_file(self.predictions_path.with_suffix(".lock"), "a+")
+        return locked_file(self.root_dir / "prediction_lab.ledger.lock", "a+")
+
+    def _existing_open_market_ids(self) -> set[str]:
+        with self._prediction_ledger_lock():
+            rows = load_jsonl(self.predictions_path)
+        return {str(row.get("market_id") or "") for row in rows if row.get("status") == "open" and row.get("market_id")}
 
     @staticmethod
     def _decision_type(signal: dict[str, Any]) -> str:

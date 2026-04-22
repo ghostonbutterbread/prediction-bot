@@ -16,7 +16,7 @@ Multi-exchange prediction market trading bot with news sentiment analysis, Kelly
 - **Kelly Criterion** — mathematically optimal position sizing
 - **Multi-exchange** — trade the same market across platforms
 - **Risk management** — edge thresholds, confidence gates, position limits
-- **SQLite logging** — every scan, signal, and trade recorded
+- **JSON/JSONL logging** — every scan, signal, and trade recorded in repo-local structured files
 - **Shared API throttling** — reusable read/write rate limiting for Kalshi-bound pull, resolve, and trade paths
 
 ## Kalshi rate limiting
