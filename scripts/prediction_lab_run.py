@@ -24,6 +24,10 @@ def main() -> int:
     config = load_config(PROJECT_ROOT / args.config)
     config['_config_path'] = str(PROJECT_ROOT / args.config)
 
+    if not bool((config.get('prediction_lab', {}) or {}).get('enabled', True)):
+        print({'status': 'disabled', 'recorded_predictions': 0})
+        return 0
+
     bot, exchange = build_prediction_lab_exchange(config, demo=args.demo)
     try:
         lab = PredictionLab(config)

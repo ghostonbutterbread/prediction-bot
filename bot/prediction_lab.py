@@ -80,7 +80,6 @@ class PredictionLab:
 
         markets = exchange.get_markets(limit=self.max_markets_per_run)
         markets = self._prioritize_markets(markets)
-        existing_open_market_ids = self._existing_open_market_ids()
         group_counts = Counter()
         series_counts = Counter()
         recorded = 0
@@ -125,14 +124,11 @@ class PredictionLab:
                 decision_type in {"buy_yes", "buy_no"}
                 and (self.mode != "collector" or self.collector_record_predictions)
                 and not self.score_only
-                and market.id not in existing_open_market_ids
             )
             if should_record_prediction:
                 row = self._build_prediction_row(run_id, market, signal, decision_type=decision_type)
-                with self._prediction_ledger_lock():
-                    append_jsonl(self.predictions_path, row)
-                existing_open_market_ids.add(market.id)
-                recorded += 1
+                if self._append_prediction_if_absent(row):
+                    recorded += 1
 
             if self.mode == "seed_and_watch" and recorded >= self.max_new_predictions_per_seed:
                 break
@@ -362,7 +358,7 @@ class PredictionLab:
 
     def _update_state(self, **updates: Any) -> None:
         self.state = {**self.state, **updates}
-        atomic_write_json(self.state_path, self.state)
+        atomic_write_json(self.state_path, self.state, lock_path=self.root_dir / "prediction_lab.state.lock")
 
     def _count_open_predictions(self, rows: Optional[list[dict[str, Any]]] = None) -> int:
         rows = rows if rows is not None else load_jsonl(self.predictions_path)
@@ -405,10 +401,15 @@ class PredictionLab:
     def _prediction_ledger_lock(self):
         return locked_file(self.root_dir / "prediction_lab.ledger.lock", "a+")
 
-    def _existing_open_market_ids(self) -> set[str]:
+    def _append_prediction_if_absent(self, row: dict[str, Any]) -> bool:
         with self._prediction_ledger_lock():
             rows = load_jsonl(self.predictions_path)
-        return {str(row.get("market_id") or "") for row in rows if row.get("status") == "open" and row.get("market_id")}
+            market_id = str(row.get("market_id") or "")
+            already_open = any(str(existing.get("market_id") or "") == market_id and existing.get("status") == "open" for existing in rows)
+            if already_open:
+                return False
+            append_jsonl(self.predictions_path, row)
+            return True
 
     @staticmethod
     def _decision_type(signal: dict[str, Any]) -> str:

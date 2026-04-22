@@ -31,16 +31,24 @@ def locked_file(path: Path, mode: str):
                 pass
 
 
-def atomic_write_json(path: Path, payload: Any) -> None:
+def atomic_write_json(path: Path, payload: Any, *, lock_path: Path | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(payload, fh, indent=2)
-        os.replace(tmp_path, path)
-    finally:
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
+
+    def _write() -> None:
+        fd, tmp_path = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, indent=2)
+            os.replace(tmp_path, path)
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+
+    if lock_path is not None:
+        with locked_file(lock_path, "a+"):
+            _write()
+    else:
+        _write()
 
 
 def append_jsonl(path: Path, row: dict[str, Any]) -> None:
