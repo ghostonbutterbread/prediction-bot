@@ -116,10 +116,7 @@ class PredictionLab:
                 continue
 
             decision_type = self._decision_type(signal)
-            if self.mode == "collector" and self.collector_record_market_snapshots:
-                with self._prediction_ledger_lock():
-                    append_jsonl(self.market_snapshots_path, self._build_market_snapshot_row(run_id, market, signal, decision_type=decision_type))
-
+            prediction_recorded = False
             should_record_prediction = (
                 decision_type in {"buy_yes", "buy_no"}
                 and (self.mode != "collector" or self.collector_record_predictions)
@@ -127,8 +124,13 @@ class PredictionLab:
             )
             if should_record_prediction:
                 row = self._build_prediction_row(run_id, market, signal, decision_type=decision_type)
-                if self._append_prediction_if_absent(row):
+                prediction_recorded = self._append_prediction_if_absent(row)
+                if prediction_recorded:
                     recorded += 1
+
+            if self.mode == "collector" and self.collector_record_market_snapshots:
+                with self._prediction_ledger_lock():
+                    append_jsonl(self.market_snapshots_path, self._build_market_snapshot_row(run_id, market, signal, decision_type=decision_type, prediction_recorded=prediction_recorded))
 
             if self.mode == "seed_and_watch" and recorded >= self.max_new_predictions_per_seed:
                 break
@@ -300,7 +302,7 @@ class PredictionLab:
             },
         }
 
-    def _build_market_snapshot_row(self, run_id: str, market, signal: dict[str, Any], *, decision_type: str) -> dict[str, Any]:
+    def _build_market_snapshot_row(self, run_id: str, market, signal: dict[str, Any], *, decision_type: str, prediction_recorded: bool) -> dict[str, Any]:
         metadata = dict(getattr(market, "metadata", {}) or {})
         return {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -315,7 +317,7 @@ class PredictionLab:
             "edge": signal.get("edge"),
             "direction": signal.get("direction"),
             "decision_type": decision_type,
-            "recorded_prediction": decision_type in {"buy_yes", "buy_no"},
+            "recorded_prediction": prediction_recorded,
         }
 
     def _prioritize_markets(self, markets: list[Any]) -> list[Any]:
@@ -357,8 +359,11 @@ class PredictionLab:
             }
 
     def _update_state(self, **updates: Any) -> None:
-        self.state = {**self.state, **updates}
-        atomic_write_json(self.state_path, self.state, lock_path=self.root_dir / "prediction_lab.state.lock")
+        state_lock = self.root_dir / "prediction_lab.state.lock"
+        with locked_file(state_lock, "a+"):
+            current_state = self._load_state_unlocked()
+            self.state = {**current_state, **updates}
+            atomic_write_json(self.state_path, self.state)
 
     def _count_open_predictions(self, rows: Optional[list[dict[str, Any]]] = None) -> int:
         rows = rows if rows is not None else load_jsonl(self.predictions_path)
@@ -367,6 +372,26 @@ class PredictionLab:
     def _count_resolved_predictions(self, rows: Optional[list[dict[str, Any]]] = None) -> int:
         rows = rows if rows is not None else load_jsonl(self.predictions_path)
         return sum(1 for row in rows if row.get("status") == "resolved")
+
+    def _load_state_unlocked(self) -> dict[str, Any]:
+        if not self.state_path.exists():
+            return {
+                "mode": self.mode,
+                "last_run_id": None,
+                "paused_reason": None,
+                "open_prediction_count": 0,
+                "resolved_prediction_count": 0,
+            }
+        try:
+            return json.loads(self.state_path.read_text())
+        except Exception:
+            return {
+                "mode": self.mode,
+                "last_run_id": None,
+                "paused_reason": None,
+                "open_prediction_count": 0,
+                "resolved_prediction_count": 0,
+            }
 
     def _fetch_market_outcome(self, exchange, market_id: str) -> Optional[str]:
         fetch_raw = getattr(exchange, "_fetch_market_raw", None)
