@@ -34,6 +34,7 @@ class LivePosition:
     size: float
     order_id: str
     created_at: str
+    event_key: str = ""
 
 
 class PredictionBot:
@@ -309,6 +310,8 @@ class PredictionBot:
             "trades_executed": self.lifecycle_counters.get("trades_executed", 0),
             "blocked_total": self.lifecycle_counters.get("blocked_total", 0),
             "runner_errors": self.lifecycle_counters.get("errors", 0),
+            "filled_event_exposure": round(sum(getattr(position, "size", 0.0) for position in self.open_positions), 2),
+            "pending_event_exposure": round(sum(float(order.get("remaining_size", 0.0) or 0.0) for order in self.open_orders), 2),
         }
         if self.last_block_reasons:
             extra["top_blockers"] = ", ".join(

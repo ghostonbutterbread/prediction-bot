@@ -267,6 +267,83 @@ class SimulatorSessionTests(unittest.TestCase):
             self.assertEqual(trade.decision_trace["normalized"]["direction"], "BUY_NO")
             self.assertEqual(trade.decision_trace["normalized"]["entry_price"], 0.24)
 
+    def test_create_trade_allows_same_event_retrade_but_blocks_exact_duplicate_market(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = Simulator(
+                {
+                    "data_dir": tmpdir,
+                    "enable_social": False,
+                    "strategy": {
+                        "enable_news": False,
+                        "enable_social": False,
+                        "enable_ai": False,
+                    },
+                }
+            )
+            first_signal = {
+                "market_id": "KXHIGHNY-26APR16-T70",
+                "question": "Will NYC high be below 70?",
+                "exchange": "kalshi",
+                "direction": "BUY_YES",
+                "model_probability": 0.7,
+                "market_price": 0.4,
+                "edge": 0.3,
+                "confidence": 0.9,
+                "signals": {},
+            }
+            second_signal = dict(first_signal)
+            second_signal["market_id"] = "KXHIGHNY-26APR16-T72"
+            second_signal["question"] = "Will NYC high be below 72?"
+            with patch.object(sim.kelly, "calculate", return_value=2.0):
+                first_trade = sim._create_trade(first_signal)
+                sim.trades.append(first_trade)
+                sim.traded_markets.add(first_trade.market_id)
+                retrade = sim._create_trade(second_signal)
+                duplicate = sim._create_trade(first_signal)
+
+            self.assertIsNotNone(retrade)
+            self.assertEqual(retrade.event_key, "KXHIGHNY-26APR16")
+            self.assertIsNone(duplicate)
+
+    def test_resolved_market_is_removed_from_runtime_duplicate_blocklist(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = Simulator(
+                {
+                    "data_dir": tmpdir,
+                    "enable_social": False,
+                    "strategy": {
+                        "enable_news": False,
+                        "enable_social": False,
+                        "enable_ai": False,
+                    },
+                }
+            )
+            first_signal = {
+                "market_id": "KXHIGHNY-26APR16-T70",
+                "question": "Will NYC high be below 70?",
+                "exchange": "kalshi",
+                "direction": "BUY_YES",
+                "model_probability": 0.7,
+                "market_price": 0.4,
+                "edge": 0.3,
+                "confidence": 0.9,
+                "signals": {},
+            }
+            second_signal = dict(first_signal)
+            second_signal["market_id"] = "KXHIGHNY-26APR16-T72"
+            second_signal["question"] = "Will NYC high be below 72?"
+
+            with patch.object(sim.kelly, "calculate", return_value=2.0):
+                first_trade = sim._create_trade(first_signal)
+                sim.trades.append(first_trade)
+                sim.traded_markets.add(first_trade.market_id)
+                first_trade.resolved = True
+                sim.state_adapter.refresh_traded_markets()
+                retrade = sim._create_trade(second_signal)
+
+            self.assertIsNotNone(retrade)
+            self.assertNotIn(first_trade.market_id, sim.traded_markets)
+
     def test_load_session_discards_zero_sized_trade_rows(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir)

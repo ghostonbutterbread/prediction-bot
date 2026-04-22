@@ -127,11 +127,13 @@ def trade_event_key(trade: dict) -> str:
 
     category = str(trade.get("category", "") or "")
     question = str(trade.get("question", "") or "")
+    parts = market_id.split("-")
     if is_weather_market(market_id=market_id, question=question, category=category):
-        parts = market_id.split("-")
         if len(parts) >= 3:
             return "-".join(parts[:2])
 
+    if len(parts) >= 3:
+        return "-".join(parts[:-1])
     return market_id
 
 
@@ -250,6 +252,10 @@ def summarize_event_performance(trades: list[dict]) -> dict:
     losses = sum(1 for pnl in event_pnls if pnl < 0)
     flats = sum(1 for pnl in event_pnls if pnl == 0)
     total = len(event_pnls)
+    avg_positions = (
+        round(sum(len(group) for group in event_groups.values()) / total, 2)
+        if total else 0.0
+    )
     return {
         "resolved_events": total,
         "wins": wins,
@@ -258,4 +264,6 @@ def summarize_event_performance(trades: list[dict]) -> dict:
         "win_rate": round(wins / total * 100, 1) if total else 0.0,
         "total_pnl": round(sum(event_pnls), 4) if event_pnls else 0.0,
         "avg_pnl_per_event": round(sum(event_pnls) / total, 4) if total else 0.0,
+        "avg_positions_per_resolved_event": avg_positions,
+        "retrade_count": sum(max(0, len(group) - 1) for group in event_groups.values()),
     }

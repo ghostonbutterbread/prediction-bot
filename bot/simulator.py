@@ -217,6 +217,7 @@ class Simulator:
         self.last_loss_date = loaded.last_loss_date
         self.trades = loaded.trades
         self.traded_markets = loaded.traded_markets
+        self.state_adapter.refresh_traded_markets()
         self.rolling_win_rate = 0.0
         self.rolling_win_count = 0
         self.rolling_loss_count = 0
@@ -620,6 +621,7 @@ class Simulator:
             available_cash_before=self._coerce_float_or_none(metadata.get("available_cash_before")),
             available_cash_after_entry=self._coerce_float_or_none(metadata.get("available_cash_after_entry")),
             contracts=self._coerce_float_or_none(metadata.get("contracts")),
+            event_key=metadata.get("event_key", ""),
         )
 
     def _effective_trades(self) -> list[SimTrade]:

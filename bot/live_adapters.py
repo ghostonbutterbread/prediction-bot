@@ -9,6 +9,7 @@ from typing import Any, Protocol
 
 from bot.exchanges.base import BaseExchange, Position, RestingOrder
 from bot.shared_core import AccountState, OrderState, PositionState, ResolutionEvent
+from bot.trade_audit import trade_event_key
 
 logger = logging.getLogger(__name__)
 
@@ -43,9 +44,9 @@ class RunnerLiveStateAdapter:
 
     def get_account_state(self) -> AccountState:
         balance = self.host.risk.state.current_balance
-        reserved = sum(position.size for position in self.host.open_positions) + sum(
-            order.get("remaining_size", 0.0) for order in self.host.open_orders
-        )
+        filled_reserved = sum(position.size for position in self.host.open_positions)
+        pending_reserved = sum(order.get("remaining_size", 0.0) for order in self.host.open_orders)
+        reserved = filled_reserved + pending_reserved
         available_cash = max(0.0, balance - reserved)
         tradable_cash = available_cash
         if self.host.risk.max_tradable_balance and self.host.risk.max_tradable_balance > 0:
@@ -65,6 +66,8 @@ class RunnerLiveStateAdapter:
                 "mode": self.host.config.get("trading", {}).get("mode", "live"),
                 "effective_tradable_cash": round(tradable_cash, 2),
                 "resting_orders": len(self.host.open_orders),
+                "filled_event_exposure": round(filled_reserved, 2),
+                "pending_event_exposure": round(pending_reserved, 2),
             },
         )
 
@@ -80,7 +83,7 @@ class RunnerLiveStateAdapter:
                 entry_price=position.price,
                 position_size=position.size,
                 reserved_capital=position.size,
-                metadata={"source": "live_reconciled"},
+                metadata={"source": "live_reconciled", "event_key": getattr(position, "event_key", "")},
             )
             for position in self.host.open_positions
         ]
@@ -97,7 +100,7 @@ class RunnerLiveStateAdapter:
                 remaining_size=order.get("remaining_size", 0.0),
                 limit_price=order.get("price"),
                 created_at=order.get("created_at", ""),
-                metadata={"question": order.get("question", "")},
+                metadata={"question": order.get("question", ""), "event_key": order.get("event_key", "")},
             )
             for order in self.host.open_orders
         ]
@@ -199,6 +202,7 @@ class RunnerLiveReconciliationAdapter:
             size=size,
             order_id=f"reconciled:{exchange_name}:{market_id}:{index}",
             created_at=created_at,
+            event_key=trade_event_key({"market_id": market_id, "question": getattr(position, "question", "") or market_id}),
         )
 
     def _normalize_resting_order(self, exchange_name: str, order: RestingOrder | dict):
@@ -242,4 +246,5 @@ class RunnerLiveReconciliationAdapter:
             "remaining_size": remaining_size,
             "price": price,
             "created_at": created_at_text,
+            "event_key": trade_event_key({"market_id": str(market_id), "question": str(question)}),
         }
