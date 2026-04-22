@@ -16,6 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from bot.trade_audit import (
     coerce_float as audit_coerce_float,
     enrich_trade_audit_fields,
+    group_trades_by_event,
     is_trade_effective_row,
     summarize_event_performance,
 )
@@ -101,6 +102,20 @@ def analyze() -> dict:
     resolved = [t for t in trades if t.get("resolved")]
     trusted_resolved = [t for t in resolved if t.get("integrity_status") == "ok"]
     event_performance = summarize_event_performance(trusted_resolved)
+    open_trades = [t for t in trades if not t.get("resolved")]
+    open_event_groups = group_trades_by_event(open_trades)
+    top_concentrated_events = sorted(
+        (
+            {
+                "event_key": event_key,
+                "open_positions": len(group),
+                "reserved_capital": round(sum(audit_coerce_float(t.get("reserved_capital"), 0.0) for t in group), 2),
+            }
+            for event_key, group in open_event_groups.items()
+        ),
+        key=lambda row: (row["reserved_capital"], row["open_positions"]),
+        reverse=True,
+    )[:5]
     integrity_issue_counts = defaultdict(int)
     for trade in resolved:
         for issue in trade.get("integrity_errors", []) or []:
@@ -118,6 +133,8 @@ def analyze() -> dict:
             "trusted_resolved_positions": len(trusted_resolved),
             "invalid_resolved_positions": len(resolved) - len(trusted_resolved),
             "resolved_events": event_performance["resolved_events"],
+            "retrade_count": event_performance.get("retrade_count", 0),
+            "open_event_count": len(open_event_groups),
             "scans": latest.get("scan_count", 0),
             "total_equity": latest.get("balance"),
             "available_cash": latest.get("available_cash"),
@@ -188,6 +205,10 @@ def analyze() -> dict:
         result["event_performance"] = {
             "basis": "trusted_resolved_events",
             **event_performance,
+            "open_event_concentration": {
+                "open_events": len(open_event_groups),
+                "top_concentrated_events": top_concentrated_events,
+            },
         }
     
     if trades:
@@ -428,8 +449,17 @@ def format_report(analysis: dict) -> str:
     if ep:
         lines.append(
             f"📍 Event Win Rate: {ep.get('win_rate', 0)}% | "
-            f"Events: {ep.get('resolved_events', 0)} | Avg/Event: ${ep.get('avg_pnl_per_event', 0):+.2f}"
+            f"Events: {ep.get('resolved_events', 0)} | Avg/Event: ${ep.get('avg_pnl_per_event', 0):+.2f} | "
+            f"Avg Pos/Event: {ep.get('avg_positions_per_resolved_event', 0)}"
         )
+        if ep.get("retrade_count") is not None:
+            lines.append(f"🔁 Retrades: {ep.get('retrade_count', 0)} | Open Events: {s.get('open_event_count', 0)}")
+        top_events = (ep.get("open_event_concentration") or {}).get("top_concentrated_events") or []
+        if top_events:
+            top = top_events[0]
+            lines.append(
+                f"Top Open Event: {top.get('event_key')} | {top.get('open_positions')} positions | ${top.get('reserved_capital', 0):.2f} reserved"
+            )
     
     if sq:
         lines.append(f"Edge: {sq.get('avg_edge', 0)}% avg, {sq.get('max_edge', 0)}% max | Conf: {sq.get('avg_confidence', 0)}%")

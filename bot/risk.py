@@ -174,6 +174,12 @@ class RiskManager:
 
     def __init__(self, config: dict = None):
         config = config or {}
+        risk_cfg = config.get("risk", {}) or {}
+
+        def config_value(key: str, default=None):
+            if key in risk_cfg:
+                return risk_cfg.get(key)
+            return config.get(key, default)
 
         trading_cfg = config.get("trading", {}) or {}
         configured_mode = str(trading_cfg.get("mode", config.get("mode", "")) or "").strip().lower()
@@ -187,11 +193,11 @@ class RiskManager:
         # Resolve limits: env vars override preset, explicit config overrides both
         def resolve_float(key: str, default: float) -> float:
             env_key = key.upper()
-            return float(os.getenv(env_key, config.get(key, preset.get(key, default))))
+            return float(os.getenv(env_key, config_value(key, preset.get(key, default))))
 
         def resolve_int(key: str, default: int) -> int:
             env_key = key.upper()
-            return int(float(os.getenv(env_key, config.get(key, preset.get(key, default)))))
+            return int(float(os.getenv(env_key, config_value(key, preset.get(key, default)))))
 
         self.kelly_fraction = resolve_float("kelly_fraction", preset["kelly_fraction"])
         self.max_bet_pct = resolve_float("max_bet_pct", preset["max_bet_pct"])
@@ -200,8 +206,20 @@ class RiskManager:
         self.max_drawdown_pct = resolve_float("max_drawdown_pct", preset["max_drawdown_pct"])
         self.max_open_positions = resolve_int("max_open_positions", preset["max_open_positions"])
         self.cooldown_after_losses = resolve_int("cooldown_after_losses", preset["cooldown_after_losses"])
-        self.max_tradable_balance = resolve_float("max_tradable_balance_usd", config.get("max_tradable_balance", 0.0))
-        self.max_position_size_usd = resolve_float("max_position_size_usd", config.get("max_position_size_usd", 0.0))
+        self.max_tradable_balance = resolve_float("max_tradable_balance_usd", config_value("max_tradable_balance", 0.0))
+        self.max_position_size_usd = resolve_float("max_position_size_usd", config_value("max_position_size_usd", 0.0))
+        self.max_event_exposure_pct = resolve_float("max_event_exposure_pct", 0.10)
+        self.max_event_positions = resolve_int("max_event_positions", 3)
+        self.retrade_edge_premium = resolve_float("retrade_edge_premium", 0.01)
+        self.retrade_confidence_premium = resolve_float("retrade_confidence_premium", 0.00)
+        self.retrade_size_decay = resolve_float("retrade_size_decay", 0.65)
+        self.min_retrade_net_edge = resolve_float("min_retrade_net_edge", 0.005)
+        self.min_retrade_expected_profit_usd = resolve_float("min_retrade_expected_profit_usd", 0.0)
+        self.strict_event_overlap = bool(config_value("strict_event_overlap", True))
+        self.require_price_improvement_for_same_market_family = bool(
+            config_value("require_price_improvement_for_same_market_family", False)
+        )
+        self.price_improvement_ticks = resolve_float("price_improvement_ticks", 0.03)
         if "enabled" in trading_cfg:
             self.trading_enabled = bool(trading_cfg.get("enabled"))
         elif "trading_enabled" in trading_cfg:
@@ -213,15 +231,15 @@ class RiskManager:
         # max(session_starting_balance, session_peak_balance).
         # Requires manual reset (delete data/risk_state.json or set FORCE_RESUME=true).
         self.max_session_drawdown_pct = float(
-            os.getenv("MAX_DRAWDOWN_PCT", config.get("max_session_drawdown_pct", 0.20))
+            os.getenv("MAX_DRAWDOWN_PCT", config_value("max_session_drawdown_pct", 0.20))
         )
 
         # Stress scaling — more lenient as bankroll grows
-        self.stress_threshold = config.get("stress_threshold", 0.8)
-        self.stress_reduction = config.get("stress_reduction", 0.3)
-        self.min_position_size = float(config.get("min_position_size", 1.0))
+        self.stress_threshold = config_value("stress_threshold", 0.8)
+        self.stress_reduction = config_value("stress_reduction", 0.3)
+        self.min_position_size = float(config_value("min_position_size", 1.0))
 
-        starting = config.get("starting_balance", 100.0)
+        starting = config_value("starting_balance", 100.0)
         # State
         self.state = RiskState(
             starting_balance=starting,
@@ -661,6 +679,10 @@ class RiskManager:
             self.state.session_starting_balance,
         )
         self._save_state()
+
+    def record_trade_result(self, trade_ref, pnl: float):
+        """Backward-compatible alias for older runner calls."""
+        self.record_outcome(trade_ref, pnl)
 
     def record_outcome(self, trade_ref, pnl: float):
         """Record the outcome of a resolved trade."""

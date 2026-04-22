@@ -81,7 +81,7 @@ class RunnerLivePathTests(unittest.TestCase):
 
             self.assertIn("order", result)
             self.assertEqual(len(bot.exchanges["kalshi"].orders), 1)
-            self.assertEqual(bot.exchanges["kalshi"].orders[0]["size"], 4.0)
+            self.assertEqual(bot.exchanges["kalshi"].orders[0]["size"], 2.5)
 
     def test_live_path_respects_trading_disabled(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -123,6 +123,8 @@ class RunnerLivePathTests(unittest.TestCase):
             self.assertEqual(snapshot.resolved_trades, 1)
             self.assertEqual(snapshot.total_trades, 2)
             self.assertIn("source", snapshot.extra)
+            self.assertEqual(snapshot.extra["filled_event_exposure"], 4.0)
+            self.assertEqual(snapshot.extra["pending_event_exposure"], 0.0)
 
 
 if __name__ == "__main__":

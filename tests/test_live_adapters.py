@@ -117,6 +117,8 @@ class LiveAdaptersTests(unittest.TestCase):
             adapter = RunnerLiveStateAdapter(bot)
             account = adapter.get_account_state()
             self.assertEqual(account.reserved_capital, 5.0)
+            self.assertEqual(account.metadata["filled_event_exposure"], 2.0)
+            self.assertEqual(account.metadata["pending_event_exposure"], 3.0)
             self.assertEqual(len(adapter.list_open_positions()), 1)
             self.assertEqual(len(adapter.list_resting_orders()), 1)
 
