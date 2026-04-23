@@ -28,6 +28,7 @@ This is the strongest part of parity right now. Paper tuning is meaningful becau
 
 - [~] Paper evaluates signals from strategy snapshot
 - [~] Live revalidates using current bid/ask before execution
+- [ ] Extract a shared execution snapshot / pricing normalization helper and move live onto it first
 - [ ] Paper should simulate the same bid/ask revalidation pass as live before final approval
 - [ ] Paper should store both original signal snapshot and revalidated execution snapshot for apples-to-apples comparison
 
@@ -162,6 +163,7 @@ Right now a lot of parity is inferred from code structure rather than proven by 
 ## 12. Production Readiness Priorities
 
 ### Highest priority
+- [ ] Extract shared execution snapshot / price normalization logic and make live use it first
 - [ ] Paper should simulate live revalidation with current bid/ask semantics
 - [ ] Unify execution/audit row schema across paper and live
 - [ ] Harden live order lifecycle handling: partials, rejects, cancels, stale orders

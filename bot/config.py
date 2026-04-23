@@ -89,6 +89,15 @@ def _default_prediction_lab_config() -> dict[str, Any]:
     }
 
 
+def _default_parity_mode_config() -> dict[str, Any]:
+    return {
+        "enabled": False,
+        "record_revalidation_snapshot": True,
+        "require_book_prices": False,
+        "fallback_to_signal_prices": True,
+    }
+
+
 def _normalize_storage_config(config: dict) -> dict:
     storage = _deep_merge(_default_storage_config(), config.get("storage", {}) or {})
     logs = storage.get("logs", {}) or {}
@@ -112,6 +121,15 @@ def _normalize_storage_config(config: dict) -> dict:
         allowed_groups = [part.strip() for part in allowed_groups.split(",") if part.strip()]
     scan["allowed_market_groups"] = [str(group).strip().lower() for group in allowed_groups if str(group).strip()]
     config["scan"] = scan
+
+    parity_mode = _deep_merge(_default_parity_mode_config(), config.get("parity_mode", {}) or {})
+    parity_mode["enabled"] = bool(parity_mode.get("enabled", False))
+    parity_mode["record_revalidation_snapshot"] = bool(parity_mode.get("record_revalidation_snapshot", True))
+    parity_mode["require_book_prices"] = bool(parity_mode.get("require_book_prices", False))
+    parity_mode["fallback_to_signal_prices"] = bool(parity_mode.get("fallback_to_signal_prices", True))
+    if parity_mode["require_book_prices"]:
+        parity_mode["fallback_to_signal_prices"] = False
+    config["parity_mode"] = parity_mode
 
     prediction_lab = _deep_merge(_default_prediction_lab_config(), config.get("prediction_lab", {}) or {})
     groups = prediction_lab.get("groups") or []
@@ -369,6 +387,7 @@ def _default_config() -> dict:
             "base_dir": "data",
         },
         "storage": _default_storage_config(),
+        "parity_mode": _default_parity_mode_config(),
         "risk": {
             "kelly_fraction": 0.75,
             "max_position_pct": 0.20,

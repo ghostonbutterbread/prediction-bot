@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from bot.live_execution import RunnerLiveExecutionAdapter
+from bot.shared_core import build_execution_snapshot
 from bot.runner import LivePosition, PredictionBot
 
 
@@ -24,6 +25,22 @@ class FakeExchange:
 
 
 class LiveExecutionTests(unittest.TestCase):
+    def test_build_execution_snapshot_uses_book_prices_and_side_specific_market_price(self):
+        yes_snapshot = build_execution_snapshot(
+            {"market_price": 0.40},
+            direction="BUY_YES",
+            bid_ask={"best_yes_ask": 0.41, "best_no_ask": 0.59, "best_yes_bid": 0.40, "best_no_bid": 0.58},
+        )
+        self.assertEqual(yes_snapshot["market_price"], 0.41)
+        self.assertEqual(yes_snapshot["source"], "book")
+
+        no_snapshot = build_execution_snapshot(
+            {"market_price": 0.40},
+            direction="BUY_NO",
+            bid_ask={"best_yes_ask": 0.41, "best_no_ask": 0.59, "best_yes_bid": 0.40, "best_no_bid": 0.58},
+        )
+        self.assertEqual(no_snapshot["market_price"], 0.59)
+
     def _make_bot(self, tmpdir):
         bot = PredictionBot(
             {
