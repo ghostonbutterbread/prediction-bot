@@ -4,7 +4,7 @@ Prediction Market Trading Bot — Multi-Exchange
 
 Usage:
     python main.py demo              # Demo mode (Kalshi demo + paper trading)
-    python main.py paper             # Single paper scan
+    python main.py paper             # Single simulator-backed paper scan
     python main.py simulate [N] [s]  # Run N scans (every s seconds), audit trail
     python main.py audit [session]   # Review simulation results
     python main.py resolve [session] # Resolve open trades — check outcomes, compute P&L
@@ -115,11 +115,23 @@ def cmd_demo():
     bot.close()
 
 
-def cmd_paper():
-    """Paper trading on live markets."""
+def cmd_paper(config_path: str = "config.yaml"):
+    """Paper trading on live markets using simulator-backed paper state only."""
     from bot.runner import PredictionBot
+    from bot.simulator import Simulator
 
-    config = get_config()
+    try:
+        from bot.config import load_config as load_yaml_config
+        config = load_yaml_config(config_path)
+        config["_config_path"] = config_path
+    except Exception:
+        config = get_config()
+
+    config.setdefault("trading", {})["mode"] = "paper"
+    if "enabled" not in config.setdefault("trading", {}):
+        config["trading"]["enabled"] = config.get("trading_enabled", True)
+    os.environ["PAPER_MODE"] = "true"
+
     bot = PredictionBot(config)
 
     api_key = os.getenv("KALSHI_API_KEY_ID")
@@ -130,11 +142,22 @@ def cmd_paper():
         return
 
     bot.add_kalshi(api_key, private_key_path, demo=False)
-    bot.connect_all()
+    results = bot.connect_all()
 
-    print("📝 Paper trading mode — analyzing live markets, no orders placed")
-    result = bot.scan_once()
+    if not any(results.values()):
+        print("❌ Connection failed")
+        return
+
+    sim = Simulator(config)
+    exchange = list(bot.exchanges.values())[0]
+
+    print("📝 Paper trading mode, simulator-backed bankroll, live market data only")
+    print(f"   Session: {sim.session_id}")
+    print(f"   Balance: ${sim.balance:.2f}")
+
+    result = sim.scan(exchange)
     print(f"\n📊 Result: {result}")
+    print(f"📁 Session saved to: {config.get('data_dir', 'data')}/sim_{sim.session_id}.json")
 
     bot.close()
 
@@ -517,6 +540,13 @@ def cmd_prediction_lab_report(config_path: str = 'config.yaml'):
     prediction_lab_report_main()
 
 
+def cmd_prediction_lab_collect(config_path: str = 'config.yaml'):
+    from scripts.prediction_lab_collect import main as prediction_lab_collect_main
+    import sys
+    sys.argv = ['prediction_lab_collect', '--config', config_path]
+    prediction_lab_collect_main()
+
+
 def cmd_news(query: str = None):
     """Test news feed."""
     from bot.feeds.news import NewsFeed
@@ -606,6 +636,8 @@ def main():
         cmd_prediction_lab_resolve(config_path)
     elif cmd == "prediction-lab-report":
         cmd_prediction_lab_report(config_path)
+    elif cmd == "prediction-lab-collect":
+        cmd_prediction_lab_collect(config_path)
     elif cmd == "news":
         query = " ".join(sys.argv[2:]) if len(sys.argv) > 2 else None
         cmd_news(query)

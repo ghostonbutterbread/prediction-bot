@@ -54,11 +54,14 @@ def _default_scan_config() -> dict[str, Any]:
 def _default_prediction_lab_config() -> dict[str, Any]:
     return {
         "enabled": True,
+        "paused": False,
         "mode": "seed_and_watch",
         "groups": ["weather"],
         "max_markets_per_run": 1000,
         "max_new_predictions_per_seed": 500,
         "score_only": True,
+        "experiment_id": "default",
+        "strategy_version": "v1",
         "hypothetical_notional_mode": "flat",
         "flat_notional_usd": 10.0,
         "use_sizing_logic": False,
@@ -74,6 +77,9 @@ def _default_prediction_lab_config() -> dict[str, Any]:
         "collector_interval_seconds": 900,
         "collector_record_market_snapshots": True,
         "collector_record_predictions": True,
+        "collector_fetch_mode": "direct_markets",
+        "collector_direct_page_size": 200,
+        "collector_max_pages": 10,
         "collection_storage_cap_gb": 5,
         "collection_warning_threshold_pct": 90,
         "auto_pause_collection_on_storage_cap": True,
@@ -117,9 +123,12 @@ def _normalize_storage_config(config: dict) -> dict:
     prediction_lab.pop("weather_only_daily_temp_first", None)
 
     prediction_lab["enabled"] = bool(prediction_lab.get("enabled", True))
+    prediction_lab["paused"] = bool(prediction_lab.get("paused", False))
     prediction_lab["mode"] = str(prediction_lab.get("mode", "seed_and_watch") or "seed_and_watch").lower()
     prediction_lab["max_markets_per_run"] = max(1, int(prediction_lab.get("max_markets_per_run", 1000) or 1000))
     prediction_lab["max_new_predictions_per_seed"] = max(1, int(prediction_lab.get("max_new_predictions_per_seed", 500) or 500))
+    prediction_lab["experiment_id"] = str(prediction_lab.get("experiment_id", "default") or "default")
+    prediction_lab["strategy_version"] = str(prediction_lab.get("strategy_version", "v1") or "v1")
     prediction_lab["flat_notional_usd"] = float(prediction_lab.get("flat_notional_usd", 10.0) or 10.0)
     prediction_lab["min_confidence_to_record"] = float(prediction_lab.get("min_confidence_to_record", 0.0) or 0.0)
     prediction_lab["min_edge_to_record"] = float(prediction_lab.get("min_edge_to_record", 0.0) or 0.0)
@@ -133,6 +142,9 @@ def _normalize_storage_config(config: dict) -> dict:
     prediction_lab["collector_interval_seconds"] = max(1, int(prediction_lab.get("collector_interval_seconds", 900) or 900))
     prediction_lab["collector_record_market_snapshots"] = bool(prediction_lab.get("collector_record_market_snapshots", True))
     prediction_lab["collector_record_predictions"] = bool(prediction_lab.get("collector_record_predictions", True))
+    prediction_lab["collector_fetch_mode"] = str(prediction_lab.get("collector_fetch_mode", "direct_markets") or "direct_markets").lower()
+    prediction_lab["collector_direct_page_size"] = max(1, int(prediction_lab.get("collector_direct_page_size", 200) or 200))
+    prediction_lab["collector_max_pages"] = max(1, int(prediction_lab.get("collector_max_pages", 10) or 10))
     prediction_lab["collection_storage_cap_gb"] = float(prediction_lab.get("collection_storage_cap_gb", 5.0) or 5.0)
     prediction_lab["collection_warning_threshold_pct"] = float(prediction_lab.get("collection_warning_threshold_pct", 90) or 90)
     prediction_lab["auto_pause_collection_on_storage_cap"] = bool(prediction_lab.get("auto_pause_collection_on_storage_cap", True))

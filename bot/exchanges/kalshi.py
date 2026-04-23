@@ -120,6 +120,67 @@ class KalshiExchange(BaseExchange):
             logger.error(f"Kalshi connection failed: {e}")
             return False
 
+    def get_markets_direct(self, limit: int = 50, page_size: int = 200, max_pages: int = 10) -> list[Market]:
+        try:
+            markets = []
+            cursor = None
+            pages = 0
+            auth_headers = self.client.kalshi_auth.create_auth_headers('GET', '/trade-api/v2/markets')
+            logger.info('Kalshi direct market pull: limit=%s page_size=%s max_pages=%s groups=%s', limit, page_size, max_pages, sorted(self._allowed_market_groups))
+            while len(markets) < limit and pages < max_pages:
+                pages += 1
+                params = f'?status=open&limit={max(1, min(page_size, 1000))}'
+                if cursor:
+                    params += f'&cursor={cursor}'
+                url = f'{self.host}/markets{params}'
+                resp = http_get_with_retry(url, auth_headers, throttle=self._throttle, timeout=10)
+                if not resp or resp.status_code != 200:
+                    logger.warning('Kalshi direct market pull stopped: page=%s status=%s', pages, getattr(resp, 'status_code', None))
+                    break
+                data = resp.json()
+                raw = data.get('markets', [])
+                if not raw:
+                    break
+                page_added = 0
+                for m in raw:
+                    yes_price = _dollars_from_raw(m, 'yes_ask')
+                    no_price = _dollars_from_raw(m, 'no_ask')
+                    if yes_price <= 0 or yes_price >= 1:
+                        continue
+                    close_time = _parse_dt_raw(m.get('close_time'))
+                    market = Market(
+                        id=m.get('ticker', ''),
+                        exchange='kalshi',
+                        question=m.get('title', ''),
+                        yes_price=yes_price,
+                        no_price=no_price,
+                        volume=float(m.get('volume_fp', 0) or 0),
+                        liquidity=_dollars_from_raw(m, 'liquidity'),
+                        closes_at=close_time,
+                        category=m.get('series_ticker', 'other'),
+                        metadata={
+                            'status': m.get('status', ''),
+                            'source': 'direct_paginated',
+                        },
+                        yes_bid=_dollars_from_raw(m, 'yes_bid'),
+                        no_bid=_dollars_from_raw(m, 'no_bid'),
+                    )
+                    if self._market_allowed(market):
+                        markets.append(market)
+                        page_added += 1
+                        if len(markets) >= limit:
+                            break
+                logger.info('Kalshi direct market pull page=%s fetched=%s accepted=%s total=%s', pages, len(raw), page_added, len(markets))
+                cursor = data.get('cursor')
+                if not cursor:
+                    break
+            deduped = self._dedupe_and_filter_markets(markets, now=datetime.now(timezone.utc))
+            logger.info('Kalshi direct market pull complete: pages=%s accepted=%s deduped=%s returning=%s', pages, len(markets), len(deduped), min(len(deduped), limit))
+            return deduped[:limit]
+        except Exception as e:
+            logger.error(f'Error fetching direct markets: {e}')
+            return []
+
     def get_markets(self, limit: int = 50, category: str = None) -> list[Market]:
         try:
             markets = []
@@ -313,64 +374,55 @@ class KalshiExchange(BaseExchange):
                         if len(markets) >= limit:
                             break
 
-            # Dedup by market ID
-            seen = set()
-            deduped = []
-            for m in markets:
-                if m.id not in seen:
-                    seen.add(m.id)
-                    deduped.append(m)
-
-            # Sort: prioritize markets closing sooner
-            deduped.sort(key=lambda m: (
-                (m.closes_at - now).total_seconds() if isinstance(m.closes_at, datetime) else float('inf')
-            ))
-
-            # === Market freshness filter — reject already-closed markets ===
-            # This prevents ancient/historical markets (e.g. 2017 Shiba Inu) from
-            # flooding the scanner and filling position slots.
-            # Rejects: closed markets (closes_at in past) AND markets with no close time
-            # (missing close time is a red flag for stale/historical markets).
-            import re
-            before = len(deduped)
-            now_ts = datetime.now(timezone.utc)
-            two_days_ago = now_ts - timedelta(days=2)
-            fresh = []
-            for m in deduped:
-                # Reject if closes_at is None (malformed/historical market)
-                if m.closes_at is None:
-                    logger.debug(f"Filtered market with no close time: {m.id}")
-                    continue
-                # Reject if already closed
-                if m.closes_at <= now_ts:
-                    logger.debug(f"Filtered closed market: {m.id} (closed {m.closes_at})")
-                    continue
-                # Reject if ticker date is more than 2 days old (e.g. MAR2217 = March 22, 2017)
-                # Ticker pattern: KXSOMETHING-YYMMDD-...  or KXSOMETHING-YYMMDD
-                ticker_match = re.search(r'-(\d{6})-', m.id)
-                if ticker_match:
-                    try:
-                        yymmdd = ticker_match.group(1)
-                        yy, mm, dd = int(yymmdd[:2]), int(yymmdd[2:4]), int(yymmdd[4:6])
-                        # 26 = 2026, 17 = 2017 (Kalshi uses 2-digit year)
-                        market_year = 2000 + yy if yy >= 90 else 2000 + yy
-                        market_date = datetime(market_year, mm, dd, tzinfo=timezone.utc)
-                        if market_date < two_days_ago:
-                            logger.debug(f"Filtered stale ticker: {m.id} (ticker date {market_date.date()})")
-                            continue
-                    except (ValueError, OverflowError):
-                        pass  # Can't parse date — let it through
-                fresh.append(m)
-            deduped = fresh
-            if before != len(deduped):
-                logger.info(f"Filtered {before - len(deduped)} stale/closed markets (already resolved)")
-
+            deduped = self._dedupe_and_filter_markets(markets, now=now)
             logger.info(f"Fetched {len(deduped)} unique Kalshi markets (sorted by close time)")
             return deduped[:limit]
 
         except Exception as e:
             logger.error(f"Error fetching markets: {e}")
             return []
+
+    def _dedupe_and_filter_markets(self, markets: list[Market], *, now: datetime) -> list[Market]:
+        seen = set()
+        deduped = []
+        for m in markets:
+            if m.id not in seen:
+                seen.add(m.id)
+                deduped.append(m)
+
+        deduped.sort(key=lambda m: (
+            (m.closes_at - now).total_seconds() if isinstance(m.closes_at, datetime) else float('inf')
+        ))
+
+        import re
+        before = len(deduped)
+        now_ts = datetime.now(timezone.utc)
+        two_days_ago = now_ts - timedelta(days=2)
+        fresh = []
+        for m in deduped:
+            if m.closes_at is None:
+                logger.debug(f"Filtered market with no close time: {m.id}")
+                continue
+            if m.closes_at <= now_ts:
+                logger.debug(f"Filtered closed market: {m.id} (closed {m.closes_at})")
+                continue
+            ticker_match = re.search(r'-(\d{6})-', m.id)
+            if ticker_match:
+                try:
+                    yymmdd = ticker_match.group(1)
+                    yy, mm, dd = int(yymmdd[:2]), int(yymmdd[2:4]), int(yymmdd[4:6])
+                    market_year = 2000 + yy if yy >= 90 else 2000 + yy
+                    market_date = datetime(market_year, mm, dd, tzinfo=timezone.utc)
+                    if market_date < two_days_ago:
+                        logger.debug(f"Filtered stale ticker: {m.id} (ticker date {market_date.date()})")
+                        continue
+                except (ValueError, OverflowError):
+                    pass
+            fresh.append(m)
+        deduped = fresh
+        if before != len(deduped):
+            logger.info(f"Filtered {before - len(deduped)} stale/closed markets (already resolved)")
+        return deduped
 
     def get_market(self, market_id: str) -> Optional[Market]:
         try:

@@ -32,6 +32,7 @@ class PredictionLab:
         self.config = config or {}
         self.lab_cfg = (self.config.get("prediction_lab", {}) or {})
         self.mode = str(self.lab_cfg.get("mode", "seed_and_watch") or "seed_and_watch").lower()
+        self.paused = bool(self.lab_cfg.get("paused", False))
         strategy_cfg = dict((self.config.get("strategy", {}) or {}))
         if self.lab_cfg.get("disable_news", True):
             strategy_cfg["enable_news"] = False
@@ -50,12 +51,17 @@ class PredictionLab:
         self.use_sizing_logic = bool(self.lab_cfg.get("use_sizing_logic", False))
         self.collector_record_market_snapshots = bool(self.lab_cfg.get("collector_record_market_snapshots", True))
         self.collector_record_predictions = bool(self.lab_cfg.get("collector_record_predictions", True))
+        self.collector_fetch_mode = str(self.lab_cfg.get("collector_fetch_mode", "direct_markets") or "direct_markets").lower()
+        self.collector_direct_page_size = int(self.lab_cfg.get("collector_direct_page_size", 200) or 200)
+        self.collector_max_pages = int(self.lab_cfg.get("collector_max_pages", 10) or 10)
         self.send_telegram_updates = bool(self.lab_cfg.get("send_telegram_updates", False))
         self.telegram_summary_on_pause = bool(self.lab_cfg.get("telegram_summary_on_pause", False))
         self.min_confidence_to_record = float(self.lab_cfg.get("min_confidence_to_record", 0.0) or 0.0)
         self.min_edge_to_record = float(self.lab_cfg.get("min_edge_to_record", 0.0) or 0.0)
         self.hypothetical_mode = str(self.lab_cfg.get("hypothetical_notional_mode", "flat") or "flat").lower()
         self.flat_notional_usd = float(self.lab_cfg.get("flat_notional_usd", 10.0) or 10.0)
+        self.experiment_id = str(self.lab_cfg.get("experiment_id") or "default")
+        self.strategy_version = str(self.lab_cfg.get("strategy_version") or "v1")
         self.mapper = WeatherMarketCityMapper()
         self.data_dir = Path(self.config.get("data_dir", "data"))
         self.root_dir = self.data_dir / "prediction_lab"
@@ -70,15 +76,20 @@ class PredictionLab:
 
     def run(self, exchange) -> PredictionLabRunResult:
         run_id = datetime.now(timezone.utc).strftime("plab_%Y%m%dT%H%M%SZ")
+        self._validate_v1_groups()
         if not bool(self.lab_cfg.get("enabled", True)):
-            self._update_state(mode=self.mode, last_run_id=run_id, paused_reason="disabled")
+            self._update_state(mode=self.mode, paused=False, last_run_id=run_id, paused_reason="disabled")
+            return PredictionLabRunResult(run_id=run_id, scanned_markets=0, recorded_predictions=0, group_counts={}, series_counts={}, ledger_path=str(self.predictions_path))
+
+        if self.paused:
+            self._update_state(mode=self.mode, paused=True, last_run_id=run_id, paused_reason="manual_pause")
             return PredictionLabRunResult(run_id=run_id, scanned_markets=0, recorded_predictions=0, group_counts={}, series_counts={}, ledger_path=str(self.predictions_path))
 
         if self.mode == "resolve_only":
-            self._update_state(mode=self.mode, last_run_id=run_id, paused_reason="resolve_only")
+            self._update_state(mode=self.mode, paused=False, last_run_id=run_id, paused_reason="resolve_only")
             return PredictionLabRunResult(run_id=run_id, scanned_markets=0, recorded_predictions=0, group_counts={}, series_counts={}, ledger_path=str(self.predictions_path))
 
-        markets = exchange.get_markets(limit=self.max_markets_per_run)
+        markets = self._get_candidate_markets(exchange)
         markets = self._prioritize_markets(markets)
         group_counts = Counter()
         series_counts = Counter()
@@ -138,7 +149,9 @@ class PredictionLab:
         paused_reason = "seed_complete" if self.mode == "seed_and_watch" else None
         self._update_state(
             mode=self.mode,
+            paused=False,
             last_run_id=run_id,
+            last_collect_at=datetime.now(timezone.utc).isoformat(),
             open_prediction_count=self._count_open_predictions(),
             resolved_prediction_count=self._count_resolved_predictions(),
             paused_reason=paused_reason,
@@ -156,6 +169,8 @@ class PredictionLab:
     def resolve_open_predictions(self, exchange) -> dict[str, Any]:
         with self._prediction_ledger_lock():
             rows = load_jsonl(self.predictions_path)
+            existing_resolutions = load_jsonl(self.resolutions_path)
+            resolved_keys = {self._prediction_identity(row) for row in existing_resolutions}
             unresolved = [row for row in rows if row.get("status") == "open"]
             resolved_count = 0
             correct = 0
@@ -168,28 +183,36 @@ class PredictionLab:
                 if not market_id:
                     continue
                 outcome = self._fetch_market_outcome(exchange, market_id)
-                if outcome not in {"YES", "NO"}:
+                if outcome not in {"YES", "NO", "VOID"}:
                     continue
-                action = row.get("direction", "SKIP")
-                fee_model = ReplayFeeModel(profit_fee_rate=float(self.config.get("kalshi_fee_rate", 0.07) or 0.07))
-                position_size = float((row.get("hypothetical") or {}).get("notional_usd", self.flat_notional_usd) or self.flat_notional_usd)
-                if self.use_sizing_logic:
-                    position_size = position_size
-                scored = score_replay_answer(
-                    action,
-                    {
-                        "replay_id": row.get("prediction_id"),
-                        "market_id": market_id,
-                        "outcome": outcome,
-                        "prices": {
-                            "yes_price": row.get("yes_market_price"),
-                            "no_price": row.get("no_market_price"),
+                identity = self._prediction_identity(row)
+                if identity in resolved_keys:
+                    row["status"] = "resolved"
+                    continue
+                if outcome == "VOID":
+                    scored = {"is_correct": None, "net_pnl": 0.0, "gross_pnl": 0.0, "entry_price": None, "quoted_entry_price": None}
+                    row["status"] = "voided"
+                else:
+                    action = row.get("direction", "SKIP")
+                    fee_model = ReplayFeeModel(profit_fee_rate=float(self.config.get("kalshi_fee_rate", 0.07) or 0.07))
+                    position_size = float((row.get("hypothetical") or {}).get("notional_usd", self.flat_notional_usd) or self.flat_notional_usd)
+                    if self.use_sizing_logic:
+                        position_size = position_size
+                    scored = score_replay_answer(
+                        action,
+                        {
+                            "replay_id": row.get("prediction_id"),
+                            "market_id": market_id,
+                            "outcome": outcome,
+                            "prices": {
+                                "yes_price": row.get("yes_market_price"),
+                                "no_price": row.get("no_market_price"),
+                            },
                         },
-                    },
-                    position_size=position_size,
-                    fee_model=fee_model,
-                )
-                row["status"] = "resolved"
+                        position_size=position_size,
+                        fee_model=fee_model,
+                    )
+                    row["status"] = "resolved"
                 row["resolution"] = {
                     "outcome": outcome,
                     "resolved_at": datetime.now(timezone.utc).isoformat(),
@@ -200,6 +223,7 @@ class PredictionLab:
                     "quoted_entry_price": scored.get("quoted_entry_price"),
                 }
                 append_jsonl(self.resolutions_path, row)
+                resolved_keys.add(identity)
                 resolved_count += 1
                 if scored.get("is_correct") is True:
                     correct += 1
@@ -214,6 +238,7 @@ class PredictionLab:
             open_prediction_count = self._count_open_predictions(rows)
             self._update_state(
                 mode=self.mode,
+                last_resolve_at=datetime.now(timezone.utc).isoformat(),
                 open_prediction_count=open_prediction_count,
                 resolved_prediction_count=self._count_resolved_predictions(rows),
                 paused_reason=None if open_prediction_count else "no_open_predictions",
@@ -296,6 +321,8 @@ class PredictionLab:
             "no_market_price": signal.get("no_market_price", getattr(market, "no_price", None)),
             "signals": signal.get("signals", {}),
             "weather_context": context,
+            "experiment_id": self.experiment_id,
+            "strategy_version": self.strategy_version,
             "hypothetical": {
                 "mode": self.hypothetical_mode,
                 "notional_usd": self.flat_notional_usd,
@@ -320,6 +347,16 @@ class PredictionLab:
             "recorded_prediction": prediction_recorded,
         }
 
+    def _get_candidate_markets(self, exchange) -> list[Any]:
+        direct_fetch = getattr(exchange, "get_markets_direct", None)
+        if self.mode == "collector" and self.collector_fetch_mode == "direct_markets" and callable(direct_fetch):
+            return direct_fetch(
+                limit=self.max_markets_per_run,
+                page_size=self.collector_direct_page_size,
+                max_pages=self.collector_max_pages,
+            )
+        return exchange.get_markets(limit=self.max_markets_per_run)
+
     def _prioritize_markets(self, markets: list[Any]) -> list[Any]:
         def score(market: Any) -> tuple[int, float]:
             metadata = dict(getattr(market, "metadata", {}) or {})
@@ -339,26 +376,16 @@ class PredictionLab:
 
     def _load_state(self) -> dict[str, Any]:
         if not self.state_path.exists():
-            return {
-                "mode": self.mode,
-                "last_run_id": None,
-                "paused_reason": None,
-                "open_prediction_count": 0,
-                "resolved_prediction_count": 0,
-            }
+            return self._default_state()
         try:
             with locked_file(self.state_path, "r") as fh:
                 return json.load(fh)
         except Exception:
-            return {
-                "mode": self.mode,
-                "last_run_id": None,
-                "paused_reason": None,
-                "open_prediction_count": 0,
-                "resolved_prediction_count": 0,
-            }
+            return self._default_state()
 
     def _update_state(self, **updates: Any) -> None:
+        if "pause_reason" in updates and "paused_reason" not in updates:
+            updates["paused_reason"] = updates["pause_reason"]
         state_lock = self.root_dir / "prediction_lab.state.lock"
         with locked_file(state_lock, "a+"):
             current_state = self._load_state_unlocked()
@@ -375,23 +402,60 @@ class PredictionLab:
 
     def _load_state_unlocked(self) -> dict[str, Any]:
         if not self.state_path.exists():
-            return {
-                "mode": self.mode,
-                "last_run_id": None,
-                "paused_reason": None,
-                "open_prediction_count": 0,
-                "resolved_prediction_count": 0,
-            }
+            return self._default_state()
         try:
             return json.loads(self.state_path.read_text())
         except Exception:
-            return {
-                "mode": self.mode,
-                "last_run_id": None,
-                "paused_reason": None,
-                "open_prediction_count": 0,
-                "resolved_prediction_count": 0,
-            }
+            return self._default_state()
+
+    def storage_usage(self) -> dict[str, Any]:
+        total_bytes = 0
+        for path in (self.market_snapshots_path, self.predictions_path):
+            if path.exists() and path.is_file():
+                try:
+                    total_bytes += path.stat().st_size
+                except OSError:
+                    continue
+        cap_gb = float(self.lab_cfg.get("collection_storage_cap_gb", 0.0) or 0.0)
+        cap_bytes = int(cap_gb * (1024**3)) if cap_gb > 0 else 0
+        warning_threshold_pct = float(self.lab_cfg.get("collection_warning_threshold_pct", 90.0) or 90.0)
+        pct_of_cap = (total_bytes / cap_bytes * 100.0) if cap_bytes > 0 else None
+        return {
+            "bytes": total_bytes,
+            "gb": round(total_bytes / (1024**3), 6),
+            "cap_bytes": cap_bytes,
+            "cap_gb": cap_gb,
+            "pct_of_cap": round(pct_of_cap, 2) if pct_of_cap is not None else None,
+            "warning_threshold_pct": warning_threshold_pct,
+            "warning_threshold_reached": bool(pct_of_cap is not None and pct_of_cap >= warning_threshold_pct),
+            "over_cap": bool(cap_bytes > 0 and total_bytes >= cap_bytes),
+        }
+
+    def update_runtime_state(self, **updates: Any) -> None:
+        self._update_state(**updates)
+
+    def _default_state(self) -> dict[str, Any]:
+        return {
+            "mode": self.mode,
+            "run_state": "paused" if self.paused else "idle_watch",
+            "pause_reason": "manual_pause" if self.paused else "none",
+            "paused_reason": "manual_pause" if self.paused else "none",
+            "paused": self.paused,
+            "last_run_id": None,
+            "last_collect_at": None,
+            "last_resolve_at": None,
+            "last_storage_check_at": None,
+            "storage_usage_bytes": 0,
+            "storage_usage_gb": 0.0,
+            "warning_emitted": False,
+            "open_prediction_count": 0,
+            "resolved_prediction_count": 0,
+            "active_group": self.groups[0] if self.groups else None,
+            "last_error": None,
+            "seed_complete": False,
+            "experiment_id": self.experiment_id,
+            "strategy_version": self.strategy_version,
+        }
 
     def _fetch_market_outcome(self, exchange, market_id: str) -> Optional[str]:
         fetch_raw = getattr(exchange, "_fetch_market_raw", None)
@@ -401,14 +465,16 @@ class PredictionLab:
         if not isinstance(raw, dict):
             return None
         result = str(raw.get("result") or raw.get("settlement_value") or "").upper()
-        if result in {"YES", "NO"}:
-            return result
+        if result in {"YES", "NO", "VOID", "CANCELLED", "CANCELED"}:
+            return "VOID" if result in {"VOID", "CANCELLED", "CANCELED"} else result
         close_price = raw.get("close_price")
         if close_price in (1, 1.0, "1", "1.0"):
             return "YES"
         if close_price in (0, 0.0, "0", "0.0"):
             return "NO"
         status = str(raw.get("status") or "").lower()
+        if status in {"cancelled", "canceled", "voided", "void"}:
+            return "VOID"
         if status == "settled":
             yes_sub_title = str(raw.get("subtitle") or "")
             if "yes" in yes_sub_title.lower():
@@ -426,12 +492,23 @@ class PredictionLab:
     def _prediction_ledger_lock(self):
         return locked_file(self.root_dir / "prediction_lab.ledger.lock", "a+")
 
+    def _validate_v1_groups(self) -> None:
+        if len(self.groups) != 1:
+            raise ValueError("Prediction Lab v1 collector requires exactly one configured group")
+
+    def _prediction_identity(self, row: dict[str, Any]) -> tuple[str, str, str]:
+        return (
+            str(row.get("market_id") or ""),
+            str(row.get("experiment_id") or self.experiment_id),
+            str(row.get("strategy_version") or self.strategy_version),
+        )
+
     def _append_prediction_if_absent(self, row: dict[str, Any]) -> bool:
         with self._prediction_ledger_lock():
             rows = load_jsonl(self.predictions_path)
-            market_id = str(row.get("market_id") or "")
-            already_open = any(str(existing.get("market_id") or "") == market_id and existing.get("status") == "open" for existing in rows)
-            if already_open:
+            identity = self._prediction_identity(row)
+            already_present = any(self._prediction_identity(existing) == identity for existing in rows)
+            if already_present:
                 return False
             append_jsonl(self.predictions_path, row)
             return True
