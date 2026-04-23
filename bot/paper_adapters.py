@@ -233,6 +233,9 @@ class SimulatorPaperStateAdapter:
                 "trading_enabled": self.host.risk.state.trading_enabled,
                 "max_tradable_balance": round(self.host.risk.max_tradable_balance, 2),
                 "max_position_size_usd": round(self.host.risk.max_position_size_usd, 2),
+                "standby_active": self.host.risk.state.standby_active,
+                "standby_reason_codes": list(self.host.risk.state.standby_reason_codes),
+                "standby_blocked_scan_count": self.host.risk.state.standby_blocked_scan_count,
             },
         )
 
@@ -274,6 +277,10 @@ class SimulatorPaperStateAdapter:
             metadata={
                 "mode": "paper",
                 "starting_balance": round(self.host.starting_balance, 2),
+                "standby_active": self.host.risk.state.standby_active,
+                "standby_reason_codes": list(self.host.risk.state.standby_reason_codes),
+                "standby_blocked_scan_count": self.host.risk.state.standby_blocked_scan_count,
+                "standby_entered_at": self.host.risk.state.standby_entered_at,
             },
         )
 

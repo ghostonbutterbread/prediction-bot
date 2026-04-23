@@ -275,6 +275,34 @@ class Simulator:
         logger.info(f"\n{'='*60}")
         logger.info(f"Sim Scan #{self.scan_count} at {datetime.now(timezone.utc).strftime('%H:%M:%S')}")
 
+        standby_status = self.risk.evaluate_standby_resume()
+        if standby_status.get("standby_active"):
+            logger.info(
+                "⏸️  Standby active | reasons=%s | useful_capacity=$%.2f",
+                ",".join(standby_status.get("standby_reason_codes", [])) or "unknown",
+                standby_status.get("useful_trade_capacity", 0.0),
+            )
+            resolution_events = self.resolve_open_positions(exchange)
+            if resolution_events:
+                standby_status = self.risk.evaluate_standby_resume()
+                if standby_status.get("resumed"):
+                    logger.info("▶️  Standby cleared after resolutions | %s", standby_status.get("resume_reason", ""))
+            self._save_session()
+            return {
+                "markets": 0,
+                "signals": 0,
+                "trades": 0,
+                "balance": self.balance,
+                "total_trades": len(self._effective_trades()),
+                "blocked_reasons": {},
+                "standby": {
+                    "active": bool(standby_status.get("standby_active")),
+                    "resumed": bool(standby_status.get("resumed")),
+                    "reason_codes": list(standby_status.get("standby_reason_codes", [])),
+                    "resume_reason": standby_status.get("resume_reason", ""),
+                },
+            }
+
         markets = exchange.get_markets(limit=100)
         if not markets:
             return {"markets": 0, "signals": 0, "trades": 0}
@@ -527,6 +555,7 @@ class Simulator:
             except Exception as e:
                 logger.debug(f"Resolution pass error: {e}")
 
+        self.risk.record_blocked_scan(dict(blockers), trades_taken=len(trades_taken))
         self._save_session()
 
         return {
@@ -536,6 +565,11 @@ class Simulator:
             "balance": self.balance,
             "total_trades": len(self._effective_trades()),
             "blocked_reasons": dict(blockers),
+            "standby": {
+                "active": bool(self.risk.state.standby_active),
+                "reason_codes": list(self.risk.state.standby_reason_codes),
+                "blocked_scan_count": self.risk.state.standby_blocked_scan_count,
+            },
         }
 
     def _should_trade(self, signal: dict) -> bool:
