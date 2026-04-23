@@ -228,6 +228,13 @@ class Simulator:
             available_cash=self.available_cash,
             reserved_capital=self.reserved_capital,
         )
+        startup_standby = self.risk.reconcile_startup_standby()
+        if startup_standby.get("asserted"):
+            logger.info(
+                "⏸️  Startup standby asserted | reasons=%s | useful_capacity=$%.2f",
+                ",".join(startup_standby.get("reason_codes", [])) or "unknown",
+                startup_standby.get("useful_trade_capacity", 0.0),
+            )
 
     def _hydrate_trade(self, t_data: dict, index: int) -> SimTrade:
         return SimTrade(

@@ -868,6 +868,79 @@ class RiskManager:
                 reasons.add(STANDBY_REASON_CAPITAL_HEADROOM)
         return sorted(reasons)
 
+    def reconcile_startup_standby(self) -> dict:
+        """Re-assert standby after a restart if the restored portfolio is already extended."""
+        useful_capacity = self._estimate_useful_trade_capacity()
+        capital_reasons: list[str] = []
+
+        if self.state.open_positions >= self.max_open_positions:
+            capital_reasons.append(STANDBY_REASON_MAX_POSITIONS)
+
+        spendable_cash = max(0.0, self._coerce_float(self.state.available_cash, 0.0))
+        tradable_cash = spendable_cash
+        if self.max_tradable_balance > 0:
+            tradable_cash = min(tradable_cash, self.max_tradable_balance)
+        if tradable_cash < self.min_position_size:
+            capital_reasons.append(STANDBY_REASON_TRADABLE_BALANCE)
+
+        max_exposure_dollars = max(0.0, self.state.current_balance * self.max_exposure_pct)
+        exposure_headroom = max(0.0, max_exposure_dollars - self.state.total_exposure)
+        if exposure_headroom < self.min_position_size or useful_capacity < self.standby_min_useful_trade_size_usd:
+            capital_reasons.append(STANDBY_REASON_CAPITAL_HEADROOM)
+
+        capital_reasons = sorted(set(capital_reasons))
+
+        if not self.standby_mode_enabled or self.is_live:
+            return {
+                "standby_active": bool(self.state.standby_active),
+                "reason_codes": list(self.state.standby_reason_codes),
+                "useful_trade_capacity": useful_capacity,
+                "asserted": False,
+            }
+
+        if self.state.standby_active:
+            if not self.state.standby_reason_codes:
+                self.state.standby_reason_codes = list(capital_reasons)
+                self._save_state()
+            return {
+                "standby_active": True,
+                "reason_codes": list(self.state.standby_reason_codes),
+                "useful_trade_capacity": useful_capacity,
+                "asserted": False,
+            }
+
+        if not capital_reasons:
+            return {
+                "standby_active": False,
+                "reason_codes": [],
+                "useful_trade_capacity": useful_capacity,
+                "asserted": False,
+            }
+
+        self.state.standby_active = True
+        self.state.standby_entered_at = self.state.standby_entered_at or datetime.now(timezone.utc).isoformat()
+        self.state.standby_reason_codes = capital_reasons
+        self.state.standby_blocked_scan_count = max(
+            self.state.standby_blocked_scan_count,
+            self.standby_blocked_scan_threshold,
+        )
+        self.state.standby_unresolved_positions_at_entry = max(
+            int(self.state.standby_unresolved_positions_at_entry),
+            int(self.state.open_positions),
+        )
+        self.state.standby_exposure_at_entry = max(
+            self._coerce_float(self.state.standby_exposure_at_entry, 0.0),
+            round(self.state.total_exposure, 2),
+        )
+        self.state.standby_available_cash_at_entry = round(self.state.available_cash, 2)
+        self._save_state()
+        return {
+            "standby_active": True,
+            "reason_codes": list(self.state.standby_reason_codes),
+            "useful_trade_capacity": useful_capacity,
+            "asserted": True,
+        }
+
     def record_blocked_scan(self, blocked_reasons: dict[str, int] | None, *, trades_taken: int = 0) -> None:
         if not self.standby_mode_enabled or self.is_live:
             return

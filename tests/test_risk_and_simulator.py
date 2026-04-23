@@ -146,6 +146,40 @@ class RiskManagerTests(unittest.TestCase):
             self.assertFalse(risk.state.standby_active)
             self.assertIn("positions_resolved=2", risk.state.standby_last_resume_reason)
 
+    def test_reconcile_startup_standby_asserts_when_portfolio_already_extended(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            risk = RiskManager({"data_dir": tmpdir, "starting_balance": 100.0})
+            risk.max_open_positions = 15
+            risk.state.open_positions = 15
+            risk.state.total_exposure = 127.21
+            risk.state.available_cash = 316.25
+            risk.state.current_balance = 443.46
+            risk.state.standby_active = False
+
+            result = risk.reconcile_startup_standby()
+
+            self.assertTrue(result["asserted"])
+            self.assertTrue(risk.state.standby_active)
+            self.assertIn("max_positions", risk.state.standby_reason_codes)
+            self.assertEqual(risk.state.standby_unresolved_positions_at_entry, 15)
+            self.assertEqual(risk.state.standby_blocked_scan_count, risk.standby_blocked_scan_threshold)
+
+    def test_reconcile_startup_standby_preserves_existing_active_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            risk = RiskManager({"data_dir": tmpdir, "starting_balance": 100.0})
+            risk.state.standby_active = True
+            risk.state.standby_reason_codes = ["max_positions"]
+            risk.state.open_positions = 15
+            risk.state.total_exposure = 127.21
+            risk.state.available_cash = 316.25
+            risk.state.current_balance = 443.46
+
+            result = risk.reconcile_startup_standby()
+
+            self.assertFalse(result["asserted"])
+            self.assertTrue(result["standby_active"])
+            self.assertEqual(risk.state.standby_reason_codes, ["max_positions"])
+
 
 class SimulatorSessionTests(unittest.TestCase):
     def test_create_trade_sizes_from_available_cash_and_reserves_it(self):

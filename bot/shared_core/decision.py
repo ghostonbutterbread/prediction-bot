@@ -34,6 +34,10 @@ DEFAULT_RETRADE_POLICY = {
     "fee_rate": 0.07,
 }
 
+HIDDEN_GEM_ENTRY_PRICE_CAP = 0.05
+HIDDEN_GEM_MIN_EDGE = 0.05
+HIDDEN_GEM_MIN_PROBABILITY_MULTIPLE = 3.0
+
 
 def build_trade_decision(
     context: TradeContext,
@@ -137,6 +141,54 @@ def build_trade_decision(
             win_probability=win_probability,
             reasoning=reasoning,
         )
+
+    hidden_gem_thresholds = {
+        "entry_price_cap": HIDDEN_GEM_ENTRY_PRICE_CAP,
+        "min_edge": HIDDEN_GEM_MIN_EDGE,
+        "min_probability_multiple": HIDDEN_GEM_MIN_PROBABILITY_MULTIPLE,
+    }
+    reasoning["thresholds"]["hidden_gem"] = hidden_gem_thresholds
+    if entry_price <= HIDDEN_GEM_ENTRY_PRICE_CAP:
+        probability_multiple = (win_probability / entry_price) if entry_price > 0 else float("inf")
+        reasoning["hidden_gem"] = {
+            "triggered": True,
+            "probability_multiple": round(probability_multiple, 4),
+            "entry_price": entry_price,
+            "win_probability": win_probability,
+            "edge": edge,
+        }
+        if edge < HIDDEN_GEM_MIN_EDGE:
+            return TradeDecision(
+                action="SKIP",
+                approved=False,
+                reason_code="hidden_gem_edge_below_threshold",
+                reason=(
+                    f"Hidden gem edge {edge:.4f} below minimum {HIDDEN_GEM_MIN_EDGE:.4f} "
+                    f"for entry price {entry_price:.4f}"
+                ),
+                edge=edge,
+                confidence=confidence,
+                entry_price=entry_price,
+                win_probability=win_probability,
+                reasoning=reasoning,
+            )
+        if probability_multiple + 1e-9 < HIDDEN_GEM_MIN_PROBABILITY_MULTIPLE:
+            return TradeDecision(
+                action="SKIP",
+                approved=False,
+                reason_code="hidden_gem_probability_multiple_below_threshold",
+                reason=(
+                    f"Hidden gem probability multiple {probability_multiple:.4f} below minimum "
+                    f"{HIDDEN_GEM_MIN_PROBABILITY_MULTIPLE:.4f} for entry price {entry_price:.4f}"
+                ),
+                edge=edge,
+                confidence=confidence,
+                entry_price=entry_price,
+                win_probability=win_probability,
+                reasoning=reasoning,
+            )
+    else:
+        reasoning["hidden_gem"] = {"triggered": False}
 
     duplicate_reason = _event_blocker_reason(event_snapshot, retrade_policy)
     if duplicate_reason is not None:
