@@ -350,6 +350,95 @@ class SimulatorSessionTests(unittest.TestCase):
             self.assertEqual(trade.decision_trace["normalized"]["direction"], "BUY_NO")
             self.assertEqual(trade.decision_trace["normalized"]["entry_price"], 0.24)
 
+    def test_create_trade_records_parity_metadata_when_enabled(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = Simulator(
+                {
+                    "data_dir": tmpdir,
+                    "enable_social": False,
+                    "parity_mode": {
+                        "enabled": True,
+                        "record_revalidation_snapshot": True,
+                        "require_book_prices": False,
+                        "fallback_to_signal_prices": True,
+                    },
+                    "strategy": {
+                        "enable_news": False,
+                        "enable_social": False,
+                        "enable_ai": False,
+                    },
+                }
+            )
+            sim.available_cash = 25.0
+            sim.reserved_capital = 75.0
+            sim.risk.state.available_cash = 25.0
+            sim.risk.state.reserved_capital = 75.0
+
+            signal = {
+                "market_id": "test-parity-market",
+                "question": "Will test settle YES?",
+                "exchange": "kalshi",
+                "direction": "BUY_YES",
+                "market_price": 0.04,
+                "yes_price": 0.04,
+                "no_price": 0.96,
+                "best_yes_ask": 0.04,
+                "best_no_ask": 0.96,
+                "model_probability": 0.20,
+                "edge": 0.16,
+                "confidence": 0.9,
+                "signals": {},
+            }
+
+            with patch.object(sim.kelly, "calculate", return_value=5.0):
+                trade = sim._create_trade(signal)
+
+            self.assertIsNotNone(trade)
+            parity = trade.decision_trace.get("parity_mode", {})
+            self.assertTrue(parity.get("enabled"))
+            self.assertTrue(parity.get("execution_revalidated"))
+            self.assertEqual(parity.get("execution_snapshot_source"), "book")
+
+    def test_create_trade_parity_mode_can_reject_missing_book_when_required(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = Simulator(
+                {
+                    "data_dir": tmpdir,
+                    "enable_social": False,
+                    "parity_mode": {
+                        "enabled": True,
+                        "record_revalidation_snapshot": True,
+                        "require_book_prices": True,
+                        "fallback_to_signal_prices": False,
+                    },
+                    "strategy": {
+                        "enable_news": False,
+                        "enable_social": False,
+                        "enable_ai": False,
+                    },
+                }
+            )
+            sim.available_cash = 25.0
+            sim.reserved_capital = 75.0
+            sim.risk.state.available_cash = 25.0
+            sim.risk.state.reserved_capital = 75.0
+
+            signal = {
+                "market_id": "test-parity-no-book",
+                "question": "Will test settle YES?",
+                "exchange": "kalshi",
+                "direction": "BUY_YES",
+                "model_probability": 0.20,
+                "edge": 0.16,
+                "confidence": 0.9,
+                "signals": {},
+            }
+
+            with patch.object(sim.kelly, "calculate", return_value=5.0):
+                trade = sim._create_trade(signal)
+
+            self.assertIsNone(trade)
+
     def test_create_trade_allows_same_event_retrade_but_blocks_exact_duplicate_market(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             sim = Simulator(

@@ -23,6 +23,7 @@ from bot.shared_core import (
     TradeContext,
     TradeDecision,
     build_trade_decision,
+    build_execution_snapshot,
     normalize_trade_context,
     reason_to_key,
 )
@@ -135,6 +136,7 @@ class Simulator:
         self.enable_time_decay_ranking = config.get("enable_time_decay_ranking", True)
         self.single_trade_mode = bool(config.get("trading", {}).get("single_trade_mode", False))
         self.single_trade_completed = False
+        self.parity_mode = dict(config.get("parity_mode", {}) or {})
 
         self.data_dir = Path(config.get("data_dir", "data"))
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -618,6 +620,53 @@ class Simulator:
             max_entry_price=self.max_entry_price,
         )
 
+        original_decision = decision
+        original_context = context
+        original_signal_snapshot = dict(signal)
+        execution_snapshot = None
+        execution_decision = None
+        execution_revalidation_outcome = None
+
+        if self.parity_mode.get("enabled"):
+            execution_snapshot = build_execution_snapshot(
+                signal,
+                direction=str(signal.get("direction", "BUY_YES") or "BUY_YES").upper(),
+                bid_ask={
+                    "best_yes_ask": signal.get("best_yes_ask"),
+                    "best_no_ask": signal.get("best_no_ask"),
+                    "best_yes_bid": signal.get("best_yes_bid"),
+                    "best_no_bid": signal.get("best_no_bid"),
+                },
+                fallback_to_signal_prices=bool(self.parity_mode.get("fallback_to_signal_prices", True)),
+            )
+            if execution_snapshot.get("source") == "missing" and self.parity_mode.get("require_book_prices"):
+                if blockers is not None:
+                    blockers["parity_book_prices_required"] += 1
+                logger.info("  🛑 Parity revalidation skipped: book prices required but missing")
+                return None
+
+            parity_signal = dict(signal)
+            parity_signal.update({
+                "market_price": execution_snapshot.get("market_price"),
+                "yes_price": execution_snapshot.get("yes_price"),
+                "no_price": execution_snapshot.get("no_price"),
+                "best_yes_ask": execution_snapshot.get("best_yes_ask"),
+                "best_no_ask": execution_snapshot.get("best_no_ask"),
+                "best_yes_bid": execution_snapshot.get("best_yes_bid"),
+                "best_no_bid": execution_snapshot.get("best_no_bid"),
+            })
+            context = self.state_adapter.build_trade_context(parity_signal)
+            decision = build_trade_decision(
+                context,
+                kelly_sizer=self.kelly,
+                risk_policy=self.risk,
+                min_edge=self.min_edge,
+                min_confidence=self.min_confidence,
+                max_entry_price=self.max_entry_price,
+            )
+            execution_decision = decision
+            execution_revalidation_outcome = "approved" if decision.approved else ("fallback" if execution_snapshot.get("source") == "fallback" else "rejected")
+
         if not decision.approved:
             if blockers is not None:
                 blockers[decision.reason_code] += 1
@@ -627,6 +676,20 @@ class Simulator:
         if decision.warnings:
             for w in decision.warnings:
                 logger.debug(f"⚠️  {w}")
+
+        decision.reasoning = dict(decision.reasoning or {})
+        decision.reasoning["parity_mode"] = {
+            "enabled": bool(self.parity_mode.get("enabled")),
+            "execution_revalidated": bool(self.parity_mode.get("enabled")),
+            "execution_revalidation_outcome": execution_revalidation_outcome,
+            "execution_snapshot_source": (execution_snapshot or {}).get("source"),
+            "original_signal_snapshot": original_signal_snapshot if self.parity_mode.get("record_revalidation_snapshot", True) else None,
+            "execution_snapshot": execution_snapshot if self.parity_mode.get("record_revalidation_snapshot", True) else None,
+            "original_decision_reason_code": getattr(original_decision, "reason_code", None),
+            "execution_decision_reason_code": getattr(execution_decision, "reason_code", None),
+            "original_entry_price": getattr(original_decision, "entry_price", None),
+            "execution_entry_price": getattr(execution_decision, "entry_price", None),
+        }
 
         result = self.execute(decision, context)
         if not result.accepted:

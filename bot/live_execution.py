@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, Protocol
 
 from bot.exchanges.base import BaseExchange
-from bot.shared_core import TradeContext, TradeDecision
+from bot.shared_core import TradeContext, TradeDecision, build_execution_snapshot
 from bot.trade_audit import trade_event_key
 
 logger = logging.getLogger(__name__)
@@ -115,14 +115,16 @@ class RunnerLiveExecutionAdapter:
         candidate_family_key = self._market_family_key(candidate_market_id)
         same_family_entries = [entry for entry in event_entries if entry["family_key"] == candidate_family_key]
         event_entry_prices = [entry["entry_price"] for entry in same_market_entries if 0 < entry["entry_price"] < 1]
+        direction = str(signal.get("direction", "BUY_YES") or "BUY_YES").upper()
+        execution_snapshot = build_execution_snapshot(signal, direction=direction)
         return TradeContext(
             exchange=signal.get("exchange", "unknown"),
             market_id=candidate_market_id,
             question=signal.get("question", ""),
-            direction=signal.get("direction", "BUY_YES"),
-            market_price=signal.get("market_price"),
-            yes_price=signal.get("yes_price", signal.get("market_price")),
-            no_price=signal.get("no_price"),
+            direction=direction,
+            market_price=execution_snapshot.get("market_price"),
+            yes_price=execution_snapshot.get("yes_price"),
+            no_price=execution_snapshot.get("no_price"),
             model_probability=signal.get("model_probability"),
             edge=signal.get("edge"),
             confidence=signal.get("confidence"),
@@ -152,11 +154,12 @@ class RunnerLiveExecutionAdapter:
                     "best_same_market_entry_price": min(event_entry_prices) if event_entry_prices else None,
                     "best_same_family_entry_price": min((entry["entry_price"] for entry in same_family_entries if 0 < entry["entry_price"] < 1), default=None),
                     "liquidity": self.host._coerce_float(signal.get("liquidity"), default=0.0) or None,
-                    "best_yes_ask": self.host._coerce_float(signal.get("best_yes_ask", signal.get("yes_price")), default=0.0) or None,
-                    "best_no_ask": self.host._coerce_float(signal.get("best_no_ask", signal.get("no_price")), default=0.0) or None,
-                    "best_yes_bid": self.host._coerce_float(signal.get("best_yes_bid"), default=0.0) or None,
-                    "best_no_bid": self.host._coerce_float(signal.get("best_no_bid"), default=0.0) or None,
-                    "estimated_fill_price": self.host._coerce_float(signal.get("no_price" if candidate_direction == "BUY_NO" else "yes_price"), default=0.0) or None,
+                    "best_yes_ask": execution_snapshot.get("best_yes_ask"),
+                    "best_no_ask": execution_snapshot.get("best_no_ask"),
+                    "best_yes_bid": execution_snapshot.get("best_yes_bid"),
+                    "best_no_bid": execution_snapshot.get("best_no_bid"),
+                    "estimated_fill_price": execution_snapshot.get("estimated_fill_price"),
+                    "execution_snapshot_source": execution_snapshot.get("source"),
                 },
                 "retrade_policy": {
                     "max_event_exposure_pct": self.host.risk.max_event_exposure_pct,
@@ -188,34 +191,37 @@ class RunnerLiveExecutionAdapter:
         market_id = signal["market_id"]
         side = "YES" if decision.action == "BUY_YES" else "NO"
 
+        bid_ask = None
         try:
             market_bid_ask = exchange.get_market_bid_ask(market_id)
             if market_bid_ask and market_bid_ask.get("best_yes_ask", 0) > 0:
-                yes_ask = market_bid_ask.get("best_yes_ask", 0)
-                no_ask = market_bid_ask.get("best_no_ask", 0)
-                yes_bid = market_bid_ask.get("best_yes_bid", 0)
-                no_bid = market_bid_ask.get("best_no_bid", 0)
+                bid_ask = market_bid_ask
             else:
                 logger.warning(f"No market price data for {market_id} - skipping")
                 return None
         except Exception as e:
             logger.debug(f"Could not fetch market bid/ask for {market_id}: {e}")
-            yes_ask = signal.get("market_price", 0.50)
-            if yes_ask <= 0 or yes_ask >= 1:
-                logger.warning(f"No valid market price for {market_id} - skipping")
-                return None
-            no_ask = 1 - yes_ask
-            yes_bid = max(0.0, yes_ask - 0.01)
-            no_bid = max(0.0, no_ask - 0.01)
+
+        execution_snapshot = build_execution_snapshot(
+            signal,
+            direction=decision.action,
+            bid_ask=bid_ask,
+            fallback_to_signal_prices=True,
+        )
+        if execution_snapshot.get("market_price") is None:
+            logger.warning(f"No valid market price for {market_id} - skipping")
+            return None
 
         live_signal = dict(signal)
-        live_signal["yes_price"] = yes_ask
-        live_signal["no_price"] = no_ask
-        live_signal["best_yes_ask"] = yes_ask
-        live_signal["best_no_ask"] = no_ask
-        live_signal["best_yes_bid"] = yes_bid
-        live_signal["best_no_bid"] = no_bid
-        live_signal["market_price"] = yes_ask if decision.action == "BUY_YES" else no_ask
+        live_signal.update({
+            "yes_price": execution_snapshot.get("yes_price"),
+            "no_price": execution_snapshot.get("no_price"),
+            "best_yes_ask": execution_snapshot.get("best_yes_ask"),
+            "best_no_ask": execution_snapshot.get("best_no_ask"),
+            "best_yes_bid": execution_snapshot.get("best_yes_bid"),
+            "best_no_bid": execution_snapshot.get("best_no_bid"),
+            "market_price": execution_snapshot.get("market_price"),
+        })
 
         strategy_cfg = self.host.config.get("strategy", {}) or {}
         live_context = self.build_trade_context(live_signal, exchange, self.host.config)

@@ -50,16 +50,21 @@ But it is **not always desirable** to simulate this during strategy iteration, b
    - no duplicating approval logic
    - parity mode should only change the price/context source used for the final paper approval pass
 
-3. **Auditability first**
+3. **Promote shared decision-prep logic upward**
+   - if pricing normalization, execution snapshot construction, or decision-prep behavior is needed by both paper and live, it must be extracted into a shared helper before parity mode depends on it
+   - do not let paper and live hand-roll separate interpretations of the same execution-time inputs
+   - environment-specific behavior should stay in adapters, but shared decision inputs must be normalized consistently across modes
+
+4. **Auditability first**
    - when parity mode is enabled, paper must record both:
      - the original strategy snapshot
      - the revalidated execution snapshot
    - this is necessary so we can tell whether a rejection came from model logic or execution-time drift
 
-4. **Paper remains a logic lab**
+5. **Paper remains a logic lab**
    - parity mode augments paper, it does not replace the simpler mode
 
-5. **Reviewer-friendly structure**
+6. **Reviewer-friendly structure**
    - new behavior should be isolated and testable
    - avoid scattering live-specific assumptions across the simulator
 
@@ -175,6 +180,8 @@ Before paper simulates execution, optionally perform a live-style revalidation p
 ### Important detail
 This should not copy logic from live execution. The goal is to **reuse the same shared decision function**, while building a paper-side execution snapshot that mirrors live input semantics.
 
+Before paper parity mode uses live-style revalidation, any execution snapshot or pricing normalization logic shared by both environments must first be extracted into a shared helper and adopted by live as the canonical path.
+
 ### Acceptance criteria
 - parity mode off → current paper behavior unchanged
 - parity mode on → paper can reject a trade that only passed at stale snapshot price
@@ -216,6 +223,7 @@ If paper and live each hand-roll this differently, parity mode will drift.
 
 ### Acceptance criteria
 - both paper and live can rely on the same normalization helper
+- live is refactored to use this helper before paper parity mode is added
 - price-field semantics match across modes
 
 ---
@@ -359,13 +367,15 @@ These are the likely reviewer questions:
 
 ## Recommended Implementation Order
 
-1. Add config support in `bot/config.py`
-2. Add a small shared execution-snapshot helper
+0. Lock in the architectural rule: if a decision-prep behavior is needed by both paper and live, move it into shared code before parity mode depends on it
+1. Add the small shared execution-snapshot helper
+2. Refactor live to use the shared helper as the canonical execution-price normalization path
 3. Define execution-price semantics explicitly in code/comments/tests
-4. Wire optional revalidation into paper execution path
-5. Add audit fields
-6. Add tests
-7. Update docs/status output
+4. Add config support in `bot/config.py`
+5. Wire optional revalidation into paper execution path using the shared helper
+6. Add audit fields
+7. Add tests
+8. Update docs/status output
 
 ---
 
@@ -375,10 +385,11 @@ This spec is done when:
 
 1. Paper supports a config-driven optional live-parity revalidation pass
 2. Default paper behavior remains unchanged
-3. Parity-enabled paper uses execution-time price inputs before final approval
-4. Audit logs clearly show original vs revalidated decision state
-5. Matching inputs produce matching paper/live approval outcomes
-6. Tests cover enabled, disabled, fallback, and drift scenarios
+3. Live and paper both derive shared execution-time pricing inputs from the same canonical helper
+4. Parity-enabled paper uses execution-time price inputs before final approval
+5. Audit logs clearly show original vs revalidated decision state
+6. Matching inputs produce matching paper/live approval outcomes
+7. Tests cover enabled, disabled, fallback, and drift scenarios
 
 ---
 

@@ -18,6 +18,7 @@ from bot.shared_core import (
     ResolutionEvent,
     TradeContext,
     TradeDecision,
+    build_execution_snapshot,
 )
 from bot.trade_audit import calculate_contracts, enrich_trade_audit_fields, is_trade_effective_row, trade_event_key
 
@@ -302,6 +303,32 @@ class SimulatorPaperStateAdapter:
         same_family_rows = [row for row in event_rows if row["family_key"] == candidate_family_key]
         event_entry_prices = [row["entry_price"] for row in same_market_rows if row["entry_price"] is not None]
         best_yes_ask, best_no_ask, best_yes_bid, best_no_bid = self._resolve_book_prices(signal, market_price, yes_price, no_price)
+        execution_snapshot = build_execution_snapshot(
+            {
+                **dict(signal),
+                "market_price": market_price,
+                "yes_price": yes_price,
+                "no_price": no_price,
+                "best_yes_ask": best_yes_ask,
+                "best_no_ask": best_no_ask,
+                "best_yes_bid": best_yes_bid,
+                "best_no_bid": best_no_bid,
+            },
+            direction=direction,
+            bid_ask={
+                "best_yes_ask": best_yes_ask,
+                "best_no_ask": best_no_ask,
+                "best_yes_bid": best_yes_bid,
+                "best_no_bid": best_no_bid,
+            },
+        )
+        market_price = execution_snapshot.get("market_price")
+        yes_price = execution_snapshot.get("yes_price")
+        no_price = execution_snapshot.get("no_price")
+        best_yes_ask = execution_snapshot.get("best_yes_ask")
+        best_no_ask = execution_snapshot.get("best_no_ask")
+        best_yes_bid = execution_snapshot.get("best_yes_bid")
+        best_no_bid = execution_snapshot.get("best_no_bid")
         liquidity = self._resolve_signal_liquidity(signal)
         return TradeContext(
             exchange=str(signal.get("exchange", "unknown") or "unknown"),
@@ -344,8 +371,9 @@ class SimulatorPaperStateAdapter:
                     "best_no_ask": best_no_ask,
                     "best_yes_bid": best_yes_bid,
                     "best_no_bid": best_no_bid,
-                    "estimated_fill_price": best_no_ask if candidate_direction == "BUY_NO" else best_yes_ask,
+                    "estimated_fill_price": execution_snapshot.get("estimated_fill_price"),
                     "estimated_slippage": self._estimate_signal_slippage(signal, 0.0),
+                    "execution_snapshot_source": execution_snapshot.get("source"),
                 },
                 "retrade_policy": self._retrade_policy_metadata(),
             },
@@ -604,6 +632,14 @@ class SimulatorPaperExecutionAdapter:
                 "confidence": source_signal.get("confidence", 0),
                 "signals": source_signal.get("signals", {}),
                 "decision_trace": decision.reasoning,
+                "parity_mode_enabled": bool((decision.reasoning or {}).get("parity_mode", {}).get("enabled", False)),
+                "execution_revalidated": bool((decision.reasoning or {}).get("parity_mode", {}).get("execution_revalidated", False)),
+                "execution_revalidation_outcome": (decision.reasoning or {}).get("parity_mode", {}).get("execution_revalidation_outcome"),
+                "original_signal_snapshot": (decision.reasoning or {}).get("parity_mode", {}).get("original_signal_snapshot"),
+                "execution_snapshot": (decision.reasoning or {}).get("parity_mode", {}).get("execution_snapshot"),
+                "original_decision_reason_code": (decision.reasoning or {}).get("parity_mode", {}).get("original_decision_reason_code"),
+                "execution_decision_reason_code": (decision.reasoning or {}).get("parity_mode", {}).get("execution_decision_reason_code"),
+                "execution_snapshot_source": (decision.reasoning or {}).get("parity_mode", {}).get("execution_snapshot_source"),
                 "category": category,
                 "contracts": contracts,
                 "reserved_capital": reserved_delta,
