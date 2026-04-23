@@ -8,6 +8,18 @@ from bot.risk import RiskManager
 from bot.simulator import Simulator
 
 
+class FakeStandbyExchange:
+    def __init__(self):
+        self.calls = 0
+
+    def get_market(self, market_id: str):
+        return None
+
+    def get_markets(self, limit=100):
+        self.calls += 1
+        return []
+
+
 class RiskManagerTests(unittest.TestCase):
     def test_max_exposure_caps_size_instead_of_full_reject(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -96,6 +108,43 @@ class RiskManagerTests(unittest.TestCase):
             self.assertTrue(decision.approved)
             self.assertEqual(decision.adjusted_size, 4.0)
             self.assertTrue(any("Hard position cap clipped size" in warning for warning in decision.warnings))
+
+    def test_capital_blockers_enter_standby_after_threshold(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            risk = RiskManager({"data_dir": tmpdir, "starting_balance": 100.0})
+            risk.state.open_positions = risk.max_open_positions
+            risk.state.total_exposure = 40.0
+            risk.state.available_cash = 2.0
+
+            for _ in range(2):
+                risk.record_blocked_scan({"risk_max_positions_15_15": 3}, trades_taken=0)
+                self.assertFalse(risk.state.standby_active)
+
+            risk.record_blocked_scan({"risk_max_positions_15_15": 2}, trades_taken=0)
+
+            self.assertTrue(risk.state.standby_active)
+            self.assertEqual(risk.state.standby_reason_codes, ["max_positions"])
+            self.assertEqual(risk.state.standby_blocked_scan_count, 3)
+            self.assertEqual(risk.state.standby_unresolved_positions_at_entry, risk.max_open_positions)
+            self.assertEqual(risk.state.standby_exposure_at_entry, 40.0)
+
+    def test_standby_resumes_when_positions_resolve_and_useful_capacity_returns(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            risk = RiskManager({"data_dir": tmpdir, "starting_balance": 100.0})
+            risk.state.standby_active = True
+            risk.state.standby_reason_codes = ["max_positions"]
+            risk.state.standby_unresolved_positions_at_entry = 5
+            risk.state.standby_exposure_at_entry = 30.0
+            risk.state.open_positions = 3
+            risk.state.total_exposure = 18.0
+            risk.state.available_cash = 20.0
+            risk.state.current_balance = 100.0
+
+            result = risk.evaluate_standby_resume()
+
+            self.assertTrue(result["resumed"])
+            self.assertFalse(risk.state.standby_active)
+            self.assertIn("positions_resolved=2", risk.state.standby_last_resume_reason)
 
 
 class SimulatorSessionTests(unittest.TestCase):
@@ -411,6 +460,33 @@ class SimulatorSessionTests(unittest.TestCase):
             self.assertEqual(sim.reserved_capital, 5.0)
             self.assertEqual(sim.risk.state.available_cash, 100.0)
             self.assertEqual(sim.risk.state.reserved_capital, 5.0)
+
+    def test_simulator_skips_market_fetch_while_standby_active(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = Simulator(
+                {
+                    "data_dir": tmpdir,
+                    "enable_social": False,
+                    "strategy": {
+                        "enable_news": False,
+                        "enable_social": False,
+                        "enable_ai": False,
+                    },
+                }
+            )
+            sim.risk.state.standby_active = True
+            sim.risk.state.standby_reason_codes = ["max_positions"]
+            sim.risk.state.standby_unresolved_positions_at_entry = 5
+            sim.risk.state.open_positions = 5
+            sim.risk.state.total_exposure = 30.0
+            sim.risk.state.available_cash = 1.0
+            exchange = FakeStandbyExchange()
+
+            result = sim.scan(exchange)
+
+            self.assertEqual(exchange.calls, 0)
+            self.assertTrue(result["standby"]["active"])
+            self.assertEqual(result["standby"]["reason_codes"], ["max_positions"])
 
 
 if __name__ == "__main__":

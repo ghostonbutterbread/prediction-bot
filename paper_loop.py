@@ -210,6 +210,16 @@ def _build_status_snapshot(simulator, scan_num: int):
             open_count += 1
 
     win_rate = (wins / resolved_count) if resolved_count else 0.0
+    extra = {}
+    if risk_status.get("standby_active"):
+        extra["standby_active"] = True
+        extra["standby_reason_codes"] = ",".join(risk_status.get("standby_reason_codes", []))
+        extra["standby_blocked_scan_count"] = risk_status.get("standby_blocked_scan_count")
+        extra["standby_entered_at"] = risk_status.get("standby_entered_at")
+        extra["standby_useful_trade_capacity"] = risk_status.get("standby_useful_trade_capacity")
+    elif risk_status.get("standby_last_resume_at"):
+        extra["standby_last_resume_at"] = risk_status.get("standby_last_resume_at")
+        extra["standby_last_resume_reason"] = risk_status.get("standby_last_resume_reason")
     return build_snapshot(
         mode=risk_status.get("mode"),
         trading_enabled=bool(risk_status.get("trading_enabled")),
@@ -227,6 +237,7 @@ def _build_status_snapshot(simulator, scan_num: int):
         resolved_trades=resolved_count,
         scan_num=scan_num,
         session_id=getattr(simulator, "session_id", ""),
+        extra=extra,
     )
 
 
@@ -235,7 +246,7 @@ def _log_summary(simulator, scan_num: int, reason: str):
     snapshot = _build_status_snapshot(simulator, scan_num=scan_num)
     risk_status = simulator.risk.get_status()
     logger.info(
-        "SUMMARY [%s] scan=%s mode=%s enabled=%s tradable_cap=%s max_pos=%s balance=$%.2f avail=%s reserved=%s exposure=%s pnl=%+.2f (%+.1f%%) win_rate=%.0f%% trades=%s (%s open / %s resolved)",
+        "SUMMARY [%s] scan=%s mode=%s enabled=%s tradable_cap=%s max_pos=%s balance=$%.2f avail=%s reserved=%s exposure=%s pnl=%+.2f (%+.1f%%) win_rate=%.0f%% trades=%s (%s open / %s resolved) standby=%s standby_reasons=%s useful_capacity=%s",
         reason,
         scan_num,
         risk_status.get("mode"),
@@ -252,6 +263,9 @@ def _log_summary(simulator, scan_num: int, reason: str):
         snapshot.total_trades,
         snapshot.open_trades,
         snapshot.resolved_trades,
+        risk_status.get("standby_active"),
+        ",".join(risk_status.get("standby_reason_codes", [])),
+        risk_status.get("standby_useful_trade_capacity"),
     )
 
     if simulator.config.get("alerts", {}).get("enabled") and simulator.config.get("alerts", {}).get("send_hourly_status"):

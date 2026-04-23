@@ -22,7 +22,11 @@ class StatusModuleTests(unittest.TestCase):
             resolved_trades=2,
             scan_num=42,
             session_id="sess-123",
-            extra={"source": "paper"},
+            extra={
+                "source": "paper",
+                "standby_active": True,
+                "standby_reason_codes": "max_positions",
+            },
         )
 
         msg = format_status_message(snapshot, reason="hourly cadence")
@@ -36,6 +40,8 @@ class StatusModuleTests(unittest.TestCase):
         self.assertIn("trades=3 (1 open / 2 resolved)", msg)
         self.assertIn("session=sess-123", msg)
         self.assertIn("source=paper", msg)
+        self.assertIn("standby_active=True", msg)
+        self.assertIn("standby_reason_codes=max_positions", msg)
 
 
 if __name__ == "__main__":
