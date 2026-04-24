@@ -27,7 +27,6 @@ def build_execution_snapshot(
     """
 
     direction = str(direction or signal.get("direction", "BUY_YES") or "BUY_YES").upper()
-    source = "book" if bid_ask else "missing"
 
     raw_market_price = _coerce_float(signal.get("market_price"))
     signal_yes = _coerce_float(signal.get("yes_price"))
@@ -39,6 +38,8 @@ def build_execution_snapshot(
     best_no_ask = _coerce_float((bid_ask or {}).get("best_no_ask"))
     best_yes_bid = _coerce_float((bid_ask or {}).get("best_yes_bid"))
     best_no_bid = _coerce_float((bid_ask or {}).get("best_no_bid"))
+    has_book_prices = any(value is not None for value in (best_yes_ask, best_no_ask, best_yes_bid, best_no_bid))
+    source = "book" if has_book_prices else "missing"
 
     if best_yes_ask is None and fallback_to_signal_prices:
         if signal_yes is not None:

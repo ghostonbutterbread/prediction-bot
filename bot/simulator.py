@@ -645,17 +645,7 @@ class Simulator:
                 logger.info("  🛑 Parity revalidation skipped: book prices required but missing")
                 return None
 
-            parity_signal = dict(signal)
-            parity_signal.update({
-                "market_price": execution_snapshot.get("market_price"),
-                "yes_price": execution_snapshot.get("yes_price"),
-                "no_price": execution_snapshot.get("no_price"),
-                "best_yes_ask": execution_snapshot.get("best_yes_ask"),
-                "best_no_ask": execution_snapshot.get("best_no_ask"),
-                "best_yes_bid": execution_snapshot.get("best_yes_bid"),
-                "best_no_bid": execution_snapshot.get("best_no_bid"),
-            })
-            context = self.state_adapter.build_trade_context(parity_signal)
+            context = self.state_adapter.build_trade_context_from_snapshot(signal, execution_snapshot=execution_snapshot)
             decision = build_trade_decision(
                 context,
                 kelly_sizer=self.kelly,
@@ -665,17 +655,7 @@ class Simulator:
                 max_entry_price=self.max_entry_price,
             )
             execution_decision = decision
-            execution_revalidation_outcome = "approved" if decision.approved else ("fallback" if execution_snapshot.get("source") == "fallback" else "rejected")
-
-        if not decision.approved:
-            if blockers is not None:
-                blockers[decision.reason_code] += 1
-            logger.info(f"  🛑 Shared decision skipped: {decision.reason}")
-            return None
-
-        if decision.warnings:
-            for w in decision.warnings:
-                logger.debug(f"⚠️  {w}")
+            execution_revalidation_outcome = "approved" if decision.approved else "rejected"
 
         decision.reasoning = dict(decision.reasoning or {})
         decision.reasoning["parity_mode"] = {
@@ -690,6 +670,18 @@ class Simulator:
             "original_entry_price": getattr(original_decision, "entry_price", None),
             "execution_entry_price": getattr(execution_decision, "entry_price", None),
         }
+
+        if not decision.approved:
+            if blockers is not None:
+                blockers[decision.reason_code] += 1
+            logger.info(f"  🛑 Shared decision skipped: {decision.reason}")
+            if self.parity_mode.get("enabled"):
+                return self._trade_from_execution_rejection(decision, context)
+            return None
+
+        if decision.warnings:
+            for w in decision.warnings:
+                logger.debug(f"⚠️  {w}")
 
         result = self.execute(decision, context)
         if not result.accepted:
@@ -726,6 +718,31 @@ class Simulator:
             available_cash_after_entry=self._coerce_float_or_none(metadata.get("available_cash_after_entry")),
             contracts=self._coerce_float_or_none(metadata.get("contracts")),
             event_key=metadata.get("event_key", ""),
+        )
+
+    def _trade_from_execution_rejection(self, decision: TradeDecision, context: TradeContext) -> SimTrade:
+        return SimTrade(
+            id=f"rejected_{self.session_id}_{len(self.trades) + 1:04d}",
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            exchange=context.exchange,
+            market_id=context.market_id,
+            question=context.question,
+            direction=decision.action,
+            model_probability=round(float(decision.win_probability or 0.0), 4),
+            market_price=round(float(decision.entry_price or context.market_price or 0.0), 4),
+            edge=decision.edge or 0,
+            confidence=decision.confidence or 0,
+            position_size=0.0,
+            signals=dict(context.source_context.get("signals", {}) or {}),
+            decision_trace=dict(decision.reasoning or {}),
+            category=context.metadata.get("category", ""),
+            reserved_capital=0.0,
+            available_cash_before=round(context.account_state.available_cash, 2),
+            available_cash_after_entry=round(context.account_state.available_cash, 2),
+            contracts=0.0,
+            event_key=context.metadata.get("event_key", ""),
+            integrity_status="execution_rejected",
+            integrity_errors=[decision.reason_code],
         )
 
     def _effective_trades(self) -> list[SimTrade]:

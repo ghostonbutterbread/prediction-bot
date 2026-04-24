@@ -16,7 +16,7 @@ class FakeExchange:
         return 25.0
 
     def get_market_bid_ask(self, market_id):
-        return {"best_yes_ask": 0.40, "best_no_ask": 0.60}
+        return {"best_yes_ask": 0.40, "best_no_ask": 0.60, "best_yes_bid": 0.39, "best_no_bid": 0.59}
 
     def place_order(self, market_id, side, price, size):
         order = SimpleNamespace(id=f"ord-{len(self.orders)+1}")
@@ -172,13 +172,42 @@ class LiveExecutionTests(unittest.TestCase):
             self.assertIn("refresh", result)
             self.assertEqual(result["refresh"]["balance"], 25.0)
 
+    def test_live_context_and_execution_snapshot_match_under_identical_prices(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = self._make_bot(tmpdir)
+            adapter = RunnerLiveExecutionAdapter(bot)
+            exchange = FakeExchange()
+            signal = {
+                "exchange": "kalshi",
+                "market_id": "m-parity",
+                "question": "Will parity hold?",
+                "direction": "BUY_YES",
+                "market_price": 0.40,
+                "yes_price": 0.40,
+                "no_price": 0.60,
+                "model_probability": 0.70,
+                "edge": 0.30,
+                "confidence": 0.90,
+            }
+
+            snapshot = build_execution_snapshot(
+                signal,
+                direction="BUY_YES",
+                bid_ask=exchange.get_market_bid_ask("m-parity"),
+            )
+            context = adapter.build_trade_context({**signal, **snapshot}, exchange, bot.config)
+
+            self.assertEqual(context.market_price, snapshot["market_price"])
+            self.assertEqual(context.yes_price, snapshot["yes_price"])
+            self.assertEqual(context.metadata["event_snapshot"]["execution_snapshot_source"], "fallback")
+
     def test_execute_revalidates_against_live_ask_before_order(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             bot = self._make_bot(tmpdir)
             bot.config["max_entry_price"] = 0.70
             adapter = RunnerLiveExecutionAdapter(bot)
             exchange = FakeExchange()
-            exchange.get_market_bid_ask = lambda market_id: {"best_yes_ask": 0.75, "best_no_ask": 0.25}
+            exchange.get_market_bid_ask = lambda market_id: {"best_yes_ask": 0.75, "best_no_ask": 0.25, "best_yes_bid": 0.74, "best_no_bid": 0.24}
             signal = {
                 "exchange": "kalshi",
                 "market_id": "m1",

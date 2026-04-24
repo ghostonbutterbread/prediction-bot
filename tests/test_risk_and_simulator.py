@@ -1,10 +1,14 @@
 import json
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 from pathlib import Path
 
 from bot.risk import RiskManager
+from bot.runner import PredictionBot
+from bot.live_execution import RunnerLiveExecutionAdapter
+from bot.shared_core import build_execution_snapshot, build_trade_decision
 from bot.simulator import Simulator
 
 
@@ -179,6 +183,25 @@ class RiskManagerTests(unittest.TestCase):
             self.assertFalse(result["asserted"])
             self.assertTrue(result["standby_active"])
             self.assertEqual(risk.state.standby_reason_codes, ["max_positions"])
+
+
+class StaticBookExchange:
+    def __init__(self, yes_ask=0.41, no_ask=0.59, yes_bid=0.40, no_bid=0.58):
+        self.snapshot = {
+            "best_yes_ask": yes_ask,
+            "best_no_ask": no_ask,
+            "best_yes_bid": yes_bid,
+            "best_no_bid": no_bid,
+        }
+
+    def get_balance(self):
+        return 25.0
+
+    def get_market_bid_ask(self, market_id):
+        return dict(self.snapshot)
+
+    def place_order(self, market_id, side, price, size):
+        return SimpleNamespace(id="dry-run")
 
 
 class SimulatorSessionTests(unittest.TestCase):
@@ -398,6 +421,206 @@ class SimulatorSessionTests(unittest.TestCase):
             self.assertTrue(parity.get("enabled"))
             self.assertTrue(parity.get("execution_revalidated"))
             self.assertEqual(parity.get("execution_snapshot_source"), "book")
+            self.assertEqual(parity.get("execution_revalidation_outcome"), "approved")
+
+    def test_create_trade_parity_mode_rejects_drift_and_persists_audit_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = Simulator(
+                {
+                    "data_dir": tmpdir,
+                    "enable_social": False,
+                    "parity_mode": {
+                        "enabled": True,
+                        "record_revalidation_snapshot": True,
+                        "require_book_prices": False,
+                        "fallback_to_signal_prices": True,
+                    },
+                    "strategy": {
+                        "enable_news": False,
+                        "enable_social": False,
+                        "enable_ai": False,
+                    },
+                    "max_entry_price": 0.70,
+                }
+            )
+            sim.available_cash = 25.0
+            sim.reserved_capital = 75.0
+            sim.risk.state.available_cash = 25.0
+            sim.risk.state.reserved_capital = 75.0
+
+            signal = {
+                "market_id": "test-parity-drift",
+                "question": "Will test drift reject?",
+                "exchange": "kalshi",
+                "direction": "BUY_YES",
+                "market_price": 0.40,
+                "yes_price": 0.40,
+                "no_price": 0.60,
+                "best_yes_ask": 0.75,
+                "best_no_ask": 0.25,
+                "model_probability": 0.90,
+                "edge": 0.30,
+                "confidence": 0.9,
+                "signals": {},
+            }
+
+            with patch.object(sim.kelly, "calculate", return_value=5.0):
+                trade = sim._create_trade(signal)
+
+            self.assertIsNotNone(trade)
+            self.assertEqual(trade.integrity_status, "execution_rejected")
+            parity = trade.decision_trace.get("parity_mode", {})
+            self.assertTrue(parity.get("enabled"))
+            self.assertEqual(parity.get("execution_revalidation_outcome"), "rejected")
+            self.assertEqual(parity.get("execution_snapshot_source"), "book")
+            self.assertEqual(parity.get("original_decision_reason_code"), "approved")
+            self.assertEqual(parity.get("execution_decision_reason_code"), "entry_price_above_cap")
+
+    def test_create_trade_parity_off_preserves_logic_only_flow(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = Simulator(
+                {
+                    "data_dir": tmpdir,
+                    "enable_social": False,
+                    "parity_mode": {
+                        "enabled": False,
+                        "record_revalidation_snapshot": True,
+                        "require_book_prices": False,
+                        "fallback_to_signal_prices": True,
+                    },
+                    "strategy": {
+                        "enable_news": False,
+                        "enable_social": False,
+                        "enable_ai": False,
+                    },
+                    "max_entry_price": 0.70,
+                }
+            )
+            sim.available_cash = 25.0
+            sim.reserved_capital = 75.0
+            sim.risk.state.available_cash = 25.0
+            sim.risk.state.reserved_capital = 75.0
+
+            signal = {
+                "market_id": "test-parity-off",
+                "question": "Will parity off preserve old flow?",
+                "exchange": "kalshi",
+                "direction": "BUY_YES",
+                "market_price": 0.40,
+                "yes_price": 0.40,
+                "no_price": 0.60,
+                "best_yes_ask": 0.75,
+                "best_no_ask": 0.25,
+                "model_probability": 0.90,
+                "edge": 0.30,
+                "confidence": 0.9,
+                "signals": {},
+            }
+
+            with patch.object(sim.kelly, "calculate", return_value=5.0):
+                trade = sim._create_trade(signal)
+
+            self.assertIsNotNone(trade)
+            self.assertEqual(trade.integrity_status, "ok")
+            parity = trade.decision_trace.get("parity_mode", {})
+            self.assertFalse(parity.get("enabled"))
+            self.assertIsNone(parity.get("execution_revalidation_outcome"))
+
+    def test_golden_parity_same_execution_snapshot_matches_live_reason_code(self):
+        signal = {
+            "exchange": "kalshi",
+            "market_id": "m-golden",
+            "question": "Will parity match?",
+            "direction": "BUY_YES",
+            "market_price": 0.40,
+            "yes_price": 0.40,
+            "no_price": 0.60,
+            "model_probability": 0.70,
+            "edge": 0.30,
+            "confidence": 0.90,
+            "signals": {},
+        }
+        exchange = StaticBookExchange()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = Simulator(
+                {
+                    "data_dir": tmpdir,
+                    "enable_social": False,
+                    "parity_mode": {
+                        "enabled": True,
+                        "record_revalidation_snapshot": True,
+                        "require_book_prices": False,
+                        "fallback_to_signal_prices": True,
+                    },
+                    "strategy": {
+                        "enable_news": False,
+                        "enable_social": False,
+                        "enable_ai": False,
+                    },
+                    "max_position_size_usd": 4.0,
+                    "max_tradable_balance_usd": 10.0,
+                }
+            )
+            sim.available_cash = 25.0
+            sim.reserved_capital = 0.0
+            sim.risk.state.available_cash = 25.0
+            sim.risk.state.reserved_capital = 0.0
+
+            execution_snapshot = build_execution_snapshot(
+                signal,
+                direction="BUY_YES",
+                bid_ask=exchange.get_market_bid_ask("m-golden"),
+            )
+            paper_context = sim.state_adapter.build_trade_context_from_snapshot(signal, execution_snapshot=execution_snapshot)
+            paper_decision = build_trade_decision(
+                paper_context,
+                kelly_sizer=sim.kelly,
+                risk_policy=sim.risk,
+                min_edge=sim.min_edge,
+                min_confidence=sim.min_confidence,
+                max_entry_price=sim.max_entry_price,
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = PredictionBot(
+                {
+                    "log_dir": tmpdir,
+                    "data_dir": tmpdir,
+                    "trading": {"mode": "live", "enabled": True},
+                    "strategy": {
+                        "min_edge": 0.01,
+                        "min_confidence": 0.5,
+                        "enable_news": False,
+                        "enable_social": False,
+                        "enable_ai": False,
+                    },
+                    "max_position_size_usd": 4.0,
+                    "max_tradable_balance_usd": 10.0,
+                }
+            )
+            bot.risk.state.current_balance = 25.0
+            bot.risk.state.available_cash = 25.0
+            bot.risk.state.peak_balance = 25.0
+            bot.risk.state.session_starting_balance = 25.0
+            bot.risk.state.session_peak_balance = 25.0
+            bot.risk.state.max_drawdown_halt = False
+            adapter = RunnerLiveExecutionAdapter(bot)
+            live_signal = dict(signal)
+            live_signal.update(execution_snapshot)
+            live_context = adapter.build_trade_context(live_signal, exchange, bot.config)
+            live_decision = build_trade_decision(
+                live_context,
+                kelly_sizer=bot.kelly,
+                risk_policy=bot.risk,
+                min_edge=0.01,
+                min_confidence=0.5,
+                max_entry_price=bot.config.get("max_entry_price", 0.70),
+            )
+
+        self.assertEqual(paper_decision.approved, live_decision.approved)
+        self.assertEqual(paper_decision.reason_code, live_decision.reason_code)
+        self.assertEqual(paper_decision.entry_price, live_decision.entry_price)
 
     def test_create_trade_parity_mode_can_reject_missing_book_when_required(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -438,6 +661,7 @@ class SimulatorSessionTests(unittest.TestCase):
                 trade = sim._create_trade(signal)
 
             self.assertIsNone(trade)
+            self.assertNotIn("parity_book_prices_required", [getattr(t, "integrity_status", None) for t in sim.trades])
 
     def test_create_trade_allows_same_event_retrade_but_blocks_exact_duplicate_market(self):
         with tempfile.TemporaryDirectory() as tmpdir:
