@@ -286,6 +286,14 @@ class SimulatorPaperStateAdapter:
         )
 
     def build_trade_context(self, signal: dict[str, Any]) -> TradeContext:
+        return self.build_trade_context_from_snapshot(signal, execution_snapshot=None)
+
+    def build_trade_context_from_snapshot(
+        self,
+        signal: dict[str, Any],
+        *,
+        execution_snapshot: dict[str, Any] | None,
+    ) -> TradeContext:
         direction = str(signal.get("direction", "BUY_YES") or "BUY_YES").upper()
         market_price, yes_price, no_price = self._resolve_signal_prices(signal, direction)
         account_state = self.get_account_state()
@@ -303,9 +311,11 @@ class SimulatorPaperStateAdapter:
         same_family_rows = [row for row in event_rows if row["family_key"] == candidate_family_key]
         event_entry_prices = [row["entry_price"] for row in same_market_rows if row["entry_price"] is not None]
         best_yes_ask, best_no_ask, best_yes_bid, best_no_bid = self._resolve_book_prices(signal, market_price, yes_price, no_price)
-        execution_snapshot = build_execution_snapshot(
-            {
-                **dict(signal),
+        snapshot = execution_snapshot
+        if snapshot is None:
+            snapshot = {
+                "source": "signal",
+                "direction": direction,
                 "market_price": market_price,
                 "yes_price": yes_price,
                 "no_price": no_price,
@@ -313,22 +323,15 @@ class SimulatorPaperStateAdapter:
                 "best_no_ask": best_no_ask,
                 "best_yes_bid": best_yes_bid,
                 "best_no_bid": best_no_bid,
-            },
-            direction=direction,
-            bid_ask={
-                "best_yes_ask": best_yes_ask,
-                "best_no_ask": best_no_ask,
-                "best_yes_bid": best_yes_bid,
-                "best_no_bid": best_no_bid,
-            },
-        )
-        market_price = execution_snapshot.get("market_price")
-        yes_price = execution_snapshot.get("yes_price")
-        no_price = execution_snapshot.get("no_price")
-        best_yes_ask = execution_snapshot.get("best_yes_ask")
-        best_no_ask = execution_snapshot.get("best_no_ask")
-        best_yes_bid = execution_snapshot.get("best_yes_bid")
-        best_no_bid = execution_snapshot.get("best_no_bid")
+                "estimated_fill_price": market_price,
+            }
+        market_price = snapshot.get("market_price")
+        yes_price = snapshot.get("yes_price")
+        no_price = snapshot.get("no_price")
+        best_yes_ask = snapshot.get("best_yes_ask")
+        best_no_ask = snapshot.get("best_no_ask")
+        best_yes_bid = snapshot.get("best_yes_bid")
+        best_no_bid = snapshot.get("best_no_bid")
         liquidity = self._resolve_signal_liquidity(signal)
         return TradeContext(
             exchange=str(signal.get("exchange", "unknown") or "unknown"),
@@ -371,9 +374,9 @@ class SimulatorPaperStateAdapter:
                     "best_no_ask": best_no_ask,
                     "best_yes_bid": best_yes_bid,
                     "best_no_bid": best_no_bid,
-                    "estimated_fill_price": execution_snapshot.get("estimated_fill_price"),
+                    "estimated_fill_price": snapshot.get("estimated_fill_price"),
                     "estimated_slippage": self._estimate_signal_slippage(signal, 0.0),
-                    "execution_snapshot_source": execution_snapshot.get("source"),
+                    "execution_snapshot_source": snapshot.get("source"),
                 },
                 "retrade_policy": self._retrade_policy_metadata(),
             },

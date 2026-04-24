@@ -26,11 +26,11 @@ This is the strongest part of parity right now. Paper tuning is meaningful becau
 
 ## 2. Signal Input Parity
 
-- [~] Paper evaluates signals from strategy snapshot
-- [~] Live revalidates using current bid/ask before execution
-- [ ] Extract a shared execution snapshot / pricing normalization helper and move live onto it first
-- [ ] Paper should simulate the same bid/ask revalidation pass as live before final approval
-- [ ] Paper should store both original signal snapshot and revalidated execution snapshot for apples-to-apples comparison
+- [~] Paper evaluates signals from strategy snapshot in default mode
+- [x] Live revalidates using current bid/ask before execution
+- [x] Shared execution snapshot / pricing normalization helper exists and live uses it
+- [x] Paper parity mode can simulate the same bid/ask revalidation pass as live before final approval
+- [x] Paper parity mode stores both original signal snapshot and revalidated execution snapshot for apples-to-apples comparison
 
 ### Why this matters
 A trade can pass in paper on stale snapshot assumptions but fail live once the real book is checked.
@@ -67,10 +67,10 @@ Right now differences may be intentional, but they still make parity harder to r
 
 - [~] Paper has a dedicated execution adapter
 - [~] Live has a dedicated execution adapter
-- [~] Live revalidates before order placement
-- [ ] Normalize execution result schema so paper and live emit the same fields where possible
-- [ ] Record requested size, approved size, placed size, fill price, slippage estimate, and execution timestamp in the same shape
-- [ ] Ensure both modes preserve decision reasoning alongside execution outcome
+- [x] Live revalidates before order placement
+- [~] Normalize execution result schema so paper and live emit the same fields where possible
+- [~] Record requested size, approved size, placed size, fill price, slippage estimate, and execution timestamp in the same shape
+- [x] Both modes preserve decision reasoning alongside execution outcome
 
 ### Why this matters
 If trade records differ too much, analysis becomes harder and parity regressions hide in data formatting.
@@ -122,7 +122,7 @@ A production bot needs trustworthy post-trade accounting, not just good entries.
 
 - [x] Paper has strong audit trail
 - [~] Live logs lifecycle and trade history, but not as richly as paper
-- [ ] Make live persist the same audit-grade reasoning snapshots as paper
+- [~] Live and paper now share execution snapshot normalization, but live still needs richer persisted audit snapshots
 - [ ] Add before/after snapshots for account state around order placement and reconciliation
 - [ ] Add structured reason codes for live execution failures/rejections
 - [ ] Add a parity report that compares paper-style expected fields vs live-recorded fields
@@ -148,7 +148,7 @@ This is the difference between "works" and "production ready".
 
 ## 11. Testing Gaps
 
-- [ ] Unit tests for shared-core parity between paper and live context builders
+- [~] Unit tests now cover shared execution snapshot alignment and a golden same-snapshot paper/live decision case
 - [ ] Fixture tests for hidden-gem logic in both modes
 - [ ] Fixture tests for retrade/event-overlap logic in both modes
 - [ ] Fixture tests for partial-fill and order-status transitions
@@ -163,8 +163,8 @@ Right now a lot of parity is inferred from code structure rather than proven by 
 ## 12. Production Readiness Priorities
 
 ### Highest priority
-- [ ] Extract shared execution snapshot / price normalization logic and make live use it first
-- [ ] Paper should simulate live revalidation with current bid/ask semantics
+- [x] Extract shared execution snapshot / price normalization logic and make live use it first
+- [x] Paper parity mode can simulate live revalidation with current bid/ask semantics
 - [ ] Unify execution/audit row schema across paper and live
 - [ ] Harden live order lifecycle handling: partials, rejects, cancels, stale orders
 - [ ] Unify settlement lifecycle states and accounting shape
@@ -185,7 +185,7 @@ Right now a lot of parity is inferred from code structure rather than proven by 
 
 Current state:
 - Decision logic parity: **strong**
-- Execution parity: **partial**
+- Execution parity: **improving, with Phase 1 snapshot parity now in place**
 - Lifecycle/accounting parity: **partial**
 - Production resilience in live: **needs hardening**
 
