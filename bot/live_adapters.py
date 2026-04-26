@@ -34,6 +34,8 @@ class LiveReconciliationSnapshot:
     reserved_capital: float
     available_cash: float
     partial_fills: int
+    verdict: str = "safe"
+    issues: list[str] | None = None
 
 
 class RunnerLiveStateAdapter:
@@ -192,8 +194,16 @@ class RunnerLiveReconciliationAdapter:
         reserved_positions = sum(position.size for position in reconciled_positions)
         reserved_orders = sum(order.get("remaining_size", 0.0) for order in active_open_orders)
         reserved_total = reserved_positions + reserved_orders
-        available_cash = max(0.0, balance - reserved_total)
+        raw_available_cash = balance - reserved_total
+        available_cash = max(0.0, raw_available_cash)
         partial_fills = sum(1 for order in active_open_orders if order.get("filled_size", 0.0) > 0 and order.get("remaining_size", 0.0) > 0)
+        verdict, issues = self._classify_reconciliation_verdict(
+            reconciled_positions=reconciled_positions,
+            active_open_orders=active_open_orders,
+            balance=balance,
+            raw_available_cash=raw_available_cash,
+            partial_fills=partial_fills,
+        )
         return LiveReconciliationSnapshot(
             exchange=exchange_name,
             open_positions=reconciled_positions,
@@ -202,7 +212,48 @@ class RunnerLiveReconciliationAdapter:
             reserved_capital=round(reserved_total, 2),
             available_cash=round(available_cash, 2),
             partial_fills=partial_fills,
+            verdict=verdict,
+            issues=issues,
         )
+
+    def _classify_reconciliation_verdict(
+        self,
+        *,
+        reconciled_positions: list[Any],
+        active_open_orders: list[dict],
+        balance: float,
+        raw_available_cash: float,
+        partial_fills: int,
+    ) -> tuple[str, list[str]]:
+        issues: list[str] = []
+
+        order_ids = [str(order.get("order_id") or "") for order in active_open_orders if str(order.get("order_id") or "")]
+        if len(order_ids) != len(set(order_ids)):
+            issues.append("duplicate_active_order_ids")
+
+        if raw_available_cash < -0.01:
+            issues.append("negative_available_cash_after_reconcile")
+
+        local_order_ids = {str(order.get("order_id") or "") for order in getattr(self.host, "open_orders", []) if str(order.get("order_id") or "")}
+        exchange_order_ids = set(order_ids)
+        if local_order_ids and (local_order_ids - exchange_order_ids):
+            issues.append("local_open_orders_missing_from_exchange")
+
+        local_position_ids = {str(getattr(position, "order_id", "") or "") for position in getattr(self.host, "open_positions", []) if str(getattr(position, "order_id", "") or "")}
+        exchange_position_ids = {str(getattr(position, "order_id", "") or "") for position in reconciled_positions if str(getattr(position, "order_id", "") or "")}
+        if local_position_ids and (local_position_ids - exchange_position_ids):
+            issues.append("local_positions_missing_from_exchange")
+
+        if partial_fills > 0:
+            issues.append("partial_fill_exposure_present")
+        if active_open_orders:
+            issues.append("resting_orders_present")
+
+        if any(issue in {"duplicate_active_order_ids", "negative_available_cash_after_reconcile"} for issue in issues):
+            return "blocked", issues
+        if issues:
+            return "degraded", issues
+        return "safe", issues
 
     def settle(self, exchange_name: str, exchange: BaseExchange, open_positions: list[Any]) -> list[ResolutionEvent]:
         events: list[ResolutionEvent] = []
