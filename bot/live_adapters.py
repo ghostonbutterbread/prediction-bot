@@ -9,6 +9,7 @@ from typing import Any, Protocol
 
 from bot.exchanges.base import BaseExchange, Position, RestingOrder
 from bot.shared_core import AccountState, OrderState, PositionState, ResolutionEvent
+from bot.trade_audit import apply_execution_audit_contract, canonical_execution_status, normalize_outcome, trade_event_key
 
 logger = logging.getLogger(__name__)
 
@@ -43,9 +44,9 @@ class RunnerLiveStateAdapter:
 
     def get_account_state(self) -> AccountState:
         balance = self.host.risk.state.current_balance
-        reserved = sum(position.size for position in self.host.open_positions) + sum(
-            order.get("remaining_size", 0.0) for order in self.host.open_orders
-        )
+        filled_reserved = sum(position.size for position in self.host.open_positions)
+        pending_reserved = sum(order.get("remaining_size", 0.0) for order in self.host.open_orders)
+        reserved = filled_reserved + pending_reserved
         available_cash = max(0.0, balance - reserved)
         tradable_cash = available_cash
         if self.host.risk.max_tradable_balance and self.host.risk.max_tradable_balance > 0:
@@ -65,6 +66,8 @@ class RunnerLiveStateAdapter:
                 "mode": self.host.config.get("trading", {}).get("mode", "live"),
                 "effective_tradable_cash": round(tradable_cash, 2),
                 "resting_orders": len(self.host.open_orders),
+                "filled_event_exposure": round(filled_reserved, 2),
+                "pending_event_exposure": round(pending_reserved, 2),
             },
         )
 
@@ -80,7 +83,7 @@ class RunnerLiveStateAdapter:
                 entry_price=position.price,
                 position_size=position.size,
                 reserved_capital=position.size,
-                metadata={"source": "live_reconciled"},
+                metadata={"source": "live_reconciled", "event_key": getattr(position, "event_key", "")},
             )
             for position in self.host.open_positions
         ]
@@ -97,7 +100,7 @@ class RunnerLiveStateAdapter:
                 remaining_size=order.get("remaining_size", 0.0),
                 limit_price=order.get("price"),
                 created_at=order.get("created_at", ""),
-                metadata={"question": order.get("question", "")},
+                metadata={"question": order.get("question", ""), "event_key": order.get("event_key", "")},
             )
             for order in self.host.open_orders
         ]
@@ -114,31 +117,87 @@ class RunnerLiveReconciliationAdapter:
         resting_orders = getattr(exchange, "get_resting_orders", lambda: [])() or []
         reconciled_positions = [p for idx, p in enumerate((self._normalize_position(exchange_name, p, i) for i, p in enumerate(positions, start=1)), start=1) if p]
         trade_history_rows = [
-            {
-                "timestamp": position.created_at,
-                "market_id": position.market_id,
-                "question": position.question,
-                "direction": position.direction,
-                "size": position.size,
-                "price": position.price,
-                "resolved": False,
-                "order_id": position.order_id,
-                "decision_reason": "reconciled_from_exchange",
-                "reconciled": True,
-            }
+            apply_execution_audit_contract(
+                {
+                    "timestamp": position.created_at,
+                    "trade_id": position.order_id,
+                    "market_id": position.market_id,
+                    "question": position.question,
+                    "direction": position.direction,
+                    "size": position.size,
+                    "price": position.price,
+                    "resolved": False,
+                    "order_id": position.order_id,
+                    "status": "filled",
+                    "lifecycle_state": "filled_open",
+                    "decision_reason": "reconciled_from_exchange",
+                    "decision_reason_code": "reconciled_from_exchange",
+                    "requested_size": position.size,
+                    "approved_size": position.size,
+                    "placed_size": position.size,
+                    "filled_size": position.size,
+                    "remaining_size": 0.0,
+                    "reserved_capital": position.size,
+                    "market_price": position.price,
+                    "entry_price": position.price,
+                    "fill_price": position.price,
+                    "exchange": exchange_name,
+                    "event_key": getattr(position, "event_key", "") or trade_event_key({"market_id": position.market_id, "question": position.question}),
+                    "decision_trace": {},
+                    "reconciled": True,
+                }
+            )
             for position in reconciled_positions
         ]
         reconciled_orders = [o for o in (self._normalize_resting_order(exchange_name, order) for order in resting_orders) if o]
+        active_open_orders = [
+            order for order in reconciled_orders
+            if (self.host._coerce_float(order.get("remaining_size", 0.0), 0.0) or 0.0) > 0
+        ]
+        trade_history_rows.extend(
+            apply_execution_audit_contract(
+                {
+                    "timestamp": order.get("created_at"),
+                    "trade_id": order.get("order_id"),
+                    "market_id": order.get("market_id"),
+                    "question": order.get("question", ""),
+                    "direction": order.get("direction"),
+                    "order_id": order.get("order_id"),
+                    "status": canonical_execution_status(
+                        order.get("status"),
+                        filled_size=order.get("filled_size"),
+                        placed_size=(order.get("filled_size", 0.0) or 0.0) + (order.get("remaining_size", 0.0) or 0.0),
+                        remaining_size=order.get("remaining_size"),
+                    ),
+                    "decision_reason": "reconciled_resting_order",
+                    "decision_reason_code": "reconciled_resting_order",
+                    "requested_size": order.get("requested_size", 0.0),
+                    "approved_size": order.get("requested_size", 0.0),
+                    "placed_size": (order.get("filled_size", 0.0) or 0.0) + (order.get("remaining_size", 0.0) or 0.0),
+                    "filled_size": order.get("filled_size", 0.0),
+                    "remaining_size": order.get("remaining_size", 0.0),
+                    "reserved_capital": order.get("remaining_size", 0.0),
+                    "market_price": order.get("price"),
+                    "entry_price": order.get("price"),
+                    "fill_price": order.get("price") if (order.get("filled_size", 0.0) or 0.0) > 0 else None,
+                    "exchange": order.get("exchange", exchange_name),
+                    "event_key": order.get("event_key") or trade_event_key({"market_id": order.get("market_id", ""), "question": order.get("question", "")}),
+                    "decision_trace": {},
+                    "reconciled": True,
+                }
+            )
+            for order in reconciled_orders
+        )
         balance = self.host._coerce_float(getattr(exchange, "get_balance", lambda: 0.0)(), default=self.host.risk.state.current_balance)
         reserved_positions = sum(position.size for position in reconciled_positions)
-        reserved_orders = sum(order.get("remaining_size", 0.0) for order in reconciled_orders)
+        reserved_orders = sum(order.get("remaining_size", 0.0) for order in active_open_orders)
         reserved_total = reserved_positions + reserved_orders
         available_cash = max(0.0, balance - reserved_total)
-        partial_fills = sum(1 for order in reconciled_orders if order.get("filled_size", 0.0) > 0 and order.get("remaining_size", 0.0) > 0)
+        partial_fills = sum(1 for order in active_open_orders if order.get("filled_size", 0.0) > 0 and order.get("remaining_size", 0.0) > 0)
         return LiveReconciliationSnapshot(
             exchange=exchange_name,
             open_positions=reconciled_positions,
-            open_orders=reconciled_orders,
+            open_orders=active_open_orders,
             trade_history_rows=trade_history_rows,
             reserved_capital=round(reserved_total, 2),
             available_cash=round(available_cash, 2),
@@ -151,31 +210,39 @@ class RunnerLiveReconciliationAdapter:
             market = getattr(exchange, "get_market", lambda market_id: None)(position.market_id)
             if market is None:
                 continue
-            outcome = market.metadata.get("result") or market.metadata.get("outcome")
-            if market.close_price is None and not outcome:
+            raw_outcome = market.metadata.get("result") or market.metadata.get("outcome")
+            if market.close_price is None and not raw_outcome:
                 continue
             settlement_value = market.close_price
+            market_outcome = normalize_outcome(raw_outcome)
             if settlement_value is None:
-                if str(outcome).upper() == "YES":
+                if market_outcome == "YES":
                     settlement_value = 1.0
-                elif str(outcome).upper() == "NO":
+                elif market_outcome == "NO":
                     settlement_value = 0.0
                 else:
                     continue
-            won = (position.direction == "BUY_YES" and settlement_value >= 1.0) or (
-                position.direction == "BUY_NO" and settlement_value <= 0.0
+            if market_outcome is None:
+                if settlement_value >= 1.0:
+                    market_outcome = "YES"
+                elif settlement_value <= 0.0:
+                    market_outcome = "NO"
+                else:
+                    continue
+            won = (position.direction == "BUY_YES" and market_outcome == "YES") or (
+                position.direction == "BUY_NO" and market_outcome == "NO"
             )
             pnl = round((settlement_value - position.price) * position.size if position.direction == "BUY_YES" else ((1.0 - settlement_value) - position.price) * position.size, 2)
             events.append(
                 ResolutionEvent(
                     position_id=position.order_id,
                     market_id=position.market_id,
-                    outcome="won" if won else "lost",
+                    outcome=market_outcome,
                     status="resolved",
                     resolved_at=datetime.now(timezone.utc).isoformat(),
                     pnl=pnl,
                     settlement_value=settlement_value,
-                    metadata={"exchange": exchange_name, "question": position.question},
+                    metadata={"exchange": exchange_name, "question": position.question, "resolution_result": "won" if won else "lost"},
                 )
             )
         return events
@@ -199,6 +266,7 @@ class RunnerLiveReconciliationAdapter:
             size=size,
             order_id=f"reconciled:{exchange_name}:{market_id}:{index}",
             created_at=created_at,
+            event_key=trade_event_key({"market_id": market_id, "question": getattr(position, "question", "") or market_id}),
         )
 
     def _normalize_resting_order(self, exchange_name: str, order: RestingOrder | dict):
@@ -242,4 +310,5 @@ class RunnerLiveReconciliationAdapter:
             "remaining_size": remaining_size,
             "price": price,
             "created_at": created_at_text,
+            "event_key": trade_event_key({"market_id": str(market_id), "question": str(question)}),
         }

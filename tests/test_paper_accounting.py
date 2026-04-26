@@ -176,6 +176,116 @@ class PaperAccountingTests(unittest.TestCase):
             self.assertAlmostEqual(session["available_cash"], 109.3)
             self.assertAlmostEqual(session["reserved_capital"], 0.0)
 
+    def test_resolver_settles_kalshi_finalized_market_with_result(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session_id = "20260423_120000"
+            session_path = Path(tmpdir) / f"sim_{session_id}.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "session_id": session_id,
+                        "starting_balance": 100.0,
+                        "balance": 100.0,
+                        "available_cash": 90.0,
+                        "reserved_capital": 10.0,
+                        "trades": [
+                            {
+                                "id": "t1",
+                                "timestamp": "2026-04-23T12:00:00+00:00",
+                                "exchange": "kalshi",
+                                "market_id": "KXHIGHLAX-26APR23-T75",
+                                "question": "Will the high temp in LA be >75° on Apr 23, 2026?",
+                                "direction": "BUY_YES",
+                                "model_probability": 0.7,
+                                "market_price": 0.5,
+                                "edge": 0.2,
+                                "confidence": 0.9,
+                                "position_size": 10.0,
+                                "reserved_capital": 10.0,
+                                "signals": {},
+                                "resolved": False,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            resolver = TradeResolver(tmpdir)
+            summary = resolver.resolve_session(
+                session_id,
+                FakeExchange({"KXHIGHLAX-26APR23-T75": FakeMarket(status="finalized", result="no")}),
+            )
+
+            session = json.loads(session_path.read_text(encoding="utf-8"))
+            [trade] = session["trades"]
+
+            self.assertEqual(summary["resolved_this_pass"], 1)
+            self.assertTrue(trade["resolved"])
+            self.assertEqual(trade["outcome"], "NO")
+            self.assertAlmostEqual(trade["pnl"], -10.0)
+            self.assertAlmostEqual(summary["reserved_capital"], 0.0)
+
+    def test_resolver_does_not_settle_closed_market_without_result(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session_id = "20260423_123000"
+            session_path = Path(tmpdir) / f"sim_{session_id}.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "session_id": session_id,
+                        "starting_balance": 100.0,
+                        "balance": 100.0,
+                        "available_cash": 90.0,
+                        "reserved_capital": 10.0,
+                        "trades": [
+                            {
+                                "id": "t1",
+                                "timestamp": "2026-04-23T12:00:00+00:00",
+                                "exchange": "kalshi",
+                                "market_id": "KXHIGHLAX-26APR23-T75",
+                                "question": "Will the high temp in LA be >75° on Apr 23, 2026?",
+                                "direction": "BUY_YES",
+                                "model_probability": 0.7,
+                                "market_price": 0.5,
+                                "edge": 0.2,
+                                "confidence": 0.9,
+                                "position_size": 10.0,
+                                "reserved_capital": 10.0,
+                                "signals": {},
+                                "resolved": False,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            resolver = TradeResolver(tmpdir)
+            summary = resolver.resolve_session(
+                session_id,
+                FakeExchange(
+                    {
+                        "KXHIGHLAX-26APR23-T75": FakeMarket(
+                            status="closed",
+                            result=None,
+                            yes_price=0.5,
+                            no_price=0.5,
+                            close_price=None,
+                        )
+                    }
+                ),
+            )
+
+            session = json.loads(session_path.read_text(encoding="utf-8"))
+            [trade] = session["trades"]
+
+            self.assertEqual(summary["resolved_this_pass"], 0)
+            self.assertFalse(trade["resolved"])
+            self.assertEqual(trade["outcome"], "pending_settlement")
+            self.assertEqual(trade["resolution_type"], "closed_unsettled")
+            self.assertAlmostEqual(summary["reserved_capital"], 10.0)
+
     def test_resolver_marks_malformed_resolved_rows_untrusted_and_excludes_them_from_balance(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             session_id = "20260416_130000"

@@ -1,6 +1,7 @@
 """Shared core interfaces and thin decision path."""
 
 from .decision import build_trade_decision, normalize_trade_context, reason_to_key
+from .execution_snapshot import build_execution_snapshot
 from .interfaces import (
     AccountState,
     AccountStateProvider,
@@ -39,6 +40,7 @@ __all__ = [
     "StateAdapter",
     "TradeContext",
     "TradeDecision",
+    "build_execution_snapshot",
     "build_trade_decision",
     "normalize_trade_context",
     "reason_to_key",

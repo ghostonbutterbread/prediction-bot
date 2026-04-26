@@ -121,6 +121,12 @@ class LiveDashboard:
             f"Trades: {total_trades} ({open_count} open / {resolved_count} resolved)"
         )
         lines.append("║" + stats + " " * max(0, 78 - len(stats)) + "║")
+        if getattr(simulator.risk.state, "standby_active", False):
+            standby = (
+                f"  ⏸ STANDBY | reasons={','.join(simulator.risk.state.standby_reason_codes)} | "
+                f"blocked_scans={simulator.risk.state.standby_blocked_scan_count}"
+            )[:78]
+            lines.append("║" + standby + " " * max(0, 78 - len(standby)) + "║")
 
         # Divider
         lines.append("╠" + "═" * 78 + "╣")

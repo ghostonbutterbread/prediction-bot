@@ -20,6 +20,11 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 
+
+STANDBY_REASON_MAX_POSITIONS = "max_positions"
+STANDBY_REASON_TRADABLE_BALANCE = "tradable_balance"
+STANDBY_REASON_CAPITAL_HEADROOM = "capital_headroom"
+
 logger = logging.getLogger(__name__)
 
 
@@ -86,6 +91,17 @@ class RiskState:
 
     # Cooldown
     cooldown_until: str = ""
+
+    # Shared standby-mode state (paper first, live-ready shape)
+    standby_active: bool = False
+    standby_entered_at: str = ""
+    standby_reason_codes: list[str] = field(default_factory=list)
+    standby_blocked_scan_count: int = 0
+    standby_unresolved_positions_at_entry: int = 0
+    standby_exposure_at_entry: float = 0.0
+    standby_available_cash_at_entry: float = 0.0
+    standby_last_resume_at: str = ""
+    standby_last_resume_reason: str = ""
 
     # History
     trade_history: list = field(default_factory=list)
@@ -174,6 +190,12 @@ class RiskManager:
 
     def __init__(self, config: dict = None):
         config = config or {}
+        risk_cfg = config.get("risk", {}) or {}
+
+        def config_value(key: str, default=None):
+            if key in risk_cfg:
+                return risk_cfg.get(key)
+            return config.get(key, default)
 
         trading_cfg = config.get("trading", {}) or {}
         configured_mode = str(trading_cfg.get("mode", config.get("mode", "")) or "").strip().lower()
@@ -187,11 +209,11 @@ class RiskManager:
         # Resolve limits: env vars override preset, explicit config overrides both
         def resolve_float(key: str, default: float) -> float:
             env_key = key.upper()
-            return float(os.getenv(env_key, config.get(key, preset.get(key, default))))
+            return float(os.getenv(env_key, config_value(key, preset.get(key, default))))
 
         def resolve_int(key: str, default: int) -> int:
             env_key = key.upper()
-            return int(float(os.getenv(env_key, config.get(key, preset.get(key, default)))))
+            return int(float(os.getenv(env_key, config_value(key, preset.get(key, default)))))
 
         self.kelly_fraction = resolve_float("kelly_fraction", preset["kelly_fraction"])
         self.max_bet_pct = resolve_float("max_bet_pct", preset["max_bet_pct"])
@@ -200,8 +222,20 @@ class RiskManager:
         self.max_drawdown_pct = resolve_float("max_drawdown_pct", preset["max_drawdown_pct"])
         self.max_open_positions = resolve_int("max_open_positions", preset["max_open_positions"])
         self.cooldown_after_losses = resolve_int("cooldown_after_losses", preset["cooldown_after_losses"])
-        self.max_tradable_balance = resolve_float("max_tradable_balance_usd", config.get("max_tradable_balance", 0.0))
-        self.max_position_size_usd = resolve_float("max_position_size_usd", config.get("max_position_size_usd", 0.0))
+        self.max_tradable_balance = resolve_float("max_tradable_balance_usd", config_value("max_tradable_balance", 0.0))
+        self.max_position_size_usd = resolve_float("max_position_size_usd", config_value("max_position_size_usd", 0.0))
+        self.max_event_exposure_pct = resolve_float("max_event_exposure_pct", 0.10)
+        self.max_event_positions = resolve_int("max_event_positions", 3)
+        self.retrade_edge_premium = resolve_float("retrade_edge_premium", 0.01)
+        self.retrade_confidence_premium = resolve_float("retrade_confidence_premium", 0.00)
+        self.retrade_size_decay = resolve_float("retrade_size_decay", 0.65)
+        self.min_retrade_net_edge = resolve_float("min_retrade_net_edge", 0.005)
+        self.min_retrade_expected_profit_usd = resolve_float("min_retrade_expected_profit_usd", 0.0)
+        self.strict_event_overlap = bool(config_value("strict_event_overlap", True))
+        self.require_price_improvement_for_same_market_family = bool(
+            config_value("require_price_improvement_for_same_market_family", False)
+        )
+        self.price_improvement_ticks = resolve_float("price_improvement_ticks", 0.03)
         if "enabled" in trading_cfg:
             self.trading_enabled = bool(trading_cfg.get("enabled"))
         elif "trading_enabled" in trading_cfg:
@@ -213,15 +247,27 @@ class RiskManager:
         # max(session_starting_balance, session_peak_balance).
         # Requires manual reset (delete data/risk_state.json or set FORCE_RESUME=true).
         self.max_session_drawdown_pct = float(
-            os.getenv("MAX_DRAWDOWN_PCT", config.get("max_session_drawdown_pct", 0.20))
+            os.getenv("MAX_DRAWDOWN_PCT", config_value("max_session_drawdown_pct", 0.20))
         )
 
         # Stress scaling — more lenient as bankroll grows
-        self.stress_threshold = config.get("stress_threshold", 0.8)
-        self.stress_reduction = config.get("stress_reduction", 0.3)
-        self.min_position_size = float(config.get("min_position_size", 1.0))
+        self.stress_threshold = config_value("stress_threshold", 0.8)
+        self.stress_reduction = config_value("stress_reduction", 0.3)
+        self.min_position_size = float(config_value("min_position_size", 1.0))
+        standby_cfg = config.get("standby_mode", {}) or {}
+        self.standby_mode_enabled = bool(standby_cfg.get("enabled", not self.is_live))
+        self.standby_blocked_scan_threshold = int(standby_cfg.get("blocked_scan_threshold", 3) or 3)
+        self.standby_min_positions_resolved_to_resume = int(
+            standby_cfg.get("min_positions_resolved_to_resume", 2) or 2
+        )
+        self.standby_min_exposure_reduction_pct = float(
+            standby_cfg.get("min_exposure_reduction_pct", 0.10) or 0.10
+        )
+        self.standby_min_useful_trade_size_usd = float(
+            standby_cfg.get("min_useful_trade_size_usd", 5.0) or 5.0
+        )
 
-        starting = config.get("starting_balance", 100.0)
+        starting = config_value("starting_balance", 100.0)
         # State
         self.state = RiskState(
             starting_balance=starting,
@@ -662,6 +708,10 @@ class RiskManager:
         )
         self._save_state()
 
+    def record_trade_result(self, trade_ref, pnl: float):
+        """Backward-compatible alias for older runner calls."""
+        self.record_outcome(trade_ref, pnl)
+
     def record_outcome(self, trade_ref, pnl: float):
         """Record the outcome of a resolved trade."""
         self.reset_daily()
@@ -788,6 +838,193 @@ class RiskManager:
             self._save_state()
             logger.info(f"📅 Daily reset — new trading day: {today}")
 
+    def _estimate_useful_trade_capacity(self) -> float:
+        spendable_cash = max(0.0, self._coerce_float(self.state.available_cash, 0.0))
+        tradable_cash = spendable_cash
+        if self.max_tradable_balance > 0:
+            tradable_cash = min(tradable_cash, self.max_tradable_balance)
+
+        max_exposure_dollars = max(0.0, self.state.current_balance * self.max_exposure_pct)
+        exposure_headroom = max(0.0, max_exposure_dollars - self.state.total_exposure)
+        capacity = min(tradable_cash, exposure_headroom)
+
+        if self.max_position_size_usd > 0:
+            capacity = min(capacity, self.max_position_size_usd)
+        if self.state.open_positions >= self.max_open_positions:
+            return 0.0
+        return round(max(0.0, capacity), 2)
+
+    def _capital_standby_reasons_from_blockers(self, blocked_reasons: dict[str, int] | None) -> list[str]:
+        reasons = set()
+        for key, count in (blocked_reasons or {}).items():
+            if not count:
+                continue
+            normalized = str(key or "")
+            if "max_positions" in normalized:
+                reasons.add(STANDBY_REASON_MAX_POSITIONS)
+            elif "tradable_balance" in normalized:
+                reasons.add(STANDBY_REASON_TRADABLE_BALANCE)
+            elif "exposure" in normalized or "capital" in normalized or "headroom" in normalized:
+                reasons.add(STANDBY_REASON_CAPITAL_HEADROOM)
+        return sorted(reasons)
+
+    def reconcile_startup_standby(self) -> dict:
+        """Re-assert standby after a restart if the restored portfolio is already extended."""
+        useful_capacity = self._estimate_useful_trade_capacity()
+        capital_reasons: list[str] = []
+
+        if self.state.open_positions >= self.max_open_positions:
+            capital_reasons.append(STANDBY_REASON_MAX_POSITIONS)
+
+        spendable_cash = max(0.0, self._coerce_float(self.state.available_cash, 0.0))
+        tradable_cash = spendable_cash
+        if self.max_tradable_balance > 0:
+            tradable_cash = min(tradable_cash, self.max_tradable_balance)
+        if tradable_cash < self.min_position_size:
+            capital_reasons.append(STANDBY_REASON_TRADABLE_BALANCE)
+
+        max_exposure_dollars = max(0.0, self.state.current_balance * self.max_exposure_pct)
+        exposure_headroom = max(0.0, max_exposure_dollars - self.state.total_exposure)
+        if exposure_headroom < self.min_position_size or useful_capacity < self.standby_min_useful_trade_size_usd:
+            capital_reasons.append(STANDBY_REASON_CAPITAL_HEADROOM)
+
+        capital_reasons = sorted(set(capital_reasons))
+
+        if not self.standby_mode_enabled or self.is_live:
+            return {
+                "standby_active": bool(self.state.standby_active),
+                "reason_codes": list(self.state.standby_reason_codes),
+                "useful_trade_capacity": useful_capacity,
+                "asserted": False,
+            }
+
+        if self.state.standby_active:
+            if not self.state.standby_reason_codes:
+                self.state.standby_reason_codes = list(capital_reasons)
+                self._save_state()
+            return {
+                "standby_active": True,
+                "reason_codes": list(self.state.standby_reason_codes),
+                "useful_trade_capacity": useful_capacity,
+                "asserted": False,
+            }
+
+        if not capital_reasons:
+            return {
+                "standby_active": False,
+                "reason_codes": [],
+                "useful_trade_capacity": useful_capacity,
+                "asserted": False,
+            }
+
+        self.state.standby_active = True
+        self.state.standby_entered_at = self.state.standby_entered_at or datetime.now(timezone.utc).isoformat()
+        self.state.standby_reason_codes = capital_reasons
+        self.state.standby_blocked_scan_count = max(
+            self.state.standby_blocked_scan_count,
+            self.standby_blocked_scan_threshold,
+        )
+        self.state.standby_unresolved_positions_at_entry = max(
+            int(self.state.standby_unresolved_positions_at_entry),
+            int(self.state.open_positions),
+        )
+        self.state.standby_exposure_at_entry = max(
+            self._coerce_float(self.state.standby_exposure_at_entry, 0.0),
+            round(self.state.total_exposure, 2),
+        )
+        self.state.standby_available_cash_at_entry = round(self.state.available_cash, 2)
+        self._save_state()
+        return {
+            "standby_active": True,
+            "reason_codes": list(self.state.standby_reason_codes),
+            "useful_trade_capacity": useful_capacity,
+            "asserted": True,
+        }
+
+    def record_blocked_scan(self, blocked_reasons: dict[str, int] | None, *, trades_taken: int = 0) -> None:
+        if not self.standby_mode_enabled or self.is_live:
+            return
+        if self.state.standby_active:
+            return
+
+        capital_reasons = self._capital_standby_reasons_from_blockers(blocked_reasons)
+        if trades_taken > 0 or not capital_reasons:
+            self.state.standby_blocked_scan_count = 0
+            self._save_state()
+            return
+
+        self.state.standby_blocked_scan_count += 1
+        if self.state.standby_blocked_scan_count < self.standby_blocked_scan_threshold:
+            self._save_state()
+            return
+
+        self.state.standby_active = True
+        self.state.standby_entered_at = datetime.now(timezone.utc).isoformat()
+        self.state.standby_reason_codes = capital_reasons
+        self.state.standby_unresolved_positions_at_entry = self.state.open_positions
+        self.state.standby_exposure_at_entry = round(self.state.total_exposure, 2)
+        self.state.standby_available_cash_at_entry = round(self.state.available_cash, 2)
+        self._save_state()
+
+    def clear_blocked_scan_streak(self) -> None:
+        if self.state.standby_blocked_scan_count == 0:
+            return
+        self.state.standby_blocked_scan_count = 0
+        self._save_state()
+
+    def evaluate_standby_resume(self) -> dict:
+        useful_capacity = self._estimate_useful_trade_capacity()
+        if not self.standby_mode_enabled or not self.state.standby_active:
+            return {
+                "standby_active": False,
+                "useful_trade_capacity": useful_capacity,
+                "resumed": False,
+            }
+
+        positions_resolved = max(
+            0,
+            int(self.state.standby_unresolved_positions_at_entry) - int(self.state.open_positions),
+        )
+        entry_exposure = max(0.0, self._coerce_float(self.state.standby_exposure_at_entry, 0.0))
+        current_exposure = max(0.0, self._coerce_float(self.state.total_exposure, 0.0))
+        exposure_reduction_pct = 0.0
+        if entry_exposure > 0:
+            exposure_reduction_pct = max(0.0, (entry_exposure - current_exposure) / entry_exposure)
+        positions_triggered = positions_resolved >= self.standby_min_positions_resolved_to_resume
+        exposure_triggered = exposure_reduction_pct >= self.standby_min_exposure_reduction_pct
+        capacity_ok = useful_capacity >= self.standby_min_useful_trade_size_usd
+
+        if (positions_triggered or exposure_triggered) and capacity_ok:
+            reason_bits = []
+            if positions_triggered:
+                reason_bits.append(f"positions_resolved={positions_resolved}")
+            if exposure_triggered:
+                reason_bits.append(f"exposure_reduction_pct={exposure_reduction_pct:.2f}")
+            reason_bits.append(f"useful_trade_capacity=${useful_capacity:.2f}")
+            self.state.standby_active = False
+            self.state.standby_blocked_scan_count = 0
+            self.state.standby_last_resume_at = datetime.now(timezone.utc).isoformat()
+            self.state.standby_last_resume_reason = ",".join(reason_bits)
+            self.state.standby_reason_codes = []
+            self._save_state()
+            return {
+                "standby_active": False,
+                "resumed": True,
+                "resume_reason": self.state.standby_last_resume_reason,
+                "positions_resolved": positions_resolved,
+                "exposure_reduction_pct": round(exposure_reduction_pct, 4),
+                "useful_trade_capacity": useful_capacity,
+            }
+
+        return {
+            "standby_active": True,
+            "resumed": False,
+            "positions_resolved": positions_resolved,
+            "exposure_reduction_pct": round(exposure_reduction_pct, 4),
+            "useful_trade_capacity": useful_capacity,
+            "standby_reason_codes": list(self.state.standby_reason_codes),
+        }
+
     def get_status(self) -> dict:
         """Get current risk status summary."""
         return {
@@ -807,6 +1044,16 @@ class RiskManager:
             "consecutive_losses": self.state.consecutive_losses,
             "cooldown": "YES" if self.state.is_in_cooldown else "no",
             "risk_headroom": f"{max(0, 100 - (abs(self.state.daily_pnl_pct) / (self.daily_loss_limit_pct * 100) * 100)):.0f}%",
+            "standby_active": self.state.standby_active,
+            "standby_entered_at": self.state.standby_entered_at or "",
+            "standby_reason_codes": list(self.state.standby_reason_codes),
+            "standby_blocked_scan_count": self.state.standby_blocked_scan_count,
+            "standby_unresolved_positions_at_entry": self.state.standby_unresolved_positions_at_entry,
+            "standby_exposure_at_entry": round(self.state.standby_exposure_at_entry, 2),
+            "standby_available_cash_at_entry": round(self.state.standby_available_cash_at_entry, 2),
+            "standby_last_resume_at": self.state.standby_last_resume_at or "",
+            "standby_last_resume_reason": self.state.standby_last_resume_reason or "",
+            "standby_useful_trade_capacity": f"${self._estimate_useful_trade_capacity():.2f}",
             "limits": {
                 "kelly": f"{self.kelly_fraction:.0%}",
                 "max_bet": f"{self.max_bet_pct:.0%}",

@@ -81,7 +81,7 @@ class RunnerLivePathTests(unittest.TestCase):
 
             self.assertIn("order", result)
             self.assertEqual(len(bot.exchanges["kalshi"].orders), 1)
-            self.assertEqual(bot.exchanges["kalshi"].orders[0]["size"], 4.0)
+            self.assertEqual(bot.exchanges["kalshi"].orders[0]["size"], 2.5)
 
     def test_live_path_respects_trading_disabled(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -109,9 +109,48 @@ class RunnerLivePathTests(unittest.TestCase):
     def test_build_status_snapshot_uses_shared_shape(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             bot = self._make_bot(tmpdir)
+            bot.config["parity_mode"] = {"enabled": True}
             bot.trade_history = [
-                {"resolved": False},
-                {"resolved": True},
+                {
+                    "resolved": False,
+                    "status": "filled",
+                    "lifecycle_state": "filled_open",
+                    "trade_id": "live-1",
+                    "market_id": "m-1",
+                    "direction": "BUY_YES",
+                    "requested_size": 1.0,
+                    "approved_size": 1.0,
+                    "placed_size": 1.0,
+                    "filled_size": 1.0,
+                    "remaining_size": 0.0,
+                    "reserved_capital": 1.0,
+                    "parity_mode_enabled": True,
+                    "execution_revalidated": True,
+                    "execution_revalidation_outcome": "approved",
+                    "execution_snapshot_source": "book",
+                    "execution_decision_reason_code": "approved",
+                    "execution_snapshot": {"market_price": 0.41, "source": "book"},
+                },
+                {
+                    "resolved": True,
+                    "status": "rejected",
+                    "lifecycle_state": "revalidation_rejected",
+                    "trade_id": "live-2",
+                    "market_id": "m-2",
+                    "direction": "BUY_YES",
+                    "requested_size": 1.0,
+                    "approved_size": 1.0,
+                    "placed_size": 0.0,
+                    "filled_size": 0.0,
+                    "remaining_size": 0.0,
+                    "reserved_capital": 0.0,
+                    "parity_mode_enabled": True,
+                    "execution_revalidated": True,
+                    "execution_revalidation_outcome": "rejected",
+                    "execution_snapshot_source": "fallback",
+                    "execution_decision_reason_code": "price_above_threshold",
+                    "execution_snapshot": {"market_price": 0.47, "source": "fallback"},
+                },
             ]
             bot.open_positions = [
                 SimpleNamespace(size=4.0),
@@ -123,6 +162,23 @@ class RunnerLivePathTests(unittest.TestCase):
             self.assertEqual(snapshot.resolved_trades, 1)
             self.assertEqual(snapshot.total_trades, 2)
             self.assertIn("source", snapshot.extra)
+            self.assertEqual(snapshot.extra["filled_event_exposure"], 4.0)
+            self.assertEqual(snapshot.extra["pending_event_exposure"], 0.0)
+            self.assertIn("normalized_trade_summary", snapshot.extra)
+            self.assertEqual(snapshot.extra["normalized_trade_summary"]["total_rows"], 2)
+            self.assertIn("parity_summary", snapshot.extra)
+            self.assertTrue(snapshot.extra["parity_summary"]["parity_mode_enabled"])
+            self.assertEqual(snapshot.extra["parity_summary"]["execution_revalidated_rows"], 2)
+            self.assertEqual(snapshot.extra["parity_summary"]["execution_rejected_rows"], 1)
+            self.assertEqual(snapshot.extra["parity_summary"]["fallback_rows"], 1)
+            self.assertEqual(snapshot.extra["parity_summary"]["snapshot_source_counts"]["book"], 1)
+            self.assertEqual(snapshot.extra["parity_summary"]["snapshot_source_counts"]["fallback"], 1)
+            self.assertEqual(snapshot.extra["parity_summary"]["lifecycle_state_counts"]["filled_open"], 1)
+            self.assertEqual(snapshot.extra["parity_summary"]["lifecycle_state_counts"]["revalidation_rejected"], 1)
+            self.assertEqual(snapshot.extra["normalized_trade_summary"]["execution_revalidation_outcome_counts"]["approved"], 1)
+            self.assertEqual(snapshot.extra["normalized_trade_summary"]["execution_revalidation_outcome_counts"]["rejected"], 1)
+            self.assertEqual(snapshot.extra["parity_summary"]["invalid_contract_rows"], 0)
+            self.assertEqual(snapshot.extra["parity_summary"]["top_contract_issues"], [])
 
 
 if __name__ == "__main__":
