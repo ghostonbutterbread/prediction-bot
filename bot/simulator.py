@@ -7,6 +7,7 @@ from pathlib import Path
 from dataclasses import dataclass, asdict, field
 from typing import Optional
 
+from bot.config import ensure_mode_storage_dir
 from bot.paper_adapters import (
     LoadedPaperSession,
     SimulatorPaperExecutionAdapter,
@@ -28,6 +29,7 @@ from bot.shared_core import (
     reason_to_key,
 )
 from bot.strategies.enhanced import EnhancedStrategyEngine, KellySizer
+from bot.parity_audit import normalize_parity_trade_row, summarize_normalized_rows
 from bot.trade_audit import (
     enrich_trade_audit_fields,
     summarize_event_performance,
@@ -57,6 +59,25 @@ class SimTrade:
     available_cash_before: Optional[float] = None
     available_cash_after_entry: Optional[float] = None
     settlement_value: Optional[float] = None
+    status: str = "filled"
+    lifecycle_state: Optional[str] = None
+    failure_stage: Optional[str] = None
+    decision_reason: Optional[str] = None
+    decision_reason_code: Optional[str] = None
+    requested_size: Optional[float] = None
+    approved_size: Optional[float] = None
+    placed_size: Optional[float] = None
+    filled_size: Optional[float] = None
+    remaining_size: Optional[float] = None
+    entry_price: Optional[float] = None
+    parity_mode_enabled: bool = False
+    execution_revalidated: bool = False
+    execution_revalidation_outcome: Optional[str] = None
+    original_signal_snapshot: Optional[dict] = None
+    execution_snapshot: Optional[dict] = None
+    original_decision_reason_code: Optional[str] = None
+    execution_decision_reason_code: Optional[str] = None
+    execution_snapshot_source: Optional[str] = None
 
     # Resolution (filled in later)
     resolved: bool = False
@@ -138,7 +159,8 @@ class Simulator:
         self.single_trade_completed = False
         self.parity_mode = dict(config.get("parity_mode", {}) or {})
 
-        self.data_dir = Path(config.get("data_dir", "data"))
+        runtime_mode = str(config.get("trading", {}).get("mode", "paper"))
+        self.data_dir = ensure_mode_storage_dir(config.get("data_dir", "data"), runtime_mode)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.state_adapter = SimulatorPaperStateAdapter(self)
         self.session_store = SimulatorPaperSessionStore(self, self.state_adapter)
@@ -258,6 +280,25 @@ class Simulator:
             available_cash_before=self._coerce_float_or_none(t_data.get("available_cash_before")),
             available_cash_after_entry=self._coerce_float_or_none(t_data.get("available_cash_after_entry")),
             settlement_value=self._coerce_float_or_none(t_data.get("settlement_value")),
+            status=t_data.get("status", "filled"),
+            lifecycle_state=t_data.get("lifecycle_state"),
+            failure_stage=t_data.get("failure_stage"),
+            decision_reason=t_data.get("decision_reason"),
+            decision_reason_code=t_data.get("decision_reason_code"),
+            requested_size=self._coerce_float_or_none(t_data.get("requested_size")),
+            approved_size=self._coerce_float_or_none(t_data.get("approved_size")),
+            placed_size=self._coerce_float_or_none(t_data.get("placed_size")),
+            filled_size=self._coerce_float_or_none(t_data.get("filled_size")),
+            remaining_size=self._coerce_float_or_none(t_data.get("remaining_size")),
+            entry_price=self._coerce_float_or_none(t_data.get("entry_price")),
+            parity_mode_enabled=bool(t_data.get("parity_mode_enabled", False)),
+            execution_revalidated=bool(t_data.get("execution_revalidated", False)),
+            execution_revalidation_outcome=t_data.get("execution_revalidation_outcome"),
+            original_signal_snapshot=t_data.get("original_signal_snapshot"),
+            execution_snapshot=t_data.get("execution_snapshot"),
+            original_decision_reason_code=t_data.get("original_decision_reason_code"),
+            execution_decision_reason_code=t_data.get("execution_decision_reason_code"),
+            execution_snapshot_source=t_data.get("execution_snapshot_source"),
             resolved=t_data.get("resolved", False),
             outcome=t_data.get("outcome"),
             pnl=t_data.get("pnl"),
@@ -718,18 +759,43 @@ class Simulator:
             available_cash_after_entry=self._coerce_float_or_none(metadata.get("available_cash_after_entry")),
             contracts=self._coerce_float_or_none(metadata.get("contracts")),
             event_key=metadata.get("event_key", ""),
+            status="filled",
+            lifecycle_state="filled_open",
+            decision_reason=getattr(result, "message", None),
+            decision_reason_code=(metadata.get("reason_code") or (metadata.get("decision_trace", {}) or {}).get("reason_code") or "approved"),
+            requested_size=self._coerce_float_or_none(result.requested_size),
+            approved_size=round(float(metadata.get("reserved_capital") or result.filled_size or 0.0), 2),
+            placed_size=round(float(result.filled_size or 0.0), 2),
+            filled_size=round(float(result.filled_size or 0.0), 2),
+            remaining_size=self._coerce_float_or_none(result.remaining_size),
+            entry_price=round(result.fill_price or 0.0, 4),
+            parity_mode_enabled=bool(metadata.get("parity_mode_enabled", False)),
+            execution_revalidated=bool(metadata.get("execution_revalidated", False)),
+            execution_revalidation_outcome=metadata.get("execution_revalidation_outcome"),
+            original_signal_snapshot=metadata.get("original_signal_snapshot"),
+            execution_snapshot=metadata.get("execution_snapshot"),
+            original_decision_reason_code=metadata.get("original_decision_reason_code"),
+            execution_decision_reason_code=metadata.get("execution_decision_reason_code"),
+            execution_snapshot_source=metadata.get("execution_snapshot_source"),
         )
 
     def _trade_from_execution_rejection(self, decision: TradeDecision, context: TradeContext) -> SimTrade:
+        parity = dict((decision.reasoning or {}).get("parity_mode", {}) or {})
+        requested_size = float(getattr(decision, "requested_position_size", 0.0) or 0.0)
+        approved_size = float(getattr(decision, "position_size", 0.0) or 0.0)
+        entry_price = round(float(decision.entry_price or context.market_price or 0.0), 4)
+        trade_direction = decision.action if str(getattr(decision, "action", "")).startswith("BUY_") else (
+            parity.get("execution_snapshot", {}) or {}
+        ).get("direction") or context.source_context.get("direction") or context.direction
         return SimTrade(
             id=f"rejected_{self.session_id}_{len(self.trades) + 1:04d}",
             timestamp=datetime.now(timezone.utc).isoformat(),
             exchange=context.exchange,
             market_id=context.market_id,
             question=context.question,
-            direction=decision.action,
+            direction=trade_direction,
             model_probability=round(float(decision.win_probability or 0.0), 4),
-            market_price=round(float(decision.entry_price or context.market_price or 0.0), 4),
+            market_price=entry_price,
             edge=decision.edge or 0,
             confidence=decision.confidence or 0,
             position_size=0.0,
@@ -741,6 +807,25 @@ class Simulator:
             available_cash_after_entry=round(context.account_state.available_cash, 2),
             contracts=0.0,
             event_key=context.metadata.get("event_key", ""),
+            status="rejected",
+            lifecycle_state="revalidation_rejected" if parity.get("enabled") else "risk_check_rejected",
+            failure_stage="revalidation" if parity.get("enabled") else "risk_check",
+            decision_reason=decision.reason,
+            decision_reason_code=decision.reason_code,
+            requested_size=requested_size,
+            approved_size=approved_size,
+            placed_size=0.0,
+            filled_size=0.0,
+            remaining_size=0.0,
+            entry_price=entry_price,
+            parity_mode_enabled=bool(parity.get("enabled", False)),
+            execution_revalidated=bool(parity.get("execution_revalidated", False)),
+            execution_revalidation_outcome=parity.get("execution_revalidation_outcome"),
+            original_signal_snapshot=parity.get("original_signal_snapshot"),
+            execution_snapshot=parity.get("execution_snapshot"),
+            original_decision_reason_code=parity.get("original_decision_reason_code"),
+            execution_decision_reason_code=parity.get("execution_decision_reason_code"),
+            execution_snapshot_source=parity.get("execution_snapshot_source"),
             integrity_status="execution_rejected",
             integrity_errors=[decision.reason_code],
         )
@@ -900,6 +985,28 @@ class Simulator:
             t for t in resolved_positions if t.integrity_status == "ok" and t.pnl is not None
         ]
         event_summary = summarize_event_performance([asdict(t) for t in trusted_resolved])
+        canonical_trade_rows = []
+        for trade in self.trades:
+            trade_row = asdict(trade)
+            enrich_trade_audit_fields(trade_row)
+            canonical_trade_rows.append(trade_row)
+
+        normalized_trade_rows = [
+            normalize_parity_trade_row(row, source="paper") for row in canonical_trade_rows
+        ]
+        normalized_trade_summary = summarize_normalized_rows(normalized_trade_rows)
+        parity_summary = {
+            "parity_mode_enabled": bool(self.parity_mode.get("enabled")),
+            "parity_revalidated_trades": normalized_trade_summary.get("execution_revalidated_rows", 0),
+            "parity_rejected_trades": normalized_trade_summary.get("execution_rejected_rows", 0),
+            "parity_fallback_trades": normalized_trade_summary.get("fallback_rows", 0),
+            "snapshot_source_counts": normalized_trade_summary.get("snapshot_source_counts", {}),
+            "lifecycle_state_counts": normalized_trade_summary.get("lifecycle_state_counts", {}),
+            "invalid_contract_rows": normalized_trade_summary.get("invalid_contract_rows", 0),
+            "top_execution_reason_codes": normalized_trade_summary.get("top_execution_reason_codes", []),
+            "top_contract_issues": normalized_trade_summary.get("top_contract_issues", []),
+            "normalized_trade_summary": normalized_trade_summary,
+        }
 
         return {
             "session": self.session_id,
@@ -925,6 +1032,11 @@ class Simulator:
             "resolved_events": event_summary["resolved_events"],
             "event_win_rate": event_summary["win_rate"],
             "scans_run": self.scan_count,
+            "parity_mode_enabled": parity_summary["parity_mode_enabled"],
+            "parity_revalidated_trades": parity_summary["parity_revalidated_trades"],
+            "parity_rejected_trades": parity_summary["parity_rejected_trades"],
+            "parity_fallback_trades": parity_summary["parity_fallback_trades"],
+            "parity_summary": parity_summary,
         }
 
     def get_open_trades(self) -> list[dict]:

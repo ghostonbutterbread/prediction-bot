@@ -153,6 +153,11 @@ class SimulatorPaperSessionStore:
         last_loss_date: str | None,
         report: dict[str, Any],
     ) -> dict[str, Any]:
+        trade_rows = []
+        for trade in self.host.trades:
+            trade_row = asdict(trade)
+            enrich_trade_audit_fields(trade_row)
+            trade_rows.append(trade_row)
         return {
             "session_id": self.host.session_id,
             "starting_balance": self.host.starting_balance,
@@ -161,7 +166,7 @@ class SimulatorPaperSessionStore:
             "reserved_capital": self.host.reserved_capital,
             "scan_count": self.host.scan_count,
             "max_entry_price": max_entry_price,
-            "trades": [asdict(trade) for trade in self.host.trades],
+            "trades": trade_rows,
             "report": report,
             "consecutive_daily_losses": consecutive_daily_losses,
             "last_loss_date": last_loss_date,
@@ -192,11 +197,21 @@ class SimulatorPaperSessionStore:
         return session_file
 
     def _resolve_session_file(self, session_id: str | None) -> Path | None:
-        if session_id:
-            session_file = self.host.data_dir / f"sim_{session_id}.json"
-            return session_file if session_file.exists() else None
+        search_dirs = [self.host.data_dir]
+        if self.host.data_dir.name in {"paper", "live"}:
+            search_dirs.append(self.host.data_dir.parent)
 
-        session_files = sorted(self.host.data_dir.glob("sim_*.json"), reverse=True)
+        if session_id:
+            for directory in search_dirs:
+                session_file = directory / f"sim_{session_id}.json"
+                if session_file.exists():
+                    return session_file
+            return None
+
+        session_files: list[Path] = []
+        for directory in search_dirs:
+            session_files.extend(directory.glob("sim_*.json"))
+        session_files = sorted(session_files, key=lambda path: path.stat().st_mtime, reverse=True)
         return session_files[0] if session_files else None
 
 

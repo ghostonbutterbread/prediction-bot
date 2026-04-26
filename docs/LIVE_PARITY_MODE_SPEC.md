@@ -2,19 +2,26 @@
 
 ## Goal
 
-Add an optional, config-driven **live parity testing mode** that lets paper trading simulate the final live revalidation step without forcing that extra complexity into every paper experiment.
+Add an optional, config-driven **paper parity mode** that lets paper trading simulate the final live revalidation step without forcing that extra complexity into every paper experiment.
 
-This preserves two valid operating modes:
+Parity mode is a paper-only feature. It is not a live trading mode, and it is not meant to replace the live adapter.
+
+This preserves three distinct roles:
 
 1. **Logic-first paper mode**
    - Fewer moving parts
    - Best for rapid strategy iteration
-   - Tests core trading logic and policy changes
+   - Tests core trading logic, policy changes, and whether we are trading the right parts of the market
 
-2. **Live-parity paper mode**
+2. **Parity paper mode**
+   - Still paper
    - Adds a final execution-style revalidation pass
-   - Better approximation of live behavior
+   - Better approximation of live behavior under market movement
    - Best for pre-production confidence and parity testing
+
+3. **Live trading**
+   - The real adapter
+   - Interacts with the API, places orders, sits on markets when thresholds are met, and continues through the real order/position lifecycle
 
 The feature should be **enabled or disabled via config**, not hard-coded.
 
@@ -37,6 +44,8 @@ That gap matters for production readiness, especially in:
 - fast-moving markets
 
 But it is **not always desirable** to simulate this during strategy iteration, because it adds moving pieces and can obscure pure logic evaluation.
+
+Parity mode exists to close that gap inside paper. Its purpose is to model market movement and execution-time drift before going live, while normal paper mode remains the simpler logic lab and live remains the real execution path.
 
 ---
 
@@ -67,6 +76,11 @@ But it is **not always desirable** to simulate this during strategy iteration, b
 6. **Reviewer-friendly structure**
    - new behavior should be isolated and testable
    - avoid scattering live-specific assumptions across the simulator
+
+7. **API truth over local inference in live mode**
+   - when live exchange/API state is available, prefer it over backend assumptions
+   - local logic may decide, normalize, and report, but it should not invent post-submission outcomes that the API can confirm
+   - this rule applies primarily to live mode; paper must synthesize its own state because no real exchange truth exists there
 
 ---
 
@@ -126,15 +140,35 @@ This keeps current paper behavior unchanged unless explicitly enabled.
 3. Audit trail additions for original vs final execution snapshot
 4. Targeted tests for paper/live approval parity under matching prices
 5. Documentation updates
+6. Clear documentation that parity mode belongs to paper, while live remains the real execution adapter
 
 ### Out of scope for this phase
 
-1. Partial-fill simulation in paper
-2. Full live order lifecycle emulation in paper
-3. Slippage modeling beyond simple execution-price refresh
-4. Exchange-API behavior simulation beyond price refresh and revalidation
+1. Turning parity mode into a live runtime mode
+2. Partial-fill simulation in paper
+3. Full live order lifecycle emulation in paper
+4. Slippage modeling beyond simple execution-price refresh
+5. Exchange-API behavior simulation beyond price refresh and revalidation
 
-This phase is specifically about **decision parity at execution time**, not full market microstructure simulation.
+This phase is specifically about **decision parity at execution time**, not full market microstructure simulation or replacing live.
+
+Across the broader system, the standing rule should be:
+- **paper** may simulate because there is no exchange truth
+- **live** should defer to API truth whenever the exchange can tell us what really happened
+
+## Sequencing Note
+
+Parity work is now strong enough that the main near-term blocker is no longer "does parity mode exist?" but "is live operationally safe?"
+
+So the recommended sequence is:
+1. checkpoint and merge the current parity / Prediction Lab groundwork once the branch is clean and reviewable
+2. move next implementation energy into live lifecycle hardening
+3. come back after that pass to finish the remaining parity follow-ups, especially:
+   - canonical write-time execution/audit row enforcement
+   - stronger parity diff/report surfacing
+   - broader restart/recovery parity coverage
+
+That keeps parity as an explicit follow-on lane rather than losing it during live work.
 
 ---
 
@@ -163,7 +197,11 @@ Normalize and expose a `parity_mode` config block with the fields above.
 - possibly `bot/simulator.py`
 
 ### Change
-Before paper simulates execution, optionally perform a live-style revalidation pass:
+Before paper simulates execution, optionally perform a live-style revalidation pass.
+
+This is a paper-only behavior. Live continues to act as the real adapter and source of execution-time truth.
+
+For live mode specifically, exchange/API state should win over local inference whenever it is available. That means balances, open orders, partial fills, cancellations, resting status, and open positions should be derived from API truth rather than optimistic backend assumptions.
 
 1. Start from the original signal
 2. If parity mode is enabled:
@@ -280,6 +318,11 @@ Expose parity mode in status/reporting so it is obvious whether a paper run was:
 - live-parity revalidated
 - parity fallback used
 
+Reporting should reinforce the distinction between:
+- normal paper mode as a strategy/logic lab
+- parity mode as a paper execution-realism lab
+- live as the actual trading adapter
+
 ### Acceptance criteria
 - paper session/report clearly indicates parity mode state
 - confusion between logic-only and parity-mode runs is reduced
@@ -356,6 +399,7 @@ These are the likely reviewer questions:
 - paper-side optional execution revalidation
 - audit fields for original vs execution snapshot
 - tests
+- explicit documentation that parity mode is paper-only and exists to model market movement before going live
 
 ### Phase 2
 - cleaner normalized execution result schema
@@ -390,14 +434,16 @@ This spec is done when:
 5. Audit logs clearly show original vs revalidated decision state
 6. Matching inputs produce matching paper/live approval outcomes
 7. Tests cover enabled, disabled, fallback, and drift scenarios
+8. The docs clearly preserve the intended separation: normal paper tests logic, parity mode tests paper under live-style market movement, and live remains the real execution adapter
 
 ---
 
 ## Bottom Line
 
-This change should make paper more useful in two distinct ways:
+This change should make the system more useful in three distinct ways:
 
-- **Logic-first mode** for fast strategy iteration
-- **Parity mode** for pre-production validation against live-like execution-time conditions
+- **Logic-first paper mode** for fast strategy iteration
+- **Parity paper mode** for pre-production validation against live-like execution-time conditions and market movement
+- **Live trading** as the real adapter that acts on the API and carries trades through the real lifecycle
 
-That gives us the best of both worlds without forcing one workflow to serve every purpose.
+That gives us the best of both worlds without forcing one workflow to serve every purpose, and without confusing paper parity mode for live itself.

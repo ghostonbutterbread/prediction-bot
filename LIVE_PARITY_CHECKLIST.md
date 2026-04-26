@@ -1,6 +1,6 @@
 # Live Parity Checklist
 
-Purpose: make live trading a faithful, resilient implementation of the paper-tested logic.
+Purpose: make paper parity mode a faithful pre-live execution-realism lab, while keeping live trading as the real adapter and preserving normal paper mode as the simpler logic lab.
 
 ## Status Key
 - [x] Implemented / largely aligned
@@ -24,6 +24,16 @@ This is the strongest part of parity right now. Paper tuning is meaningful becau
 
 ---
 
+## Framing
+
+- Normal paper mode is the strategy and logic lab.
+- Parity mode is still paper, but revalidates against live-style execution-time market movement.
+- Live trading is the real adapter that interacts with the API and carries trades through the real lifecycle.
+
+The checklist below should be read through that lens: parity work primarily upgrades paper, while shared helpers and audit alignment exist to keep paper's revalidation semantics anchored to real live behavior.
+
+---
+
 ## 2. Signal Input Parity
 
 - [~] Paper evaluates signals from strategy snapshot in default mode
@@ -33,7 +43,7 @@ This is the strongest part of parity right now. Paper tuning is meaningful becau
 - [x] Paper parity mode stores both original signal snapshot and revalidated execution snapshot for apples-to-apples comparison
 
 ### Why this matters
-A trade can pass in paper on stale snapshot assumptions but fail live once the real book is checked.
+A trade can pass in normal paper on stale snapshot assumptions but fail once parity mode rechecks the real book shape. That is exactly the pre-live edge case parity mode is meant to surface.
 
 ---
 
@@ -59,21 +69,21 @@ Even with shared decision logic, different account-state construction can lead t
 - [ ] Add fixture tests comparing paper and live decisions under identical account/risk inputs
 
 ### Why this matters
-Right now differences may be intentional, but they still make parity harder to reason about.
+Right now differences may be intentional, but they still make paper parity results harder to reason about before going live.
 
 ---
 
 ## 5. Execution Parity
 
-- [~] Paper has a dedicated execution adapter
-- [~] Live has a dedicated execution adapter
+- [x] Paper has a dedicated execution adapter
+- [x] Live has a dedicated execution adapter
 - [x] Live revalidates before order placement
-- [~] Normalize execution result schema so paper and live emit the same fields where possible
-- [~] Record requested size, approved size, placed size, fill price, slippage estimate, and execution timestamp in the same shape
+- [~] Paper/live rows now share a meaningful overlap and can be normalized through `bot/parity_audit.py`, but the canonical write-side contract is still underspecified
+- [~] Requested/approved/placed/filled sizing fields are partially aligned, but not yet enforced as a single required row shape across both modes
 - [x] Both modes preserve decision reasoning alongside execution outcome
 
 ### Why this matters
-If trade records differ too much, analysis becomes harder and parity regressions hide in data formatting.
+The repo now has the beginnings of a shared report surface, but write-time row semantics still need cleanup so parity regressions show up as behavior differences rather than formatting drift.
 
 ---
 
@@ -122,13 +132,13 @@ A production bot needs trustworthy post-trade accounting, not just good entries.
 
 - [x] Paper has strong audit trail
 - [~] Live logs lifecycle and trade history, but not as richly as paper
-- [~] Live and paper now share execution snapshot normalization, but live still needs richer persisted audit snapshots
+- [~] Live and paper share execution snapshot normalization, but live still needs richer persisted audit snapshots and stricter row invariants
 - [ ] Add before/after snapshots for account state around order placement and reconciliation
-- [ ] Add structured reason codes for live execution failures/rejections
-- [ ] Add a parity report that compares paper-style expected fields vs live-recorded fields
+- [~] Structured reason codes exist in several paths, but they are not yet normalized into one canonical execution/audit schema
+- [~] A first parity report surface exists (`bot/parity_audit.py`, `scripts/parity_viewer.py`), but it still needs richer joins, diff summaries, and stronger missing-field handling
 
 ### Why this matters
-If live fails in weird ways, you need paper-grade visibility into why.
+If live fails in weird ways, you need paper-grade visibility into why — and that now means hardening the row contract and the parity report, not just adding one from scratch.
 
 ---
 
@@ -148,15 +158,15 @@ This is the difference between "works" and "production ready".
 
 ## 11. Testing Gaps
 
-- [~] Unit tests now cover shared execution snapshot alignment and a golden same-snapshot paper/live decision case
+- [~] Unit tests cover shared execution snapshot alignment, parity proofs, recovery parity, and parity audit normalization, but lifecycle/report assertions are still thin
 - [ ] Fixture tests for hidden-gem logic in both modes
 - [ ] Fixture tests for retrade/event-overlap logic in both modes
 - [ ] Fixture tests for partial-fill and order-status transitions
-- [ ] Fixture tests for restart/recovery flows
+- [ ] Fixture tests for restart/recovery flows under richer live order states
 - [ ] Golden-file comparison of trade-history rows from paper vs live for equivalent scenarios
 
 ### Why this matters
-Right now a lot of parity is inferred from code structure rather than proven by tests.
+A lot of core parity is now proven, but row-contract and lifecycle parity are still under-tested.
 
 ---
 
@@ -165,31 +175,34 @@ Right now a lot of parity is inferred from code structure rather than proven by 
 ### Highest priority
 - [x] Extract shared execution snapshot / price normalization logic and make live use it first
 - [x] Paper parity mode can simulate live revalidation with current bid/ask semantics
-- [ ] Unify execution/audit row schema across paper and live
+- [ ] Unify the execution/audit row schema across paper and live at write time
+- [ ] Harden the existing parity diff/report layer so it highlights schema gaps and behavior deltas clearly
 - [ ] Harden live order lifecycle handling: partials, rejects, cancels, stale orders
 - [ ] Unify settlement lifecycle states and accounting shape
-- [ ] Add restart/recovery parity tests
+- [~] Restart/recovery parity tests exist, but they still need broader live-lifecycle coverage
 
 ### Second priority
 - [ ] Create config-driven parity mode with identical risk settings
 - [ ] Add invariants and reconciliation alarms
-- [ ] Add richer live audit snapshots
+- [ ] Add richer live audit snapshots and account-state before/after captures
 
 ### Nice to have
 - [ ] Optional paper simulation of partial fills and slippage
-- [ ] Automated parity diff report after runs
+- [ ] Automated parity diff report after runs with artifact export / golden comparisons
 
 ---
 
 ## Bottom Line
 
 Current state:
-- Decision logic parity: **strong**
-- Execution parity: **improving, with Phase 1 snapshot parity now in place**
-- Lifecycle/accounting parity: **partial**
-- Production resilience in live: **needs hardening**
+- Normal paper mode: **good logic lab**
+- Parity paper mode: **becoming a strong execution-realism lab**
+- Live execution adapter: **real, but still needs operational hardening outside the parity lane**
 
 Recommended framing:
-- Paper is already a good decision lab
-- Live is not yet a full paper-equivalent operational twin
-- The main remaining work is around execution truth, reconciliation, lifecycle accounting, and restart safety
+- Normal paper tests logic and market selection
+- Parity mode tests whether paper decisions still hold once the market moves like live
+- Live remains the real adapter, with separate operational-hardening work still to do
+
+For a practical pre-live summary, first-live risk caps, and known production gaps, see:
+- `docs/LIVE_CANARY_READINESS.md`

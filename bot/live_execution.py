@@ -8,7 +8,13 @@ from typing import Any, Protocol
 
 from bot.exchanges.base import BaseExchange
 from bot.shared_core import TradeContext, TradeDecision, build_execution_snapshot
-from bot.trade_audit import trade_event_key
+from bot.trade_audit import (
+    apply_execution_audit_contract,
+    build_signal_snapshot,
+    canonical_execution_status,
+    infer_reserved_capital,
+    trade_event_key,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +33,7 @@ class LiveExecutionHost(Protocol):
     def _coerce_float(self, value, default: float = 0.0) -> float:
         ...
 
-    def _log_trade(self, signal: dict, order, decision, size: float, price: float):
+    def _log_trade(self, signal: dict, order, decision, size: float, price: float, audit_row: dict | None = None):
         ...
 
 
@@ -188,8 +194,12 @@ class RunnerLiveExecutionAdapter:
     def execute(self, signal: dict, decision: TradeDecision, exchange: BaseExchange) -> dict | None:
         from bot.shared_core import build_trade_decision
 
+        initial_decision = decision
+        initial_signal_snapshot = build_signal_snapshot(signal, direction=getattr(decision, "action", signal.get("direction", "BUY_YES")))
         market_id = signal["market_id"]
         side = "YES" if decision.action == "BUY_YES" else "NO"
+        exchange_name = signal.get("exchange", "unknown")
+        pre_trade_refresh = self.host.live_sync.refresh_before_execution(exchange_name, exchange)
 
         bid_ask = None
         try:
@@ -225,6 +235,7 @@ class RunnerLiveExecutionAdapter:
 
         strategy_cfg = self.host.config.get("strategy", {}) or {}
         live_context = self.build_trade_context(live_signal, exchange, self.host.config)
+        live_context.metadata["pre_trade_refresh"] = dict(pre_trade_refresh)
         live_decision = build_trade_decision(
             live_context,
             kelly_sizer=self.host.kelly,
@@ -235,6 +246,19 @@ class RunnerLiveExecutionAdapter:
         )
         if not live_decision.approved:
             logger.info(f"🛑 Live revalidation skipped: {live_decision.reason}")
+            self._append_rejected_trade_row(
+                signal=signal,
+                exchange=exchange,
+                decision=live_decision,
+                initial_decision=initial_decision,
+                initial_signal_snapshot=initial_signal_snapshot,
+                execution_snapshot=execution_snapshot,
+                status="rejected",
+                message=live_decision.reason,
+                failure_stage="revalidation",
+                execution_revalidated=True,
+                execution_revalidation_outcome="rejected",
+            )
             return None
 
         price = max(0.01, min(float(live_decision.entry_price or 0.0), 0.99))
@@ -242,51 +266,162 @@ class RunnerLiveExecutionAdapter:
 
         if size < 1:
             logger.info(f"Position too small after shared risk controls: ${size:.2f}")
+            self._append_rejected_trade_row(
+                signal=signal,
+                exchange=exchange,
+                decision=live_decision,
+                initial_decision=initial_decision,
+                initial_signal_snapshot=initial_signal_snapshot,
+                execution_snapshot=execution_snapshot,
+                status="rejected",
+                message="Position too small after shared risk controls",
+                failure_stage="sizing",
+                execution_revalidated=True,
+                execution_revalidation_outcome="approved",
+            )
             return None
 
         decision = live_decision
         order = exchange.place_order(market_id, side, price, size)
         if not order:
+            self._append_rejected_trade_row(
+                signal=signal,
+                exchange=exchange,
+                decision=decision,
+                initial_decision=initial_decision,
+                initial_signal_snapshot=initial_signal_snapshot,
+                execution_snapshot=execution_snapshot,
+                status="failed",
+                message="Exchange did not return an order",
+                failure_stage="placement",
+                execution_revalidated=True,
+                execution_revalidation_outcome="approved",
+            )
             return None
 
         from bot.runner import LivePosition
 
         order_id = order.id if hasattr(order, "id") else str(order)
-        self.host.open_positions.append(
-            LivePosition(
-                market_id=market_id,
-                question=signal.get("question", ""),
-                direction=decision.action,
-                price=price,
-                size=size,
-                order_id=order_id,
-                created_at=datetime.now(timezone.utc).isoformat(),
-                event_key=trade_event_key(signal),
+        order_status = canonical_execution_status(
+            getattr(order, "status", None),
+            filled_size=getattr(order, "filled_size", None),
+            placed_size=size,
+            remaining_size=getattr(order, "remaining_size", None),
+        )
+        filled_size = self.host._coerce_float(getattr(order, "filled_size", None), default=None)
+        remaining_size = self.host._coerce_float(getattr(order, "remaining_size", None), default=None)
+        if filled_size is None and remaining_size is None:
+            filled_size = 0.0
+            remaining_size = size
+        elif filled_size is None:
+            filled_size = max(0.0, size - float(remaining_size or 0.0))
+        elif remaining_size is None:
+            remaining_size = max(0.0, size - float(filled_size or 0.0))
+        filled_size = max(0.0, min(float(filled_size or 0.0), size))
+        remaining_size = max(0.0, min(float(remaining_size or 0.0), size))
+        if filled_size + remaining_size > size:
+            overflow = filled_size + remaining_size - size
+            remaining_size = max(0.0, remaining_size - overflow)
+        if order_status == "filled":
+            filled_size = size
+            remaining_size = 0.0
+        elif order_status == "partial":
+            if filled_size <= 0.0:
+                filled_size = max(0.0, size - remaining_size)
+            if remaining_size <= 0.0:
+                remaining_size = max(0.0, size - filled_size)
+        elif order_status == "placed":
+            filled_size = 0.0
+            remaining_size = size
+
+        timestamp = datetime.now(timezone.utc).isoformat()
+        if filled_size > 0:
+            self.host.open_positions.append(
+                LivePosition(
+                    market_id=market_id,
+                    question=signal.get("question", ""),
+                    direction=decision.action,
+                    price=price,
+                    size=filled_size,
+                    order_id=order_id,
+                    created_at=timestamp,
+                    event_key=trade_event_key(signal),
+                )
             )
-        )
-        self.host.trade_history.append(
-            {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "market_id": market_id,
-                "question": signal.get("question", ""),
-                "direction": decision.action,
-                "size": size,
-                "price": price,
-                "resolved": False,
-                "order_id": order_id,
-                "decision_reason": decision.reason,
-                "event_key": trade_event_key(signal),
-                "decision_trace": dict(getattr(decision, "reasoning", {}) or {}),
-            }
-        )
+        if remaining_size > 0:
+            self.host.open_orders.append(
+                {
+                    "order_id": order_id,
+                    "exchange": exchange_name,
+                    "market_id": market_id,
+                    "question": signal.get("question", ""),
+                    "direction": decision.action,
+                    "status": getattr(order, "status", None) or ("partial" if filled_size > 0 else "open"),
+                    "requested_size": float(decision.requested_position_size or size),
+                    "filled_size": filled_size,
+                    "remaining_size": remaining_size,
+                    "price": price,
+                    "created_at": timestamp,
+                    "event_key": trade_event_key(signal),
+                }
+            )
+        decision_trace = dict(getattr(decision, "reasoning", {}) or {})
+        parity_mode = dict((decision_trace or {}).get("parity_mode", {}) or {})
         refresh = self.host.live_sync.refresh_after_execution(exchange)
+        refresh["pre_trade_refresh"] = dict(pre_trade_refresh)
+        available_cash_after_entry = refresh.get("available_cash", 0.0)
+        executed_row = {
+            "timestamp": timestamp,
+            "trade_id": order_id,
+            "market_id": market_id,
+            "question": signal.get("question", ""),
+            "direction": decision.action,
+            "size": size,
+            "price": price,
+            "resolved": False,
+            "order_id": order_id,
+            "status": order_status,
+            "failure_stage": None,
+            "decision_reason": decision.reason,
+            "decision_reason_code": decision.reason_code,
+            "requested_size": decision.requested_position_size,
+            "approved_size": decision.position_size,
+            "placed_size": size,
+            "filled_size": filled_size,
+            "remaining_size": remaining_size,
+            "market_price": execution_snapshot.get("market_price"),
+            "entry_price": price,
+            "fill_price": price if filled_size > 0 else None,
+            "exchange": exchange_name,
+            "model_probability": round(float(decision.win_probability or 0.0), 4),
+            "edge": signal.get("edge", 0),
+            "confidence": signal.get("confidence", 0),
+            "signals": signal.get("signals", {}),
+            "decision_trace": decision_trace,
+            "parity_mode_enabled": bool(parity_mode.get("enabled", False)),
+            "execution_revalidated": True,
+            "execution_revalidation_outcome": "approved",
+            "original_signal_snapshot": parity_mode.get("original_signal_snapshot") or initial_signal_snapshot,
+            "execution_snapshot": parity_mode.get("execution_snapshot") or execution_snapshot,
+            "original_decision_reason_code": parity_mode.get("original_decision_reason_code") or getattr(initial_decision, "reason_code", None),
+            "execution_decision_reason_code": parity_mode.get("execution_decision_reason_code") or getattr(decision, "reason_code", None),
+            "execution_snapshot_source": parity_mode.get("execution_snapshot_source") or execution_snapshot.get("source"),
+            "estimated_fill_price": ((decision_trace or {}).get("retrade", {}) or {}).get("estimated_fill_price") or execution_snapshot.get("estimated_fill_price"),
+            "slippage_estimate": ((decision_trace or {}).get("retrade", {}) or {}).get("slippage_estimate"),
+            "reserved_capital": infer_reserved_capital(order_status, filled_size=filled_size, remaining_size=remaining_size),
+            "available_cash_before": max(0.0, available_cash_after_entry + infer_reserved_capital(order_status, filled_size=filled_size, remaining_size=remaining_size)),
+            "available_cash_after_entry": available_cash_after_entry,
+            "event_key": trade_event_key(signal),
+        }
+        canonical_row = apply_execution_audit_contract(executed_row)
+        self.host.trade_history.append(canonical_row)
 
         logger.info(
-            f"✅ Trade executed: {side} ${size:.2f} @ ${price:.4f} on {signal['exchange']}/{market_id}"
+            f"✅ Trade executed: {side} ${size:.2f} @ ${price:.4f} on {exchange_name}/{market_id}"
         )
-        self.host._log_trade(signal, order, decision, size, price)
+        self.host._log_trade(signal, order, decision, size, price, audit_row=canonical_row)
         balance_after = self.host._coerce_float(getattr(exchange, "get_balance", lambda: 0.0)(), default=0.0)
-        reserved_capital = sum(position.size for position in self.host.open_positions)
+        reserved_capital = sum(position.size for position in self.host.open_positions) + sum(float(order.get("remaining_size", 0.0) or 0.0) for order in self.host.open_orders)
         self.host._log_lifecycle_event(
             "trade_placed",
             {
@@ -303,6 +438,80 @@ class RunnerLiveExecutionAdapter:
                 "reserved_capital": reserved_capital,
                 "available_cash": max(0.0, balance_after - reserved_capital),
                 "tradable_cap": getattr(self.host.risk, "max_tradable_balance", None),
+                "pre_trade_refresh": pre_trade_refresh,
             },
         )
         return {"order": order, "signal": signal, "decision": decision, "refresh": refresh}
+
+    def _append_rejected_trade_row(
+        self,
+        *,
+        signal: dict,
+        exchange: BaseExchange,
+        decision: TradeDecision,
+        initial_decision: TradeDecision | None,
+        initial_signal_snapshot: dict[str, Any] | None,
+        execution_snapshot: dict[str, Any] | None,
+        status: str,
+        message: str,
+        failure_stage: str,
+        execution_revalidated: bool,
+        execution_revalidation_outcome: str | None,
+    ) -> None:
+        decision_trace = dict(getattr(decision, "reasoning", {}) or {})
+        parity_mode = dict((decision_trace or {}).get("parity_mode", {}) or {})
+        balance = self.host._coerce_float(getattr(exchange, "get_balance", lambda: 0.0)(), default=0.0)
+        reserved_capital = sum(position.size for position in self.host.open_positions)
+        pending_capital = sum(float(order.get("remaining_size", 0.0) or 0.0) for order in self.host.open_orders)
+        available_cash = max(0.0, balance - reserved_capital - pending_capital)
+        timestamp = datetime.now(timezone.utc).isoformat()
+        requested_size = float(getattr(decision, "requested_position_size", 0.0) or 0.0)
+        fallback_trade_id = f"live-{failure_stage}:{signal.get('market_id', 'unknown')}:{timestamp}"
+        rejected_row = {
+            "timestamp": timestamp,
+            "trade_id": fallback_trade_id,
+            "market_id": signal.get("market_id", ""),
+            "question": signal.get("question", ""),
+            "direction": getattr(decision, "action", signal.get("direction", "BUY_YES")),
+            "size": 0.0,
+            "price": execution_snapshot.get("market_price") if execution_snapshot else signal.get("market_price"),
+            "resolved": False,
+            "order_id": None,
+            "status": status,
+            "lifecycle_state": f"{failure_stage}_rejected",
+            "failure_stage": failure_stage,
+            "decision_reason": getattr(decision, "reason", message),
+            "decision_reason_code": getattr(decision, "reason_code", "unknown"),
+            "requested_size": requested_size,
+            "approved_size": float(getattr(decision, "position_size", 0.0) or 0.0),
+            "placed_size": 0.0,
+            "filled_size": 0.0,
+            "remaining_size": 0.0,
+            "market_price": execution_snapshot.get("market_price") if execution_snapshot else signal.get("market_price"),
+            "entry_price": execution_snapshot.get("market_price") if execution_snapshot else signal.get("market_price"),
+            "fill_price": None,
+            "exchange": signal.get("exchange", "unknown"),
+            "model_probability": round(float(getattr(decision, "win_probability", 0.0) or 0.0), 4),
+            "edge": signal.get("edge", 0),
+            "confidence": signal.get("confidence", 0),
+            "signals": signal.get("signals", {}),
+            "decision_trace": decision_trace,
+            "parity_mode_enabled": bool(parity_mode.get("enabled", False)),
+            "execution_revalidated": execution_revalidated,
+            "execution_revalidation_outcome": execution_revalidation_outcome,
+            "original_signal_snapshot": parity_mode.get("original_signal_snapshot") or initial_signal_snapshot,
+            "execution_snapshot": parity_mode.get("execution_snapshot") or execution_snapshot,
+            "original_decision_reason_code": parity_mode.get("original_decision_reason_code") or getattr(initial_decision, "reason_code", None),
+            "execution_decision_reason_code": parity_mode.get("execution_decision_reason_code") or (getattr(decision, "reason_code", None) if execution_revalidated else None),
+            "execution_snapshot_source": parity_mode.get("execution_snapshot_source") or ((execution_snapshot or {}).get("source") if execution_snapshot else None),
+            "estimated_fill_price": ((decision_trace or {}).get("retrade", {}) or {}).get("estimated_fill_price") or ((execution_snapshot or {}).get("estimated_fill_price") if execution_snapshot else None),
+            "slippage_estimate": ((decision_trace or {}).get("retrade", {}) or {}).get("slippage_estimate"),
+            "reserved_capital": 0.0,
+            "available_cash_before": available_cash,
+            "available_cash_after_entry": available_cash,
+            "event_key": trade_event_key(signal),
+            "message": message,
+        }
+        canonical_row = apply_execution_audit_contract(rejected_row)
+        self.host.trade_history.append(canonical_row)
+        self.host._log_trade(signal, None, decision, 0.0, canonical_row.get("entry_price") or canonical_row.get("market_price") or 0.0, audit_row=canonical_row)

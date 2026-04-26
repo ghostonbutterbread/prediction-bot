@@ -311,6 +311,16 @@ def _runtime_mode(config: dict) -> str:
     return "live" if mode == "live" else "paper"
 
 
+def ensure_mode_storage_dir(path: str | Path, mode: str) -> Path:
+    base = Path(path)
+    normalized_mode = "live" if str(mode or "").strip().lower() == "live" else "paper"
+    if base.name == normalized_mode:
+        return base
+    if base.name in {"paper", "live"}:
+        return base.parent / normalized_mode
+    return base / normalized_mode
+
+
 def _apply_runtime_paths(config: dict) -> dict:
     config = deepcopy(config)
     mode = _runtime_mode(config)

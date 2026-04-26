@@ -63,6 +63,93 @@ class SharedCoreDecisionTests(unittest.TestCase):
             available_cash=25.0,
         )
 
+    def test_build_trade_decision_allows_current_hidden_gem_below_fifty_percent(self):
+        account_state = AccountState(
+            starting_balance=100.0,
+            current_balance=100.0,
+            available_cash=25.0,
+            reserved_capital=0.0,
+            total_exposure=0.0,
+            open_positions=0,
+        )
+        context = TradeContext(
+            exchange="kalshi",
+            market_id="hidden-gem-1",
+            question="Will cheap market settle YES?",
+            direction="BUY_YES",
+            market_price=0.03,
+            yes_price=0.03,
+            no_price=0.97,
+            model_probability=0.12,
+            edge=0.09,
+            confidence=0.9,
+            account_state=account_state,
+            source_context={"question": "Will cheap market settle YES?"},
+        )
+        kelly_sizer = Mock()
+        kelly_sizer.calculate.return_value = 2.0
+        risk_policy = Mock()
+        risk_policy.check_trade.return_value = SimpleNamespace(
+            approved=True,
+            reason="Approved",
+            adjusted_size=2.0,
+            risk_score=0.1,
+            warnings=[],
+        )
+
+        decision = build_trade_decision(
+            context,
+            kelly_sizer=kelly_sizer,
+            risk_policy=risk_policy,
+            min_edge=0.05,
+            min_confidence=0.5,
+            max_entry_price=0.7,
+        )
+
+        self.assertTrue(decision.approved)
+        self.assertEqual(decision.reason_code, "approved")
+        self.assertTrue(decision.reasoning["hidden_gem"]["triggered"])
+
+    def test_build_trade_decision_rejects_non_hidden_gem_at_or_below_fifty_percent(self):
+        account_state = AccountState(
+            starting_balance=100.0,
+            current_balance=100.0,
+            available_cash=25.0,
+            reserved_capital=0.0,
+            total_exposure=0.0,
+            open_positions=0,
+        )
+        context = TradeContext(
+            exchange="kalshi",
+            market_id="market-1",
+            question="Will regular market settle YES?",
+            direction="BUY_YES",
+            market_price=0.22,
+            yes_price=0.22,
+            no_price=0.78,
+            model_probability=0.50,
+            edge=0.28,
+            confidence=0.9,
+            account_state=account_state,
+            source_context={"question": "Will regular market settle YES?"},
+        )
+        kelly_sizer = Mock()
+        risk_policy = Mock()
+
+        decision = build_trade_decision(
+            context,
+            kelly_sizer=kelly_sizer,
+            risk_policy=risk_policy,
+            min_edge=0.05,
+            min_confidence=0.5,
+            max_entry_price=0.7,
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertEqual(decision.reason_code, "win_probability_below_non_hidden_gem_floor")
+        kelly_sizer.calculate.assert_not_called()
+        risk_policy.check_trade.assert_not_called()
+
     def test_build_trade_decision_rejects_duplicate_same_event_market(self):
         account_state = AccountState(
             starting_balance=100.0,
