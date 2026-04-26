@@ -77,6 +77,9 @@ def canonical_execution_status(
     if normalized:
         aliases = {
             "open": "placed",
+            "accepted": "placed",
+            "submitted": "placed",
+            "resting": "placed",
             "partial_fill": "partial",
             "partially_filled": "partial",
             "partially-filled": "partial",
