@@ -469,12 +469,84 @@ class SimulatorSessionTests(unittest.TestCase):
 
             self.assertIsNotNone(trade)
             self.assertEqual(trade.integrity_status, "execution_rejected")
+            self.assertEqual(trade.status, "rejected")
+            self.assertEqual(trade.lifecycle_state, "revalidation_rejected")
+            self.assertEqual(trade.failure_stage, "revalidation")
+            self.assertEqual(trade.requested_size, 0.0)
+            self.assertEqual(trade.approved_size, 0.0)
+            self.assertEqual(trade.placed_size, 0.0)
+            self.assertEqual(trade.filled_size, 0.0)
+            self.assertEqual(trade.entry_price, 0.75)
             parity = trade.decision_trace.get("parity_mode", {})
             self.assertTrue(parity.get("enabled"))
             self.assertEqual(parity.get("execution_revalidation_outcome"), "rejected")
             self.assertEqual(parity.get("execution_snapshot_source"), "book")
             self.assertEqual(parity.get("original_decision_reason_code"), "approved")
             self.assertEqual(parity.get("execution_decision_reason_code"), "entry_price_above_cap")
+            self.assertTrue(trade.parity_mode_enabled)
+            self.assertTrue(trade.execution_revalidated)
+            self.assertEqual(trade.execution_revalidation_outcome, "rejected")
+            self.assertEqual(trade.execution_snapshot_source, "book")
+            self.assertEqual(trade.original_decision_reason_code, "approved")
+            self.assertEqual(trade.execution_decision_reason_code, "entry_price_above_cap")
+
+    def test_paper_session_save_promotes_parity_fields_into_canonical_row(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = Simulator(
+                {
+                    "data_dir": tmpdir,
+                    "enable_social": False,
+                    "parity_mode": {
+                        "enabled": True,
+                        "record_revalidation_snapshot": True,
+                        "require_book_prices": False,
+                        "fallback_to_signal_prices": True,
+                    },
+                    "strategy": {
+                        "enable_news": False,
+                        "enable_social": False,
+                        "enable_ai": False,
+                    },
+                    "max_entry_price": 0.70,
+                }
+            )
+            sim.available_cash = 25.0
+            sim.reserved_capital = 75.0
+            sim.risk.state.available_cash = 25.0
+            sim.risk.state.reserved_capital = 75.0
+
+            signal = {
+                "market_id": "test-parity-save",
+                "question": "Will saved paper rows keep parity fields?",
+                "exchange": "kalshi",
+                "direction": "BUY_YES",
+                "market_price": 0.40,
+                "yes_price": 0.40,
+                "no_price": 0.60,
+                "best_yes_ask": 0.41,
+                "best_no_ask": 0.59,
+                "model_probability": 0.90,
+                "edge": 0.30,
+                "confidence": 0.9,
+                "signals": {},
+            }
+
+            with patch.object(sim.kelly, "calculate", return_value=5.0):
+                trade = sim._create_trade(signal)
+
+            self.assertIsNotNone(trade)
+            sim.trades.append(trade)
+            session_path = sim.session_store.save_session()
+            payload = json.loads(Path(session_path).read_text())
+            row = payload["trades"][0]
+            self.assertEqual(row["schema_name"], "execution_audit_row")
+            self.assertEqual(row["schema_version"], 1)
+            self.assertTrue(row["parity_mode_enabled"])
+            self.assertTrue(row["execution_revalidated"])
+            self.assertEqual(row["execution_snapshot_source"], "book")
+            self.assertIsNotNone(row["execution_snapshot"])
+            self.assertEqual(row["trade_id"], trade.id)
+            self.assertEqual(row["lifecycle_state"], "filled_open")
 
     def test_create_trade_parity_off_preserves_logic_only_flow(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -621,6 +693,83 @@ class SimulatorSessionTests(unittest.TestCase):
         self.assertEqual(paper_decision.approved, live_decision.approved)
         self.assertEqual(paper_decision.reason_code, live_decision.reason_code)
         self.assertEqual(paper_decision.entry_price, live_decision.entry_price)
+
+    def test_report_includes_parity_status_counts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = Simulator(
+                {
+                    "data_dir": tmpdir,
+                    "enable_social": False,
+                    "parity_mode": {
+                        "enabled": True,
+                        "record_revalidation_snapshot": True,
+                        "require_book_prices": False,
+                        "fallback_to_signal_prices": True,
+                    },
+                    "strategy": {
+                        "enable_news": False,
+                        "enable_social": False,
+                        "enable_ai": False,
+                    },
+                    "max_entry_price": 0.70,
+                }
+            )
+            sim.available_cash = 25.0
+            sim.reserved_capital = 75.0
+            sim.risk.state.available_cash = 25.0
+            sim.risk.state.reserved_capital = 75.0
+
+            approved_signal = {
+                "market_id": "test-parity-report-approved",
+                "question": "Will approved parity trade pass?",
+                "exchange": "kalshi",
+                "direction": "BUY_YES",
+                "market_price": 0.04,
+                "yes_price": 0.04,
+                "no_price": 0.96,
+                "best_yes_ask": 0.04,
+                "best_no_ask": 0.96,
+                "model_probability": 0.20,
+                "edge": 0.16,
+                "confidence": 0.9,
+                "signals": {},
+            }
+            rejected_signal = {
+                "market_id": "test-parity-report-rejected",
+                "question": "Will rejected parity trade fail?",
+                "exchange": "kalshi",
+                "direction": "BUY_YES",
+                "market_price": 0.40,
+                "yes_price": 0.40,
+                "no_price": 0.60,
+                "best_yes_ask": 0.75,
+                "best_no_ask": 0.25,
+                "model_probability": 0.90,
+                "edge": 0.30,
+                "confidence": 0.9,
+                "signals": {},
+            }
+
+            with patch.object(sim.kelly, "calculate", return_value=5.0):
+                approved_trade = sim._create_trade(approved_signal)
+                rejected_trade = sim._create_trade(rejected_signal)
+                sim.trades.extend([approved_trade, rejected_trade])
+
+            report = sim.report()
+            self.assertTrue(report["parity_mode_enabled"])
+            self.assertEqual(report["parity_revalidated_trades"], 2)
+            self.assertEqual(report["parity_rejected_trades"], 1)
+            self.assertEqual(report["parity_fallback_trades"], 0)
+            self.assertIn("parity_summary", report)
+            self.assertTrue(report["parity_summary"]["parity_mode_enabled"])
+            self.assertEqual(report["parity_summary"]["parity_revalidated_trades"], 2)
+            self.assertEqual(report["parity_summary"]["parity_rejected_trades"], 1)
+            self.assertEqual(report["parity_summary"]["snapshot_source_counts"]["book"], 2)
+            self.assertEqual(report["parity_summary"]["lifecycle_state_counts"]["filled_open"], 1)
+            self.assertEqual(report["parity_summary"]["lifecycle_state_counts"]["revalidation_rejected"], 1)
+            self.assertEqual(report["parity_summary"]["invalid_contract_rows"], 0)
+            self.assertEqual(report["parity_summary"]["top_contract_issues"], [])
+            self.assertEqual(report["parity_summary"]["top_execution_reason_codes"][0][0], "approved")
 
     def test_create_trade_parity_mode_can_reject_missing_book_when_required(self):
         with tempfile.TemporaryDirectory() as tmpdir:

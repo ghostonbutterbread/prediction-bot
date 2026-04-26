@@ -84,6 +84,52 @@ class LiveAdaptersTests(unittest.TestCase):
             self.assertEqual(snapshot.available_cash, 10.0)
             self.assertEqual(snapshot.partial_fills, 1)
 
+    def test_reconciliation_keeps_closed_order_outcomes_in_history_but_not_open_orders(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = self._make_bot(tmpdir)
+            adapter = RunnerLiveReconciliationAdapter(bot)
+            exchange = FakeExchange(
+                orders=[
+                    RestingOrder(
+                        order_id="ord-cancel-partial",
+                        market_id="M3",
+                        exchange="kalshi",
+                        side="YES",
+                        requested_size=4.0,
+                        filled_size=1.5,
+                        remaining_size=0.0,
+                        price=0.45,
+                        status="cancelled",
+                        created_at=datetime(2026, 4, 20, 18, 3, tzinfo=timezone.utc),
+                    ),
+                    RestingOrder(
+                        order_id="ord-expired",
+                        market_id="M4",
+                        exchange="kalshi",
+                        side="NO",
+                        requested_size=2.0,
+                        filled_size=0.0,
+                        remaining_size=0.0,
+                        price=0.58,
+                        status="expired",
+                        created_at=datetime(2026, 4, 20, 18, 4, tzinfo=timezone.utc),
+                    )
+                ],
+                balance=25.0,
+            )
+
+            snapshot = adapter.reconcile("kalshi", exchange)
+            self.assertEqual(snapshot.open_orders, [])
+            self.assertEqual(snapshot.reserved_capital, 0.0)
+            self.assertEqual(snapshot.available_cash, 25.0)
+
+            partial_cancel = next(row for row in snapshot.trade_history_rows if row["trade_id"] == "ord-cancel-partial")
+            expired = next(row for row in snapshot.trade_history_rows if row["trade_id"] == "ord-expired")
+            self.assertEqual(partial_cancel["status"], "canceled")
+            self.assertEqual(partial_cancel["lifecycle_state"], "canceled_partial")
+            self.assertEqual(expired["status"], "stale")
+            self.assertEqual(expired["lifecycle_state"], "stale_open_order")
+
     def test_state_adapter_exposes_positions_and_orders(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             bot = self._make_bot(tmpdir)
@@ -157,7 +203,8 @@ class LiveAdaptersTests(unittest.TestCase):
 
             events = adapter.settle("kalshi", exchange, open_positions)
             self.assertEqual(len(events), 1)
-            self.assertEqual(events[0].outcome, "won")
+            self.assertEqual(events[0].outcome, "YES")
+            self.assertEqual(events[0].metadata["resolution_result"], "won")
             self.assertEqual(events[0].pnl, 1.2)
 
 

@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from bot.config import load_config
+from bot.config import ensure_mode_storage_dir, load_config
 from bot.exchanges.base import BaseExchange
 from bot.live_adapters import RunnerLiveReconciliationAdapter, RunnerLiveStateAdapter
 from bot.live_execution import RunnerLiveExecutionAdapter
@@ -19,7 +19,9 @@ from bot.notifications import build_notification, normalize_verbosity
 from bot.risk import RiskManager
 from bot.telegram_notifier import TelegramNotifier
 from bot.shared_core import AccountState, TradeContext, build_trade_decision
+from bot.parity_audit import normalize_parity_trade_row, summarize_normalized_rows
 from bot.status import build_snapshot, summarize_log_storage
+from bot.trade_audit import apply_execution_audit_contract, build_risk_block_audit_row, build_scan_candidate_summary
 from bot.strategies.enhanced import EnhancedStrategyEngine, KellySizer
 
 logger = logging.getLogger(__name__)
@@ -87,7 +89,8 @@ class PredictionBot:
         self.verbosity_level = normalize_verbosity((config.get("verbosity", {}) or {}).get("level", "normal"))
         self.telegram_notifier = TelegramNotifier(self.alerts)
 
-        self.log_dir = Path(config.get("log_dir", "data"))
+        runtime_mode = str(self.config.get("trading", {}).get("mode", "paper"))
+        self.log_dir = ensure_mode_storage_dir(config.get("log_dir", "data"), runtime_mode)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         if self._config_path and self._config_path.exists():
             self._config_last_mtime = self._config_path.stat().st_mtime
@@ -303,6 +306,9 @@ class PredictionBot:
         balance_value = self._coerce_float(status.get("balance"), default=self.risk.state.current_balance)
         pnl_text = status.get("pnl", "$0.00 (+0.0%)")
         pnl_value, pnl_pct = self._parse_pnl_fields(pnl_text)
+        normalized_trade_summary = summarize_normalized_rows([
+            normalize_parity_trade_row(trade, source="live") for trade in self.trade_history
+        ])
         extra = {
             "source": self.config.get("trading", {}).get("mode", "paper"),
             "blocked_last_scan": sum(self.last_block_reasons.values()),
@@ -312,6 +318,21 @@ class PredictionBot:
             "runner_errors": self.lifecycle_counters.get("errors", 0),
             "filled_event_exposure": round(sum(getattr(position, "size", 0.0) for position in self.open_positions), 2),
             "pending_event_exposure": round(sum(float(order.get("remaining_size", 0.0) or 0.0) for order in self.open_orders), 2),
+            "normalized_trade_summary": normalized_trade_summary,
+            "parity_summary": {
+                "parity_mode_enabled": bool((self.config.get("parity_mode", {}) or {}).get("enabled", False)),
+                "parity_candidates": normalized_trade_summary.get("parity_candidates", 0),
+                "parity_enabled_rows": normalized_trade_summary.get("parity_enabled_rows", 0),
+                "execution_revalidated_rows": normalized_trade_summary.get("execution_revalidated_rows", 0),
+                "execution_rejected_rows": normalized_trade_summary.get("execution_rejected_rows", 0),
+                "fallback_rows": normalized_trade_summary.get("fallback_rows", 0),
+                "missing_snapshot_rows": normalized_trade_summary.get("missing_snapshot_rows", 0),
+                "snapshot_source_counts": normalized_trade_summary.get("snapshot_source_counts", {}),
+                "lifecycle_state_counts": normalized_trade_summary.get("lifecycle_state_counts", {}),
+                "invalid_contract_rows": normalized_trade_summary.get("invalid_contract_rows", 0),
+                "top_contract_issues": normalized_trade_summary.get("top_contract_issues", []),
+                "top_execution_reason_codes": normalized_trade_summary.get("top_execution_reason_codes", []),
+            },
         }
         if self.last_block_reasons:
             extra["top_blockers"] = ", ".join(
@@ -386,11 +407,17 @@ class PredictionBot:
                     event = next((evt for evt in resolution_events if evt.position_id == trade.get("order_id")), None)
                     if event is None:
                         continue
+                    trade["status"] = "resolved"
+                    trade["lifecycle_state"] = "resolved_position"
                     trade["resolved"] = True
                     trade["resolved_at"] = event.resolved_at
                     trade["pnl"] = event.pnl
                     trade["settlement_value"] = event.settlement_value
+                    trade["outcome"] = event.outcome
                     trade["resolution_outcome"] = event.outcome
+                    if isinstance(event.metadata, dict) and event.metadata.get("resolution_result"):
+                        trade["resolution_result"] = event.metadata.get("resolution_result")
+                    apply_execution_audit_contract(trade)
                     self.risk.record_trade_result(trade.get("order_id"), event.pnl or 0.0)
             total_pnl = sum(float(event.pnl or 0.0) for event in resolution_events)
             self._log_lifecycle_event(
@@ -405,25 +432,32 @@ class PredictionBot:
             )
 
     def _log_scan(self, signals: list, trades: int, blocked_reasons: dict[str, int]):
+        timestamp = datetime.now(timezone.utc).isoformat()
         log_file = self.log_dir / f"scans_{datetime.now().strftime('%Y-%m-%d')}.jsonl"
         market_groups: dict[str, int] = {}
         for signal in signals:
             group = str(signal.get("market_group") or "unknown")
             market_groups[group] = market_groups.get(group, 0) + 1
+        candidate_summaries = [
+            build_scan_candidate_summary(signal, timestamp=timestamp, rank=index)
+            for index, signal in enumerate(signals[:3], start=1)
+        ]
         with open(log_file, "a") as f:
             f.write(json.dumps({
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": timestamp,
                 "signals": len(signals),
                 "trades": trades,
                 "blocked_reasons": blocked_reasons,
                 "market_groups": market_groups,
                 "top_signals": signals[:3],
+                "candidate_summaries": candidate_summaries,
             }) + "\n")
 
-    def _log_trade(self, signal: dict, order, decision, size: float, price: float):
+    def _log_trade(self, signal: dict, order, decision, size: float, price: float, audit_row: dict | None = None):
         log_file = self.log_dir / "trades.jsonl"
-        with open(log_file, "a") as f:
-            f.write(json.dumps({
+        payload = audit_row
+        if payload is None:
+            payload = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "signal": signal,
                 "decision": {
@@ -435,20 +469,21 @@ class PredictionBot:
                 "order_id": order.id if hasattr(order, 'id') else str(order),
                 "fill_price": price,
                 "size": size,
-            }) + "\n")
+            }
+        else:
+            payload = apply_execution_audit_contract(dict(payload))
+        with open(log_file, "a") as f:
+            f.write(json.dumps(payload) + "\n")
 
     def _log_risk_block_event(self, signal: dict, result: dict):
         decision = result.get("decision")
-        payload = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "market_id": signal.get("market_id", ""),
-            "question": signal.get("question", ""),
-            "exchange": signal.get("exchange", ""),
-            "direction": signal.get("direction", ""),
-            "blocked_reason": result.get("blocked_reason", "unknown"),
-            "decision_reason": getattr(decision, "reason", ""),
-            "decision_reason_code": getattr(decision, "reason_code", ""),
-        }
+        payload = build_risk_block_audit_row(
+            signal,
+            decision=decision,
+            blocked_reason=result.get("blocked_reason", "unknown"),
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            available_cash=self.risk.state.available_cash,
+        )
         log_file = self.log_dir / "risk_blocks.jsonl"
         with open(log_file, "a") as f:
             f.write(json.dumps(payload) + "\n")
@@ -515,6 +550,8 @@ class PredictionBot:
         self.telegram_notifier = TelegramNotifier(self.alerts)
 
         current_mode = str(self.config.get("trading", {}).get("mode", previous_mode)).lower()
+        self.log_dir = ensure_mode_storage_dir(self.config.get("log_dir", self.log_dir), current_mode)
+        self.log_dir.mkdir(parents=True, exist_ok=True)
         current_enabled = bool(
             self.config.get("trading", {}).get(
                 "enabled",

@@ -37,6 +37,7 @@ DEFAULT_RETRADE_POLICY = {
 HIDDEN_GEM_ENTRY_PRICE_CAP = 0.05
 HIDDEN_GEM_MIN_EDGE = 0.05
 HIDDEN_GEM_MIN_PROBABILITY_MULTIPLE = 3.0
+NON_HIDDEN_GEM_MIN_WIN_PROBABILITY = 0.50
 
 
 def build_trade_decision(
@@ -189,6 +190,22 @@ def build_trade_decision(
             )
     else:
         reasoning["hidden_gem"] = {"triggered": False}
+        reasoning["thresholds"]["non_hidden_gem_min_win_probability"] = NON_HIDDEN_GEM_MIN_WIN_PROBABILITY
+        if win_probability <= NON_HIDDEN_GEM_MIN_WIN_PROBABILITY:
+            return TradeDecision(
+                action="SKIP",
+                approved=False,
+                reason_code="win_probability_below_non_hidden_gem_floor",
+                reason=(
+                    f"Win probability {win_probability:.4f} must be above "
+                    f"{NON_HIDDEN_GEM_MIN_WIN_PROBABILITY:.4f} unless hidden-gem criteria are met"
+                ),
+                edge=edge,
+                confidence=confidence,
+                entry_price=entry_price,
+                win_probability=win_probability,
+                reasoning=reasoning,
+            )
 
     duplicate_reason = _event_blocker_reason(event_snapshot, retrade_policy)
     if duplicate_reason is not None:
