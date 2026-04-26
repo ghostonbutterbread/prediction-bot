@@ -12,11 +12,12 @@ from bot.runner import LivePosition, PredictionBot
 
 
 class FakeExchange:
-    def __init__(self, *, balance=25.0, positions=None, resting_orders=None):
+    def __init__(self, *, balance=25.0, positions=None, resting_orders=None, order_status="open"):
         self.orders = []
         self.balance = balance
         self.positions = positions or []
         self.resting_orders = resting_orders or []
+        self.order_status = order_status
 
     def get_balance(self):
         return self.balance
@@ -31,9 +32,10 @@ class FakeExchange:
         return {"best_yes_ask": 0.40, "best_no_ask": 0.60, "best_yes_bid": 0.39, "best_no_bid": 0.59}
 
     def place_order(self, market_id, side, price, size):
-        order = SimpleNamespace(id=f"ord-{len(self.orders)+1}", status="open")
+        order = SimpleNamespace(id=f"ord-{len(self.orders)+1}", status=self.order_status)
         self.orders.append({"market_id": market_id, "side": side, "price": price, "size": size})
         return order
+
 
 
 class LiveExecutionTests(unittest.TestCase):
@@ -148,6 +150,42 @@ class LiveExecutionTests(unittest.TestCase):
             self.assertEqual(snapshot["filled_event_exposure_before"], 2.0)
             self.assertEqual(snapshot["pending_event_exposure_before"], 3.0)
             self.assertIn("KXHIGHNY-26APR16-T71", snapshot["held_market_ids"])
+
+    def test_execute_submitted_order_maps_to_canonical_placed_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = self._make_bot(tmpdir)
+            adapter = RunnerLiveExecutionAdapter(bot)
+            exchange = FakeExchange(order_status="submitted")
+            signal = {
+                "exchange": "kalshi",
+                "market_id": "m-submitted",
+                "question": "Will a submitted order stay canonical?",
+                "direction": "BUY_YES",
+                "market_price": 0.40,
+                "yes_price": 0.40,
+                "no_price": 0.60,
+                "model_probability": 0.70,
+                "edge": 0.30,
+                "confidence": 0.90,
+            }
+            decision = SimpleNamespace(
+                action="BUY_YES",
+                position_size=2.5,
+                entry_price=0.40,
+                reason="ok",
+                reason_code="ok",
+                requested_position_size=2.5,
+                reasoning={},
+            )
+
+            result = adapter.execute(signal, decision, exchange)
+
+            self.assertIsNotNone(result)
+            trade_row = bot.trade_history[0]
+            self.assertEqual(trade_row["status"], "placed")
+            self.assertEqual(trade_row["lifecycle_state"], "placed_open")
+            self.assertEqual(trade_row["filled_size"], 0.0)
+            self.assertEqual(trade_row["remaining_size"], 1.0)
 
     def test_execute_places_order_as_resting_until_fill_is_known(self):
         with tempfile.TemporaryDirectory() as tmpdir:
