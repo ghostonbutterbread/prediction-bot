@@ -224,6 +224,8 @@ class LiveExecutionTests(unittest.TestCase):
             self.assertEqual(result["refresh"]["balance"], 25.0)
             self.assertTrue(result["refresh"]["pre_trade_refresh"]["pre_trade_refresh"])
             self.assertEqual(result["refresh"]["pre_trade_refresh"]["open_orders"], 0)
+            self.assertEqual(result["refresh"]["pre_trade_refresh"]["reconciliation_verdict"], "safe")
+            self.assertEqual(result["refresh"]["pre_trade_refresh"]["reconciliation_issues"], [])
             trade_row = bot.trade_history[0]
             self.assertEqual(trade_row["decision_reason_code"], "approved")
             self.assertEqual(trade_row["status"], "placed")

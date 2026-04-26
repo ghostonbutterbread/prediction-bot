@@ -61,6 +61,8 @@ class RunnerLiveSync:
                 "open_positions": len(snapshot.open_positions),
                 "open_orders": len(snapshot.open_orders),
                 "partial_fills": int(getattr(snapshot, "partial_fills", 0) or 0),
+                "reconciliation_verdict": getattr(snapshot, "verdict", "safe") or "safe",
+                "reconciliation_issues": list(getattr(snapshot, "issues", []) or []),
                 "pre_trade_refresh": True,
             }
         except Exception:
@@ -69,6 +71,8 @@ class RunnerLiveSync:
                 "open_positions": len(self.host.open_positions),
                 "open_orders": len(self.host.open_orders),
                 "partial_fills": sum(1 for order in self.host.open_orders if (order.get("filled_size", 0.0) or 0.0) > 0 and (order.get("remaining_size", 0.0) or 0.0) > 0),
+                "reconciliation_verdict": "degraded",
+                "reconciliation_issues": ["reconciliation_refresh_failed"],
                 "pre_trade_refresh": False,
             })
             return fallback

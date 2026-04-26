@@ -83,6 +83,9 @@ class LiveAdaptersTests(unittest.TestCase):
             self.assertEqual(snapshot.reserved_capital, 5.0)
             self.assertEqual(snapshot.available_cash, 10.0)
             self.assertEqual(snapshot.partial_fills, 1)
+            self.assertEqual(snapshot.verdict, "degraded")
+            self.assertIn("partial_fill_exposure_present", snapshot.issues)
+            self.assertIn("resting_orders_present", snapshot.issues)
 
     def test_reconciliation_normalizes_submitted_and_resting_orders_to_placed_open(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -172,6 +175,45 @@ class LiveAdaptersTests(unittest.TestCase):
             self.assertEqual(partial_cancel["lifecycle_state"], "canceled_partial")
             self.assertEqual(expired["status"], "stale")
             self.assertEqual(expired["lifecycle_state"], "stale_open_order")
+
+    def test_reconciliation_marks_negative_effective_cash_as_blocked(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = self._make_bot(tmpdir)
+            adapter = RunnerLiveReconciliationAdapter(bot)
+            exchange = FakeExchange(
+                positions=[
+                    Position(
+                        market_id="M1",
+                        exchange="kalshi",
+                        question="Will it rain?",
+                        side="YES",
+                        entry_price=0.40,
+                        size=4.0,
+                        current_price=0.44,
+                        pnl=0.0,
+                        opened_at=datetime(2026, 4, 20, 18, 0, tzinfo=timezone.utc),
+                    )
+                ],
+                orders=[
+                    RestingOrder(
+                        order_id="ord-1",
+                        market_id="M2",
+                        exchange="kalshi",
+                        side="NO",
+                        requested_size=4.0,
+                        filled_size=0.0,
+                        remaining_size=4.0,
+                        price=0.61,
+                        status="open",
+                        created_at=datetime(2026, 4, 20, 18, 1, tzinfo=timezone.utc),
+                    )
+                ],
+                balance=5.0,
+            )
+
+            snapshot = adapter.reconcile("kalshi", exchange)
+            self.assertEqual(snapshot.verdict, "blocked")
+            self.assertIn("negative_available_cash_after_reconcile", snapshot.issues)
 
     def test_state_adapter_exposes_positions_and_orders(self):
         with tempfile.TemporaryDirectory() as tmpdir:
