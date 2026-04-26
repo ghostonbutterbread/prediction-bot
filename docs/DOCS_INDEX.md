@@ -130,6 +130,16 @@ These define what code and tests should enforce:
 - `docs/LIVE_PARITY_IMPLEMENTATION_BRIEF.md`
 - `docs/EXECUTION_AUDIT_ROW_SCHEMA_SPEC.md`
 
+### Supporting architecture lane
+These are narrower supporting specs for adjacent workstreams:
+- `docs/architecture/shared_core_adapters_design.md` — shared-core/adapters split
+- `docs/architecture/event_retrade_spec.md` — event-aware retrade behavior
+- `docs/architecture/event_retrade_v2_spec.md` — stronger retrade follow-up pass
+- `docs/architecture/paper_live_rollout_log.md` — rollout logging concept
+- `docs/architecture/paper_live_rollout_log_and_standby_spec.md` — rollout + standby design
+- `docs/architecture/prediction_lab_long_run_collection_spec.md` — Prediction Lab long-run collection direction
+- `docs/architecture/prediction_lab_long_run_collection_v1_spec.md` — earlier/v1 collection version
+
 ---
 
 ## Current project direction in one glance
