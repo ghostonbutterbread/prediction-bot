@@ -18,8 +18,9 @@ from bot.shared_core import (
     ResolutionEvent,
     TradeContext,
     TradeDecision,
+    build_execution_snapshot,
 )
-from bot.trade_audit import calculate_contracts, enrich_trade_audit_fields, is_trade_effective_row
+from bot.trade_audit import calculate_contracts, enrich_trade_audit_fields, is_trade_effective_row, trade_event_key
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +124,11 @@ class SimulatorPaperSessionStore:
             raw_available_cash = balance - raw_reserved_capital
 
         effective_trades = [trade for trade in trades if self.state_adapter.is_trade_effective(trade)]
-        traded_markets = {getattr(trade, "market_id", "") for trade in effective_trades if getattr(trade, "market_id", "")}
+        traded_markets = {
+            getattr(trade, "market_id", "")
+            for trade in effective_trades
+            if getattr(trade, "market_id", "") and not getattr(trade, "resolved", False)
+        }
 
         return LoadedPaperSession(
             session_id=loaded_session_id,
@@ -148,6 +153,11 @@ class SimulatorPaperSessionStore:
         last_loss_date: str | None,
         report: dict[str, Any],
     ) -> dict[str, Any]:
+        trade_rows = []
+        for trade in self.host.trades:
+            trade_row = asdict(trade)
+            enrich_trade_audit_fields(trade_row)
+            trade_rows.append(trade_row)
         return {
             "session_id": self.host.session_id,
             "starting_balance": self.host.starting_balance,
@@ -156,7 +166,7 @@ class SimulatorPaperSessionStore:
             "reserved_capital": self.host.reserved_capital,
             "scan_count": self.host.scan_count,
             "max_entry_price": max_entry_price,
-            "trades": [asdict(trade) for trade in self.host.trades],
+            "trades": trade_rows,
             "report": report,
             "consecutive_daily_losses": consecutive_daily_losses,
             "last_loss_date": last_loss_date,
@@ -187,11 +197,21 @@ class SimulatorPaperSessionStore:
         return session_file
 
     def _resolve_session_file(self, session_id: str | None) -> Path | None:
-        if session_id:
-            session_file = self.host.data_dir / f"sim_{session_id}.json"
-            return session_file if session_file.exists() else None
+        search_dirs = [self.host.data_dir]
+        if self.host.data_dir.name in {"paper", "live"}:
+            search_dirs.append(self.host.data_dir.parent)
 
-        session_files = sorted(self.host.data_dir.glob("sim_*.json"), reverse=True)
+        if session_id:
+            for directory in search_dirs:
+                session_file = directory / f"sim_{session_id}.json"
+                if session_file.exists():
+                    return session_file
+            return None
+
+        session_files: list[Path] = []
+        for directory in search_dirs:
+            session_files.extend(directory.glob("sim_*.json"))
+        session_files = sorted(session_files, key=lambda path: path.stat().st_mtime, reverse=True)
         return session_files[0] if session_files else None
 
 
@@ -229,6 +249,9 @@ class SimulatorPaperStateAdapter:
                 "trading_enabled": self.host.risk.state.trading_enabled,
                 "max_tradable_balance": round(self.host.risk.max_tradable_balance, 2),
                 "max_position_size_usd": round(self.host.risk.max_position_size_usd, 2),
+                "standby_active": self.host.risk.state.standby_active,
+                "standby_reason_codes": list(self.host.risk.state.standby_reason_codes),
+                "standby_blocked_scan_count": self.host.risk.state.standby_blocked_scan_count,
             },
         )
 
@@ -255,6 +278,7 @@ class SimulatorPaperStateAdapter:
                     metadata={
                         "exchange": getattr(trade, "exchange", ""),
                         "category": getattr(trade, "category", ""),
+                        "event_key": getattr(trade, "event_key", "") or trade_event_key(getattr(trade, "__dict__", {})),
                     },
                 )
             )
@@ -269,15 +293,64 @@ class SimulatorPaperStateAdapter:
             metadata={
                 "mode": "paper",
                 "starting_balance": round(self.host.starting_balance, 2),
+                "standby_active": self.host.risk.state.standby_active,
+                "standby_reason_codes": list(self.host.risk.state.standby_reason_codes),
+                "standby_blocked_scan_count": self.host.risk.state.standby_blocked_scan_count,
+                "standby_entered_at": self.host.risk.state.standby_entered_at,
             },
         )
 
     def build_trade_context(self, signal: dict[str, Any]) -> TradeContext:
+        return self.build_trade_context_from_snapshot(signal, execution_snapshot=None)
+
+    def build_trade_context_from_snapshot(
+        self,
+        signal: dict[str, Any],
+        *,
+        execution_snapshot: dict[str, Any] | None,
+    ) -> TradeContext:
         direction = str(signal.get("direction", "BUY_YES") or "BUY_YES").upper()
         market_price, yes_price, no_price = self._resolve_signal_prices(signal, direction)
+        account_state = self.get_account_state()
+        event_key = trade_event_key(signal)
+        event_rows = self._same_event_trade_rows(event_key)
+        event_exposure = round(sum(row["reserved_capital"] for row in event_rows), 2)
+        filled_event_rows = [row for row in event_rows if row["lifecycle_state"] == "filled"]
+        pending_event_rows = [row for row in event_rows if row["lifecycle_state"] != "filled"]
+        current_balance = round(account_state.current_balance, 2)
+        max_event_exposure = round(current_balance * self.host.risk.max_event_exposure_pct, 2)
+        candidate_market_id = str(signal.get("market_id", "") or "")
+        candidate_direction = direction
+        candidate_family_key = self._market_family_key(candidate_market_id)
+        same_market_rows = [row for row in event_rows if row["market_id"] == candidate_market_id]
+        same_family_rows = [row for row in event_rows if row["family_key"] == candidate_family_key]
+        event_entry_prices = [row["entry_price"] for row in same_market_rows if row["entry_price"] is not None]
+        best_yes_ask, best_no_ask, best_yes_bid, best_no_bid = self._resolve_book_prices(signal, market_price, yes_price, no_price)
+        snapshot = execution_snapshot
+        if snapshot is None:
+            snapshot = {
+                "source": "signal",
+                "direction": direction,
+                "market_price": market_price,
+                "yes_price": yes_price,
+                "no_price": no_price,
+                "best_yes_ask": best_yes_ask,
+                "best_no_ask": best_no_ask,
+                "best_yes_bid": best_yes_bid,
+                "best_no_bid": best_no_bid,
+                "estimated_fill_price": market_price,
+            }
+        market_price = snapshot.get("market_price")
+        yes_price = snapshot.get("yes_price")
+        no_price = snapshot.get("no_price")
+        best_yes_ask = snapshot.get("best_yes_ask")
+        best_no_ask = snapshot.get("best_no_ask")
+        best_yes_bid = snapshot.get("best_yes_bid")
+        best_no_bid = snapshot.get("best_no_bid")
+        liquidity = self._resolve_signal_liquidity(signal)
         return TradeContext(
             exchange=str(signal.get("exchange", "unknown") or "unknown"),
-            market_id=str(signal.get("market_id", "") or ""),
+            market_id=candidate_market_id,
             question=str(signal.get("question", "") or ""),
             direction=direction,
             market_price=market_price,
@@ -286,10 +359,41 @@ class SimulatorPaperStateAdapter:
             model_probability=self.coerce_float_or_none(signal.get("model_probability")),
             edge=self.coerce_float_or_none(signal.get("edge")),
             confidence=self.coerce_float_or_none(signal.get("confidence")),
-            account_state=self.get_account_state(),
+            account_state=account_state,
             source_context=dict(signal),
             metadata={
                 "category": signal.get("category", ""),
+                "event_key": event_key,
+                "market_family_key": candidate_family_key,
+                "event_snapshot": {
+                    "event_key": event_key,
+                    "candidate_family_key": candidate_family_key,
+                    "event_position_count_before": len(event_rows),
+                    "event_entries_count": len(event_rows),
+                    "event_exposure_before": event_exposure,
+                    "filled_event_exposure_before": round(sum(row["reserved_capital"] for row in filled_event_rows), 2),
+                    "pending_event_exposure_before": round(sum(row["reserved_capital"] for row in pending_event_rows), 2),
+                    "filled_event_position_count_before": len(filled_event_rows),
+                    "pending_event_position_count_before": len(pending_event_rows),
+                    "max_event_exposure_pct": self.host.risk.max_event_exposure_pct,
+                    "held_market_ids": [row["market_id"] for row in event_rows],
+                    "same_event_directions": [row["direction"] for row in event_rows],
+                    "same_family_markets": [row["market_id"] for row in same_family_rows],
+                    "same_family_positions": list(same_family_rows),
+                    "opposite_side_detected": any(row["direction"] != candidate_direction for row in event_rows),
+                    "event_entry_prices": event_entry_prices,
+                    "best_same_market_entry_price": min(event_entry_prices) if event_entry_prices else None,
+                    "best_same_family_entry_price": min((row["entry_price"] for row in same_family_rows if row["entry_price"] is not None), default=None),
+                    "liquidity": liquidity,
+                    "best_yes_ask": best_yes_ask,
+                    "best_no_ask": best_no_ask,
+                    "best_yes_bid": best_yes_bid,
+                    "best_no_bid": best_no_bid,
+                    "estimated_fill_price": snapshot.get("estimated_fill_price"),
+                    "estimated_slippage": self._estimate_signal_slippage(signal, 0.0),
+                    "execution_snapshot_source": snapshot.get("source"),
+                },
+                "retrade_policy": self._retrade_policy_metadata(),
             },
         )
 
@@ -305,6 +409,14 @@ class SimulatorPaperStateAdapter:
                 self.host.session_id,
             )
             self.host.trades = effective
+        self.refresh_traded_markets()
+
+    def refresh_traded_markets(self) -> None:
+        self.host.traded_markets = {
+            getattr(trade, "market_id", "")
+            for trade in self.effective_trades()
+            if getattr(trade, "market_id", "") and not getattr(trade, "resolved", False)
+        }
 
     def refresh_capital_state(self) -> None:
         self.host.reserved_capital = round(
@@ -342,6 +454,85 @@ class SimulatorPaperStateAdapter:
         if size is not None and size > 0:
             return round(size, 2)
         return 0.0
+
+    def _same_event_trade_rows(self, event_key: str) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for trade in self.effective_trades():
+            if getattr(trade, "resolved", False):
+                continue
+            trade_row = {
+                "event_key": trade_event_key(getattr(trade, "__dict__", {})),
+                "market_id": getattr(trade, "market_id", ""),
+                "direction": str(getattr(trade, "direction", "BUY_YES") or "BUY_YES").upper(),
+                "reserved_capital": self.trade_reserved_amount(trade),
+                "entry_price": self.coerce_float_or_none(getattr(trade, "market_price", None)),
+                "lifecycle_state": "filled",
+            }
+            trade_row["family_key"] = self._market_family_key(trade_row["market_id"])
+            if trade_row["event_key"] == event_key:
+                rows.append(trade_row)
+        return rows
+
+    def _retrade_policy_metadata(self) -> dict[str, Any]:
+        return {
+            "max_event_exposure_pct": self.host.risk.max_event_exposure_pct,
+            "max_event_positions": self.host.risk.max_event_positions,
+            "retrade_edge_premium": self.host.risk.retrade_edge_premium,
+            "retrade_confidence_premium": self.host.risk.retrade_confidence_premium,
+            "retrade_size_decay": self.host.risk.retrade_size_decay,
+            "strict_event_overlap": self.host.risk.strict_event_overlap,
+            "min_retrade_net_edge": self.host.risk.min_retrade_net_edge,
+            "min_retrade_expected_profit_usd": getattr(self.host.risk, "min_retrade_expected_profit_usd", 0.0),
+            "require_price_improvement_for_same_market_family": self.host.risk.require_price_improvement_for_same_market_family,
+            "price_improvement_ticks": self.host.risk.price_improvement_ticks,
+            "fee_rate": getattr(getattr(self.host, "kelly", None), "fee_rate", 0.07),
+        }
+
+    def _estimate_signal_slippage(self, signal: dict[str, Any], size: float) -> float:
+        liquidity = self._resolve_signal_liquidity(signal)
+        if not liquidity or liquidity <= 0 or size <= 0:
+            return 0.0
+        return round(min((size / max(liquidity, 1.0)) * 0.10, 0.03), 6)
+
+    def _resolve_signal_liquidity(self, signal: dict[str, Any]) -> float | None:
+        market = signal.get("_market")
+        liquidity = self.coerce_float_or_none(signal.get("liquidity"))
+        if liquidity is None and market:
+            liquidity = self.coerce_float_or_none(getattr(market, "liquidity", None))
+        return liquidity
+
+    def _resolve_book_prices(
+        self,
+        signal: dict[str, Any],
+        market_price: float | None,
+        yes_price: float | None,
+        no_price: float | None,
+    ) -> tuple[float | None, float | None, float | None, float | None]:
+        market = signal.get("_market")
+        best_yes_ask = self.coerce_float_or_none(signal.get("best_yes_ask"))
+        best_no_ask = self.coerce_float_or_none(signal.get("best_no_ask"))
+        best_yes_bid = self.coerce_float_or_none(signal.get("best_yes_bid"))
+        best_no_bid = self.coerce_float_or_none(signal.get("best_no_bid"))
+        if market:
+            best_yes_ask = best_yes_ask if best_yes_ask is not None else self.coerce_float_or_none(getattr(market, "yes_price", None))
+            best_no_ask = best_no_ask if best_no_ask is not None else self.coerce_float_or_none(getattr(market, "no_price", None))
+        if best_yes_ask is None:
+            best_yes_ask = yes_price if yes_price is not None else market_price
+        if best_no_ask is None:
+            best_no_ask = no_price if no_price is not None else (round(1 - best_yes_ask, 4) if best_yes_ask is not None else None)
+        if best_yes_bid is None and best_yes_ask is not None:
+            best_yes_bid = max(0.0, round(best_yes_ask - 0.01, 4))
+        if best_no_bid is None and best_no_ask is not None:
+            best_no_bid = max(0.0, round(best_no_ask - 0.01, 4))
+        return best_yes_ask, best_no_ask, best_yes_bid, best_no_bid
+
+    @staticmethod
+    def _market_family_key(market_id: str) -> str:
+        market_id = str(market_id or "")
+        if not market_id:
+            return ""
+        parts = market_id.split("-")
+        return "-".join(parts[:-1]) if len(parts) > 1 else market_id
 
     def _resolve_signal_prices(
         self,
@@ -459,11 +650,22 @@ class SimulatorPaperExecutionAdapter:
                 "confidence": source_signal.get("confidence", 0),
                 "signals": source_signal.get("signals", {}),
                 "decision_trace": decision.reasoning,
+                "parity_mode_enabled": bool((decision.reasoning or {}).get("parity_mode", {}).get("enabled", False)),
+                "execution_revalidated": bool((decision.reasoning or {}).get("parity_mode", {}).get("execution_revalidated", False)),
+                "execution_revalidation_outcome": (decision.reasoning or {}).get("parity_mode", {}).get("execution_revalidation_outcome"),
+                "original_signal_snapshot": (decision.reasoning or {}).get("parity_mode", {}).get("original_signal_snapshot"),
+                "execution_snapshot": (decision.reasoning or {}).get("parity_mode", {}).get("execution_snapshot"),
+                "original_decision_reason_code": (decision.reasoning or {}).get("parity_mode", {}).get("original_decision_reason_code"),
+                "execution_decision_reason_code": (decision.reasoning or {}).get("parity_mode", {}).get("execution_decision_reason_code"),
+                "execution_snapshot_source": (decision.reasoning or {}).get("parity_mode", {}).get("execution_snapshot_source"),
                 "category": category,
                 "contracts": contracts,
                 "reserved_capital": reserved_delta,
                 "available_cash_before": available_cash_before,
                 "available_cash_after_entry": available_cash_after,
+                "event_key": context.metadata.get("event_key", ""),
+                "retrade": bool((decision.reasoning or {}).get("retrade", {}).get("enabled", False)),
+                "event_position_count_before": (decision.reasoning or {}).get("retrade", {}).get("event_position_count_before", 0),
             },
         )
 

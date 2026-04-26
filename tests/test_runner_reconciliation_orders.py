@@ -100,8 +100,19 @@ class RunnerReconciliationOrdersTests(unittest.TestCase):
             self.assertEqual(bot.open_orders[1]["direction"], "BUY_NO")
             self.assertEqual(bot.risk.state.reserved_capital, 10.0)
             self.assertEqual(bot.risk.state.available_cash, 10.0)
+            self.assertEqual(len(bot.trade_history), 3)
+            reconciled_position = next(row for row in bot.trade_history if row["trade_id"].startswith("reconciled:kalshi:POS-1"))
+            reconciled_partial = next(row for row in bot.trade_history if row["trade_id"] == "ord-1")
+            reconciled_resting = next(row for row in bot.trade_history if row["trade_id"] == "ord-2")
+            self.assertEqual(reconciled_position["status"], "filled")
+            self.assertEqual(reconciled_partial["status"], "partial")
+            self.assertEqual(reconciled_partial["lifecycle_state"], "partial_open")
+            self.assertEqual(reconciled_partial["filled_size"], 2.0)
+            self.assertEqual(reconciled_partial["remaining_size"], 3.0)
+            self.assertEqual(reconciled_resting["status"], "placed")
+            self.assertEqual(reconciled_resting["lifecycle_state"], "placed_open")
 
-            with open(f"{tmpdir}/lifecycle.jsonl") as f:
+            with open(f"{tmpdir}/live/lifecycle.jsonl") as f:
                 events = [json.loads(line) for line in f if line.strip()]
             reconcile_events = [e for e in events if e["event"] == "reconciliation_completed"]
             self.assertEqual(reconcile_events[0]["details"]["open_orders"], 2)

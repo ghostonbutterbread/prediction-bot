@@ -51,6 +51,53 @@ def _default_scan_config() -> dict[str, Any]:
     }
 
 
+def _default_prediction_lab_config() -> dict[str, Any]:
+    return {
+        "enabled": True,
+        "paused": False,
+        "mode": "seed_and_watch",
+        "groups": ["weather"],
+        "max_markets_per_run": 1000,
+        "max_new_predictions_per_seed": 500,
+        "score_only": True,
+        "experiment_id": "default",
+        "strategy_version": "v1",
+        "hypothetical_notional_mode": "flat",
+        "flat_notional_usd": 10.0,
+        "use_sizing_logic": False,
+        "min_confidence_to_record": 0.0,
+        "min_edge_to_record": 0.0,
+        "record_all_scored": True,
+        "seed_daily_temp_first": True,
+        "allow_non_weather": False,
+        "disable_news": True,
+        "disable_social": True,
+        "disable_ai": True,
+        "continue_collecting": False,
+        "collector_interval_seconds": 900,
+        "collector_record_market_snapshots": True,
+        "collector_record_predictions": True,
+        "collector_fetch_mode": "direct_markets",
+        "collector_direct_page_size": 200,
+        "collector_max_pages": 10,
+        "collection_storage_cap_gb": 5,
+        "collection_warning_threshold_pct": 90,
+        "auto_pause_collection_on_storage_cap": True,
+        "resolve_interval_seconds": 1800,
+        "send_telegram_updates": True,
+        "telegram_summary_on_pause": True,
+    }
+
+
+def _default_parity_mode_config() -> dict[str, Any]:
+    return {
+        "enabled": False,
+        "record_revalidation_snapshot": True,
+        "require_book_prices": False,
+        "fallback_to_signal_prices": True,
+    }
+
+
 def _normalize_storage_config(config: dict) -> dict:
     storage = _deep_merge(_default_storage_config(), config.get("storage", {}) or {})
     logs = storage.get("logs", {}) or {}
@@ -74,6 +121,55 @@ def _normalize_storage_config(config: dict) -> dict:
         allowed_groups = [part.strip() for part in allowed_groups.split(",") if part.strip()]
     scan["allowed_market_groups"] = [str(group).strip().lower() for group in allowed_groups if str(group).strip()]
     config["scan"] = scan
+
+    parity_mode = _deep_merge(_default_parity_mode_config(), config.get("parity_mode", {}) or {})
+    parity_mode["enabled"] = bool(parity_mode.get("enabled", False))
+    parity_mode["record_revalidation_snapshot"] = bool(parity_mode.get("record_revalidation_snapshot", True))
+    parity_mode["require_book_prices"] = bool(parity_mode.get("require_book_prices", False))
+    parity_mode["fallback_to_signal_prices"] = bool(parity_mode.get("fallback_to_signal_prices", True))
+    if parity_mode["require_book_prices"]:
+        parity_mode["fallback_to_signal_prices"] = False
+    config["parity_mode"] = parity_mode
+
+    prediction_lab = _deep_merge(_default_prediction_lab_config(), config.get("prediction_lab", {}) or {})
+    groups = prediction_lab.get("groups") or []
+    if isinstance(groups, str):
+        groups = [part.strip() for part in groups.split(",") if part.strip()]
+    prediction_lab["groups"] = [str(group).strip().lower() for group in groups if str(group).strip()]
+    if "weather_only_daily_temp_first" in prediction_lab and "seed_daily_temp_first" not in prediction_lab:
+        prediction_lab["seed_daily_temp_first"] = prediction_lab.get("weather_only_daily_temp_first")
+    prediction_lab.pop("weather_only_daily_temp_first", None)
+
+    prediction_lab["enabled"] = bool(prediction_lab.get("enabled", True))
+    prediction_lab["paused"] = bool(prediction_lab.get("paused", False))
+    prediction_lab["mode"] = str(prediction_lab.get("mode", "seed_and_watch") or "seed_and_watch").lower()
+    prediction_lab["max_markets_per_run"] = max(1, int(prediction_lab.get("max_markets_per_run", 1000) or 1000))
+    prediction_lab["max_new_predictions_per_seed"] = max(1, int(prediction_lab.get("max_new_predictions_per_seed", 500) or 500))
+    prediction_lab["experiment_id"] = str(prediction_lab.get("experiment_id", "default") or "default")
+    prediction_lab["strategy_version"] = str(prediction_lab.get("strategy_version", "v1") or "v1")
+    prediction_lab["flat_notional_usd"] = float(prediction_lab.get("flat_notional_usd", 10.0) or 10.0)
+    prediction_lab["min_confidence_to_record"] = float(prediction_lab.get("min_confidence_to_record", 0.0) or 0.0)
+    prediction_lab["min_edge_to_record"] = float(prediction_lab.get("min_edge_to_record", 0.0) or 0.0)
+    prediction_lab["record_all_scored"] = bool(prediction_lab.get("record_all_scored", True))
+    prediction_lab["seed_daily_temp_first"] = bool(prediction_lab.get("seed_daily_temp_first", True))
+    prediction_lab["allow_non_weather"] = bool(prediction_lab.get("allow_non_weather", False))
+    prediction_lab["disable_news"] = bool(prediction_lab.get("disable_news", True))
+    prediction_lab["disable_social"] = bool(prediction_lab.get("disable_social", True))
+    prediction_lab["disable_ai"] = bool(prediction_lab.get("disable_ai", True))
+    prediction_lab["continue_collecting"] = bool(prediction_lab.get("continue_collecting", False))
+    prediction_lab["collector_interval_seconds"] = max(1, int(prediction_lab.get("collector_interval_seconds", 900) or 900))
+    prediction_lab["collector_record_market_snapshots"] = bool(prediction_lab.get("collector_record_market_snapshots", True))
+    prediction_lab["collector_record_predictions"] = bool(prediction_lab.get("collector_record_predictions", True))
+    prediction_lab["collector_fetch_mode"] = str(prediction_lab.get("collector_fetch_mode", "direct_markets") or "direct_markets").lower()
+    prediction_lab["collector_direct_page_size"] = max(1, int(prediction_lab.get("collector_direct_page_size", 200) or 200))
+    prediction_lab["collector_max_pages"] = max(1, int(prediction_lab.get("collector_max_pages", 10) or 10))
+    prediction_lab["collection_storage_cap_gb"] = float(prediction_lab.get("collection_storage_cap_gb", 5.0) or 5.0)
+    prediction_lab["collection_warning_threshold_pct"] = float(prediction_lab.get("collection_warning_threshold_pct", 90) or 90)
+    prediction_lab["auto_pause_collection_on_storage_cap"] = bool(prediction_lab.get("auto_pause_collection_on_storage_cap", True))
+    prediction_lab["resolve_interval_seconds"] = max(1, int(prediction_lab.get("resolve_interval_seconds", 1800) or 1800))
+    prediction_lab["send_telegram_updates"] = bool(prediction_lab.get("send_telegram_updates", True))
+    prediction_lab["telegram_summary_on_pause"] = bool(prediction_lab.get("telegram_summary_on_pause", True))
+    config["prediction_lab"] = prediction_lab
     return config
 
 try:
@@ -192,6 +288,10 @@ def _apply_env_overrides(config: dict) -> dict:
         overrides.setdefault("scan", {})["summary_sample_per_exchange"] = int(os.getenv("SCAN_SUMMARY_SAMPLE_PER_EXCHANGE"))
     if os.getenv("ALLOWED_MARKET_GROUPS"):
         overrides.setdefault("scan", {})["allowed_market_groups"] = os.getenv("ALLOWED_MARKET_GROUPS")
+    if os.getenv("PREDICTION_LAB_GROUPS"):
+        overrides.setdefault("prediction_lab", {})["groups"] = os.getenv("PREDICTION_LAB_GROUPS")
+    if os.getenv("PREDICTION_LAB_MAX_MARKETS"):
+        overrides.setdefault("prediction_lab", {})["max_markets_per_run"] = int(os.getenv("PREDICTION_LAB_MAX_MARKETS"))
 
     if overrides:
         config = _deep_merge(config, overrides)
@@ -209,6 +309,16 @@ def _runtime_mode(config: dict) -> str:
     trading = config.get("trading", {}) or {}
     mode = str(trading.get("mode") or config.get("TRADING_MODE") or os.getenv("TRADING_MODE") or "paper").strip().lower()
     return "live" if mode == "live" else "paper"
+
+
+def ensure_mode_storage_dir(path: str | Path, mode: str) -> Path:
+    base = Path(path)
+    normalized_mode = "live" if str(mode or "").strip().lower() == "live" else "paper"
+    if base.name == normalized_mode:
+        return base
+    if base.name in {"paper", "live"}:
+        return base.parent / normalized_mode
+    return base / normalized_mode
 
 
 def _apply_runtime_paths(config: dict) -> dict:
@@ -287,6 +397,7 @@ def _default_config() -> dict:
             "base_dir": "data",
         },
         "storage": _default_storage_config(),
+        "parity_mode": _default_parity_mode_config(),
         "risk": {
             "kelly_fraction": 0.75,
             "max_position_pct": 0.20,

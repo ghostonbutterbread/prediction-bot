@@ -167,6 +167,38 @@ trade_economics:
   min_position_size_usd: 1.0
   min_expected_net_profit_usd: 0.10
 
+prediction_lab:
+  enabled: true
+  paused: false
+  mode: collector
+  groups:
+    - weather
+  max_markets_per_run: 1000
+  continue_collecting: true
+  collector_interval_seconds: 900
+  resolve_interval_seconds: 1800
+  collector_record_market_snapshots: true
+  collector_record_predictions: true
+  collector_fetch_mode: direct_markets
+  collector_direct_page_size: 200
+  collector_max_pages: 10
+  collection_storage_cap_gb: 25
+  collection_warning_threshold_pct: 90
+  auto_pause_collection_on_storage_cap: true
+  score_only: true
+  experiment_id: weather-collector-v1
+  strategy_version: v1
+  hypothetical_notional_mode: flat
+  flat_notional_usd: 10
+  use_sizing_logic: false
+  min_confidence_to_record: 0.0
+  min_edge_to_record: 0.0
+  record_all_scored: true
+  seed_daily_temp_first: true
+  disable_news: true
+  disable_social: true
+  disable_ai: true
+
 logging:
   log_dir: data
   level: INFO

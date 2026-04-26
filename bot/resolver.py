@@ -116,7 +116,7 @@ class TradeResolver:
                 # on "closed" status alone, as Kalshi marks markets closed before
                 # the settlement result is available.
                 result_available = self._has_result(market)
-                if market_status in ("settled", "resolved") or (
+                if market_status in ("settled", "resolved", "finalized") or (
                     market_status == "closed" and result_available
                 ):
                     # Market resolved — determine winner

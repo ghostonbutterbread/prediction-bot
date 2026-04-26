@@ -14,9 +14,30 @@ Multi-exchange prediction market trading bot with news sentiment analysis, Kelly
 - **Multi-signal strategy engine** — price mispricing + news sentiment + volume analysis + time decay
 - **News-reactive trading** — Google News RSS integration with sentiment scoring
 - **Kelly Criterion** — mathematically optimal position sizing
+- **Shared-core trade decisions** — paper and live both use the same core approval path for thresholds, retrades, sizing, and hidden-gem gating
 - **Multi-exchange** — trade the same market across platforms
 - **Risk management** — edge thresholds, confidence gates, position limits
-- **SQLite logging** — every scan, signal, and trade recorded
+- **JSON/JSONL logging** — every scan, signal, and trade recorded in repo-local structured files
+- **Shared API throttling** — reusable read/write rate limiting for Kalshi-bound pull, resolve, and trade paths
+
+## Kalshi rate limiting
+
+Kalshi request throttling is shared through `bot/http_rate_limit.py` and used by the exchange adapter for both reads and writes.
+
+Current behavior:
+- adapter attempts to auto-detect limits via `GET /account/limits`
+- if needed, account tier can still be hard-set with `KALSHI_ACCOUNT_TIER`
+- supported tiers:
+  - `basic` → 20 reads/s, 10 writes/s
+  - `advanced` → 30 reads/s, 30 writes/s
+  - `premier` → 100 reads/s, 100 writes/s
+  - `prime` → 400 reads/s, 400 writes/s
+- optional hard overrides:
+  - `KALSHI_READS_PER_SECOND`
+  - `KALSHI_WRITES_PER_SECOND`
+- if detection and overrides are unavailable, the adapter defaults to `basic`
+
+This is shared infrastructure so pull, resolve, and live/paper-adjacent Kalshi flows can reuse the same throttling behavior instead of duplicating it.
 
 ## Quick Start
 
@@ -106,9 +127,11 @@ Uses **half-Kelly Criterion** for mathematically optimal bet sizing:
 - Capped at 10% of balance per trade (paper) / 5% (live)
 
 ### Risk Controls
-- Minimum 5% edge required (configurable)
+- Minimum edge required (configurable)
 - Minimum 50% confidence threshold
 - Maximum 10% portfolio per position
+- Hidden-gem gating in shared core for cheap contracts: for entry price `<= $0.05`, require edge `>= 0.05` and model probability `>= 3x` market price
+- Retrade / same-event overlap controls live in the shared decision path
 - **Session kill-switch**: permanently halts if balance drops >20% from high-water mark
 - Consecutive-loss cooldown, daily loss limit, max drawdown pause
 - All trades saved to JSON session files
@@ -156,8 +179,24 @@ Uses **half-Kelly Criterion** for mathematically optimal bet sizing:
 4. Save Key ID in `.env` as `KALSHI_API_KEY_ID`
 5. Save private key file as `kalshi_private_key` in project root
 
+## Paper vs Live Parity
+
+Current state:
+- Paper and live share the core decision engine via `bot/shared_core/decision.py`
+- Shared-core behavior now includes threshold checks, retrade/event overlap gating, Kelly sizing, risk-policy checks, and hidden-gem gating
+- Paper is still the more mature analysis/audit environment
+- Live still needs more hardening around execution lifecycle, reconciliation, and settlement parity
+
+Planning docs:
+- `LIVE_PARITY_CHECKLIST.md` — current parity gaps and priorities
+- `docs/LIVE_PARITY_MODE_SPEC.md` — optional parity-mode design so paper can mimic live execution-time revalidation without complicating default paper mode
+
+Planned next step:
+- Phase 1 parity mode work to let paper optionally perform live-style execution-time revalidation before final approval
+
 ## Roadmap
 
+- [ ] Phase 1 live-parity paper mode
 - [ ] Polymarket exchange adapter
 - [ ] Cross-market arbitrage (Kalshi vs Polymarket)
 - [ ] WebSocket real-time data feeds

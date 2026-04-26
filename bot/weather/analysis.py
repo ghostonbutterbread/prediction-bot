@@ -9,6 +9,7 @@ from typing import Iterable
 
 from bot.feeds.live_data import LiveFeedAggregator
 from bot.feeds.weather_pro import CITY_COORDS
+from bot.market_classification import is_weather_market as canonical_is_weather_market
 
 from .historical import load_historical_weather_records
 from .market_mapping import WeatherMarketCityMapper, looks_like_temperature_question
@@ -51,12 +52,7 @@ class WeatherSampleRecord:
 
 
 def is_weather_market(market_id: str = "", question: str = "", category: str = "") -> bool:
-    market_id = str(market_id or "").upper()
-    category = str(category or "").upper()
-    return (
-        market_id.startswith(WEATHER_SERIES_PREFIXES)
-        or category.startswith(WEATHER_SERIES_PREFIXES)
-    ) and looks_like_temperature_question(question)
+    return canonical_is_weather_market(market_id=market_id, question=question, category=category)
 
 
 def category_from_market_id(market_id: str) -> str:

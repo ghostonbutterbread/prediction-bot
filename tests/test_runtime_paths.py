@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from bot.config import load_config
+from bot.paper_adapters import SimulatorPaperSessionStore
 from bot.runner import PredictionBot
 from bot.simulator import Simulator
 
@@ -32,8 +33,8 @@ strategy:
                 {
                     "runtime": {"base_dir": tmpdir},
                     "trading": {"mode": "live"},
-                    "log_dir": f"{tmpdir}/live",
-                    "data_dir": f"{tmpdir}/live",
+                    "log_dir": tmpdir,
+                    "data_dir": tmpdir,
                 }
             )
             self.assertTrue(str(bot.log_dir).endswith("/live"))
@@ -44,10 +45,27 @@ strategy:
                 {
                     "runtime": {"base_dir": tmpdir},
                     "trading": {"mode": "paper"},
-                    "data_dir": f"{tmpdir}/paper",
+                    "data_dir": tmpdir,
                 }
             )
             self.assertTrue(str(sim.data_dir).endswith("/paper"))
+
+    def test_paper_session_store_falls_back_to_legacy_root_layout(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            legacy = Path(tmpdir) / "sim_20260423_000000.json"
+            legacy.write_text('{"session_id":"20260423_000000","trades":[]}')
+
+            sim = Simulator(
+                {
+                    "trading": {"mode": "paper"},
+                    "data_dir": tmpdir,
+                    "strategy": {"enable_news": False, "enable_social": False, "enable_ai": False},
+                }
+            )
+            store = SimulatorPaperSessionStore(sim, sim.state_adapter)
+            resolved = store._resolve_session_file("20260423_000000")
+
+            self.assertEqual(resolved, legacy)
 
 
 if __name__ == "__main__":

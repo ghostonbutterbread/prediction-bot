@@ -29,6 +29,25 @@ class RiskConfigModeTests(unittest.TestCase):
             self.assertFalse(risk.trading_enabled)
             self.assertFalse(risk.state.trading_enabled)
 
+    def test_event_retrade_settings_load_from_nested_risk_config(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            risk = RiskManager(
+                {
+                    "data_dir": tmpdir,
+                    "starting_balance": 100.0,
+                    "risk": {
+                        "max_event_exposure_pct": 0.2,
+                        "max_event_positions": 5,
+                        "retrade_edge_premium": 0.03,
+                        "strict_event_overlap": False,
+                    },
+                }
+            )
+            self.assertEqual(risk.max_event_exposure_pct, 0.2)
+            self.assertEqual(risk.max_event_positions, 5)
+            self.assertEqual(risk.retrade_edge_premium, 0.03)
+            self.assertFalse(risk.strict_event_overlap)
+
 
 if __name__ == "__main__":
     unittest.main()
