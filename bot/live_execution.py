@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any, Protocol
 
 from bot.exchanges.base import BaseExchange
@@ -200,6 +201,42 @@ class RunnerLiveExecutionAdapter:
         side = "YES" if decision.action == "BUY_YES" else "NO"
         exchange_name = signal.get("exchange", "unknown")
         pre_trade_refresh = self.host.live_sync.refresh_before_execution(exchange_name, exchange)
+        refresh_verdict = str(pre_trade_refresh.get("reconciliation_verdict") or "safe").lower()
+        refresh_issues = list(pre_trade_refresh.get("reconciliation_issues") or [])
+        strict_degraded = bool((((self.host.config.get("trading") or {}).get("live_reconciliation") or {}).get("block_on_degraded", False)))
+        if refresh_verdict == "blocked" or (refresh_verdict == "degraded" and strict_degraded):
+            reason_code = "reconciliation_state_blocked" if refresh_verdict == "blocked" else "reconciliation_state_degraded"
+            reason = "Live reconciliation blocked order placement" if refresh_verdict == "blocked" else "Live reconciliation degraded state blocked by policy"
+            gated_decision = SimpleNamespace(
+                action=getattr(decision, "action", signal.get("direction", "BUY_YES")),
+                approved=False,
+                position_size=0.0,
+                requested_position_size=float(getattr(decision, "requested_position_size", 0.0) or getattr(decision, "position_size", 0.0) or 0.0),
+                entry_price=getattr(decision, "entry_price", signal.get("market_price")),
+                win_probability=getattr(decision, "win_probability", signal.get("model_probability")),
+                reason=reason,
+                reason_code=reason_code,
+                reasoning={"reconciliation_gate": {"verdict": refresh_verdict, "issues": refresh_issues, "pre_trade_refresh": dict(pre_trade_refresh)}},
+            )
+            self._append_rejected_trade_row(
+                signal=signal,
+                exchange=exchange,
+                decision=gated_decision,
+                initial_decision=initial_decision,
+                initial_signal_snapshot=initial_signal_snapshot,
+                execution_snapshot=None,
+                status="rejected",
+                message=reason,
+                failure_stage="reconciliation",
+                execution_revalidated=False,
+                execution_revalidation_outcome=None,
+            )
+            return {
+                "blocked_reason": reason_code,
+                "decision": gated_decision,
+                "reconciliation_issues": refresh_issues,
+                "refresh": {"pre_trade_refresh": dict(pre_trade_refresh)},
+            }
 
         bid_ask = None
         try:

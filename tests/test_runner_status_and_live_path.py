@@ -83,6 +83,33 @@ class RunnerLivePathTests(unittest.TestCase):
             self.assertEqual(len(bot.exchanges["kalshi"].orders), 1)
             self.assertEqual(bot.exchanges["kalshi"].orders[0]["size"], 2.5)
 
+    def test_live_path_blocks_when_startup_reconciliation_gate_is_blocked(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = self._make_bot(tmpdir)
+            bot.reconciliation_gate["kalshi"] = {
+                "verdict": "blocked",
+                "issues": ["negative_available_cash_after_reconcile"],
+            }
+            signal = {
+                "exchange": "kalshi",
+                "market_id": "m-gated",
+                "question": "Should startup gate block?",
+                "direction": "BUY_YES",
+                "market_price": 0.35,
+                "yes_price": 0.35,
+                "no_price": 0.65,
+                "model_probability": 0.70,
+                "edge": 0.20,
+                "confidence": 0.90,
+            }
+
+            with patch.object(bot.kelly, "calculate", return_value=5.0):
+                result = bot._process_signal(signal)
+
+            self.assertEqual(result["blocked_reason"], "reconciliation_state_blocked")
+            self.assertIn("negative_available_cash_after_reconcile", result["reconciliation_issues"])
+            self.assertEqual(len(bot.exchanges["kalshi"].orders), 0)
+
     def test_live_path_respects_trading_disabled(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             bot = self._make_bot(tmpdir, trading_enabled=False, trading={"mode": "live", "trading_enabled": False})
