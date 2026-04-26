@@ -160,7 +160,9 @@ class PredictionBot:
             "reserved_capital": snapshot.reserved_capital,
             "available_cash": snapshot.available_cash,
             "partial_fills": snapshot.partial_fills,
-            "status": "ok",
+            "reconciliation_verdict": getattr(snapshot, "verdict", "safe") or "safe",
+            "reconciliation_issues": list(getattr(snapshot, "issues", []) or []),
+            "status": "ok" if (getattr(snapshot, "verdict", "safe") or "safe") != "blocked" else "blocked",
         }
         self._log_lifecycle_event("reconciliation_completed", summary)
         return summary

@@ -117,6 +117,8 @@ class RunnerReconciliationOrdersTests(unittest.TestCase):
             reconcile_events = [e for e in events if e["event"] == "reconciliation_completed"]
             self.assertEqual(reconcile_events[0]["details"]["open_orders"], 2)
             self.assertEqual(reconcile_events[0]["details"]["partial_fills"], 1)
+            self.assertEqual(reconcile_events[0]["details"]["reconciliation_verdict"], "degraded")
+            self.assertIn("partial_fill_exposure_present", reconcile_events[0]["details"]["reconciliation_issues"])
 
 
 if __name__ == "__main__":
