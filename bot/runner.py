@@ -74,6 +74,7 @@ class PredictionBot:
         self.open_positions: list[LivePosition] = []
         self.open_orders: list[dict] = []
         self.trade_history: list[dict] = []
+        self.reconciliation_gate: dict[str, dict] = {}
         self.lifecycle_counters = {
             "signals_considered": 0,
             "trades_executed": 0,
@@ -152,6 +153,13 @@ class PredictionBot:
             open_positions=len(self.open_positions),
         )
 
+        verdict = getattr(snapshot, "verdict", "safe") or "safe"
+        issues = list(getattr(snapshot, "issues", []) or [])
+        if verdict == "blocked":
+            self.reconciliation_gate[exchange_name] = {"verdict": verdict, "issues": issues}
+        else:
+            self.reconciliation_gate.pop(exchange_name, None)
+
         summary = {
             "exchange": exchange_name,
             "open_positions": len(snapshot.open_positions),
@@ -160,9 +168,9 @@ class PredictionBot:
             "reserved_capital": snapshot.reserved_capital,
             "available_cash": snapshot.available_cash,
             "partial_fills": snapshot.partial_fills,
-            "reconciliation_verdict": getattr(snapshot, "verdict", "safe") or "safe",
-            "reconciliation_issues": list(getattr(snapshot, "issues", []) or []),
-            "status": "ok" if (getattr(snapshot, "verdict", "safe") or "safe") != "blocked" else "blocked",
+            "reconciliation_verdict": verdict,
+            "reconciliation_issues": issues,
+            "status": "ok" if verdict != "blocked" else "blocked",
         }
         self._log_lifecycle_event("reconciliation_completed", summary)
         return summary
@@ -364,12 +372,21 @@ class PredictionBot:
         )
 
     def _process_signal(self, signal: dict) -> Optional[dict]:
-        exchange = self.exchanges.get(signal.get("exchange"))
+        exchange_name = signal.get("exchange")
+        exchange = self.exchanges.get(exchange_name)
         if not exchange:
             return None
 
         if self.single_trade_mode and self.single_trade_completed:
             return {"blocked_reason": "single_trade_mode_completed"}
+
+        gate = self.reconciliation_gate.get(exchange_name or "") or {}
+        if (gate.get("verdict") or "") == "blocked":
+            return {
+                "blocked_reason": "reconciliation_state_blocked",
+                "decision": None,
+                "reconciliation_issues": list(gate.get("issues") or []),
+            }
 
         context = self.live_execution.build_trade_context(signal, exchange, self.config)
         strategy_cfg = self.config.get("strategy", {})
@@ -388,6 +405,12 @@ class PredictionBot:
 
         result = self.live_execution.execute(signal, decision, exchange)
         if result:
+            if result.get("blocked_reason"):
+                return {
+                    "blocked_reason": result.get("blocked_reason"),
+                    "decision": result.get("decision") or decision,
+                    "reconciliation_issues": result.get("reconciliation_issues", []),
+                }
             return {"order": result, "decision": decision}
         return {"blocked_reason": "execution_failed", "decision": decision}
 

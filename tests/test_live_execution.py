@@ -457,6 +457,77 @@ class LiveExecutionTests(unittest.TestCase):
             self.assertEqual(snapshot["liquidity"], 50.0)
             self.assertTrue(context.metadata["retrade_policy"]["require_price_improvement_for_same_market_family"])
 
+    def test_execute_blocks_when_pre_trade_reconciliation_is_blocked(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = self._make_bot(tmpdir)
+            adapter = RunnerLiveExecutionAdapter(bot)
+            exchange = FakeExchange(
+                balance=5.0,
+                positions=[
+                    Position(
+                        market_id="m-blocked-pos",
+                        exchange="kalshi",
+                        question="Will blocked reconcile happen?",
+                        side="YES",
+                        entry_price=0.40,
+                        size=4.0,
+                        current_price=0.44,
+                        pnl=0.0,
+                        opened_at=None,
+                    )
+                ],
+                resting_orders=[
+                    RestingOrder(
+                        order_id="ord-blocked",
+                        market_id="m-blocked-order",
+                        exchange="kalshi",
+                        question="Will blocked reconcile happen?",
+                        side="NO",
+                        requested_size=4.0,
+                        filled_size=0.0,
+                        remaining_size=4.0,
+                        price=0.61,
+                        status="open",
+                        created_at=None,
+                    )
+                ],
+            )
+            signal = {
+                "exchange": "kalshi",
+                "market_id": "m-blocked-next",
+                "question": "Should a blocked reconcile halt entry?",
+                "direction": "BUY_YES",
+                "market_price": 0.40,
+                "yes_price": 0.40,
+                "no_price": 0.60,
+                "model_probability": 0.90,
+                "edge": 0.30,
+                "confidence": 0.90,
+            }
+            decision = SimpleNamespace(
+                action="BUY_YES",
+                approved=True,
+                position_size=2.5,
+                entry_price=0.40,
+                win_probability=0.70,
+                reason="ok",
+                reason_code="approved",
+                requested_position_size=2.5,
+                reasoning={},
+            )
+
+            result = adapter.execute(signal, decision, exchange)
+
+            self.assertIsNotNone(result)
+            self.assertEqual(result["blocked_reason"], "reconciliation_state_blocked")
+            self.assertEqual(exchange.orders, [])
+            self.assertEqual(len(bot.trade_history), 1)
+            trade_row = bot.trade_history[0]
+            self.assertEqual(trade_row["status"], "rejected")
+            self.assertEqual(trade_row["failure_stage"], "reconciliation")
+            self.assertEqual(trade_row["decision_reason_code"], "reconciliation_state_blocked")
+            self.assertFalse(trade_row["execution_revalidated"])
+
     def test_execute_refreshes_exchange_state_before_revalidating(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             bot = self._make_bot(tmpdir)
