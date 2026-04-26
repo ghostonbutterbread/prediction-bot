@@ -84,6 +84,49 @@ class LiveAdaptersTests(unittest.TestCase):
             self.assertEqual(snapshot.available_cash, 10.0)
             self.assertEqual(snapshot.partial_fills, 1)
 
+    def test_reconciliation_normalizes_submitted_and_resting_orders_to_placed_open(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = self._make_bot(tmpdir)
+            adapter = RunnerLiveReconciliationAdapter(bot)
+            exchange = FakeExchange(
+                orders=[
+                    RestingOrder(
+                        order_id="ord-submitted",
+                        market_id="M-submitted",
+                        exchange="kalshi",
+                        side="YES",
+                        requested_size=4.0,
+                        filled_size=0.0,
+                        remaining_size=4.0,
+                        price=0.45,
+                        status="submitted",
+                        created_at=datetime(2026, 4, 20, 18, 2, tzinfo=timezone.utc),
+                    ),
+                    RestingOrder(
+                        order_id="ord-resting",
+                        market_id="M-resting",
+                        exchange="kalshi",
+                        side="NO",
+                        requested_size=3.0,
+                        filled_size=0.0,
+                        remaining_size=3.0,
+                        price=0.58,
+                        status="resting",
+                        created_at=datetime(2026, 4, 20, 18, 2, tzinfo=timezone.utc),
+                    ),
+                ],
+                balance=25.0,
+            )
+
+            snapshot = adapter.reconcile("kalshi", exchange)
+            self.assertEqual(len(snapshot.open_orders), 2)
+            submitted = next(row for row in snapshot.trade_history_rows if row["trade_id"] == "ord-submitted")
+            resting = next(row for row in snapshot.trade_history_rows if row["trade_id"] == "ord-resting")
+            self.assertEqual(submitted["status"], "placed")
+            self.assertEqual(submitted["lifecycle_state"], "placed_open")
+            self.assertEqual(resting["status"], "placed")
+            self.assertEqual(resting["lifecycle_state"], "placed_open")
+
     def test_reconciliation_keeps_closed_order_outcomes_in_history_but_not_open_orders(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             bot = self._make_bot(tmpdir)
