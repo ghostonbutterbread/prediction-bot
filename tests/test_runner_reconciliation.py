@@ -85,12 +85,38 @@ class RunnerReconciliationTests(unittest.TestCase):
             self.assertEqual(len(bot.trade_history), 2)
             self.assertTrue(all(t.get("reconciled") for t in bot.trade_history))
 
-            with open(f"{tmpdir}/lifecycle.jsonl") as f:
+            with open(f"{tmpdir}/live/lifecycle.jsonl") as f:
                 events = [json.loads(line) for line in f if line.strip()]
 
             reconcile_events = [e for e in events if e["event"] == "reconciliation_completed"]
             self.assertEqual(len(reconcile_events), 1)
             self.assertEqual(reconcile_events[0]["details"]["open_positions"], 2)
+
+    def test_connect_all_sets_startup_gate_when_reconciliation_is_blocked(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = self._make_bot(tmpdir)
+            bot.exchanges["kalshi"] = FakeReconExchange(
+                positions=[
+                    Position(
+                        market_id="KXBLOCK-1",
+                        exchange="kalshi",
+                        question="Blocked startup",
+                        side="YES",
+                        entry_price=0.41,
+                        size=6.0,
+                        current_price=0.45,
+                        pnl=0.0,
+                        opened_at=datetime(2026, 4, 20, 17, 0, tzinfo=timezone.utc),
+                    )
+                ],
+                balance=2.0,
+            )
+
+            result = bot.connect_all()
+
+            self.assertTrue(result["kalshi"])
+            self.assertEqual(bot.reconciliation_gate["kalshi"]["verdict"], "blocked")
+            self.assertIn("negative_available_cash_after_reconcile", bot.reconciliation_gate["kalshi"]["issues"])
 
     def test_reconciliation_replaces_previous_reconciled_snapshot(self):
         with tempfile.TemporaryDirectory() as tmpdir:
