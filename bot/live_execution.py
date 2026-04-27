@@ -338,7 +338,57 @@ class RunnerLiveExecutionAdapter:
 
         from bot.runner import LivePosition
 
-        order_id = order.id if hasattr(order, "id") else str(order)
+        raw_order_id = order.id if hasattr(order, "id") else str(order)
+        raw_order_status = str(getattr(order, "status", "") or "").strip().lower()
+        if raw_order_status in {"existing", "uncertain", "pending_confirmation"} or (raw_order_status in {"submitted", "accepted", "resting", "open", "partial", "filled"} and not str(raw_order_id or "").strip()):
+            uncertainty_reason = "duplicate_submission_suspected" if raw_order_status == "existing" else "placement_confirmation_uncertain"
+            uncertainty_message = "Exchange indicated an order may already exist; reconciliation required before retry" if raw_order_status == "existing" else "Order placement outcome is uncertain; reconciliation required before retry"
+            post_uncertainty_refresh = self.host.live_sync.refresh_before_execution(exchange_name, exchange)
+            gate_issues = [uncertainty_reason]
+            gate_issues.extend(list(post_uncertainty_refresh.get("reconciliation_issues") or []))
+            if hasattr(self.host, "reconciliation_gate") and isinstance(getattr(self.host, "reconciliation_gate"), dict):
+                self.host.reconciliation_gate[exchange_name] = {
+                    "verdict": "blocked",
+                    "issues": list(dict.fromkeys(gate_issues)),
+                }
+            uncertain_decision = SimpleNamespace(
+                action=getattr(decision, "action", signal.get("direction", "BUY_YES")),
+                approved=False,
+                position_size=0.0,
+                requested_position_size=float(getattr(decision, "requested_position_size", 0.0) or getattr(decision, "position_size", 0.0) or 0.0),
+                entry_price=price,
+                win_probability=getattr(decision, "win_probability", signal.get("model_probability")),
+                reason=uncertainty_message,
+                reason_code=uncertainty_reason,
+                reasoning={
+                    "uncertain_placement": {
+                        "raw_order_status": raw_order_status,
+                        "raw_order_id": raw_order_id,
+                        "post_uncertainty_refresh": dict(post_uncertainty_refresh),
+                    }
+                },
+            )
+            self._append_rejected_trade_row(
+                signal=signal,
+                exchange=exchange,
+                decision=uncertain_decision,
+                initial_decision=initial_decision,
+                initial_signal_snapshot=initial_signal_snapshot,
+                execution_snapshot=execution_snapshot,
+                status="failed",
+                message=uncertainty_message,
+                failure_stage="placement",
+                execution_revalidated=True,
+                execution_revalidation_outcome="approved",
+            )
+            return {
+                "blocked_reason": uncertainty_reason,
+                "decision": uncertain_decision,
+                "reconciliation_issues": list(dict.fromkeys(gate_issues)),
+                "refresh": {"pre_trade_refresh": dict(pre_trade_refresh), "post_uncertainty_refresh": dict(post_uncertainty_refresh)},
+            }
+
+        order_id = raw_order_id
         order_status = canonical_execution_status(
             getattr(order, "status", None),
             filled_size=getattr(order, "filled_size", None),

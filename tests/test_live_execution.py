@@ -528,6 +528,71 @@ class LiveExecutionTests(unittest.TestCase):
             self.assertEqual(trade_row["decision_reason_code"], "reconciliation_state_blocked")
             self.assertFalse(trade_row["execution_revalidated"])
 
+    def test_execute_blocks_uncertain_existing_order_until_reconcile_clears(self):
+        class ExistingOrderExchange(FakeExchange):
+            def __init__(self):
+                super().__init__(resting_orders=[], order_status="existing")
+
+            def place_order(self, market_id, side, price, size):
+                self.resting_orders = [
+                    RestingOrder(
+                        order_id="ord-server-existing",
+                        market_id=market_id,
+                        exchange="kalshi",
+                        question="Will an existing order be reconciled?",
+                        side=side,
+                        requested_size=size,
+                        filled_size=0.0,
+                        remaining_size=size,
+                        price=price,
+                        status="open",
+                        created_at=None,
+                    )
+                ]
+                return super().place_order(market_id, side, price, size)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = self._make_bot(tmpdir)
+            adapter = RunnerLiveExecutionAdapter(bot)
+            exchange = ExistingOrderExchange()
+            signal = {
+                "exchange": "kalshi",
+                "market_id": "m-existing",
+                "question": "Will an existing order be reconciled?",
+                "direction": "BUY_YES",
+                "market_price": 0.40,
+                "yes_price": 0.40,
+                "no_price": 0.60,
+                "model_probability": 0.90,
+                "edge": 0.30,
+                "confidence": 0.90,
+            }
+            decision = SimpleNamespace(
+                action="BUY_YES",
+                approved=True,
+                position_size=2.5,
+                entry_price=0.40,
+                reason="ok",
+                reason_code="approved",
+                requested_position_size=2.5,
+                reasoning={},
+            )
+
+            result = adapter.execute(signal, decision, exchange)
+
+            self.assertIsNotNone(result)
+            self.assertEqual(result["blocked_reason"], "duplicate_submission_suspected")
+            self.assertEqual(bot.reconciliation_gate["kalshi"]["verdict"], "blocked")
+            self.assertIn("duplicate_submission_suspected", bot.reconciliation_gate["kalshi"]["issues"])
+            self.assertEqual(len(bot.open_orders), 1)
+            self.assertEqual(bot.open_orders[0]["order_id"], "ord-server-existing")
+            self.assertEqual(len(bot.trade_history), 1)
+            trade_row = bot.trade_history[0]
+            self.assertEqual(trade_row["status"], "failed")
+            self.assertEqual(trade_row["failure_stage"], "placement")
+            self.assertEqual(trade_row["decision_reason_code"], "duplicate_submission_suspected")
+            self.assertTrue(trade_row["execution_revalidated"])
+
     def test_execute_refreshes_exchange_state_before_revalidating(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             bot = self._make_bot(tmpdir)
