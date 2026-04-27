@@ -26,6 +26,7 @@ class KalshiExchange(BaseExchange):
     def __init__(self, api_key_id: str, private_key_path: str, demo: bool = False):
         self.api_key_id = api_key_id
         self.private_key_path = private_key_path
+        self.demo = bool(demo)
         self.host = KALSHI_DEMO if demo else KALSHI_PROD
         self.client = None
         self._daily_series_tickers: list[str] = []
@@ -94,6 +95,16 @@ class KalshiExchange(BaseExchange):
         if classification is None:
             return False
         return classification.market_group in self._allowed_market_groups
+
+    def describe_runtime_identity(self) -> dict[str, object]:
+        return {
+            "exchange": self.name,
+            "environment": "demo" if self.demo else "prod",
+            "host": self.host,
+            "api_key_id": self.api_key_id,
+            "private_key_path": os.path.abspath(self.private_key_path),
+            "account_tier": self._account_tier,
+        }
 
     def connect(self) -> bool:
         try:
