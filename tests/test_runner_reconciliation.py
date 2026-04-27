@@ -4,13 +4,14 @@ import unittest
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
-from bot.exchanges.base import Position
+from bot.exchanges.base import Position, RestingOrder
 from bot.runner import PredictionBot
 
 
 class FakeReconExchange:
-    def __init__(self, positions=None, balance=25.0):
+    def __init__(self, positions=None, orders=None, balance=25.0):
         self._positions = positions or []
+        self._orders = orders or []
         self._balance = balance
         self.connected = False
 
@@ -20,6 +21,9 @@ class FakeReconExchange:
 
     def get_positions(self):
         return list(self._positions)
+
+    def get_resting_orders(self):
+        return list(self._orders)
 
     def get_balance(self):
         return self._balance
@@ -117,6 +121,47 @@ class RunnerReconciliationTests(unittest.TestCase):
             self.assertTrue(result["kalshi"])
             self.assertEqual(bot.reconciliation_gate["kalshi"]["verdict"], "blocked")
             self.assertIn("negative_available_cash_after_reconcile", bot.reconciliation_gate["kalshi"]["issues"])
+
+    def test_connect_all_blocks_ambiguous_duplicate_restart_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = self._make_bot(tmpdir)
+            bot.open_orders = [
+                {
+                    "order_id": "local-ord-1",
+                    "market_id": "KXDUP-1",
+                    "question": "Duplicate restart state",
+                    "direction": "BUY_YES",
+                    "status": "open",
+                    "requested_size": 3.0,
+                    "filled_size": 0.0,
+                    "remaining_size": 3.0,
+                    "price": 0.41,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }
+            ]
+            bot.exchanges["kalshi"] = FakeReconExchange(
+                orders=[
+                    RestingOrder(
+                        order_id="exchange-ord-2",
+                        market_id="KXDUP-1",
+                        exchange="kalshi",
+                        side="YES",
+                        requested_size=3.0,
+                        filled_size=0.0,
+                        remaining_size=3.0,
+                        price=0.41,
+                        status="open",
+                        created_at=datetime(2026, 4, 20, 17, 0, tzinfo=timezone.utc),
+                    )
+                ],
+                balance=25.0,
+            )
+
+            result = bot.connect_all()
+
+            self.assertTrue(result["kalshi"])
+            self.assertEqual(bot.reconciliation_gate["kalshi"]["verdict"], "blocked")
+            self.assertIn("ambiguous_local_exchange_duplicate_exposure", bot.reconciliation_gate["kalshi"]["issues"])
 
     def test_reconciliation_replaces_previous_reconciled_snapshot(self):
         with tempfile.TemporaryDirectory() as tmpdir:
