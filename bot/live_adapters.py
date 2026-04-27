@@ -324,7 +324,9 @@ class RunnerLiveReconciliationAdapter:
             won = (position.direction == "BUY_YES" and market_outcome == "YES") or (
                 position.direction == "BUY_NO" and market_outcome == "NO"
             )
+            exit_price = settlement_value
             pnl = round((settlement_value - position.price) * position.size if position.direction == "BUY_YES" else ((1.0 - settlement_value) - position.price) * position.size, 2)
+            settled_cash_value = round(position.size + pnl, 4)
             events.append(
                 ResolutionEvent(
                     position_id=position.order_id,
@@ -333,8 +335,14 @@ class RunnerLiveReconciliationAdapter:
                     status="resolved",
                     resolved_at=datetime.now(timezone.utc).isoformat(),
                     pnl=pnl,
-                    settlement_value=settlement_value,
-                    metadata={"exchange": exchange_name, "question": position.question, "resolution_result": "won" if won else "lost"},
+                    settlement_value=settled_cash_value,
+                    metadata={
+                        "exchange": exchange_name,
+                        "question": position.question,
+                        "resolution_result": "won" if won else "lost",
+                        "resolution_type": "settled",
+                        "exit_price": exit_price,
+                    },
                 )
             )
         return events

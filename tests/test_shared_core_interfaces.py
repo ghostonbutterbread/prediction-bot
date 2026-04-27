@@ -61,7 +61,7 @@ class SharedCorePaperAdapterTests(unittest.TestCase):
             self.assertEqual(session.session_id, sim.session_id)
             self.assertEqual(session.scan_count, 0)
             self.assertEqual(session.traded_market_count, 0)
-            self.assertEqual(session.data_path, tmpdir)
+            self.assertEqual(session.data_path, str(sim.data_dir))
 
             signal = {
                 "market_id": "test-market",
