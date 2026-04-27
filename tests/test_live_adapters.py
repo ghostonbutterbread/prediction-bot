@@ -215,6 +215,46 @@ class LiveAdaptersTests(unittest.TestCase):
             self.assertEqual(snapshot.verdict, "blocked")
             self.assertIn("negative_available_cash_after_reconcile", snapshot.issues)
 
+    def test_reconciliation_blocks_ambiguous_local_exchange_duplicate_exposure(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = self._make_bot(tmpdir)
+            bot.open_orders = [
+                {
+                    "order_id": "local-ord-1",
+                    "market_id": "M-DUP",
+                    "question": "Will duplicate state exist?",
+                    "direction": "BUY_YES",
+                    "status": "open",
+                    "requested_size": 4.0,
+                    "filled_size": 0.0,
+                    "remaining_size": 4.0,
+                    "price": 0.45,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }
+            ]
+            adapter = RunnerLiveReconciliationAdapter(bot)
+            exchange = FakeExchange(
+                orders=[
+                    RestingOrder(
+                        order_id="exchange-ord-9",
+                        market_id="M-DUP",
+                        exchange="kalshi",
+                        side="YES",
+                        requested_size=4.0,
+                        filled_size=0.0,
+                        remaining_size=4.0,
+                        price=0.45,
+                        status="open",
+                        created_at=datetime(2026, 4, 20, 18, 2, tzinfo=timezone.utc),
+                    )
+                ],
+                balance=25.0,
+            )
+
+            snapshot = adapter.reconcile("kalshi", exchange)
+            self.assertEqual(snapshot.verdict, "blocked")
+            self.assertIn("ambiguous_local_exchange_duplicate_exposure", snapshot.issues)
+
     def test_state_adapter_exposes_positions_and_orders(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             bot = self._make_bot(tmpdir)

@@ -244,12 +244,53 @@ class RunnerLiveReconciliationAdapter:
         if local_position_ids and (local_position_ids - exchange_position_ids):
             issues.append("local_positions_missing_from_exchange")
 
+        local_entries = []
+        for position in getattr(self.host, "open_positions", []):
+            local_entries.append({
+                "order_id": str(getattr(position, "order_id", "") or ""),
+                "market_id": str(getattr(position, "market_id", "") or ""),
+                "direction": str(getattr(position, "direction", "BUY_YES") or "BUY_YES").upper(),
+            })
+        for order in getattr(self.host, "open_orders", []):
+            local_entries.append({
+                "order_id": str(order.get("order_id") or ""),
+                "market_id": str(order.get("market_id") or ""),
+                "direction": str(order.get("direction", "BUY_YES") or "BUY_YES").upper(),
+            })
+
+        exchange_entries = []
+        for position in reconciled_positions:
+            exchange_entries.append({
+                "order_id": str(getattr(position, "order_id", "") or ""),
+                "market_id": str(getattr(position, "market_id", "") or ""),
+                "direction": str(getattr(position, "direction", "BUY_YES") or "BUY_YES").upper(),
+            })
+        for order in active_open_orders:
+            exchange_entries.append({
+                "order_id": str(order.get("order_id") or ""),
+                "market_id": str(order.get("market_id") or ""),
+                "direction": str(order.get("direction", "BUY_YES") or "BUY_YES").upper(),
+            })
+
+        ambiguous_overlap = any(
+            local_entry["market_id"]
+            and local_entry["market_id"] == exchange_entry["market_id"]
+            and local_entry["direction"] == exchange_entry["direction"]
+            and local_entry["order_id"]
+            and exchange_entry["order_id"]
+            and local_entry["order_id"] != exchange_entry["order_id"]
+            for local_entry in local_entries
+            for exchange_entry in exchange_entries
+        )
+        if ambiguous_overlap:
+            issues.append("ambiguous_local_exchange_duplicate_exposure")
+
         if partial_fills > 0:
             issues.append("partial_fill_exposure_present")
         if active_open_orders:
             issues.append("resting_orders_present")
 
-        if any(issue in {"duplicate_active_order_ids", "negative_available_cash_after_reconcile"} for issue in issues):
+        if any(issue in {"duplicate_active_order_ids", "negative_available_cash_after_reconcile", "ambiguous_local_exchange_duplicate_exposure"} for issue in issues):
             return "blocked", issues
         if issues:
             return "degraded", issues
