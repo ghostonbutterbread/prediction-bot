@@ -28,6 +28,11 @@ class FakeExchange:
         self.orders.append({"market_id": market_id, "side": side, "price": price, "size": size})
         return order
 
+
+class FailingExchange(FakeExchange):
+    def place_order(self, market_id, side, price, size):
+        return None
+
     def close(self):
         return None
 
@@ -110,6 +115,42 @@ class RunnerLivePathTests(unittest.TestCase):
             self.assertIn("negative_available_cash_after_reconcile", result["reconciliation_issues"])
             self.assertEqual(len(bot.exchanges["kalshi"].orders), 0)
 
+    def test_live_path_repeated_critical_failures_trigger_exchange_pause(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = self._make_bot(
+                tmpdir,
+                trading={
+                    "mode": "live",
+                    "trading_enabled": True,
+                    "live_safety": {"enabled": True, "max_consecutive_critical_failures": 2},
+                },
+            )
+            bot.exchanges["kalshi"] = FailingExchange()
+            signal = {
+                "exchange": "kalshi",
+                "market_id": "m-fail",
+                "question": "Will repeated live failures pause new entries?",
+                "direction": "BUY_YES",
+                "market_price": 0.40,
+                "yes_price": 0.40,
+                "no_price": 0.60,
+                "model_probability": 0.70,
+                "edge": 0.20,
+                "confidence": 0.90,
+            }
+
+            with patch.object(bot.kelly, "calculate", return_value=5.0):
+                first = bot._process_signal(signal)
+                second = bot._process_signal(signal)
+                third = bot._process_signal(signal)
+
+            self.assertEqual(first["blocked_reason"], "execution_failed")
+            self.assertEqual(second["blocked_reason"], "execution_failed")
+            self.assertEqual(bot.live_failure_streaks["kalshi"]["count"], 2)
+            self.assertEqual(bot.reconciliation_gate["kalshi"]["verdict"], "blocked")
+            self.assertIn("repeated_live_failures_threshold_reached", bot.reconciliation_gate["kalshi"]["issues"])
+            self.assertEqual(third["blocked_reason"], "reconciliation_state_blocked")
+
     def test_live_path_respects_trading_disabled(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             bot = self._make_bot(tmpdir, trading_enabled=False, trading={"mode": "live", "trading_enabled": False})
@@ -189,6 +230,8 @@ class RunnerLivePathTests(unittest.TestCase):
             self.assertEqual(snapshot.resolved_trades, 1)
             self.assertEqual(snapshot.total_trades, 2)
             self.assertIn("source", snapshot.extra)
+            self.assertIn("live_failure_streaks", snapshot.extra)
+            self.assertIn("reconciliation_gate", snapshot.extra)
             self.assertEqual(snapshot.extra["filled_event_exposure"], 4.0)
             self.assertEqual(snapshot.extra["pending_event_exposure"], 0.0)
             self.assertIn("normalized_trade_summary", snapshot.extra)
