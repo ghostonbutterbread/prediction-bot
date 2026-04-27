@@ -12,12 +12,23 @@ from bot.runner import LivePosition, PredictionBot
 
 
 class FakeExchange:
-    def __init__(self, *, balance=25.0, positions=None, resting_orders=None, order_status="open"):
+    def __init__(self, *, balance=25.0, positions=None, resting_orders=None, order_status="open", environment="demo", api_key_id="test-key", private_key_path="/tmp/test-key.pem"):
         self.orders = []
         self.balance = balance
         self.positions = positions or []
         self.resting_orders = resting_orders or []
         self.order_status = order_status
+        self.environment = environment
+        self.api_key_id = api_key_id
+        self.private_key_path = private_key_path
+
+    def describe_runtime_identity(self):
+        return {
+            "exchange": "kalshi",
+            "environment": self.environment,
+            "api_key_id": self.api_key_id,
+            "private_key_path": self.private_key_path,
+        }
 
     def get_balance(self):
         return self.balance
@@ -150,6 +161,51 @@ class LiveExecutionTests(unittest.TestCase):
             self.assertEqual(snapshot["filled_event_exposure_before"], 2.0)
             self.assertEqual(snapshot["pending_event_exposure_before"], 3.0)
             self.assertIn("KXHIGHNY-26APR16-T71", snapshot["held_market_ids"])
+
+    def test_execute_blocks_live_identity_mismatch_before_reconcile(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = self._make_bot(tmpdir)
+            bot.config["trading"]["live_identity"] = {
+                "exchange": "kalshi",
+                "environment": "prod",
+                "api_key_id": "expected-key",
+                "private_key_path": "/keys/prod.pem",
+            }
+            adapter = RunnerLiveExecutionAdapter(bot)
+            exchange = FakeExchange(environment="demo", api_key_id="wrong-key", private_key_path="/keys/demo.pem")
+            signal = {
+                "exchange": "kalshi",
+                "market_id": "m-identity",
+                "question": "Should identity mismatch block?",
+                "direction": "BUY_YES",
+                "market_price": 0.40,
+                "yes_price": 0.40,
+                "no_price": 0.60,
+                "model_probability": 0.70,
+                "edge": 0.30,
+                "confidence": 0.90,
+            }
+            decision = SimpleNamespace(
+                action="BUY_YES",
+                position_size=2.5,
+                entry_price=0.40,
+                reason="ok",
+                reason_code="ok",
+                requested_position_size=2.5,
+                reasoning={},
+            )
+
+            result = adapter.execute(signal, decision, exchange)
+
+            self.assertIsNotNone(result)
+            self.assertEqual(result["blocked_reason"], "live_identity_mismatch")
+            self.assertEqual(exchange.orders, [])
+            self.assertEqual(len(bot.trade_history), 1)
+            trade_row = bot.trade_history[0]
+            self.assertEqual(trade_row["status"], "rejected")
+            self.assertEqual(trade_row["failure_stage"], "identity")
+            self.assertEqual(trade_row["decision_reason_code"], "live_identity_mismatch")
+            self.assertFalse(trade_row["execution_revalidated"])
 
     def test_execute_submitted_order_maps_to_canonical_placed_state(self):
         with tempfile.TemporaryDirectory() as tmpdir:

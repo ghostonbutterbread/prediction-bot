@@ -44,6 +44,56 @@ class RunnerLiveExecutionAdapter:
     def __init__(self, host: LiveExecutionHost):
         self.host = host
 
+    def _runtime_identity(self, exchange_name: str, exchange: BaseExchange) -> dict[str, object]:
+        descriptor = getattr(exchange, "describe_runtime_identity", None)
+        if callable(descriptor):
+            identity = descriptor() or {}
+            if isinstance(identity, dict):
+                return dict(identity)
+        return {
+            "exchange": exchange_name,
+            "environment": "unknown",
+            "host": getattr(exchange, "host", None),
+            "api_key_id": getattr(exchange, "api_key_id", None),
+            "private_key_path": getattr(exchange, "private_key_path", None),
+        }
+
+    def _identity_gate_result(self, exchange_name: str, exchange: BaseExchange) -> tuple[bool, str | None, str | None, dict[str, object]]:
+        trading_cfg = self.host.config.get("trading") or {}
+        expected = (trading_cfg.get("live_identity") or {}) if isinstance(trading_cfg, dict) else {}
+        if not expected:
+            return True, None, None, self._runtime_identity(exchange_name, exchange)
+
+        runtime = self._runtime_identity(exchange_name, exchange)
+        mismatches: list[str] = []
+
+        expected_exchange = str(expected.get("exchange") or exchange_name or "").strip().lower()
+        runtime_exchange = str(runtime.get("exchange") or exchange_name or "").strip().lower()
+        if expected_exchange and runtime_exchange != expected_exchange:
+            mismatches.append("exchange")
+
+        expected_env = str(expected.get("environment") or "").strip().lower()
+        runtime_env = str(runtime.get("environment") or "").strip().lower()
+        if expected_env and runtime_env != expected_env:
+            mismatches.append("environment")
+
+        expected_key = str(expected.get("api_key_id") or "").strip()
+        runtime_key = str(runtime.get("api_key_id") or "").strip()
+        if expected_key and runtime_key != expected_key:
+            mismatches.append("api_key_id")
+
+        expected_key_path = str(expected.get("private_key_path") or "").strip()
+        runtime_key_path = str(runtime.get("private_key_path") or "").strip()
+        if expected_key_path and runtime_key_path:
+            if expected_key_path != runtime_key_path:
+                mismatches.append("private_key_path")
+        elif expected_key_path:
+            mismatches.append("private_key_path")
+
+        if mismatches:
+            return False, "live_identity_mismatch", f"Live identity mismatch for {', '.join(mismatches)}", runtime
+        return True, None, None, runtime
+
     def build_trade_context(self, signal: dict, exchange: BaseExchange, config: dict) -> TradeContext:
         from bot.shared_core import AccountState
 
@@ -200,6 +250,38 @@ class RunnerLiveExecutionAdapter:
         market_id = signal["market_id"]
         side = "YES" if decision.action == "BUY_YES" else "NO"
         exchange_name = signal.get("exchange", "unknown")
+        identity_ok, identity_reason_code, identity_reason, runtime_identity = self._identity_gate_result(exchange_name, exchange)
+        if not identity_ok:
+            identity_decision = SimpleNamespace(
+                action=getattr(decision, "action", signal.get("direction", "BUY_YES")),
+                approved=False,
+                position_size=0.0,
+                requested_position_size=float(getattr(decision, "requested_position_size", 0.0) or getattr(decision, "position_size", 0.0) or 0.0),
+                entry_price=getattr(decision, "entry_price", signal.get("market_price")),
+                win_probability=getattr(decision, "win_probability", signal.get("model_probability")),
+                reason=identity_reason,
+                reason_code=identity_reason_code,
+                reasoning={"live_identity": {"runtime": runtime_identity}},
+            )
+            self._append_rejected_trade_row(
+                signal=signal,
+                exchange=exchange,
+                decision=identity_decision,
+                initial_decision=initial_decision,
+                initial_signal_snapshot=initial_signal_snapshot,
+                execution_snapshot=None,
+                status="rejected",
+                message=identity_reason or "Live identity mismatch",
+                failure_stage="identity",
+                execution_revalidated=False,
+                execution_revalidation_outcome=None,
+            )
+            return {
+                "blocked_reason": identity_reason_code,
+                "decision": identity_decision,
+                "identity": runtime_identity,
+            }
+
         pre_trade_refresh = self.host.live_sync.refresh_before_execution(exchange_name, exchange)
         refresh_verdict = str(pre_trade_refresh.get("reconciliation_verdict") or "safe").lower()
         refresh_issues = list(pre_trade_refresh.get("reconciliation_issues") or [])
