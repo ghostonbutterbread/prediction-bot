@@ -31,6 +31,12 @@ class RunnerLifecycleSummaryTests(unittest.TestCase):
             bot.lifecycle_counters["trades_executed"] = 3
             bot.lifecycle_counters["blocked_total"] = 4
             bot.lifecycle_counters["errors"] = 1
+            bot.live_failure_streaks["kalshi"] = {
+                "count": 2,
+                "last_reason": "execution_failed",
+                "issues": ["execution_failed"],
+            }
+            bot.reconciliation_gate["kalshi"] = {"verdict": "blocked", "issues": ["repeated_live_failures_threshold_reached"]}
 
             snapshot = bot.build_status_snapshot(reason="manual")
 
@@ -38,6 +44,8 @@ class RunnerLifecycleSummaryTests(unittest.TestCase):
             self.assertEqual(snapshot.extra["trades_executed"], 3)
             self.assertEqual(snapshot.extra["blocked_total"], 4)
             self.assertEqual(snapshot.extra["runner_errors"], 1)
+            self.assertEqual(snapshot.extra["live_failure_streaks"]["kalshi"]["count"], 2)
+            self.assertEqual(snapshot.extra["reconciliation_gate"]["kalshi"]["verdict"], "blocked")
 
     def test_emit_hourly_summary_writes_once_per_hour(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -48,9 +56,11 @@ class RunnerLifecycleSummaryTests(unittest.TestCase):
             bot.lifecycle_counters["blocked_total"] = 3
             bot.lifecycle_counters["errors"] = 1
             bot.lifecycle_block_reasons = {"risk_max_drawdown_hit": 2, "risk_position_cap": 1}
+            bot.live_failure_streaks["kalshi"] = {"count": 2, "last_reason": "execution_failed", "issues": ["execution_failed"]}
+            bot.reconciliation_gate["kalshi"] = {"verdict": "blocked", "issues": ["repeated_live_failures_threshold_reached"]}
 
             fixed_now = datetime(2026, 4, 20, 17, 0, 0, tzinfo=timezone.utc)
-            summary_path = f"{tmpdir}/hourly_summary.jsonl"
+            summary_path = str(bot.log_dir / "hourly_summary.jsonl")
 
             class FixedDateTime(datetime):
                 @classmethod
@@ -68,6 +78,8 @@ class RunnerLifecycleSummaryTests(unittest.TestCase):
             self.assertEqual(lines[0]["scans"], 5)
             self.assertEqual(lines[0]["signals_considered"], 9)
             self.assertEqual(lines[0]["top_blockers"]["risk_max_drawdown_hit"], 2)
+            self.assertEqual(lines[0]["live_failure_streaks"]["kalshi"], 2)
+            self.assertEqual(lines[0]["reconciliation_gate"]["kalshi"]["verdict"], "blocked")
 
 
 if __name__ == "__main__":
