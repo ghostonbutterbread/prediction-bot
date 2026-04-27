@@ -440,8 +440,13 @@ class PredictionBot:
                     trade["settlement_value"] = event.settlement_value
                     trade["outcome"] = event.outcome
                     trade["resolution_outcome"] = event.outcome
-                    if isinstance(event.metadata, dict) and event.metadata.get("resolution_result"):
-                        trade["resolution_result"] = event.metadata.get("resolution_result")
+                    if isinstance(event.metadata, dict):
+                        if event.metadata.get("resolution_result"):
+                            trade["resolution_result"] = event.metadata.get("resolution_result")
+                        if event.metadata.get("resolution_type"):
+                            trade["resolution_type"] = event.metadata.get("resolution_type")
+                        if event.metadata.get("exit_price") is not None:
+                            trade["exit_price"] = event.metadata.get("exit_price")
                     apply_execution_audit_contract(trade)
                     self.risk.record_trade_result(trade.get("order_id"), event.pnl or 0.0)
             total_pnl = sum(float(event.pnl or 0.0) for event in resolution_events)

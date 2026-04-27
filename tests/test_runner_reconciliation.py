@@ -4,15 +4,16 @@ import unittest
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
-from bot.exchanges.base import Position, RestingOrder
+from bot.exchanges.base import Market, Position, RestingOrder
 from bot.runner import PredictionBot
 
 
 class FakeReconExchange:
-    def __init__(self, positions=None, orders=None, balance=25.0):
+    def __init__(self, positions=None, orders=None, balance=25.0, market_map=None):
         self._positions = positions or []
         self._orders = orders or []
         self._balance = balance
+        self._market_map = market_map or {}
         self.connected = False
 
     def connect(self):
@@ -27,6 +28,9 @@ class FakeReconExchange:
 
     def get_balance(self):
         return self._balance
+
+    def get_market(self, market_id):
+        return self._market_map.get(market_id)
 
     def close(self):
         return None
@@ -162,6 +166,53 @@ class RunnerReconciliationTests(unittest.TestCase):
             self.assertTrue(result["kalshi"])
             self.assertEqual(bot.reconciliation_gate["kalshi"]["verdict"], "blocked")
             self.assertIn("ambiguous_local_exchange_duplicate_exposure", bot.reconciliation_gate["kalshi"]["issues"])
+
+    def test_resolution_distinguishes_market_outcome_from_trade_result_for_buy_no_loss(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = self._make_bot(tmpdir)
+            bot.exchanges["kalshi"] = FakeReconExchange(
+                positions=[
+                    Position(
+                        market_id="KXLOSS-1",
+                        exchange="kalshi",
+                        question="Will it not rain?",
+                        side="NO",
+                        entry_price=0.62,
+                        size=2.0,
+                        current_price=0.38,
+                        pnl=0.0,
+                        opened_at=datetime(2026, 4, 20, 17, 0, tzinfo=timezone.utc),
+                    )
+                ],
+                market_map={
+                    "KXLOSS-1": Market(
+                        id="KXLOSS-1",
+                        exchange="kalshi",
+                        question="Will it not rain?",
+                        yes_price=1.0,
+                        no_price=0.0,
+                        volume=0,
+                        liquidity=0,
+                        closes_at=datetime.now(timezone.utc),
+                        category="weather",
+                        metadata={"result": "YES"},
+                        close_price=1.0,
+                    )
+                },
+                balance=25.0,
+            )
+
+            bot.connect_all()
+            bot._sync_resolved_positions()
+
+            resolved_row = next(row for row in bot.trade_history if row["trade_id"].startswith("reconciled:kalshi:KXLOSS-1"))
+            self.assertEqual(resolved_row["outcome"], "YES")
+            self.assertEqual(resolved_row["resolution_outcome"], "YES")
+            self.assertEqual(resolved_row["resolution_result"], "lost")
+            self.assertEqual(resolved_row["resolution_type"], "settled")
+            self.assertEqual(resolved_row["exit_price"], 1.0)
+            self.assertEqual(resolved_row["settlement_value"], 0.76)
+            self.assertEqual(resolved_row["pnl"], -1.24)
 
     def test_reconciliation_replaces_previous_reconciled_snapshot(self):
         with tempfile.TemporaryDirectory() as tmpdir:
