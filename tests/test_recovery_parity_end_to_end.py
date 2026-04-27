@@ -219,7 +219,10 @@ class RecoveryParityEndToEndTests(unittest.TestCase):
             self.assertTrue(resolved_row["resolved"])
             self.assertEqual(resolved_row["outcome"], "YES")
             self.assertIsNotNone(resolved_row["resolved_at"])
-            self.assertEqual(resolved_row["settlement_value"], 1.0)
+            self.assertEqual(resolved_row["settlement_value"], 4.8)
+            self.assertEqual(resolved_row["exit_price"], 1.0)
+            self.assertEqual(resolved_row["resolution_type"], "settled")
+            self.assertEqual(resolved_row["resolution_result"], "won")
             self.assertEqual(resolved_row["pnl"], 1.8)
 
     def test_live_end_to_end_restart_reconcile_then_status_and_next_decision_preserve_constraints(self):
