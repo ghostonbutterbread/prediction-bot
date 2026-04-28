@@ -385,10 +385,12 @@ class RunnerLiveExecutionAdapter:
         pre_trade_refresh = self.host.live_sync.refresh_before_execution(exchange_name, exchange)
         refresh_verdict = str(pre_trade_refresh.get("reconciliation_verdict") or "safe").lower()
         refresh_issues = list(pre_trade_refresh.get("reconciliation_issues") or [])
+        refresh_severity = str(pre_trade_refresh.get("reconciliation_severity") or "none").lower()
+        refresh_action = str(pre_trade_refresh.get("reconciliation_action") or "log_only").lower()
         strict_degraded = bool((((self.host.config.get("trading") or {}).get("live_reconciliation") or {}).get("block_on_degraded", False)))
-        if refresh_verdict == "blocked" or (refresh_verdict == "degraded" and strict_degraded):
-            reason_code = "reconciliation_state_blocked" if refresh_verdict == "blocked" else "reconciliation_state_degraded"
-            reason = "Live reconciliation blocked order placement" if refresh_verdict == "blocked" else "Live reconciliation degraded state blocked by policy"
+        if refresh_action == "block" or refresh_verdict == "blocked" or (refresh_verdict == "degraded" and strict_degraded):
+            reason_code = "reconciliation_state_blocked" if refresh_action == "block" or refresh_verdict == "blocked" else "reconciliation_state_degraded"
+            reason = "Live reconciliation blocked order placement" if reason_code == "reconciliation_state_blocked" else "Live reconciliation degraded state blocked by policy"
             gated_decision = SimpleNamespace(
                 action=getattr(decision, "action", signal.get("direction", "BUY_YES")),
                 approved=False,
@@ -398,7 +400,15 @@ class RunnerLiveExecutionAdapter:
                 win_probability=getattr(decision, "win_probability", signal.get("model_probability")),
                 reason=reason,
                 reason_code=reason_code,
-                reasoning={"reconciliation_gate": {"verdict": refresh_verdict, "issues": refresh_issues, "pre_trade_refresh": dict(pre_trade_refresh)}},
+                reasoning={
+                    "reconciliation_gate": {
+                        "verdict": refresh_verdict,
+                        "severity": refresh_severity,
+                        "action": refresh_action,
+                        "issues": refresh_issues,
+                        "pre_trade_refresh": dict(pre_trade_refresh),
+                    }
+                },
             )
             self._append_rejected_trade_row(
                 signal=signal,
