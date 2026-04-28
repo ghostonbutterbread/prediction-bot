@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from bot.parity_audit import build_parity_view, normalize_parity_trade_row
+from bot.parity_audit import build_parity_view, normalize_parity_trade_row, write_parity_comparison_artifact
 from bot.trade_audit import apply_execution_audit_contract, validate_execution_audit_row
 
 
@@ -120,6 +120,42 @@ class ParityAuditTests(unittest.TestCase):
         self.assertEqual(normalized["contract_issue_count"], 1)
         self.assertFalse(normalized["contract_valid"])
 
+    def test_normalize_parity_trade_row_surfaces_schema_gaps_lifecycle_and_price_deltas(self):
+        row = {
+            "trade_id": "gap-1",
+            "timestamp": "2026-04-23T00:00:00+00:00",
+            "market_id": "m-gap",
+            "direction": "BUY_YES",
+            "status": "placed",
+            "lifecycle_state": "placed_open",
+            "requested_size": 1.0,
+            "approved_size": 1.0,
+            "placed_size": 1.0,
+            "filled_size": 1.0,
+            "remaining_size": 0.0,
+            "market_price": 0.4,
+            "entry_price": 0.4,
+            "decision_reason_code": "approved",
+            "execution_snapshot_source": "book",
+            "original_signal_snapshot": {"market_price": 0.40},
+            "execution_snapshot": {"market_price": 0.46},
+            "original_decision_reason_code": "approved",
+            "execution_decision_reason_code": "price_above_threshold",
+        }
+
+        normalized = normalize_parity_trade_row(row, source="live")
+
+        self.assertIn("missing_schema_name", normalized["schema_gaps"])
+        self.assertIn("missing_event_key", normalized["schema_gaps"])
+        self.assertIn("missing_exchange", normalized["schema_gaps"])
+        self.assertEqual(normalized["status"], "filled")
+        self.assertIn("filled_lifecycle_mismatch", normalized["lifecycle_contradictions"])
+        self.assertTrue(normalized["decision_reason_delta"])
+        self.assertTrue(normalized["execution_price_delta"])
+        self.assertEqual(normalized["original_market_price"], 0.40)
+        self.assertEqual(normalized["execution_market_price"], 0.46)
+        self.assertAlmostEqual(normalized["execution_market_price_delta"], 0.06)
+
     def test_execution_contract_flags_resolved_rows_missing_resolution_fields(self):
         row = apply_execution_audit_contract(
             {
@@ -202,6 +238,9 @@ class ParityAuditTests(unittest.TestCase):
 
             self.assertEqual(view["paper_summary"]["total_rows"], 1)
             self.assertEqual(view["live_summary"]["total_rows"], 2)
+            self.assertEqual(view["comparison"]["paper_rows"], 1)
+            self.assertEqual(view["comparison"]["live_rows"], 2)
+            self.assertEqual(view["comparison_artifact_path"], str(data_dir / "parity_comparison.json"))
             self.assertEqual(view["paper_rows"][0]["decision_reason_code"], "approved")
             self.assertEqual(view["live_rows"][0]["trade_id"], "live-1")
             self.assertEqual(view["live_rows"][0]["status"], "placed")
@@ -240,6 +279,33 @@ class ParityAuditTests(unittest.TestCase):
             self.assertEqual(view["live_summary"]["total_rows"], 1)
             self.assertEqual(view["paper_rows"][0]["trade_id"], "paper-legacy")
             self.assertEqual(view["live_rows"][0]["trade_id"], "live-legacy")
+
+    def test_build_parity_view_compares_equivalent_paper_live_rows_and_exports_artifact(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "data"
+            (data_dir / "paper").mkdir(parents=True)
+            (data_dir / "live").mkdir(parents=True)
+            (data_dir / "paper" / "sim_20260423_000000.json").write_text(
+                '{"trades":[{"schema_name":"execution_audit_row","schema_version":1,"id":"paper-1","trade_id":"paper-1","timestamp":"2026-04-23T00:00:00+00:00","market_id":"m1","event_key":"event-1","question":"Q","exchange":"kalshi","direction":"BUY_YES","status":"filled","lifecycle_state":"filled_open","requested_size":1.0,"approved_size":1.0,"placed_size":1.0,"filled_size":1.0,"remaining_size":0.0,"reserved_capital":1.0,"market_price":0.4,"entry_price":0.4,"decision_reason_code":"approved","parity_mode_enabled":true,"execution_revalidated":true,"execution_revalidation_outcome":"approved","execution_snapshot_source":"book","original_decision_reason_code":"approved","execution_decision_reason_code":"approved","original_signal_snapshot":{"market_price":0.4},"execution_snapshot":{"market_price":0.4}}]}'
+            )
+            (data_dir / "live" / "trades.jsonl").write_text(
+                '{"schema_name":"execution_audit_row","schema_version":1,"trade_id":"live-1","timestamp":"2026-04-23T00:00:01+00:00","market_id":"m1","event_key":"event-1","question":"Q","exchange":"kalshi","direction":"BUY_YES","status":"rejected","lifecycle_state":"revalidation_rejected","failure_stage":"revalidation","requested_size":1.0,"approved_size":1.0,"placed_size":0.0,"filled_size":0.0,"remaining_size":0.0,"reserved_capital":0.0,"market_price":0.4,"entry_price":0.4,"decision_reason_code":"price_above_threshold","parity_mode_enabled":true,"execution_revalidated":true,"execution_revalidation_outcome":"rejected","execution_snapshot_source":"book","original_decision_reason_code":"approved","execution_decision_reason_code":"price_above_threshold","original_signal_snapshot":{"market_price":0.4},"execution_snapshot":{"market_price":0.47}}\n'
+            )
+
+            view = build_parity_view(data_dir)
+            comparison = view["comparison"]
+
+            self.assertEqual(comparison["matched_keys"], 1)
+            self.assertEqual(comparison["matched_pairs"], 1)
+            self.assertEqual(comparison["mismatched_pair_count"], 1)
+            self.assertIn(("status", 1), comparison["mismatch_field_counts"])
+            self.assertEqual(view["live_summary"]["decision_delta_rows"], 1)
+            self.assertEqual(view["live_summary"]["execution_price_delta_rows"], 1)
+            self.assertEqual(view["live_summary"]["top_decision_delta_pairs"][0][0], "approved -> price_above_threshold")
+
+            artifact = write_parity_comparison_artifact(data_dir)
+            self.assertTrue(artifact.exists())
+            self.assertIn('"comparison"', artifact.read_text())
 
 
 if __name__ == "__main__":
