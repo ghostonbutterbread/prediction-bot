@@ -5,11 +5,12 @@ import logging
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from math import isfinite
 from pathlib import Path
 from typing import Any, Optional
 
 from bot.file_ops import append_jsonl, atomic_write_json, load_jsonl, locked_file, rewrite_jsonl
-from bot.strategies.enhanced import EnhancedStrategyEngine
+from bot.strategies.enhanced import EnhancedStrategyEngine, KellySizer
 from bot.market_classification import apply_classification_metadata, classify_market_object
 from bot.shared_core.resolution import detect_market_outcome
 from bot.shared_core.weather_risk import (
@@ -66,8 +67,16 @@ class PredictionLab:
         self.telegram_summary_on_pause = bool(self.lab_cfg.get("telegram_summary_on_pause", False))
         self.min_confidence_to_record = float(self.lab_cfg.get("min_confidence_to_record", 0.0) or 0.0)
         self.min_edge_to_record = float(self.lab_cfg.get("min_edge_to_record", 0.0) or 0.0)
-        self.hypothetical_mode = str(self.lab_cfg.get("hypothetical_notional_mode", "flat") or "flat").lower()
+        self.hypothetical_mode = self._normalize_hypothetical_mode(self.lab_cfg.get("hypothetical_notional_mode", "flat"))
         self.flat_notional_usd = float(self.lab_cfg.get("flat_notional_usd", 10.0) or 10.0)
+        fresh_wallet_bankroll = self.lab_cfg.get("fresh_wallet_bankroll_usd", 100.0)
+        self.fresh_wallet_bankroll_usd = float(100.0 if fresh_wallet_bankroll is None else fresh_wallet_bankroll)
+        economics_cfg = self.config.get("trade_economics", {}) or {}
+        self.kelly = KellySizer(
+            fee_rate=self.config.get("kalshi_fee_rate"),
+            min_position_size_usd=economics_cfg.get("min_position_size_usd", 1.0),
+            min_expected_net_profit_usd=economics_cfg.get("min_expected_net_profit_usd", 0.0),
+        )
         self.experiment_id = str(self.lab_cfg.get("experiment_id") or "default")
         self.strategy_version = str(self.lab_cfg.get("strategy_version") or "v1")
         self.mapper = WeatherMarketCityMapper()
@@ -204,9 +213,7 @@ class PredictionLab:
                 else:
                     action = row.get("direction", "SKIP")
                     fee_model = ReplayFeeModel(profit_fee_rate=float(self.config.get("kalshi_fee_rate", 0.07) or 0.07))
-                    position_size = float((row.get("hypothetical") or {}).get("notional_usd", self.flat_notional_usd) or self.flat_notional_usd)
-                    if self.use_sizing_logic:
-                        position_size = position_size
+                    position_size = self._stored_position_size(row)
                     scored = score_replay_answer(
                         action,
                         {
@@ -228,6 +235,9 @@ class PredictionLab:
                     "is_correct": scored.get("is_correct"),
                     "net_pnl": scored.get("net_pnl"),
                     "gross_pnl": scored.get("gross_pnl"),
+                    "position_size": scored.get("position_size"),
+                    "contracts": scored.get("contracts"),
+                    "fees_paid": scored.get("fees_paid"),
                     "entry_price": scored.get("entry_price"),
                     "quoted_entry_price": scored.get("quoted_entry_price"),
                 }
@@ -333,10 +343,7 @@ class PredictionLab:
             "weather_context": context,
             "experiment_id": self.experiment_id,
             "strategy_version": self.strategy_version,
-            "hypothetical": {
-                "mode": self.hypothetical_mode,
-                "notional_usd": self.flat_notional_usd,
-            },
+            "hypothetical": self._build_hypothetical_metadata(market, signal),
             **self._observation_metadata(),
         }
         weather_risk = self._build_weather_risk_metadata(market, signal, weather_context=context)
@@ -433,6 +440,91 @@ class PredictionLab:
             "entry_price": entry_price,
             "win_probability": win_probability,
         }
+
+    def _build_hypothetical_metadata(self, market, signal: dict[str, Any]) -> dict[str, Any]:
+        normalized = self._normalize_weather_trade_signal(market, signal)
+        entry_price = normalized.get("entry_price")
+        win_probability = normalized.get("win_probability")
+        direction = str(signal.get("direction") or "SKIP").upper()
+        is_trade_direction = direction in {"BUY_YES", "BUY_NO"}
+
+        if self.hypothetical_mode == "flat":
+            approved_size = self.flat_notional_usd if is_trade_direction else 0.0
+            return {
+                "mode": "flat",
+                "sizing_method": "flat",
+                "notional_usd": self.flat_notional_usd,
+                "position_size_usd": round(approved_size, 4),
+                "approved_position_size_usd": round(approved_size, 4),
+                "requested_position_size_usd": round(approved_size, 4),
+                "entry_price": entry_price,
+                "win_probability": win_probability,
+                "bankroll_usd": None,
+                "zero_reason": None if approved_size > 0 else "not_trade_direction",
+                "reason_if_zero": None if approved_size > 0 else "not_trade_direction",
+            }
+
+        bankroll = max(0.0, self.fresh_wallet_bankroll_usd)
+        requested_size = 0.0
+        approved_size = 0.0
+        zero_reason = None
+
+        if not is_trade_direction:
+            zero_reason = "not_trade_direction"
+        elif bankroll <= 0:
+            zero_reason = "non_positive_bankroll"
+        elif entry_price is None:
+            zero_reason = "missing_entry_price"
+        elif not 0 < float(entry_price) < 1:
+            zero_reason = "invalid_entry_price"
+        elif win_probability is None:
+            zero_reason = "missing_win_probability"
+        elif not 0 <= float(win_probability) <= 1:
+            zero_reason = "invalid_win_probability"
+        else:
+            requested_size = float(self.kelly.calculate(float(win_probability), float(entry_price), bankroll) or 0.0)
+            if isfinite(requested_size) and requested_size > 0:
+                approved_size = requested_size
+            else:
+                zero_reason = "kelly_zero_size"
+
+        requested_size = round(requested_size if isfinite(requested_size) and requested_size > 0 else 0.0, 4)
+        approved_size = round(approved_size if isfinite(approved_size) and approved_size > 0 else 0.0, 4)
+        return {
+            "mode": "fresh_kelly",
+            "sizing_method": "fresh_wallet_kelly",
+            "notional_usd": approved_size,
+            "position_size_usd": approved_size,
+            "approved_position_size_usd": approved_size,
+            "requested_position_size_usd": requested_size,
+            "entry_price": entry_price,
+            "win_probability": win_probability,
+            "bankroll_usd": round(bankroll, 4),
+            "zero_reason": zero_reason,
+            "reason_if_zero": zero_reason,
+            "kelly": {
+                "bankroll_usd": round(bankroll, 4),
+                "requested_position_size_usd": requested_size,
+                "approved_position_size_usd": approved_size,
+                "entry_price": entry_price,
+                "win_probability": win_probability,
+                "zero_reason": zero_reason,
+                "fraction": getattr(self.kelly, "fraction", None),
+                "max_bet_pct": getattr(self.kelly, "max_bet_pct", None),
+                "fee_rate": getattr(self.kelly, "fee_rate", None),
+            },
+        }
+
+    def _stored_position_size(self, row: dict[str, Any]) -> float:
+        hypothetical = row.get("hypothetical") if isinstance(row.get("hypothetical"), dict) else {}
+        for key in ("position_size_usd", "approved_position_size_usd", "notional_usd"):
+            value = hypothetical.get(key)
+            try:
+                if value is not None:
+                    return max(0.0, float(value))
+            except (TypeError, ValueError):
+                continue
+        return max(0.0, self.flat_notional_usd)
 
     def _get_candidate_markets(self, exchange) -> list[Any]:
         direct_fetch = getattr(exchange, "get_markets_direct", None)
@@ -604,6 +696,13 @@ class PredictionLab:
         if direction == "BUY_NO":
             return "buy_no"
         return "skip"
+
+    @staticmethod
+    def _normalize_hypothetical_mode(value: Any) -> str:
+        normalized = str(value or "flat").strip().lower()
+        if normalized in {"fresh_kelly", "kelly"}:
+            return "fresh_kelly"
+        return "flat"
 
     @staticmethod
     def _coerce_unit_float(value: Any) -> float | None:
