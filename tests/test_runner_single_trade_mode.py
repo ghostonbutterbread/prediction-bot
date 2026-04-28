@@ -97,7 +97,7 @@ class RunnerSingleTradeModeTests(unittest.TestCase):
             self.assertEqual(len(bot.exchanges["kalshi"].orders), 1)
             self.assertEqual(second_result["blocked_reason"], "single_trade_mode_completed")
 
-            with open(f"{tmpdir}/lifecycle.jsonl") as f:
+            with open(bot.log_dir / "lifecycle.jsonl") as f:
                 events = [json.loads(line) for line in f if line.strip()]
             self.assertTrue(any(event["event"] == "single_trade_completed" for event in events))
 

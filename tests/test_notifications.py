@@ -1,8 +1,6 @@
 import json
 import tempfile
 import unittest
-from pathlib import Path
-from unittest.mock import Mock
 
 from bot.notifications import build_notification, normalize_verbosity
 from bot.runner import PredictionBot
@@ -51,7 +49,7 @@ class RunnerNotificationEmissionTests(unittest.TestCase):
                 "single_trade_completed",
                 {"open_positions": 1, "open_orders": 0, "behavior": "continue_resolution_tracking"},
             )
-            notifications = Path(tmpdir) / "notifications.jsonl"
+            notifications = bot.log_dir / "notifications.jsonl"
             self.assertTrue(notifications.exists())
             entries = [json.loads(line) for line in notifications.read_text().splitlines() if line.strip()]
             self.assertEqual(entries[-1]["event"], "single_trade_completed")
@@ -81,7 +79,7 @@ class RunnerNotificationEmissionTests(unittest.TestCase):
                     "errors": 0,
                 },
             )
-            notifications = Path(tmpdir) / "notifications.jsonl"
+            notifications = bot.log_dir / "notifications.jsonl"
             entries = [json.loads(line) for line in notifications.read_text().splitlines() if line.strip()]
             self.assertEqual(entries[-1]["event"], "hourly_summary")
             self.assertIn("Hourly summary", entries[-1]["message"])

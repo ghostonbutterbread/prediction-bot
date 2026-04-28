@@ -276,8 +276,6 @@ class RunnerLiveReconciliationAdapter:
             local_entry["market_id"]
             and local_entry["market_id"] == exchange_entry["market_id"]
             and local_entry["direction"] == exchange_entry["direction"]
-            and local_entry["order_id"]
-            and exchange_entry["order_id"]
             and local_entry["order_id"] != exchange_entry["order_id"]
             for local_entry in local_entries
             for exchange_entry in exchange_entries

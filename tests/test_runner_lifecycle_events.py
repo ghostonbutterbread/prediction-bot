@@ -24,8 +24,8 @@ class RunnerLifecycleEventTests(unittest.TestCase):
 
     def test_startup_event_logged_on_init(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            self._make_bot(tmpdir)
-            with open(f"{tmpdir}/lifecycle.jsonl") as f:
+            bot = self._make_bot(tmpdir)
+            with open(bot.log_dir / "lifecycle.jsonl") as f:
                 entries = [json.loads(line) for line in f if line.strip()]
 
             self.assertEqual(entries[0]["event"], "startup")
@@ -40,7 +40,7 @@ class RunnerLifecycleEventTests(unittest.TestCase):
             bot.stop()
             bot.close()
 
-            with open(f"{tmpdir}/lifecycle.jsonl") as f:
+            with open(bot.log_dir / "lifecycle.jsonl") as f:
                 entries = [json.loads(line) for line in f if line.strip()]
 
             events = [entry["event"] for entry in entries]

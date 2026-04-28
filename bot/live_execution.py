@@ -242,6 +242,69 @@ class RunnerLiveExecutionAdapter:
         parts = market_id.split("-")
         return "-".join(parts[:-1]) if len(parts) > 1 else market_id
 
+    @staticmethod
+    def _normalize_direction(value: Any) -> str:
+        value = str(value or "BUY_YES").strip().upper()
+        if value in {"NO", "BUY_NO", "SELL_YES"}:
+            return "BUY_NO"
+        return "BUY_YES"
+
+    def _intent_fingerprint(self, exchange_name: str, market_id: str, direction: str) -> str:
+        return f"{exchange_name}:{market_id}:{self._normalize_direction(direction)}"
+
+    def _matching_open_intent_orders(self, exchange_name: str, market_id: str, direction: str) -> list[dict]:
+        fingerprint = self._intent_fingerprint(exchange_name, market_id, direction)
+        terminal_statuses = {"canceled", "cancelled", "closed", "expired", "failed", "filled", "rejected", "resolved"}
+        matches: list[dict] = []
+        for order in self.host.open_orders:
+            order_exchange = str(order.get("exchange") or exchange_name or "").strip()
+            if order_exchange and exchange_name and order_exchange != exchange_name:
+                continue
+            remaining = self.host._coerce_float(order.get("remaining_size", 0.0), default=0.0) or 0.0
+            status = str(order.get("status") or "").strip().lower()
+            if remaining <= 0.0 or status in terminal_statuses:
+                continue
+            order_fingerprint = self._intent_fingerprint(
+                exchange_name,
+                str(order.get("market_id") or ""),
+                str(order.get("direction") or "BUY_YES"),
+            )
+            if order_fingerprint == fingerprint:
+                matches.append(dict(order))
+        return matches
+
+    def _block_exchange_until_reconciliation(
+        self,
+        exchange_name: str,
+        reason_code: str,
+        issues: list[str] | None = None,
+        *,
+        details: dict | None = None,
+    ) -> list[str]:
+        gate_issues = list(dict.fromkeys([reason_code] + list(issues or [])))
+        if hasattr(self.host, "reconciliation_gate") and isinstance(getattr(self.host, "reconciliation_gate"), dict):
+            self.host.reconciliation_gate[exchange_name] = {
+                "verdict": "blocked",
+                "issues": gate_issues,
+            }
+        runtime_updater = getattr(self.host, "_update_live_runtime_state", None)
+        if callable(runtime_updater):
+            runtime_updater(
+                exchange_name,
+                "blocked",
+                reason=reason_code,
+                issues=gate_issues,
+                details=details or {"source": "live_execution"},
+            )
+        return gate_issues
+
+    @staticmethod
+    def _blocked_gate_reason(issues: list[str]) -> str:
+        for reason in ("duplicate_live_intent_open", "duplicate_submission_suspected", "placement_confirmation_uncertain"):
+            if reason in issues:
+                return reason
+        return "reconciliation_state_blocked"
+
     def execute(self, signal: dict, decision: TradeDecision, exchange: BaseExchange) -> dict | None:
         from bot.shared_core import build_trade_decision
 
@@ -282,6 +345,92 @@ class RunnerLiveExecutionAdapter:
                 "identity": runtime_identity,
             }
 
+        existing_gate = getattr(self.host, "reconciliation_gate", {}) or {}
+        exchange_gate = existing_gate.get(exchange_name) if isinstance(existing_gate, dict) else None
+        if isinstance(exchange_gate, dict) and str(exchange_gate.get("verdict") or "").lower() == "blocked":
+            gate_issues = list(exchange_gate.get("issues") or [])
+            reason_code = self._blocked_gate_reason(gate_issues)
+            reason = "Live execution is blocked until reconciliation clears duplicate or uncertain placement risk"
+            gated_decision = SimpleNamespace(
+                action=getattr(decision, "action", signal.get("direction", "BUY_YES")),
+                approved=False,
+                position_size=0.0,
+                requested_position_size=float(getattr(decision, "requested_position_size", 0.0) or getattr(decision, "position_size", 0.0) or 0.0),
+                entry_price=getattr(decision, "entry_price", signal.get("market_price")),
+                win_probability=getattr(decision, "win_probability", signal.get("model_probability")),
+                reason=reason,
+                reason_code=reason_code,
+                reasoning={"reconciliation_gate": {"verdict": "blocked", "issues": gate_issues}},
+            )
+            self._append_rejected_trade_row(
+                signal=signal,
+                exchange=exchange,
+                decision=gated_decision,
+                initial_decision=initial_decision,
+                initial_signal_snapshot=initial_signal_snapshot,
+                execution_snapshot=None,
+                status="rejected",
+                message=reason,
+                failure_stage="reconciliation",
+                execution_revalidated=False,
+                execution_revalidation_outcome=None,
+            )
+            return {
+                "blocked_reason": reason_code,
+                "decision": gated_decision,
+                "reconciliation_issues": gate_issues,
+            }
+
+        duplicate_orders = self._matching_open_intent_orders(exchange_name, market_id, decision.action)
+        if duplicate_orders:
+            reason_code = "duplicate_live_intent_open"
+            reason = "Equivalent live order intent is already open; reconciliation required before retry"
+            fingerprint = self._intent_fingerprint(exchange_name, market_id, decision.action)
+            gate_issues = self._block_exchange_until_reconciliation(
+                exchange_name,
+                reason_code,
+                details={
+                    "source": "live_execution_idempotency",
+                    "intent_fingerprint": fingerprint,
+                    "matching_order_ids": [order.get("order_id") for order in duplicate_orders],
+                },
+            )
+            duplicate_decision = SimpleNamespace(
+                action=getattr(decision, "action", signal.get("direction", "BUY_YES")),
+                approved=False,
+                position_size=0.0,
+                requested_position_size=float(getattr(decision, "requested_position_size", 0.0) or getattr(decision, "position_size", 0.0) or 0.0),
+                entry_price=getattr(decision, "entry_price", signal.get("market_price")),
+                win_probability=getattr(decision, "win_probability", signal.get("model_probability")),
+                reason=reason,
+                reason_code=reason_code,
+                reasoning={
+                    "duplicate_intent": {
+                        "intent_fingerprint": fingerprint,
+                        "matching_order_ids": [order.get("order_id") for order in duplicate_orders],
+                    }
+                },
+            )
+            self._append_rejected_trade_row(
+                signal=signal,
+                exchange=exchange,
+                decision=duplicate_decision,
+                initial_decision=initial_decision,
+                initial_signal_snapshot=initial_signal_snapshot,
+                execution_snapshot=None,
+                status="rejected",
+                message=reason,
+                failure_stage="idempotency",
+                execution_revalidated=False,
+                execution_revalidation_outcome=None,
+            )
+            return {
+                "blocked_reason": reason_code,
+                "decision": duplicate_decision,
+                "reconciliation_issues": gate_issues,
+                "duplicate_intent": duplicate_decision.reasoning["duplicate_intent"],
+            }
+
         pre_trade_refresh = self.host.live_sync.refresh_before_execution(exchange_name, exchange)
         refresh_verdict = str(pre_trade_refresh.get("reconciliation_verdict") or "safe").lower()
         refresh_issues = list(pre_trade_refresh.get("reconciliation_issues") or [])
@@ -317,6 +466,60 @@ class RunnerLiveExecutionAdapter:
                 "blocked_reason": reason_code,
                 "decision": gated_decision,
                 "reconciliation_issues": refresh_issues,
+                "refresh": {"pre_trade_refresh": dict(pre_trade_refresh)},
+            }
+
+        duplicate_orders = self._matching_open_intent_orders(exchange_name, market_id, decision.action)
+        if duplicate_orders:
+            reason_code = "duplicate_live_intent_open"
+            reason = "Equivalent live order intent is already open; reconciliation required before retry"
+            fingerprint = self._intent_fingerprint(exchange_name, market_id, decision.action)
+            gate_issues = self._block_exchange_until_reconciliation(
+                exchange_name,
+                reason_code,
+                issues=refresh_issues,
+                details={
+                    "source": "live_execution_idempotency",
+                    "intent_fingerprint": fingerprint,
+                    "matching_order_ids": [order.get("order_id") for order in duplicate_orders],
+                    "pre_trade_refresh": dict(pre_trade_refresh),
+                },
+            )
+            duplicate_decision = SimpleNamespace(
+                action=getattr(decision, "action", signal.get("direction", "BUY_YES")),
+                approved=False,
+                position_size=0.0,
+                requested_position_size=float(getattr(decision, "requested_position_size", 0.0) or getattr(decision, "position_size", 0.0) or 0.0),
+                entry_price=getattr(decision, "entry_price", signal.get("market_price")),
+                win_probability=getattr(decision, "win_probability", signal.get("model_probability")),
+                reason=reason,
+                reason_code=reason_code,
+                reasoning={
+                    "duplicate_intent": {
+                        "intent_fingerprint": fingerprint,
+                        "matching_order_ids": [order.get("order_id") for order in duplicate_orders],
+                        "pre_trade_refresh": dict(pre_trade_refresh),
+                    }
+                },
+            )
+            self._append_rejected_trade_row(
+                signal=signal,
+                exchange=exchange,
+                decision=duplicate_decision,
+                initial_decision=initial_decision,
+                initial_signal_snapshot=initial_signal_snapshot,
+                execution_snapshot=None,
+                status="rejected",
+                message=reason,
+                failure_stage="idempotency",
+                execution_revalidated=False,
+                execution_revalidation_outcome=None,
+            )
+            return {
+                "blocked_reason": reason_code,
+                "decision": duplicate_decision,
+                "reconciliation_issues": gate_issues,
+                "duplicate_intent": duplicate_decision.reasoning["duplicate_intent"],
                 "refresh": {"pre_trade_refresh": dict(pre_trade_refresh)},
             }
 
@@ -426,13 +629,17 @@ class RunnerLiveExecutionAdapter:
             uncertainty_reason = "duplicate_submission_suspected" if raw_order_status == "existing" else "placement_confirmation_uncertain"
             uncertainty_message = "Exchange indicated an order may already exist; reconciliation required before retry" if raw_order_status == "existing" else "Order placement outcome is uncertain; reconciliation required before retry"
             post_uncertainty_refresh = self.host.live_sync.refresh_before_execution(exchange_name, exchange)
-            gate_issues = [uncertainty_reason]
-            gate_issues.extend(list(post_uncertainty_refresh.get("reconciliation_issues") or []))
-            if hasattr(self.host, "reconciliation_gate") and isinstance(getattr(self.host, "reconciliation_gate"), dict):
-                self.host.reconciliation_gate[exchange_name] = {
-                    "verdict": "blocked",
-                    "issues": list(dict.fromkeys(gate_issues)),
-                }
+            gate_issues = self._block_exchange_until_reconciliation(
+                exchange_name,
+                uncertainty_reason,
+                issues=list(post_uncertainty_refresh.get("reconciliation_issues") or []),
+                details={
+                    "source": "live_execution_uncertain_placement",
+                    "raw_order_status": raw_order_status,
+                    "raw_order_id": raw_order_id,
+                    "post_uncertainty_refresh": dict(post_uncertainty_refresh),
+                },
+            )
             uncertain_decision = SimpleNamespace(
                 action=getattr(decision, "action", signal.get("direction", "BUY_YES")),
                 approved=False,
@@ -466,7 +673,7 @@ class RunnerLiveExecutionAdapter:
             return {
                 "blocked_reason": uncertainty_reason,
                 "decision": uncertain_decision,
-                "reconciliation_issues": list(dict.fromkeys(gate_issues)),
+                "reconciliation_issues": gate_issues,
                 "refresh": {"pre_trade_refresh": dict(pre_trade_refresh), "post_uncertainty_refresh": dict(post_uncertainty_refresh)},
             }
 

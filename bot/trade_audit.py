@@ -622,9 +622,13 @@ def enrich_trade_audit_fields(trade: dict, fee_rate: float = 0.07) -> dict:
     if direction not in VALID_DIRECTIONS:
         issues.append("invalid_direction")
 
+    resolution_type = str(trade.get("resolution_type") or "")
+    manual_mark_close = resolution_type == "manual_mark_close"
+
     outcome = normalize_outcome(trade.get("outcome"))
     if outcome is None:
-        issues.append("invalid_outcome")
+        if not manual_mark_close:
+            issues.append("invalid_outcome")
     else:
         trade["outcome"] = outcome
 
@@ -632,7 +636,23 @@ def enrich_trade_audit_fields(trade: dict, fee_rate: float = 0.07) -> dict:
         issues.append("missing_resolved_at")
 
     reported_pnl = coerce_float(trade.get("pnl"), default=None)
-    if (
+    if manual_mark_close:
+        if reported_pnl is None:
+            issues.append("missing_pnl")
+        else:
+            contracts = calculate_contracts(entry_price, size) if entry_price is not None and size is not None else 0.0
+            trade["contracts"] = round(contracts, 4)
+            trade["gross_pnl"] = round(reported_pnl, 4)
+            trade["fee_paid"] = 0.0
+            trade["expected_pnl"] = round(reported_pnl, 4)
+            trade["pnl"] = round(reported_pnl, 4)
+            trade["net_pnl"] = round(reported_pnl, 4)
+            settlement_value = coerce_float(trade.get("settlement_value"), default=None)
+            if settlement_value is None and size is not None and size > 0:
+                settlement_value = size + reported_pnl
+            if settlement_value is not None:
+                trade["settlement_value"] = round(settlement_value, 4)
+    elif (
         direction in VALID_DIRECTIONS
         and outcome in VALID_OUTCOMES
         and size is not None

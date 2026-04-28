@@ -649,6 +649,162 @@ class LiveExecutionTests(unittest.TestCase):
             self.assertEqual(trade_row["decision_reason_code"], "duplicate_submission_suspected")
             self.assertTrue(trade_row["execution_revalidated"])
 
+    def test_execute_blocks_duplicate_open_intent_before_second_placement(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = self._make_bot(tmpdir)
+            bot.open_orders = [
+                {
+                    "order_id": "local-open-1",
+                    "exchange": "kalshi",
+                    "market_id": "m-duplicate-intent",
+                    "question": "Will a duplicate be blocked?",
+                    "direction": "BUY_YES",
+                    "status": "open",
+                    "requested_size": 1.0,
+                    "filled_size": 0.0,
+                    "remaining_size": 1.0,
+                    "price": 0.40,
+                    "created_at": "2026-04-20T00:00:00+00:00",
+                }
+            ]
+            adapter = RunnerLiveExecutionAdapter(bot)
+            exchange = FakeExchange()
+            signal = {
+                "exchange": "kalshi",
+                "market_id": "m-duplicate-intent",
+                "question": "Will a duplicate be blocked?",
+                "direction": "BUY_YES",
+                "market_price": 0.40,
+                "yes_price": 0.40,
+                "no_price": 0.60,
+                "model_probability": 0.70,
+                "edge": 0.30,
+                "confidence": 0.90,
+            }
+            decision = SimpleNamespace(
+                action="BUY_YES",
+                approved=True,
+                position_size=2.5,
+                entry_price=0.40,
+                win_probability=0.70,
+                reason="ok",
+                reason_code="approved",
+                requested_position_size=2.5,
+                reasoning={},
+            )
+
+            result = adapter.execute(signal, decision, exchange)
+
+            self.assertIsNotNone(result)
+            self.assertEqual(result["blocked_reason"], "duplicate_live_intent_open")
+            self.assertEqual(exchange.orders, [])
+            self.assertEqual(bot.reconciliation_gate["kalshi"]["verdict"], "blocked")
+            self.assertIn("duplicate_live_intent_open", bot.reconciliation_gate["kalshi"]["issues"])
+            self.assertEqual(bot.live_runtime_state["exchange_states"]["kalshi"]["state"], "blocked")
+            self.assertEqual(len(bot.trade_history), 1)
+            trade_row = bot.trade_history[0]
+            self.assertEqual(trade_row["status"], "rejected")
+            self.assertEqual(trade_row["failure_stage"], "idempotency")
+            self.assertEqual(trade_row["decision_reason_code"], "duplicate_live_intent_open")
+            self.assertFalse(trade_row["execution_revalidated"])
+
+    def test_execute_uncertain_placement_blocks_retry_without_multiplying_orders(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = self._make_bot(tmpdir)
+            adapter = RunnerLiveExecutionAdapter(bot)
+            exchange = FakeExchange(order_status="pending_confirmation")
+            signal = {
+                "exchange": "kalshi",
+                "market_id": "m-pending-confirmation",
+                "question": "Will pending confirmation be retried?",
+                "direction": "BUY_YES",
+                "market_price": 0.40,
+                "yes_price": 0.40,
+                "no_price": 0.60,
+                "model_probability": 0.70,
+                "edge": 0.30,
+                "confidence": 0.90,
+            }
+            decision = SimpleNamespace(
+                action="BUY_YES",
+                approved=True,
+                position_size=2.5,
+                entry_price=0.40,
+                win_probability=0.70,
+                reason="ok",
+                reason_code="approved",
+                requested_position_size=2.5,
+                reasoning={},
+            )
+
+            first = adapter.execute(signal, decision, exchange)
+            second = adapter.execute(signal, decision, exchange)
+
+            self.assertIsNotNone(first)
+            self.assertEqual(first["blocked_reason"], "placement_confirmation_uncertain")
+            self.assertIsNotNone(second)
+            self.assertEqual(second["blocked_reason"], "placement_confirmation_uncertain")
+            self.assertEqual(len(exchange.orders), 1)
+            self.assertEqual(bot.reconciliation_gate["kalshi"]["verdict"], "blocked")
+            self.assertIn("placement_confirmation_uncertain", bot.reconciliation_gate["kalshi"]["issues"])
+            self.assertEqual(bot.live_runtime_state["exchange_states"]["kalshi"]["state"], "blocked")
+            self.assertEqual(len(bot.trade_history), 2)
+            self.assertEqual(bot.trade_history[0]["decision_reason_code"], "placement_confirmation_uncertain")
+            self.assertEqual(bot.trade_history[1]["decision_reason_code"], "placement_confirmation_uncertain")
+            self.assertEqual(bot.trade_history[1]["failure_stage"], "reconciliation")
+
+    def test_execute_allows_non_duplicate_open_intent_to_place_normally(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = self._make_bot(tmpdir)
+            bot.open_orders = [
+                {
+                    "order_id": "local-other-1",
+                    "exchange": "kalshi",
+                    "market_id": "m-other-intent",
+                    "question": "Will another market stay open?",
+                    "direction": "BUY_YES",
+                    "status": "open",
+                    "requested_size": 1.0,
+                    "filled_size": 0.0,
+                    "remaining_size": 1.0,
+                    "price": 0.40,
+                    "created_at": "2026-04-20T00:00:00+00:00",
+                }
+            ]
+            adapter = RunnerLiveExecutionAdapter(bot)
+            exchange = FakeExchange()
+            signal = {
+                "exchange": "kalshi",
+                "market_id": "m-new-intent",
+                "question": "Will a new market place normally?",
+                "direction": "BUY_YES",
+                "market_price": 0.40,
+                "yes_price": 0.40,
+                "no_price": 0.60,
+                "model_probability": 0.70,
+                "edge": 0.30,
+                "confidence": 0.90,
+            }
+            decision = SimpleNamespace(
+                action="BUY_YES",
+                approved=True,
+                position_size=2.5,
+                entry_price=0.40,
+                win_probability=0.70,
+                reason="ok",
+                reason_code="approved",
+                requested_position_size=2.5,
+                reasoning={},
+            )
+
+            result = adapter.execute(signal, decision, exchange)
+
+            self.assertIsNotNone(result)
+            self.assertEqual(len(exchange.orders), 1)
+            self.assertEqual(exchange.orders[0]["market_id"], "m-new-intent")
+            self.assertEqual(len(bot.trade_history), 1)
+            self.assertEqual(bot.trade_history[0]["status"], "placed")
+
     def test_execute_refreshes_exchange_state_before_revalidating(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             bot = self._make_bot(tmpdir)
