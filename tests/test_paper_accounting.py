@@ -226,6 +226,23 @@ class PaperAccountingTests(unittest.TestCase):
             self.assertAlmostEqual(trade["pnl"], -10.0)
             self.assertAlmostEqual(summary["reserved_capital"], 0.0)
 
+    def test_resolver_normalizes_explicit_results_and_settled_close_prices(self):
+        resolver = TradeResolver()
+
+        explicit_yes = FakeMarket(status="closed", result="YES", close_price=None)
+        explicit_no = FakeMarket(status="closed", result="no", close_price=None)
+        settled_yes = FakeMarket(status="settled", result="", close_price=1.0)
+        settled_no = FakeMarket(status="finalized", result="", close_price=0.0)
+
+        self.assertTrue(resolver._has_result(explicit_yes))
+        self.assertTrue(resolver._has_result(explicit_no))
+        self.assertTrue(resolver._has_result(settled_yes))
+        self.assertTrue(resolver._has_result(settled_no))
+        self.assertEqual(resolver._determine_outcome(explicit_yes), "YES")
+        self.assertEqual(resolver._determine_outcome(explicit_no), "NO")
+        self.assertEqual(resolver._determine_outcome(settled_yes), "YES")
+        self.assertEqual(resolver._determine_outcome(settled_no), "NO")
+
     def test_resolver_does_not_settle_closed_market_without_result(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             session_id = "20260423_123000"
@@ -285,6 +302,81 @@ class PaperAccountingTests(unittest.TestCase):
             self.assertEqual(trade["outcome"], "pending_settlement")
             self.assertEqual(trade["resolution_type"], "closed_unsettled")
             self.assertAlmostEqual(summary["reserved_capital"], 10.0)
+
+    def test_closed_unsettled_close_price_does_not_count_as_result(self):
+        resolver = TradeResolver()
+        market = FakeMarket(status="closed", result="", close_price=1.0)
+
+        self.assertFalse(resolver._has_result(market))
+        self.assertEqual(resolver._determine_outcome(market), "UNKNOWN")
+
+    def test_closed_unsettled_terminal_quotes_do_not_resolve_without_result(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session_id = "20260426_230000"
+            session_path = Path(tmpdir) / f"sim_{session_id}.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "session_id": session_id,
+                        "starting_balance": 100.0,
+                        "balance": 100.0,
+                        "reserved_capital": 10.0,
+                        "trades": [
+                            {
+                                "id": "t1",
+                                "timestamp": "2026-04-26T23:00:00+00:00",
+                                "exchange": "kalshi",
+                                "market_id": "KXHIGHMIA-26APR26-T80",
+                                "question": "Will the high temp in Miami be <80° on Apr 26, 2026?",
+                                "direction": "BUY_YES",
+                                "model_probability": 0.16,
+                                "market_price": 0.01,
+                                "edge": 0.15,
+                                "confidence": 0.9,
+                                "position_size": 10.0,
+                                "reserved_capital": 10.0,
+                                "signals": {},
+                                "resolved": False,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            resolver = TradeResolver(tmpdir)
+            summary = resolver.resolve_session(
+                session_id,
+                FakeExchange(
+                    {
+                        "KXHIGHMIA-26APR26-T80": FakeMarket(
+                            status="closed",
+                            result="",
+                            yes_price=0.01,
+                            no_price=1.0,
+                            close_price=None,
+                        )
+                    }
+                ),
+            )
+
+            session = json.loads(session_path.read_text(encoding="utf-8"))
+            [trade] = session["trades"]
+
+            self.assertEqual(summary["resolved_this_pass"], 0)
+            self.assertFalse(trade["resolved"])
+            self.assertEqual(trade["outcome"], "pending_settlement")
+            self.assertEqual(trade["resolution_type"], "closed_unsettled")
+            self.assertIsNone(trade["pnl"])
+            self.assertAlmostEqual(session["balance"], 100.0)
+            self.assertAlmostEqual(session["reserved_capital"], 10.0)
+
+    def test_resolver_does_not_force_yes_no_for_void_result(self):
+        resolver = TradeResolver()
+        market = FakeMarket(status="closed", result="cancelled", close_price=1.0)
+
+        self.assertTrue(resolver._has_result(market))
+        self.assertEqual(resolver._determine_outcome(market), "VOID")
 
     def test_resolver_marks_malformed_resolved_rows_untrusted_and_excludes_them_from_balance(self):
         with tempfile.TemporaryDirectory() as tmpdir:
