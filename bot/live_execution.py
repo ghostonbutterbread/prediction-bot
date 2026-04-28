@@ -381,56 +381,6 @@ class RunnerLiveExecutionAdapter:
                 "reconciliation_issues": gate_issues,
             }
 
-        duplicate_orders = self._matching_open_intent_orders(exchange_name, market_id, decision.action)
-        if duplicate_orders:
-            reason_code = "duplicate_live_intent_open"
-            reason = "Equivalent live order intent is already open; reconciliation required before retry"
-            fingerprint = self._intent_fingerprint(exchange_name, market_id, decision.action)
-            gate_issues = self._block_exchange_until_reconciliation(
-                exchange_name,
-                reason_code,
-                details={
-                    "source": "live_execution_idempotency",
-                    "intent_fingerprint": fingerprint,
-                    "matching_order_ids": [order.get("order_id") for order in duplicate_orders],
-                },
-            )
-            duplicate_decision = SimpleNamespace(
-                action=getattr(decision, "action", signal.get("direction", "BUY_YES")),
-                approved=False,
-                position_size=0.0,
-                requested_position_size=float(getattr(decision, "requested_position_size", 0.0) or getattr(decision, "position_size", 0.0) or 0.0),
-                entry_price=getattr(decision, "entry_price", signal.get("market_price")),
-                win_probability=getattr(decision, "win_probability", signal.get("model_probability")),
-                reason=reason,
-                reason_code=reason_code,
-                reasoning={
-                    "duplicate_intent": {
-                        "intent_fingerprint": fingerprint,
-                        "matching_order_ids": [order.get("order_id") for order in duplicate_orders],
-                    }
-                },
-            )
-            self._append_rejected_trade_row(
-                signal=signal,
-                exchange=exchange,
-                decision=duplicate_decision,
-                initial_decision=initial_decision,
-                initial_signal_snapshot=initial_signal_snapshot,
-                execution_snapshot=None,
-                status="rejected",
-                message=reason,
-                failure_stage="idempotency",
-                execution_revalidated=False,
-                execution_revalidation_outcome=None,
-            )
-            return {
-                "blocked_reason": reason_code,
-                "decision": duplicate_decision,
-                "reconciliation_issues": gate_issues,
-                "duplicate_intent": duplicate_decision.reasoning["duplicate_intent"],
-            }
-
         pre_trade_refresh = self.host.live_sync.refresh_before_execution(exchange_name, exchange)
         refresh_verdict = str(pre_trade_refresh.get("reconciliation_verdict") or "safe").lower()
         refresh_issues = list(pre_trade_refresh.get("reconciliation_issues") or [])
