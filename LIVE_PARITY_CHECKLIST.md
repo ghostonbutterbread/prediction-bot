@@ -53,7 +53,7 @@ A trade can pass in normal paper on stale snapshot assumptions but fail once par
 - [x] Both modes expose available cash, reserved capital, exposure, open position count
 - [~] Paper account state is derived from simulator state
 - [~] Live account state is derived from exchange truth + local reconciliation
-- [ ] Add parity tests to ensure the same open positions / reserved capital produce equivalent `AccountState` semantics in both modes
+- [x] Parity tests ensure the same open positions / reserved capital produce equivalent `AccountState` semantics in both modes
 
 ### Why this matters
 Even with shared decision logic, different account-state construction can lead to different approvals or sizes.
@@ -66,7 +66,7 @@ Even with shared decision logic, different account-state construction can lead t
 - [~] Paper and live intentionally use different presets
 - [ ] Make all live-vs-paper risk differences explicitly visible in config/docs
 - [ ] Add a "parity mode" config where live and paper can run with identical risk settings for direct comparison
-- [ ] Add fixture tests comparing paper and live decisions under identical account/risk inputs
+- [x] Fixture tests compare paper and live decisions under identical account/risk inputs
 
 ### Why this matters
 Right now differences may be intentional, but they still make paper parity results harder to reason about before going live.
@@ -78,8 +78,8 @@ Right now differences may be intentional, but they still make paper parity resul
 - [x] Paper has a dedicated execution adapter
 - [x] Live has a dedicated execution adapter
 - [x] Live revalidates before order placement
-- [~] Paper/live rows now share a meaningful overlap and can be normalized through `bot/parity_audit.py`, but the canonical write-side contract is still underspecified
-- [~] Requested/approved/placed/filled sizing fields are partially aligned, but not yet enforced as a single required row shape across both modes
+- [~] Paper/live rows now share a documented canonical execution/audit contract, with normalization and validation flowing through `bot/trade_audit.py` and `bot/parity_audit.py`, but live write-time enforcement is still incomplete
+- [~] Requested/approved/placed/filled sizing fields now have a shared intended row shape and contract validation coverage, but not full write-time enforcement across both modes
 - [x] Both modes preserve decision reasoning alongside execution outcome
 
 ### Why this matters
@@ -92,9 +92,9 @@ The repo now has the beginnings of a shared report surface, but write-time row s
 - [~] Paper assumes simplified fills
 - [~] Live tracks open orders and partial fills
 - [ ] Simulate partial-fill lifecycle in paper, at least optionally
-- [ ] Add explicit live handling for stale orders, canceled orders, rejected orders, and partial-fill updates
-- [ ] Confirm live trade history rows distinguish requested vs filled exposure correctly
-- [ ] Add retry / reconciliation rules for transient exchange/API inconsistency
+- [~] Live has explicit handling for stale orders, canceled orders, rejected orders, and partial-fill updates, but still needs broader operational hardening
+- [x] Live trade history rows distinguish requested vs filled exposure correctly
+- [~] Retry / reconciliation rules exist for some uncertain/duplicate placement paths, but transient exchange/API inconsistency handling is not complete
 
 ### Why this matters
 This is one of the largest real-world gaps between paper and live.
@@ -103,11 +103,11 @@ This is one of the largest real-world gaps between paper and live.
 
 ## 7. Reconciliation Parity
 
-- [~] Live has exchange-truth reconciliation on connect / refresh
-- [~] Paper reconstructs from saved session state
-- [ ] Define a shared reconciliation contract: positions, resting orders, reserved capital, available cash, trade history rows
-- [ ] Add parity tests for startup recovery scenarios
-- [ ] Add tests for "bot restarts with unresolved positions/orders" in both modes
+- [x] Live has exchange-truth reconciliation on connect / refresh
+- [x] Paper reconstructs from saved session state
+- [~] A reconciliation contract is now taking shape in code/docs, but it still needs to be treated as a fully explicit shared contract
+- [x] Parity tests cover startup recovery scenarios
+- [x] Tests cover restarts with unresolved positions/orders in both modes
 
 ### Why this matters
 Production readiness depends heavily on safe restarts and correct recovery.
@@ -133,9 +133,9 @@ A production bot needs trustworthy post-trade accounting, not just good entries.
 - [x] Paper has strong audit trail
 - [~] Live logs lifecycle and trade history, but not as richly as paper
 - [~] Live and paper share execution snapshot normalization, but live still needs richer persisted audit snapshots and stricter row invariants
-- [ ] Add before/after snapshots for account state around order placement and reconciliation
-- [~] Structured reason codes exist in several paths, but they are not yet normalized into one canonical execution/audit schema
-- [~] A first parity report surface exists (`bot/parity_audit.py`, `scripts/parity_viewer.py`), but it still needs richer joins, diff summaries, and stronger missing-field handling
+- [~] Before/after account-state capture now exists in some execution paths, but not yet as a complete reconciliation snapshot surface
+- [x] Structured reason codes are normalized through a canonical execution/audit schema
+- [~] A parity report surface exists (`bot/parity_audit.py`, `scripts/parity_viewer.py`), but it still needs richer joins, diff summaries, and stronger missing-field handling
 
 ### Why this matters
 If live fails in weird ways, you need paper-grade visibility into why — and that now means hardening the row contract and the parity report, not just adding one from scratch.
@@ -144,11 +144,11 @@ If live fails in weird ways, you need paper-grade visibility into why — and th
 
 ## 10. Failure Handling / Resilience
 
-- [~] Live has some reconciliation and sync safeguards
-- [ ] Add explicit handling for exchange timeouts, stale order books, duplicate submissions, and idempotency
+- [~] Live has meaningful reconciliation and sync safeguards, but not full production-hardening coverage
+- [~] There is explicit handling for duplicate submissions and idempotency-style conflicts; timeouts and stale-book paths still need work
 - [ ] Add safe retry strategy for non-terminal exchange errors
-- [ ] Add kill-switch behavior for repeated reconciliation mismatches
-- [ ] Add invariant checks: reserved capital >= 0, available cash >= 0, open order + open position exposure matches risk state
+- [x] Kill-switch / safety-pause behavior exists for repeated critical live failures and reconciliation mismatches
+- [~] Invariant checks exist in the execution/audit contract layer, but runtime state invariants still need broader coverage
 - [ ] Add chaos-style tests for restart/reconnect during open orders
 
 ### Why this matters
@@ -158,11 +158,11 @@ This is the difference between "works" and "production ready".
 
 ## 11. Testing Gaps
 
-- [~] Unit tests cover shared execution snapshot alignment, parity proofs, recovery parity, and parity audit normalization, but lifecycle/report assertions are still thin
-- [ ] Fixture tests for hidden-gem logic in both modes
-- [ ] Fixture tests for retrade/event-overlap logic in both modes
-- [ ] Fixture tests for partial-fill and order-status transitions
-- [ ] Fixture tests for restart/recovery flows under richer live order states
+- [~] Unit tests cover shared execution snapshot alignment, parity proofs, recovery parity, parity audit normalization, and a meaningful slice of lifecycle behavior, but report ergonomics and broader live-edge coverage are still thinner than they should be
+- [x] Fixture tests cover hidden-gem logic in both modes
+- [x] Fixture tests cover retrade/event-overlap logic in both modes
+- [~] Fixture tests cover partial fills and part of the order-status transition space, but stale/rejected lifecycle coverage is still thinner than it should be
+- [x] Fixture tests cover restart/recovery flows under richer live order states
 - [ ] Golden-file comparison of trade-history rows from paper vs live for equivalent scenarios
 
 ### Why this matters
@@ -175,10 +175,10 @@ A lot of core parity is now proven, but row-contract and lifecycle parity are st
 ### Highest priority
 - [x] Extract shared execution snapshot / price normalization logic and make live use it first
 - [x] Paper parity mode can simulate live revalidation with current bid/ask semantics
-- [ ] Unify the execution/audit row schema across paper and live at write time
-- [ ] Harden the existing parity diff/report layer so it highlights schema gaps and behavior deltas clearly
-- [ ] Harden live order lifecycle handling: partials, rejects, cancels, stale orders
-- [ ] Unify settlement lifecycle states and accounting shape
+- [~] Unify the execution/audit row schema across paper and live at write time
+- [~] Harden the existing parity diff/report layer so it highlights schema gaps and behavior deltas clearly
+- [~] Harden live order lifecycle handling: partials, rejects, cancels, stale orders
+- [~] Unify settlement lifecycle states and accounting shape
 - [~] Restart/recovery parity tests exist, but they still need broader live-lifecycle coverage
 
 ### Second priority
@@ -196,8 +196,8 @@ A lot of core parity is now proven, but row-contract and lifecycle parity are st
 
 Current state:
 - Normal paper mode: **good logic lab**
-- Parity paper mode: **becoming a strong execution-realism lab**
-- Live execution adapter: **real, but still needs operational hardening outside the parity lane**
+- Parity paper mode: **strong execution-realism lab**
+- Live execution adapter: **real and substantially hardened, but still needs operational hardening outside the parity lane**
 
 Recommended framing:
 - Normal paper tests logic and market selection

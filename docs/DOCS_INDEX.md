@@ -100,7 +100,33 @@ This is the main spec for the upcoming live-hardening workstream.
 
 ---
 
-### 7. `docs/LIVE_CANARY_READINESS.md`
+### 7. `docs/LIVE_DEPLOYMENT_READINESS_PLAN.md`
+Read this when the question becomes "what must be true before unattended or true deployment is responsible?"
+
+Use it to understand:
+- the gap between supervised canary and true deployment
+- the required operational-safety (heart) work
+- the required observability/explainability (mind) work
+- the rollout ladder from canary to limited autonomy to true deployment
+
+This is the main bridge from current hardening work to real deployment readiness.
+
+---
+
+### 8. `docs/LIVE_IMPLEMENTATION_BUILD_ORDER_CHECKLIST.md`
+Read this when you want the concrete implementation order.
+
+Use it to understand:
+- what to build first vs later
+- which phases belong on the next live-hardening branch
+- which files/tests each phase should probably touch
+- what exit criteria should gate movement to the next phase
+
+This is the execution checklist that turns the broader specs into a practical build sequence.
+
+---
+
+### 9. `docs/LIVE_CANARY_READINESS.md`
 Read this only when preparing a tiny supervised live test.
 
 Use it to understand:
@@ -118,6 +144,8 @@ This is a launch-readiness note, not a build spec.
 These tell us where the project is going:
 - `docs/OVERALL_DIRECTION_SPEC.md`
 - `LIVE_PARITY_CHECKLIST.md`
+- `docs/LIVE_DEPLOYMENT_READINESS_PLAN.md`
+- `docs/LIVE_IMPLEMENTATION_BUILD_ORDER_CHECKLIST.md`
 - `docs/LIVE_CANARY_READINESS.md`
 
 ### Design/spec layer
@@ -200,8 +228,12 @@ If you are unsure where to start:
 1. read `docs/OVERALL_DIRECTION_SPEC.md`
 2. check `LIVE_PARITY_CHECKLIST.md`
 3. use `docs/LIVE_LIFECYCLE_HARDENING_SPEC.md` for the next branch
+4. use `docs/LIVE_DEPLOYMENT_READINESS_PLAN.md` for the full road from canary to true deployment
+5. use `docs/LIVE_IMPLEMENTATION_BUILD_ORDER_CHECKLIST.md` for the concrete build order
 
 That reading path matches the current plan:
 - merge this branch
 - then do live hardening
-- then return for deferred parity cleanup
+- then use the deployment-readiness plan to sequence rollout and proof
+- then use the build-order checklist to drive implementation
+- then return for deferred parity cleanup where needed

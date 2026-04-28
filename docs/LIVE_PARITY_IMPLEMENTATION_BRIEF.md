@@ -4,17 +4,20 @@
 
 Reflect the repo's current parity state accurately, then define the next concrete implementation pass.
 
-Parity mode itself is no longer the main gap. The stronger next move is to:
-1. normalize the shared execution/audit row contract
-2. harden the existing parity diff/report surface
-3. use that visibility to drive live lifecycle hardening
+Parity mode itself is no longer the main gap.
+
+The repo has now moved into a new phase:
+1. the shared execution/audit contract is substantially in place
+2. parity-mode observability exists and is already useful
+3. the main remaining work is live operational hardening, with parity follow-up focused on reporting ergonomics and direct-comparison tooling
 
 ## Status Update
 
-The execution/audit contract pass is now substantially in place.
+The execution/audit contract pass is now substantially in place, and the checklist has been updated to reflect that.
 
-That means this brief should now be read mainly as:
-- the record of why the contract/parity cleanup mattered
+This brief should now be read mainly as:
+- the record of what parity groundwork is already done
+- the list of parity-adjacent follow-ups that still matter
 - the bridge into the next live-readiness pass
 
 The concrete next-pass live spec now lives in:
@@ -34,18 +37,19 @@ Use this rule throughout implementation:
 
 What already exists:
 - Shared decision logic exists in `bot/shared_core/decision.py::build_trade_decision()`
-- Shared execution snapshot normalization exists and is already used in live (`bot/live_execution.py`) and paper-facing paths (`bot/paper_adapters.py` imports `build_execution_snapshot`)
-- Paper parity metadata is already flowing into persisted rows in some form
-- A first normalization/report layer already exists in `bot/parity_audit.py`
-- A first local viewer already exists in `scripts/parity_viewer.py`
-- Shared audit/accounting helpers already exist in `bot/trade_audit.py`
-- There are already parity-focused tests in `tests/test_parity_audit.py`, `tests/test_parity_proofs.py`, `tests/test_recovery_parity.py`, and related files
+- Shared execution snapshot normalization exists and is already used in live and paper-facing paths
+- Paper parity mode records original vs execution-time snapshot metadata
+- Paper and live both flow through a documented execution/audit contract in `bot/trade_audit.py`
+- `bot/parity_audit.py` can normalize, validate, and summarize paper/live rows through one comparable surface
+- `scripts/parity_viewer.py` provides a local inspection layer over normalized parity data
+- Account-state parity, hidden-gem parity, retrade parity, recovery parity, and several lifecycle edge cases already have direct tests
+- Live lifecycle hardening has already advanced meaningfully: identity gating, duplicate-intent blocking, uncertain-placement blocking, reconciliation refreshes, partial-fill handling, canonical lifecycle states, and repeated-failure safety pause behavior are in place
 
 What is still weak:
-- the repo does **not** yet enforce one canonical write-time execution/audit row schema across paper and live
-- `bot/parity_audit.py` still has to infer meaning from slightly different row shapes rather than reading one strongly-defined contract
-- the current viewer is useful for inspection, but still thin as a parity diff/report layer
-- live lifecycle rows still need more explicit semantics for rejected / canceled / stale / partial-fill transitions
+- parity reporting is still more of an inspection/debug surface than a polished diff/report product
+- direct-comparison ergonomics are still thinner than the raw parity data now available
+- live lifecycle behavior is much stronger, but still not yet fully production-hardened under the messiest exchange/API edge cases
+- config/documentation for intentionally different live-vs-paper risk presets is still incomplete
 
 ## Reference Spec
 
@@ -54,56 +58,31 @@ The concrete code-facing contract for this next pass lives in:
 
 That file should be treated as the source of truth for writer/reader field expectations during schema cleanup.
 
-## Main Schema Gap
+## Main Remaining Gap
 
-The biggest remaining parity problem is not price revalidation. It is row-contract drift.
+The biggest remaining parity problem is no longer basic price revalidation, and it is no longer the absence of a row contract.
 
-Today the normalization layer can recover a useful view, but too many fields are still:
-- optional without clear meaning
-- adapter-specific aliases of each other
-- present only in some failure paths
-- derived at report time instead of guaranteed at write time
+The main parity-adjacent gaps now are:
+- report ergonomics and clearer parity delta surfacing
+- a cleaner direct-comparison workflow when paper and live should run under intentionally identical risk assumptions
+- broader live operational correctness around messy order lifecycle and reconciliation conditions
 
-That makes it harder to answer:
-- what was requested vs approved vs actually placed vs filled?
-- which decision was original and which was execution-time revalidated?
-- did a row fail because logic rejected it, because execution drift rejected it, or because order placement/lifecycle failed later?
-- is a missing field actually missing, or just named differently in another adapter?
+The important shift is:
+- **before**: parity needed core infrastructure
+- **now**: parity has the core infrastructure, and the remaining work is mostly visibility, comparison ergonomics, and live safety
 
 ## Required Next Pass
 
-### Step 1: Define a canonical execution/audit row contract
-Update docs and code paths around:
-- `bot/paper_adapters.py`
-- `bot/live_execution.py`
-- `bot/trade_audit.py`
-- `bot/parity_audit.py`
-
-At minimum, the shared row contract should explicitly define:
-- identity fields: `timestamp`, `trade_id`, `market_id`, `event_key`, `direction`, `exchange`
-- lifecycle fields: `status`, `failure_stage`, `lifecycle_state`
-- sizing fields: `requested_size`, `approved_size`, `placed_size`, `filled_size`, `remaining_size`, `reserved_capital`
-- pricing fields: `market_price`, `entry_price`, `fill_price`, `estimated_fill_price`, `slippage_estimate`
-- reasoning fields: `decision_reason`, `decision_reason_code`, `original_decision_reason_code`, `execution_decision_reason_code`
-- parity fields: `parity_mode_enabled`, `execution_revalidated`, `execution_revalidation_outcome`, `execution_snapshot_source`
-- snapshot payloads: `original_signal_snapshot`, `execution_snapshot`
-- account-state context fields where practical: `available_cash_before`, `available_cash_after_entry`
-
-Also add explicit invariants for impossible combinations, for example:
-- `filled_size <= placed_size <= approved_size <= requested_size`
-- rejected rows should not masquerade as filled rows
-- `execution_revalidated=false` should not carry execution-only decision fields unless clearly marked historical/unknown
-- `execution_snapshot_source` should use a small fixed enum like `book|fallback|missing|unknown`
-
-### Step 2: Harden the parity diff/report layer that already exists
+### Step 1: Finish hardening the parity diff/report layer that already exists
 Update:
 - `bot/parity_audit.py`
 - `scripts/parity_viewer.py`
-- tests for report normalization/diffing
+- report-oriented tests and fixtures
 
 Goal:
 - stop treating the parity report as a thin viewer only
 - turn it into a first-class schema/delta surface
+- make it easier to answer "what drifted and why?" without reading raw rows by hand
 
 The report layer should clearly surface:
 - rows missing required contract fields
@@ -114,9 +93,22 @@ The report layer should clearly surface:
 - resolved outcome counts (`YES` / `NO`)
 - invalid-contract row counts and top issue breakdowns
 - paper/live row-shape mismatches for equivalent scenarios
+- better summaries/exportable artifacts for longer parity runs
 
-### Step 3: Then harden live lifecycle + settlement behavior
-Only after the row contract/reporting is cleaner, push the next hardening pass into:
+### Step 2: Add a clean direct-comparison lane for identical-risk parity runs
+Update:
+- config/docs for live-vs-paper risk differences
+- parity-mode configuration surface
+- fixture coverage around intentionally matched inputs
+
+Goal:
+- make it explicit when paper/live are intentionally using different presets
+- add a straightforward way to run parity comparisons under identical risk assumptions when that is the question
+
+This is less about core parity correctness and more about operator clarity.
+
+### Step 3: Continue live lifecycle + settlement hardening
+Push the next hardening pass into:
 - `bot/live_execution.py`
 - live adapters/sync/reconciliation paths
 - settlement / resolved-row mutation paths in `bot/runner.py`
@@ -129,16 +121,17 @@ Focus on:
 - reconciliation sanity checks against persisted rows and risk state
 - resolved/settlement rows using canonical `status`, `lifecycle_state`, and `outcome` semantics
 - resolution events using market-outcome truth (`YES` / `NO`) instead of bot-relative win/loss labels
+- broader transient exchange/API inconsistency handling
 
-This ordering matters because lifecycle work is much easier to verify once the row/report layer can show exactly what changed.
+This is now the main production-readiness lane.
 
 ## Suggested Acceptance Criteria for the Next Pass
 
-1. Paper and live both emit a documented shared execution/audit row contract for new rows
-2. The parity normalization layer no longer needs to guess between multiple aliases for core required fields
-3. The parity viewer/report can explicitly show schema gaps and behavior deltas, not just raw rows
-4. Tests cover row invariants and parity diff summaries in addition to decision parity
-5. Lifecycle hardening can build on the same contract without redefining row semantics again
+1. The parity viewer/report can explicitly show schema gaps and behavior deltas, not just raw rows
+2. Longer parity runs can produce clearer summaries or exportable artifacts for comparison
+3. Live-vs-paper risk differences are explicit in config/docs, and there is a clean identical-risk comparison lane
+4. Tests cover report/diff behavior in addition to decision parity and row invariants
+5. Live lifecycle hardening continues on top of the existing execution/audit contract without redefining row semantics again
 
 ## Non-Goals For This Pass
 
@@ -152,9 +145,9 @@ Those can follow once the shared row contract and parity report are solid.
 
 ## Bottom Line
 
-The repo has already crossed the line from “parity mode not built” to “parity mode exists, but its observability contract needs tightening.”
+The repo has already crossed the line from “parity mode not built” to “parity mode is real, strongly grounded, and no longer the main blocker.”
 
 So the best next implementation pass is:
-- unify the shared execution/audit row schema
 - harden the parity diff/report layer that already exists
-- then use that clearer surface to harden live order lifecycle behavior
+- add a cleaner direct-comparison lane for identical-risk parity runs
+- keep pushing live order/reconciliation/settlement hardening as the main operational-readiness track

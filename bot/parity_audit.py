@@ -6,10 +6,121 @@ import json
 from pathlib import Path
 from typing import Any
 
-from bot.trade_audit import apply_execution_audit_contract, coerce_float, validate_execution_audit_row
+from bot.trade_audit import (
+    EXECUTION_AUDIT_SCHEMA_NAME,
+    EXECUTION_AUDIT_SCHEMA_VERSION,
+    VALID_EXECUTION_SNAPSHOT_SOURCES,
+    apply_execution_audit_contract,
+    canonical_execution_snapshot_source,
+    coerce_float,
+    validate_execution_audit_row,
+)
+
+
+REQUIRED_EXECUTION_AUDIT_FIELDS = (
+    "schema_name",
+    "schema_version",
+    "timestamp",
+    "trade_id",
+    "market_id",
+    "event_key",
+    "exchange",
+    "direction",
+    "status",
+    "lifecycle_state",
+    "requested_size",
+    "approved_size",
+    "placed_size",
+    "filled_size",
+    "remaining_size",
+    "reserved_capital",
+    "market_price",
+    "entry_price",
+    "decision_reason_code",
+    "parity_mode_enabled",
+    "execution_revalidated",
+    "execution_snapshot_source",
+)
+
+SNAPSHOT_SOURCE_ORDER = ("book", "fallback", "missing", "unknown")
+COMPARISON_FIELDS = (
+    "status",
+    "lifecycle_state",
+    "failure_stage",
+    "decision_reason_code",
+    "execution_revalidation_outcome",
+    "execution_snapshot_source",
+    "contract_valid",
+)
+
+
+def _has_required_value(row: dict[str, Any], field: str) -> bool:
+    if field not in row:
+        return False
+    value = row.get(field)
+    if value is None:
+        return field in {"market_price", "entry_price"}
+    if isinstance(value, str):
+        return bool(value.strip())
+    return True
+
+
+def find_schema_gaps(row: dict[str, Any]) -> list[str]:
+    """Report raw-row schema gaps before canonical defaults hide them."""
+    gaps = [f"missing_{field}" for field in REQUIRED_EXECUTION_AUDIT_FIELDS if not _has_required_value(row, field)]
+    if row.get("schema_name") not in (None, EXECUTION_AUDIT_SCHEMA_NAME):
+        gaps.append("invalid_schema_name")
+    if row.get("schema_version") not in (None, EXECUTION_AUDIT_SCHEMA_VERSION):
+        gaps.append("invalid_schema_version")
+    snapshot_source = row.get("execution_snapshot_source")
+    if snapshot_source is not None and canonical_execution_snapshot_source(snapshot_source) != str(snapshot_source).strip().lower():
+        gaps.append("invalid_execution_snapshot_source")
+    return sorted(set(gaps))
+
+
+def find_lifecycle_contradictions(row: dict[str, Any]) -> list[str]:
+    status = str(row.get("status") or "").strip().lower()
+    lifecycle_state = str(row.get("lifecycle_state") or "").strip().lower()
+    if not status or not lifecycle_state:
+        return []
+
+    filled_size = coerce_float(row.get("filled_size"), default=0.0) or 0.0
+    contradictions: list[str] = []
+    expected: str | None = None
+    if status == "candidate":
+        expected = "candidate"
+    elif status == "approved":
+        expected = "approved"
+    elif status == "placed":
+        expected = "placed_open"
+    elif status == "partial":
+        expected = "partial_open"
+    elif status == "filled":
+        expected = "filled_open"
+    elif status == "canceled":
+        expected = "canceled_partial" if filled_size > 0 else "canceled_unfilled"
+    elif status == "stale":
+        expected = "stale_open_order"
+    elif status == "resolved":
+        expected = "resolved_position"
+
+    if expected and lifecycle_state != expected:
+        contradictions.append(f"{status}_lifecycle_mismatch")
+    if status == "rejected" and not lifecycle_state.endswith("_rejected"):
+        contradictions.append("rejected_lifecycle_mismatch")
+    if status == "failed" and not (lifecycle_state.endswith("_failed") or lifecycle_state == "placement_failed"):
+        contradictions.append("failed_lifecycle_mismatch")
+    return sorted(set(contradictions))
+
+
+def _snapshot_price(snapshot: Any) -> float | None:
+    if not isinstance(snapshot, dict):
+        return None
+    return coerce_float(snapshot.get("market_price"), default=None)
 
 
 def normalize_parity_trade_row(row: dict[str, Any], *, source: str) -> dict[str, Any]:
+    schema_gaps = find_schema_gaps(row)
     decision_trace = dict(row.get("decision_trace") or {})
     parity_mode = dict(decision_trace.get("parity_mode") or {})
     canonical_row = apply_execution_audit_contract(dict(row))
@@ -69,18 +180,27 @@ def normalize_parity_trade_row(row: dict[str, Any], *, source: str) -> dict[str,
         "original_signal_snapshot": original_signal_snapshot,
         "execution_snapshot": execution_snapshot,
     }
+    normalized["schema_gaps"] = schema_gaps
+    normalized["schema_gap_count"] = len(schema_gaps)
     normalized["contract_issues"] = validate_execution_audit_row(canonical_row)
     normalized["contract_issue_count"] = len(normalized["contract_issues"])
     normalized["contract_valid"] = not normalized["contract_issues"]
+    normalized["lifecycle_contradictions"] = find_lifecycle_contradictions(canonical_row)
+    normalized["lifecycle_contradiction_count"] = len(normalized["lifecycle_contradictions"])
     normalized["decision_reason_delta"] = bool(
         normalized.get("original_decision_reason_code")
         and normalized.get("execution_decision_reason_code")
         and normalized.get("original_decision_reason_code") != normalized.get("execution_decision_reason_code")
     )
-    original_snapshot = normalized.get("original_signal_snapshot") or {}
-    execution_snapshot_payload = normalized.get("execution_snapshot") or {}
-    original_market_price = coerce_float((original_snapshot or {}).get("market_price"), default=None)
-    execution_market_price = coerce_float((execution_snapshot_payload or {}).get("market_price"), default=None)
+    original_market_price = _snapshot_price(normalized.get("original_signal_snapshot"))
+    execution_market_price = _snapshot_price(normalized.get("execution_snapshot"))
+    normalized["original_market_price"] = original_market_price
+    normalized["execution_market_price"] = execution_market_price
+    normalized["execution_market_price_delta"] = (
+        round(execution_market_price - original_market_price, 6)
+        if original_market_price is not None and execution_market_price is not None
+        else None
+    )
     normalized["execution_price_delta"] = bool(
         original_market_price is not None
         and execution_market_price is not None
@@ -166,6 +286,7 @@ def load_live_rows(data_dir: str | Path) -> list[dict[str, Any]]:
 
 
 def build_parity_view(data_dir: str | Path) -> dict[str, Any]:
+    data_path = Path(data_dir)
     paper_rows = [normalize_parity_trade_row(row, source="paper") for row in load_latest_paper_session_rows(data_dir)]
     live_rows = [normalize_parity_trade_row(row, source="live") for row in load_live_rows(data_dir)]
     return {
@@ -173,6 +294,8 @@ def build_parity_view(data_dir: str | Path) -> dict[str, Any]:
         "live_rows": live_rows,
         "paper_summary": summarize_normalized_rows(paper_rows),
         "live_summary": summarize_normalized_rows(live_rows),
+        "comparison": build_paper_live_comparison(paper_rows, live_rows),
+        "comparison_artifact_path": str(default_comparison_artifact_path(data_path)),
     }
 
 
@@ -185,14 +308,24 @@ def summarize_normalized_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     execution_reason_counts: dict[str, int] = {}
     resolved_outcome_counts: dict[str, int] = {}
     snapshot_source_counts: dict[str, int] = {}
+    schema_gap_counts: dict[str, int] = {}
+    lifecycle_contradiction_counts: dict[str, int] = {}
     contract_issue_counts: dict[str, int] = {}
+    schema_gap_examples: list[dict[str, Any]] = []
+    lifecycle_contradiction_examples: list[dict[str, Any]] = []
     invalid_contract_examples: list[dict[str, Any]] = []
+    decision_delta_examples: list[dict[str, Any]] = []
+    price_delta_examples: list[dict[str, Any]] = []
+    decision_delta_pair_counts: dict[str, int] = {}
     parity_candidates = 0
     parity_enabled_rows = 0
     execution_revalidated_rows = 0
     execution_rejected_rows = 0
     fallback_rows = 0
     missing_snapshot_rows = 0
+    unknown_snapshot_rows = 0
+    schema_gap_rows = 0
+    lifecycle_contradiction_rows = 0
     invalid_contract_rows = 0
     decision_delta_rows = 0
     execution_price_delta_rows = 0
@@ -218,6 +351,8 @@ def summarize_normalized_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
             resolved_outcome_counts[resolved_outcome] = resolved_outcome_counts.get(resolved_outcome, 0) + 1
         snapshot_source = str(row.get("execution_snapshot_source") or "unknown")
         snapshot_source_counts[snapshot_source] = snapshot_source_counts.get(snapshot_source, 0) + 1
+        if snapshot_source == "unknown":
+            unknown_snapshot_rows += 1
         if row.get("is_parity_candidate"):
             parity_candidates += 1
         if row.get("parity_mode_enabled"):
@@ -228,7 +363,7 @@ def summarize_normalized_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
             execution_rejected_rows += 1
         if row.get("execution_snapshot_source") == "fallback":
             fallback_rows += 1
-        if row.get("execution_snapshot_source") in (None, "missing"):
+        if row.get("execution_snapshot_source") == "missing":
             missing_snapshot_rows += 1
         original_reason = row.get("original_decision_reason_code")
         execution_reason_value = row.get("execution_decision_reason_code")
@@ -236,15 +371,63 @@ def summarize_normalized_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
             original_reason and execution_reason_value and original_reason != execution_reason_value
         ):
             decision_delta_rows += 1
+            pair_key = f"{original_reason or 'missing'} -> {execution_reason_value or 'missing'}"
+            decision_delta_pair_counts[pair_key] = decision_delta_pair_counts.get(pair_key, 0) + 1
+            if len(decision_delta_examples) < 10:
+                decision_delta_examples.append(
+                    {
+                        "trade_id": row.get("trade_id"),
+                        "market_id": row.get("market_id"),
+                        "original_decision_reason_code": original_reason,
+                        "execution_decision_reason_code": execution_reason_value,
+                        "execution_revalidation_outcome": row.get("execution_revalidation_outcome"),
+                    }
+                )
         if row.get("execution_price_delta"):
             execution_price_delta_rows += 1
+            if len(price_delta_examples) < 10:
+                price_delta_examples.append(
+                    {
+                        "trade_id": row.get("trade_id"),
+                        "market_id": row.get("market_id"),
+                        "original_market_price": row.get("original_market_price"),
+                        "execution_market_price": row.get("execution_market_price"),
+                        "execution_market_price_delta": row.get("execution_market_price_delta"),
+                    }
+                )
         else:
-            original_snapshot = row.get("original_signal_snapshot") or {}
-            execution_snapshot = row.get("execution_snapshot") or {}
-            original_market_price = coerce_float((original_snapshot or {}).get("market_price"), default=None)
-            execution_market_price = coerce_float((execution_snapshot or {}).get("market_price"), default=None)
+            original_market_price = _snapshot_price(row.get("original_signal_snapshot"))
+            execution_market_price = _snapshot_price(row.get("execution_snapshot"))
             if original_market_price is not None and execution_market_price is not None and original_market_price != execution_market_price:
                 execution_price_delta_rows += 1
+        for gap in row.get("schema_gaps", []) or []:
+            schema_gap_counts[gap] = schema_gap_counts.get(gap, 0) + 1
+        if row.get("schema_gaps"):
+            schema_gap_rows += 1
+            if len(schema_gap_examples) < 10:
+                schema_gap_examples.append(
+                    {
+                        "source": row.get("source"),
+                        "trade_id": row.get("trade_id"),
+                        "market_id": row.get("market_id"),
+                        "gaps": list(row.get("schema_gaps") or []),
+                    }
+                )
+        for contradiction in row.get("lifecycle_contradictions", []) or []:
+            lifecycle_contradiction_counts[contradiction] = lifecycle_contradiction_counts.get(contradiction, 0) + 1
+        if row.get("lifecycle_contradictions"):
+            lifecycle_contradiction_rows += 1
+            if len(lifecycle_contradiction_examples) < 10:
+                lifecycle_contradiction_examples.append(
+                    {
+                        "source": row.get("source"),
+                        "trade_id": row.get("trade_id"),
+                        "market_id": row.get("market_id"),
+                        "status": row.get("status"),
+                        "lifecycle_state": row.get("lifecycle_state"),
+                        "contradictions": list(row.get("lifecycle_contradictions") or []),
+                    }
+                )
         for issue in row.get("contract_issues", []) or []:
             contract_issue_counts[issue] = contract_issue_counts.get(issue, 0) + 1
         if row.get("contract_issues"):
@@ -260,7 +443,13 @@ def summarize_normalized_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 )
     top_reasons = sorted(reason_counts.items(), key=lambda item: (-item[1], item[0]))[:10]
     top_execution_reasons = sorted(execution_reason_counts.items(), key=lambda item: (-item[1], item[0]))[:10]
+    top_schema_gaps = sorted(schema_gap_counts.items(), key=lambda item: (-item[1], item[0]))[:10]
+    top_lifecycle_contradictions = sorted(
+        lifecycle_contradiction_counts.items(),
+        key=lambda item: (-item[1], item[0]),
+    )[:10]
     top_contract_issues = sorted(contract_issue_counts.items(), key=lambda item: (-item[1], item[0]))[:10]
+    top_decision_delta_pairs = sorted(decision_delta_pair_counts.items(), key=lambda item: (-item[1], item[0]))[:10]
     return {
         "total_rows": len(rows),
         "status_counts": status_counts,
@@ -270,16 +459,124 @@ def summarize_normalized_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "top_reason_codes": top_reasons,
         "top_execution_reason_codes": top_execution_reasons,
         "resolved_outcome_counts": resolved_outcome_counts,
-        "snapshot_source_counts": snapshot_source_counts,
+        "snapshot_source_counts": {
+            source: snapshot_source_counts.get(source, 0)
+            for source in SNAPSHOT_SOURCE_ORDER
+            if source in VALID_EXECUTION_SNAPSHOT_SOURCES
+        },
         "parity_candidates": parity_candidates,
         "parity_enabled_rows": parity_enabled_rows,
         "execution_revalidated_rows": execution_revalidated_rows,
         "execution_rejected_rows": execution_rejected_rows,
         "fallback_rows": fallback_rows,
         "missing_snapshot_rows": missing_snapshot_rows,
+        "unknown_snapshot_rows": unknown_snapshot_rows,
+        "schema_gap_rows": schema_gap_rows,
+        "top_schema_gaps": top_schema_gaps,
+        "schema_gap_examples": schema_gap_examples,
+        "lifecycle_contradiction_rows": lifecycle_contradiction_rows,
+        "top_lifecycle_contradictions": top_lifecycle_contradictions,
+        "lifecycle_contradiction_examples": lifecycle_contradiction_examples,
         "invalid_contract_rows": invalid_contract_rows,
         "decision_delta_rows": decision_delta_rows,
+        "top_decision_delta_pairs": top_decision_delta_pairs,
+        "decision_delta_examples": decision_delta_examples,
         "execution_price_delta_rows": execution_price_delta_rows,
+        "price_delta_examples": price_delta_examples,
         "top_contract_issues": top_contract_issues,
         "invalid_contract_examples": invalid_contract_examples,
     }
+
+
+def _comparison_key(row: dict[str, Any]) -> str:
+    direction = str(row.get("direction") or "unknown")
+    if row.get("event_key"):
+        return f"event:{row.get('event_key')}:{direction}"
+    if row.get("market_id"):
+        return f"market:{row.get('market_id')}:{direction}"
+    return f"trade:{row.get('trade_id') or 'unknown'}"
+
+
+def _group_by_comparison_key(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(_comparison_key(row), []).append(row)
+    for group_rows in grouped.values():
+        group_rows.sort(key=lambda item: str(item.get("timestamp") or ""))
+    return grouped
+
+
+def build_paper_live_comparison(paper_rows: list[dict[str, Any]], live_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    paper_by_key = _group_by_comparison_key(paper_rows)
+    live_by_key = _group_by_comparison_key(live_rows)
+    all_keys = sorted(set(paper_by_key) | set(live_by_key))
+    mismatch_field_counts: dict[str, int] = {}
+    mismatch_examples: list[dict[str, Any]] = []
+    matched_keys = 0
+    matched_pairs = 0
+    mismatched_pair_count = 0
+    paper_only_row_count = 0
+    live_only_row_count = 0
+
+    for key in all_keys:
+        paper_group = paper_by_key.get(key, [])
+        live_group = live_by_key.get(key, [])
+        if not paper_group:
+            live_only_row_count += len(live_group)
+            continue
+        if not live_group:
+            paper_only_row_count += len(paper_group)
+            continue
+        matched_keys += 1
+        for index, (paper_row, live_row) in enumerate(zip(paper_group, live_group)):
+            matched_pairs += 1
+            field_deltas = {
+                field: {"paper": paper_row.get(field), "live": live_row.get(field)}
+                for field in COMPARISON_FIELDS
+                if paper_row.get(field) != live_row.get(field)
+            }
+            if not field_deltas:
+                continue
+            mismatched_pair_count += 1
+            for field in field_deltas:
+                mismatch_field_counts[field] = mismatch_field_counts.get(field, 0) + 1
+            if len(mismatch_examples) < 20:
+                mismatch_examples.append(
+                    {
+                        "comparison_key": key,
+                        "pair_index": index,
+                        "paper_trade_id": paper_row.get("trade_id"),
+                        "live_trade_id": live_row.get("trade_id"),
+                        "field_deltas": field_deltas,
+                    }
+                )
+
+        if len(paper_group) > len(live_group):
+            paper_only_row_count += len(paper_group) - len(live_group)
+        elif len(live_group) > len(paper_group):
+            live_only_row_count += len(live_group) - len(paper_group)
+
+    return {
+        "paper_rows": len(paper_rows),
+        "live_rows": len(live_rows),
+        "matched_keys": matched_keys,
+        "matched_pairs": matched_pairs,
+        "paper_only_keys": [key for key in all_keys if key in paper_by_key and key not in live_by_key][:20],
+        "live_only_keys": [key for key in all_keys if key in live_by_key and key not in paper_by_key][:20],
+        "paper_only_row_count": paper_only_row_count,
+        "live_only_row_count": live_only_row_count,
+        "mismatched_pair_count": mismatched_pair_count,
+        "mismatch_field_counts": sorted(mismatch_field_counts.items(), key=lambda item: (-item[1], item[0])),
+        "mismatch_examples": mismatch_examples,
+    }
+
+
+def default_comparison_artifact_path(data_dir: str | Path) -> Path:
+    return Path(data_dir) / "parity_comparison.json"
+
+
+def write_parity_comparison_artifact(data_dir: str | Path, output_path: str | Path | None = None) -> Path:
+    path = Path(output_path) if output_path is not None else default_comparison_artifact_path(data_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(build_parity_view(data_dir), indent=2, sort_keys=True))
+    return path
