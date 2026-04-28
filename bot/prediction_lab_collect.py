@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+from copy import deepcopy
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -37,6 +38,7 @@ class PredictionLabCollectorDaemon:
         exchange_builder: Callable[..., tuple[Any, Any]] = build_prediction_lab_exchange,
         sleep_fn: Callable[[float], None] = time.sleep,
         monotonic_fn: Callable[[], float] = time.monotonic,
+        config_patch: dict[str, Any] | None = None,
     ):
         self.config_path = Path(config_path)
         self.demo = demo
@@ -45,12 +47,30 @@ class PredictionLabCollectorDaemon:
         self.exchange_builder = exchange_builder
         self.sleep_fn = sleep_fn
         self.monotonic_fn = monotonic_fn
+        self.config_patch = deepcopy(config_patch) if config_patch else None
         self.status = PredictionLabCollectorStatus()
 
     def _load_config(self) -> dict[str, Any]:
         config = self.config_loader(self.config_path)
+        if self.config_patch:
+            config = self._deep_merge(config, self.config_patch)
+            trading_cfg = config.get("trading", {}) or {}
+            if "enabled" in trading_cfg:
+                config["trading_enabled"] = bool(trading_cfg.get("enabled"))
+            elif "trading_enabled" in trading_cfg:
+                config["trading_enabled"] = bool(trading_cfg.get("trading_enabled"))
         config["_config_path"] = str(self.config_path)
         return config
+
+    @staticmethod
+    def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+        merged = dict(base)
+        for key, value in override.items():
+            if isinstance(merged.get(key), dict) and isinstance(value, dict):
+                merged[key] = PredictionLabCollectorDaemon._deep_merge(merged[key], value)
+            else:
+                merged[key] = deepcopy(value)
+        return merged
 
     @staticmethod
     def _iso_now() -> str:
