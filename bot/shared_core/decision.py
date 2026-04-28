@@ -8,6 +8,12 @@ from typing import Any, Protocol
 from bot.trade_audit import trade_event_key
 
 from .interfaces import TradeContext, TradeDecision
+from .weather_risk import (
+    apply_weather_size_limits,
+    assess_weather_market_risk,
+    build_weather_source_confidence_evidence,
+    classify_weather_market,
+)
 
 
 class KellySizerLike(Protocol):
@@ -97,6 +103,7 @@ def build_trade_decision(
     win_probability = normalized["win_probability"]
     edge = _coerce_optional_float(context.edge) or 0.0
     confidence = _coerce_optional_float(context.confidence) or 0.0
+    source_signal = dict(context.source_context or {})
 
     reasoning["normalized"] = {
         "direction": direction,
@@ -207,6 +214,43 @@ def build_trade_decision(
                 reasoning=reasoning,
             )
 
+    weather_policy = dict((context.metadata or {}).get("weather_risk_policy") or {})
+    weather_signal = {
+        "market_id": context.market_id,
+        "question": context.question,
+        **source_signal,
+    }
+    is_weather_market = (
+        classify_weather_market(str(weather_signal.get("question") or ""), str(weather_signal.get("market_id") or "")) != "unknown"
+        or str(weather_signal.get("market_group") or weather_signal.get("group") or "").lower() == "weather"
+        or bool(weather_policy)
+    )
+    if is_weather_market:
+        weather_evidence = build_weather_source_confidence_evidence(weather_signal)
+        weather_signal = {**weather_signal, **weather_evidence}
+        weather_assessment = assess_weather_market_risk(
+            weather_signal,
+            entry_price=entry_price,
+            win_probability=win_probability,
+            policy=weather_policy,
+        )
+        reasoning["weather_risk"] = {
+            **weather_assessment.to_dict(),
+            "evidence": weather_evidence,
+        }
+        if weather_assessment.should_skip:
+            return TradeDecision(
+                action="SKIP",
+                approved=False,
+                reason_code=weather_assessment.reason_code or "weather_risk_rejected",
+                reason=weather_assessment.reason or "Weather risk gates rejected trade",
+                edge=edge,
+                confidence=confidence,
+                entry_price=entry_price,
+                win_probability=win_probability,
+                reasoning=reasoning,
+            )
+
     duplicate_reason = _event_blocker_reason(event_snapshot, retrade_policy)
     if duplicate_reason is not None:
         return TradeDecision(
@@ -284,6 +328,17 @@ def build_trade_decision(
             reasoning=reasoning,
         )
 
+    if is_weather_market:
+        weather_adjusted_size = apply_weather_size_limits(
+            requested_size,
+            weather_assessment,
+            current_balance=context.account_state.current_balance,
+        )
+        if weather_adjusted_size != requested_size:
+            reasoning["weather_risk"]["requested_size_before_weather_limits"] = round(requested_size, 4)
+            reasoning["weather_risk"]["requested_size_after_weather_limits"] = weather_adjusted_size
+            requested_size = weather_adjusted_size
+
     requested_size = apply_event_sizing(requested_size, event_snapshot, retrade_policy, reasoning)
     if requested_size <= 0:
         return TradeDecision(
@@ -345,7 +400,6 @@ def build_trade_decision(
                 reasoning=reasoning,
             )
 
-    source_signal = dict(context.source_context or {})
     risk_decision = risk_policy.check_trade(
         source_signal,
         requested_size,

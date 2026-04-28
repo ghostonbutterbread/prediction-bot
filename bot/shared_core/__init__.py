@@ -21,6 +21,12 @@ from .interfaces import (
     ResolutionEvent,
     StateAdapter,
 )
+from .weather_risk import (
+    apply_weather_size_limits,
+    assess_weather_market_risk,
+    build_weather_source_confidence_evidence,
+    classify_weather_market,
+)
 
 __all__ = [
     "AccountState",
@@ -40,8 +46,12 @@ __all__ = [
     "StateAdapter",
     "TradeContext",
     "TradeDecision",
+    "apply_weather_size_limits",
+    "assess_weather_market_risk",
     "build_execution_snapshot",
+    "build_weather_source_confidence_evidence",
     "build_trade_decision",
+    "classify_weather_market",
     "normalize_trade_context",
     "reason_to_key",
 ]

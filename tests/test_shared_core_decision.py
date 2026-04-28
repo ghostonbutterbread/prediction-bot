@@ -110,6 +110,213 @@ class SharedCoreDecisionTests(unittest.TestCase):
         self.assertEqual(decision.reason_code, "approved")
         self.assertTrue(decision.reasoning["hidden_gem"]["triggered"])
 
+    def test_build_trade_decision_does_not_apply_weather_exceptional_gate_to_non_weather_market(self):
+        account_state = AccountState(
+            starting_balance=100.0,
+            current_balance=100.0,
+            available_cash=100.0,
+            reserved_capital=0.0,
+            total_exposure=0.0,
+            open_positions=0,
+        )
+        context = TradeContext(
+            exchange="kalshi",
+            market_id="CHEAP-NONWEATHER-1",
+            question="Will a non-weather event happen?",
+            direction="BUY_YES",
+            market_price=0.03,
+            yes_price=0.03,
+            no_price=0.97,
+            model_probability=0.48,
+            edge=0.45,
+            confidence=0.9,
+            account_state=account_state,
+            source_context={"market_id": "CHEAP-NONWEATHER-1", "question": "Will a non-weather event happen?"},
+        )
+        kelly_sizer = Mock()
+        kelly_sizer.calculate.return_value = 2.0
+        risk_policy = Mock()
+        risk_policy.check_trade.return_value = SimpleNamespace(
+            approved=True,
+            reason="Approved",
+            adjusted_size=2.0,
+            risk_score=0.0,
+            warnings=[],
+        )
+
+        decision = build_trade_decision(
+            context,
+            kelly_sizer=kelly_sizer,
+            risk_policy=risk_policy,
+            min_edge=0.05,
+            min_confidence=0.5,
+            max_entry_price=0.7,
+        )
+
+        self.assertTrue(decision.approved)
+        self.assertNotIn("weather_risk", decision.reasoning)
+        self.assertEqual(decision.reason_code, "approved")
+
+    def test_build_trade_decision_applies_weather_bucket_size_cap(self):
+        account_state = AccountState(
+            starting_balance=100.0,
+            current_balance=100.0,
+            available_cash=100.0,
+            reserved_capital=0.0,
+            total_exposure=0.0,
+            open_positions=0,
+        )
+        context = TradeContext(
+            exchange="kalshi",
+            market_id="KXHIGHMIA-26APR26-B82.5",
+            question="Will the high temp in Miami be 82-83° on Apr 26?",
+            direction="BUY_YES",
+            market_price=0.22,
+            yes_price=0.22,
+            no_price=0.78,
+            model_probability=0.70,
+            edge=0.48,
+            confidence=0.9,
+            account_state=account_state,
+            source_context={
+                "market_id": "KXHIGHMIA-26APR26-B82.5",
+                "question": "Will the high temp in Miami be 82-83° on Apr 26?",
+                "market_volume": 1000,
+            },
+        )
+        kelly_sizer = Mock()
+        kelly_sizer.calculate.return_value = 100.0
+        risk_policy = Mock()
+        risk_policy.check_trade.return_value = SimpleNamespace(
+            approved=True,
+            reason="Approved",
+            adjusted_size=2.0,
+            risk_score=0.0,
+            warnings=[],
+        )
+
+        decision = build_trade_decision(
+            context,
+            kelly_sizer=kelly_sizer,
+            risk_policy=risk_policy,
+            min_edge=0.05,
+            min_confidence=0.5,
+            max_entry_price=0.7,
+        )
+
+        self.assertTrue(decision.approved)
+        self.assertEqual(decision.reasoning["weather_risk"]["shape"], "bucket")
+        self.assertEqual(decision.reasoning["weather_risk"]["requested_size_after_weather_limits"], 2.0)
+        risk_policy.check_trade.assert_called_once_with(
+            context.source_context,
+            2.0,
+            available_cash=100.0,
+        )
+
+    def test_build_trade_decision_rejects_exceptional_hidden_gem_without_weather_evidence(self):
+        account_state = AccountState(
+            starting_balance=100.0,
+            current_balance=100.0,
+            available_cash=100.0,
+            reserved_capital=0.0,
+            total_exposure=0.0,
+            open_positions=0,
+        )
+        context = TradeContext(
+            exchange="kalshi",
+            market_id="KXHIGHTSEA-26APR26-T64",
+            question="Will the maximum temperature be <64° on Apr 26?",
+            direction="BUY_YES",
+            market_price=0.03,
+            yes_price=0.03,
+            no_price=0.97,
+            model_probability=0.48,
+            edge=0.45,
+            confidence=0.9,
+            account_state=account_state,
+            source_context={
+                "market_id": "KXHIGHTSEA-26APR26-T64",
+                "question": "Will the maximum temperature be <64° on Apr 26?",
+                "market_volume": 700,
+                "weather_station_mapping": "inferred",
+            },
+        )
+        kelly_sizer = Mock()
+        risk_policy = Mock()
+
+        decision = build_trade_decision(
+            context,
+            kelly_sizer=kelly_sizer,
+            risk_policy=risk_policy,
+            min_edge=0.05,
+            min_confidence=0.5,
+            max_entry_price=0.7,
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertEqual(decision.reason_code, "weather_extreme_disagreement_without_perfect_evidence")
+        self.assertEqual(decision.reasoning["weather_risk"]["hidden_gem_tier"], "exceptional")
+        kelly_sizer.calculate.assert_not_called()
+        risk_policy.check_trade.assert_not_called()
+
+    def test_build_trade_decision_allows_exceptional_hidden_gem_with_helper_derived_weather_evidence(self):
+        account_state = AccountState(
+            starting_balance=100.0,
+            current_balance=100.0,
+            available_cash=100.0,
+            reserved_capital=0.0,
+            total_exposure=0.0,
+            open_positions=0,
+        )
+        context = TradeContext(
+            exchange="kalshi",
+            market_id="KXLOWTOKC-26APR27-T67",
+            question="Will the minimum temperature be >67° on Apr 27?",
+            direction="BUY_YES",
+            market_price=0.02,
+            yes_price=0.02,
+            no_price=0.98,
+            model_probability=0.38,
+            edge=0.36,
+            confidence=0.95,
+            account_state=account_state,
+            source_context={
+                "market_id": "KXLOWTOKC-26APR27-T67",
+                "question": "Will the minimum temperature be >67° on Apr 27?",
+                "market_volume": 4500,
+                "station_id": "KOKC",
+                "distribution_probability": 0.28,
+                "signals": {"live": 0.38, "price": 0.37},
+                "confidence": 0.95,
+            },
+        )
+        kelly_sizer = Mock()
+        kelly_sizer.calculate.return_value = 10.0
+        risk_policy = Mock()
+        risk_policy.check_trade.return_value = SimpleNamespace(
+            approved=True,
+            reason="Approved",
+            adjusted_size=1.0,
+            risk_score=0.0,
+            warnings=[],
+        )
+
+        decision = build_trade_decision(
+            context,
+            kelly_sizer=kelly_sizer,
+            risk_policy=risk_policy,
+            min_edge=0.05,
+            min_confidence=0.5,
+            max_entry_price=0.7,
+        )
+
+        self.assertTrue(decision.approved)
+        self.assertEqual(decision.reasoning["weather_risk"]["hidden_gem_tier"], "exceptional")
+        self.assertTrue(decision.reasoning["weather_risk"]["evidence_perfect"])
+        self.assertEqual(decision.reasoning["weather_risk"]["evidence"]["weather_station_mapping"], "exact")
+        self.assertGreaterEqual(decision.reasoning["weather_risk"]["evidence"]["source_agreement_score"], 0.95)
+        risk_policy.check_trade.assert_called_once()
+
     def test_build_trade_decision_rejects_non_hidden_gem_at_or_below_fifty_percent(self):
         account_state = AccountState(
             starting_balance=100.0,

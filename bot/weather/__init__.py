@@ -21,6 +21,12 @@ from .source_validation import (
     load_source_validation_pilot,
     load_source_validation_pilots,
 )
+from .station_mapping import (
+    STATIC_BASELINE_STATION_MAPPINGS,
+    WeatherStationResolution,
+    parse_weather_market_city_code,
+    resolve_weather_station,
+)
 from .training import (
     StructuralTrainingPolicy,
     TemperatureTrainingPolicy,
@@ -43,6 +49,7 @@ __all__ = [
     "ObservationLog",
     "RegistryValidationError",
     "SourceValidationError",
+    "STATIC_BASELINE_STATION_MAPPINGS",
     "DEFAULT_REPLAY_FEE_RATE",
     "DEFAULT_SOURCE_PILOT_DIR",
     "ReplayFeeModel",
@@ -55,6 +62,7 @@ __all__ = [
     "WeatherMarketCityMapper",
     "WeatherMarketContext",
     "WeatherRegistry",
+    "WeatherStationResolution",
     "apply_price_aware_training_updates",
     "build_source_validation_report",
     "build_weather_training_examples",
@@ -66,6 +74,8 @@ __all__ = [
     "load_source_validation_pilots",
     "load_weather_training_examples_from_history",
     "load_temperature_training_samples_from_history",
+    "parse_weather_market_city_code",
+    "resolve_weather_station",
     "run_price_aware_training",
     "run_price_aware_training_from_samples",
     "run_structural_training",

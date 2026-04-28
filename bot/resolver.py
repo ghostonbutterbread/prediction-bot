@@ -17,6 +17,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from bot.shared_core.resolution import (
+    has_definitive_market_outcome,
+    detect_market_outcome,
+    market_resolution_status,
+)
 from bot.trade_audit import (
     calculate_realized_accounting,
     calculate_unrealized_pnl,
@@ -108,7 +113,7 @@ class TradeResolver:
                     still_open_count += 1
                     continue
 
-                market_status = str(market.metadata.get("status", "")).strip().lower() if market.metadata else ""
+                market_status = market_resolution_status(market)
                 current_yes_price, current_no_price = self._extract_market_prices(market)
 
                 # Check if market is resolved/settled.
@@ -121,7 +126,7 @@ class TradeResolver:
                 ):
                     # Market resolved — determine winner
                     outcome = self._determine_outcome(market)
-                    if outcome == "UNKNOWN":
+                    if outcome not in {"YES", "NO"}:
                         still_open_count += 1
                         continue
                     pnl = self._calculate_realized_pnl(
@@ -255,35 +260,9 @@ class TradeResolver:
     def _determine_outcome(self, market) -> str:
         """
         Determine market outcome from market data.
-        Returns "YES" or "NO".
+        Returns "YES", "NO", "VOID", or "UNKNOWN".
         """
-        # Check metadata for resolution info
-        if market.metadata:
-            result = market.metadata.get("result")
-            normalized = self._normalize_outcome_value(result)
-            if normalized:
-                return normalized
-
-            result = market.metadata.get("outcome")
-            normalized = self._normalize_outcome_value(result)
-            if normalized:
-                return normalized
-
-        # Use close_price for settlement — this is the definitive outcome
-        # close_price: 1.0 = YES won, 0.0 = NO won
-        close = getattr(market, 'close_price', None)
-        if close is not None:
-            return "YES" if close >= 0.5 else "NO"
-
-        # Fallback: if one price is at/near $1.00, that side won
-        yes_price, no_price = self._extract_market_prices(market)
-        if yes_price is not None and yes_price >= 0.99:
-            return "YES"
-        if no_price is not None and no_price >= 0.99:
-            return "NO"
-
-        # Default: can't determine
-        return "UNKNOWN"
+        return detect_market_outcome(market) or "UNKNOWN"
 
     def _calculate_realized_pnl(
         self, direction: str, entry_price: float, size: float, outcome: str
@@ -430,28 +409,6 @@ class TradeResolver:
 
         return yes_price, no_price
 
-    def _normalize_outcome_value(self, value) -> Optional[str]:
-        if isinstance(value, bool):
-            return "YES" if value else "NO"
-        if isinstance(value, (int, float)) and value in (0, 1):
-            return "YES" if int(value) == 1 else "NO"
-        if isinstance(value, str):
-            normalized = value.strip().upper()
-            aliases = {
-                "YES": "YES",
-                "NO": "NO",
-                "TRUE": "YES",
-                "FALSE": "NO",
-                "WIN": "YES",
-                "LOSE": "NO",
-                "WON": "YES",
-                "LOST": "NO",
-                "1": "YES",
-                "0": "NO",
-            }
-            return aliases.get(normalized)
-        return None
-
     def _normalize_entry_price(
         self, direction: str, market_price, model_probability
     ) -> Optional[float]:
@@ -475,28 +432,10 @@ class TradeResolver:
 
         A market is "closed" before it is "settled" on Kalshi.  We must not
         resolve paper positions at close time — we wait until the result field
-        is actually populated or close_price is set.
+        is actually populated, or until a settled/finalized market exposes a
+        definitive close_price.
         """
-        # Explicit result/outcome fields in metadata
-        if market.metadata:
-            for key in ("result", "outcome"):
-                val = market.metadata.get(key)
-                if val is not None and str(val).strip().upper() not in ("", "NONE", "UNKNOWN", "PENDING"):
-                    return True
-
-        # close_price is set by Kalshi when the market settles (1.0 = YES, 0.0 = NO)
-        close = getattr(market, "close_price", None)
-        if close is not None:
-            return True
-
-        # Price has converged to a terminal value (99 cents or more)
-        yes_price, no_price = self._extract_market_prices(market)
-        if (yes_price is not None and yes_price >= 0.99) or (
-            no_price is not None and no_price >= 0.99
-        ):
-            return True
-
-        return False
+        return has_definitive_market_outcome(market)
 
     def _is_market_closed(self, market) -> bool:
         closes_at = getattr(market, "closes_at", None)
