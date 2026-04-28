@@ -649,12 +649,12 @@ class LiveExecutionTests(unittest.TestCase):
             self.assertEqual(trade_row["decision_reason_code"], "duplicate_submission_suspected")
             self.assertTrue(trade_row["execution_revalidated"])
 
-    def test_execute_blocks_duplicate_open_intent_before_second_placement(self):
+    def test_execute_blocks_duplicate_open_intent_after_pre_trade_refresh(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             bot = self._make_bot(tmpdir)
             bot.open_orders = [
                 {
-                    "order_id": "local-open-1",
+                    "order_id": "server-open-1",
                     "exchange": "kalshi",
                     "market_id": "m-duplicate-intent",
                     "question": "Will a duplicate be blocked?",
@@ -668,7 +668,23 @@ class LiveExecutionTests(unittest.TestCase):
                 }
             ]
             adapter = RunnerLiveExecutionAdapter(bot)
-            exchange = FakeExchange()
+            exchange = FakeExchange(
+                resting_orders=[
+                    RestingOrder(
+                        order_id="server-open-1",
+                        market_id="m-duplicate-intent",
+                        exchange="kalshi",
+                        question="Will a duplicate be blocked?",
+                        side="YES",
+                        requested_size=1.0,
+                        filled_size=0.0,
+                        remaining_size=1.0,
+                        price=0.40,
+                        status="open",
+                        created_at=None,
+                    )
+                ]
+            )
             signal = {
                 "exchange": "kalshi",
                 "market_id": "m-duplicate-intent",
@@ -700,6 +716,8 @@ class LiveExecutionTests(unittest.TestCase):
             self.assertEqual(exchange.orders, [])
             self.assertEqual(bot.reconciliation_gate["kalshi"]["verdict"], "blocked")
             self.assertIn("duplicate_live_intent_open", bot.reconciliation_gate["kalshi"]["issues"])
+            self.assertEqual(result["refresh"]["pre_trade_refresh"]["open_orders"], 1)
+            self.assertEqual(result["duplicate_intent"]["matching_order_ids"], ["server-open-1"])
             self.assertEqual(bot.live_runtime_state["exchange_states"]["kalshi"]["state"], "blocked")
             self.assertEqual(len(bot.trade_history), 1)
             trade_row = bot.trade_history[0]
@@ -707,6 +725,117 @@ class LiveExecutionTests(unittest.TestCase):
             self.assertEqual(trade_row["failure_stage"], "idempotency")
             self.assertEqual(trade_row["decision_reason_code"], "duplicate_live_intent_open")
             self.assertFalse(trade_row["execution_revalidated"])
+
+    def test_execute_refresh_clears_stale_local_duplicate_intent_before_blocking(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = self._make_bot(tmpdir)
+            bot.open_orders = [
+                {
+                    "order_id": "stale-local-open-1",
+                    "exchange": "kalshi",
+                    "market_id": "m-stale-duplicate-intent",
+                    "question": "Will stale local state be cleared?",
+                    "direction": "BUY_YES",
+                    "status": "open",
+                    "requested_size": 1.0,
+                    "filled_size": 0.0,
+                    "remaining_size": 1.0,
+                    "price": 0.40,
+                    "created_at": "2026-04-20T00:00:00+00:00",
+                }
+            ]
+            adapter = RunnerLiveExecutionAdapter(bot)
+            exchange = FakeExchange(resting_orders=[])
+            signal = {
+                "exchange": "kalshi",
+                "market_id": "m-stale-duplicate-intent",
+                "question": "Will stale local state be cleared?",
+                "direction": "BUY_YES",
+                "market_price": 0.40,
+                "yes_price": 0.40,
+                "no_price": 0.60,
+                "model_probability": 0.70,
+                "edge": 0.30,
+                "confidence": 0.90,
+            }
+            decision = SimpleNamespace(
+                action="BUY_YES",
+                approved=True,
+                position_size=2.5,
+                entry_price=0.40,
+                win_probability=0.70,
+                reason="ok",
+                reason_code="approved",
+                requested_position_size=2.5,
+                reasoning={},
+            )
+
+            result = adapter.execute(signal, decision, exchange)
+
+            self.assertIsNotNone(result)
+            self.assertNotIn("blocked_reason", result)
+            self.assertEqual(len(exchange.orders), 1)
+            self.assertEqual(exchange.orders[0]["market_id"], "m-stale-duplicate-intent")
+            self.assertEqual(result["refresh"]["pre_trade_refresh"]["open_orders"], 0)
+            self.assertEqual(result["refresh"]["pre_trade_refresh"]["reconciliation_verdict"], "degraded")
+            self.assertIn("local_open_orders_missing_from_exchange", result["refresh"]["pre_trade_refresh"]["reconciliation_issues"])
+            self.assertEqual(len(bot.open_orders), 1)
+            self.assertEqual(bot.open_orders[0]["order_id"], "ord-1")
+            self.assertEqual(bot.trade_history[0]["status"], "placed")
+
+    def test_execute_stale_duplicate_refresh_degraded_blocks_when_policy_requires(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = self._make_bot(tmpdir)
+            bot.config["trading"]["live_reconciliation"] = {"block_on_degraded": True}
+            bot.open_orders = [
+                {
+                    "order_id": "stale-local-open-1",
+                    "exchange": "kalshi",
+                    "market_id": "m-stale-policy",
+                    "question": "Will degraded refresh block?",
+                    "direction": "BUY_YES",
+                    "status": "open",
+                    "requested_size": 1.0,
+                    "filled_size": 0.0,
+                    "remaining_size": 1.0,
+                    "price": 0.40,
+                    "created_at": "2026-04-20T00:00:00+00:00",
+                }
+            ]
+            adapter = RunnerLiveExecutionAdapter(bot)
+            exchange = FakeExchange(resting_orders=[])
+            signal = {
+                "exchange": "kalshi",
+                "market_id": "m-stale-policy",
+                "question": "Will degraded refresh block?",
+                "direction": "BUY_YES",
+                "market_price": 0.40,
+                "yes_price": 0.40,
+                "no_price": 0.60,
+                "model_probability": 0.70,
+                "edge": 0.30,
+                "confidence": 0.90,
+            }
+            decision = SimpleNamespace(
+                action="BUY_YES",
+                approved=True,
+                position_size=2.5,
+                entry_price=0.40,
+                win_probability=0.70,
+                reason="ok",
+                reason_code="approved",
+                requested_position_size=2.5,
+                reasoning={},
+            )
+
+            result = adapter.execute(signal, decision, exchange)
+
+            self.assertIsNotNone(result)
+            self.assertEqual(result["blocked_reason"], "reconciliation_state_degraded")
+            self.assertEqual(exchange.orders, [])
+            self.assertIn("local_open_orders_missing_from_exchange", result["reconciliation_issues"])
+            self.assertEqual(result["refresh"]["pre_trade_refresh"]["open_orders"], 0)
+            self.assertEqual(bot.trade_history[0]["failure_stage"], "reconciliation")
 
     def test_execute_uncertain_placement_blocks_retry_without_multiplying_orders(self):
         with tempfile.TemporaryDirectory() as tmpdir:
