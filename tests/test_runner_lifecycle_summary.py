@@ -37,6 +37,13 @@ class RunnerLifecycleSummaryTests(unittest.TestCase):
                 "issues": ["execution_failed"],
             }
             bot.reconciliation_gate["kalshi"] = {"verdict": "blocked", "issues": ["repeated_live_failures_threshold_reached"]}
+            bot.live_runtime_state = {
+                "state": "blocked",
+                "reason": "repeated_live_failures_threshold_reached",
+                "issues": ["repeated_live_failures_threshold_reached"],
+                "exchange_states": {},
+                "updated_at": "2026-04-20T17:00:00+00:00",
+            }
 
             snapshot = bot.build_status_snapshot(reason="manual")
 
@@ -46,6 +53,7 @@ class RunnerLifecycleSummaryTests(unittest.TestCase):
             self.assertEqual(snapshot.extra["runner_errors"], 1)
             self.assertEqual(snapshot.extra["live_failure_streaks"]["kalshi"]["count"], 2)
             self.assertEqual(snapshot.extra["reconciliation_gate"]["kalshi"]["verdict"], "blocked")
+            self.assertEqual(snapshot.extra["live_runtime_state"]["state"], "blocked")
 
     def test_emit_hourly_summary_writes_once_per_hour(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -58,6 +66,13 @@ class RunnerLifecycleSummaryTests(unittest.TestCase):
             bot.lifecycle_block_reasons = {"risk_max_drawdown_hit": 2, "risk_position_cap": 1}
             bot.live_failure_streaks["kalshi"] = {"count": 2, "last_reason": "execution_failed", "issues": ["execution_failed"]}
             bot.reconciliation_gate["kalshi"] = {"verdict": "blocked", "issues": ["repeated_live_failures_threshold_reached"]}
+            bot.live_runtime_state = {
+                "state": "blocked",
+                "reason": "repeated_live_failures_threshold_reached",
+                "issues": ["repeated_live_failures_threshold_reached"],
+                "exchange_states": {},
+                "updated_at": "2026-04-20T17:00:00+00:00",
+            }
 
             fixed_now = datetime(2026, 4, 20, 17, 0, 0, tzinfo=timezone.utc)
             summary_path = str(bot.log_dir / "hourly_summary.jsonl")
@@ -80,6 +95,7 @@ class RunnerLifecycleSummaryTests(unittest.TestCase):
             self.assertEqual(lines[0]["top_blockers"]["risk_max_drawdown_hit"], 2)
             self.assertEqual(lines[0]["live_failure_streaks"]["kalshi"], 2)
             self.assertEqual(lines[0]["reconciliation_gate"]["kalshi"]["verdict"], "blocked")
+            self.assertEqual(lines[0]["live_runtime_state"]["state"], "blocked")
 
 
 if __name__ == "__main__":

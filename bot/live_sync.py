@@ -16,6 +16,9 @@ class LiveSyncHost(Protocol):
     def _coerce_float(self, value, default: float = 0.0) -> float:
         ...
 
+    def _apply_reconciliation_runtime_state(self, exchange_name: str, verdict: str | None, issues: list[str] | None, *, source: str):
+        ...
+
 
 class RunnerLiveSync:
     """Refreshes local live state from exchange truth before/after actions."""
@@ -54,6 +57,11 @@ class RunnerLiveSync:
                 total_exposure=snapshot.reserved_capital,
                 open_positions=len(snapshot.open_positions),
             )
+            verdict = getattr(snapshot, "verdict", "safe") or "safe"
+            issues = list(getattr(snapshot, "issues", []) or [])
+            updater = getattr(self.host, "_apply_reconciliation_runtime_state", None)
+            if callable(updater):
+                updater(exchange_name, verdict, issues, source="pre_trade_reconciliation")
             return {
                 "balance": round(snapshot.reserved_capital + snapshot.available_cash, 2),
                 "available_cash": round(snapshot.available_cash, 2),
@@ -61,18 +69,22 @@ class RunnerLiveSync:
                 "open_positions": len(snapshot.open_positions),
                 "open_orders": len(snapshot.open_orders),
                 "partial_fills": int(getattr(snapshot, "partial_fills", 0) or 0),
-                "reconciliation_verdict": getattr(snapshot, "verdict", "safe") or "safe",
-                "reconciliation_issues": list(getattr(snapshot, "issues", []) or []),
+                "reconciliation_verdict": verdict,
+                "reconciliation_issues": issues,
                 "pre_trade_refresh": True,
             }
         except Exception:
             fallback = self.refresh_account_state_from_exchange(exchange)
+            issues = ["reconciliation_refresh_failed"]
+            updater = getattr(self.host, "_apply_reconciliation_runtime_state", None)
+            if callable(updater):
+                updater(exchange_name, "blocked", issues, source="pre_trade_reconciliation")
             fallback.update({
                 "open_positions": len(self.host.open_positions),
                 "open_orders": len(self.host.open_orders),
                 "partial_fills": sum(1 for order in self.host.open_orders if (order.get("filled_size", 0.0) or 0.0) > 0 and (order.get("remaining_size", 0.0) or 0.0) > 0),
-                "reconciliation_verdict": "degraded",
-                "reconciliation_issues": ["reconciliation_refresh_failed"],
+                "reconciliation_verdict": "blocked",
+                "reconciliation_issues": issues,
                 "pre_trade_refresh": False,
             })
             return fallback

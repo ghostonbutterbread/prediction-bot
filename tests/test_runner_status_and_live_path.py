@@ -37,6 +37,31 @@ class FailingExchange(FakeExchange):
         return None
 
 
+class BadReconcileExchange(FakeExchange):
+    def get_positions(self):
+        raise RuntimeError("reconcile unavailable")
+
+
+class DegradedExchange(FakeExchange):
+    def get_positions(self):
+        return []
+
+    def get_resting_orders(self):
+        return [
+            {
+                "order_id": "ord-resting",
+                "market_id": "m-resting",
+                "side": "YES",
+                "requested_size": 1.0,
+                "filled_size": 0.0,
+                "remaining_size": 1.0,
+                "price": 0.40,
+                "status": "open",
+                "question": "Existing resting order?",
+            }
+        ]
+
+
 class RunnerLivePathTests(unittest.TestCase):
     def _make_bot(self, tmpdir, **overrides):
         config = {
@@ -114,6 +139,65 @@ class RunnerLivePathTests(unittest.TestCase):
             self.assertEqual(result["blocked_reason"], "reconciliation_state_blocked")
             self.assertIn("negative_available_cash_after_reconcile", result["reconciliation_issues"])
             self.assertEqual(len(bot.exchanges["kalshi"].orders), 0)
+
+    def test_live_path_blocks_when_pre_trade_reconciliation_cannot_refresh(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = self._make_bot(tmpdir)
+            exchange = BadReconcileExchange()
+            bot.exchanges["kalshi"] = exchange
+            signal = {
+                "exchange": "kalshi",
+                "market_id": "m-refresh-fail",
+                "question": "Should failed refresh halt live entry?",
+                "direction": "BUY_YES",
+                "market_price": 0.40,
+                "yes_price": 0.40,
+                "no_price": 0.60,
+                "model_probability": 0.70,
+                "edge": 0.20,
+                "confidence": 0.90,
+            }
+
+            with patch.object(bot.kelly, "calculate", return_value=5.0):
+                result = bot._process_signal(signal)
+
+            self.assertEqual(result["blocked_reason"], "reconciliation_state_blocked")
+            self.assertIn("reconciliation_refresh_failed", result["reconciliation_issues"])
+            self.assertEqual(exchange.orders, [])
+            self.assertEqual(bot.live_runtime_state["state"], "blocked")
+
+    def test_live_path_can_block_degraded_runtime_by_policy(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = self._make_bot(
+                tmpdir,
+                trading={
+                    "mode": "live",
+                    "trading_enabled": True,
+                    "live_reconciliation": {"block_on_degraded": True},
+                },
+            )
+            exchange = DegradedExchange()
+            bot.exchanges["kalshi"] = exchange
+            bot._reconcile_exchange_state("kalshi", exchange)
+            signal = {
+                "exchange": "kalshi",
+                "market_id": "m-new",
+                "question": "Should degraded runtime block by policy?",
+                "direction": "BUY_YES",
+                "market_price": 0.40,
+                "yes_price": 0.40,
+                "no_price": 0.60,
+                "model_probability": 0.70,
+                "edge": 0.20,
+                "confidence": 0.90,
+            }
+
+            with patch.object(bot.kelly, "calculate", return_value=5.0):
+                result = bot._process_signal(signal)
+
+            self.assertEqual(result["blocked_reason"], "reconciliation_state_degraded")
+            self.assertIn("resting_orders_present", result["reconciliation_issues"])
+            self.assertEqual(exchange.orders, [])
 
     def test_live_path_repeated_critical_failures_trigger_exchange_pause(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -232,6 +316,8 @@ class RunnerLivePathTests(unittest.TestCase):
             self.assertIn("source", snapshot.extra)
             self.assertIn("live_failure_streaks", snapshot.extra)
             self.assertIn("reconciliation_gate", snapshot.extra)
+            self.assertIn("live_runtime_state", snapshot.extra)
+            self.assertEqual(snapshot.extra["live_runtime_state"]["state"], "safe")
             self.assertEqual(snapshot.extra["filled_event_exposure"], 4.0)
             self.assertEqual(snapshot.extra["pending_event_exposure"], 0.0)
             self.assertIn("normalized_trade_summary", snapshot.extra)

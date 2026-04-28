@@ -12,6 +12,8 @@ class RunnerLiveReloadTests(unittest.TestCase):
         path.write_text(
             "\n".join(
                 [
+                    "runtime:",
+                    f"  base_dir: {path.parent}",
                     "trading:",
                     f"  mode: {mode}",
                     f"  enabled: {'true' if enabled else 'false'}",
@@ -59,7 +61,7 @@ class RunnerLiveReloadTests(unittest.TestCase):
             self.assertTrue(changed_again)
             self.assertTrue(bot.risk.trading_enabled)
 
-            with open(f"{tmpdir}/lifecycle.jsonl") as f:
+            with open(bot.log_dir / "lifecycle.jsonl") as f:
                 events = [json.loads(line) for line in f if line.strip()]
 
             event_names = [event["event"] for event in events]

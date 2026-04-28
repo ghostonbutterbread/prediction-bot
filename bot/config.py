@@ -58,6 +58,7 @@ def _default_prediction_lab_config() -> dict[str, Any]:
         "enabled": True,
         "paused": False,
         "mode": "seed_and_watch",
+        "observer_mode": False,
         "groups": ["weather"],
         "max_markets_per_run": 1000,
         "max_new_predictions_per_seed": 500,
@@ -145,6 +146,7 @@ def _normalize_storage_config(config: dict) -> dict:
     prediction_lab["enabled"] = bool(prediction_lab.get("enabled", True))
     prediction_lab["paused"] = bool(prediction_lab.get("paused", False))
     prediction_lab["mode"] = str(prediction_lab.get("mode", "seed_and_watch") or "seed_and_watch").lower()
+    prediction_lab["observer_mode"] = bool(prediction_lab.get("observer_mode", False))
     prediction_lab["max_markets_per_run"] = max(1, int(prediction_lab.get("max_markets_per_run", 1000) or 1000))
     prediction_lab["max_new_predictions_per_seed"] = max(1, int(prediction_lab.get("max_new_predictions_per_seed", 500) or 500))
     prediction_lab["experiment_id"] = str(prediction_lab.get("experiment_id", "default") or "default")

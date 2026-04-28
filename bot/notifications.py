@@ -31,6 +31,8 @@ def build_notification(event_type: str, details: dict[str, Any] | None = None, *
         return _format_positions_resolved(details, verbosity)
     if event_type == "hourly_summary":
         return _format_hourly_summary(details, verbosity)
+    if event_type == "live_runtime_state_changed":
+        return _format_live_runtime_state_changed(details, verbosity)
     if verbosity != VERBOSITY_NORMAL and event_type in {"mode_changed", "trading_paused", "trading_resumed", "reconciliation_completed"}:
         return _format_verbose_lifecycle(event_type, details, verbosity)
     return None
@@ -93,6 +95,9 @@ def _format_hourly_summary(details: dict[str, Any], verbosity: str) -> str:
         f"Scans: {details.get('scans', 0)} | Signals: {details.get('signals_considered', 0)} | Trades: {details.get('trades_executed', 0)}\n"
         f"Blocked: {details.get('blocked_total', 0)} | Open positions: {details.get('open_positions', 0)} | Errors: {details.get('errors', 0)}"
     )
+    runtime_state = (details.get("live_runtime_state") or {}).get("state")
+    if runtime_state and runtime_state != "safe":
+        base += f"\nLive runtime: {runtime_state}"
     if verbosity == VERBOSITY_NORMAL:
         return base
     blockers = details.get('top_blockers', {}) or {}
@@ -100,6 +105,24 @@ def _format_hourly_summary(details: dict[str, Any], verbosity: str) -> str:
     if verbosity == VERBOSITY_DOUBLE:
         extra.append(f"Started at: {details.get('started_at', '')}")
     return base + "\n" + "\n".join(extra)
+
+
+def _format_live_runtime_state_changed(details: dict[str, Any], verbosity: str) -> str | None:
+    state = str(details.get("state") or "safe")
+    exchange_state = str(details.get("exchange_state") or state)
+    if state == "safe" and verbosity == VERBOSITY_NORMAL:
+        return None
+    issues = details.get("exchange_issues") or details.get("issues") or []
+    base = (
+        f"Live runtime state: {state}\n"
+        f"Exchange: {details.get('exchange', 'unknown')} ({exchange_state})\n"
+        f"Reason: {details.get('reason', '')}"
+    )
+    if issues:
+        base += f"\nIssues: {', '.join(str(issue) for issue in issues[:5])}"
+    if verbosity == VERBOSITY_DOUBLE:
+        base += f"\nDetails: {details.get('details', {})}"
+    return base
 
 
 def _format_verbose_lifecycle(event_type: str, details: dict[str, Any], verbosity: str) -> str:

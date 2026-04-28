@@ -9,16 +9,18 @@ from bot.runner import PredictionBot
 
 
 class FakeReconExchange:
-    def __init__(self, positions=None, orders=None, balance=25.0, market_map=None):
+    def __init__(self, positions=None, orders=None, balance=25.0, market_map=None, connect_result=True):
         self._positions = positions or []
         self._orders = orders or []
         self._balance = balance
         self._market_map = market_map or {}
+        self._connect_result = connect_result
         self.connected = False
+        self.placed_orders = []
 
     def connect(self):
         self.connected = True
-        return True
+        return self._connect_result
 
     def get_positions(self):
         return list(self._positions)
@@ -32,8 +34,21 @@ class FakeReconExchange:
     def get_market(self, market_id):
         return self._market_map.get(market_id)
 
+    def get_market_bid_ask(self, market_id):
+        return {"best_yes_ask": 0.40, "best_no_ask": 0.60}
+
+    def place_order(self, market_id, side, price, size):
+        order = SimpleNamespace(id=f"placed-{len(self.placed_orders) + 1}", status="open", filled_size=0.0, remaining_size=size)
+        self.placed_orders.append({"market_id": market_id, "side": side, "price": price, "size": size})
+        return order
+
     def close(self):
         return None
+
+
+class FailingReconExchange(FakeReconExchange):
+    def get_positions(self):
+        raise RuntimeError("recovery unavailable")
 
 
 class RunnerReconciliationTests(unittest.TestCase):
@@ -99,6 +114,43 @@ class RunnerReconciliationTests(unittest.TestCase):
             reconcile_events = [e for e in events if e["event"] == "reconciliation_completed"]
             self.assertEqual(len(reconcile_events), 1)
             self.assertEqual(reconcile_events[0]["details"]["open_positions"], 2)
+            self.assertEqual(reconcile_events[0]["details"]["reconciliation_verdict"], "safe")
+            self.assertEqual(bot.live_runtime_state["state"], "safe")
+
+    def test_connect_all_blocks_when_startup_reconciliation_fails_even_without_live_safety(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = PredictionBot(
+                {
+                    "log_dir": tmpdir,
+                    "data_dir": tmpdir,
+                    "trading": {"mode": "live", "enabled": True, "live_safety": {"enabled": False}},
+                    "strategy": {
+                        "enable_news": False,
+                        "enable_social": False,
+                        "enable_ai": False,
+                    },
+                }
+            )
+            bot.exchanges["kalshi"] = FailingReconExchange(balance=25.0)
+
+            result = bot.connect_all()
+
+            self.assertTrue(result["kalshi"])
+            self.assertEqual(bot.reconciliation_gate["kalshi"]["verdict"], "blocked")
+            self.assertIn("reconciliation_refresh_failed", bot.reconciliation_gate["kalshi"]["issues"])
+            self.assertEqual(bot.live_runtime_state["state"], "blocked")
+
+    def test_connect_all_blocks_when_connect_succeeds_false_without_reconciliation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = self._make_bot(tmpdir)
+            bot.exchanges["kalshi"] = FakeReconExchange(connect_result=False)
+
+            result = bot.connect_all()
+
+            self.assertFalse(result["kalshi"])
+            self.assertEqual(bot.reconciliation_gate["kalshi"]["verdict"], "blocked")
+            self.assertIn("startup_reconciliation_not_run", bot.reconciliation_gate["kalshi"]["issues"])
+            self.assertEqual(bot.live_runtime_state["state"], "blocked")
 
     def test_connect_all_sets_startup_gate_when_reconciliation_is_blocked(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -125,6 +177,44 @@ class RunnerReconciliationTests(unittest.TestCase):
             self.assertTrue(result["kalshi"])
             self.assertEqual(bot.reconciliation_gate["kalshi"]["verdict"], "blocked")
             self.assertIn("negative_available_cash_after_reconcile", bot.reconciliation_gate["kalshi"]["issues"])
+            self.assertEqual(bot.live_runtime_state["state"], "blocked")
+
+    def test_connect_all_surfaces_degraded_reconciliation_runtime_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = self._make_bot(tmpdir)
+            bot.exchanges["kalshi"] = FakeReconExchange(
+                orders=[
+                    RestingOrder(
+                        order_id="ord-resting",
+                        market_id="KXREST-1",
+                        exchange="kalshi",
+                        side="YES",
+                        requested_size=3.0,
+                        filled_size=1.0,
+                        remaining_size=2.0,
+                        price=0.41,
+                        status="partial",
+                        created_at=datetime(2026, 4, 20, 17, 0, tzinfo=timezone.utc),
+                    )
+                ],
+                balance=25.0,
+            )
+
+            result = bot.connect_all()
+
+            self.assertTrue(result["kalshi"])
+            self.assertNotIn("kalshi", bot.reconciliation_gate)
+            self.assertEqual(bot.live_runtime_state["state"], "degraded")
+            self.assertEqual(bot.live_runtime_state["exchange_states"]["kalshi"]["state"], "degraded")
+            self.assertIn("partial_fill_exposure_present", bot.live_runtime_state["issues"])
+            self.assertIn("resting_orders_present", bot.live_runtime_state["issues"])
+
+            with open(f"{tmpdir}/live/lifecycle.jsonl") as f:
+                events = [json.loads(line) for line in f if line.strip()]
+
+            reconcile_events = [e for e in events if e["event"] == "reconciliation_completed"]
+            self.assertEqual(reconcile_events[0]["details"]["status"], "degraded")
+            self.assertEqual(reconcile_events[0]["details"]["runtime_state"], "degraded")
 
     def test_connect_all_blocks_ambiguous_duplicate_restart_state(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -166,6 +256,62 @@ class RunnerReconciliationTests(unittest.TestCase):
             self.assertTrue(result["kalshi"])
             self.assertEqual(bot.reconciliation_gate["kalshi"]["verdict"], "blocked")
             self.assertIn("ambiguous_local_exchange_duplicate_exposure", bot.reconciliation_gate["kalshi"]["issues"])
+
+    def test_blocked_ambiguous_startup_state_prevents_duplicate_live_entry(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = self._make_bot(tmpdir)
+            exchange = FakeReconExchange(
+                orders=[
+                    RestingOrder(
+                        order_id="exchange-ord-2",
+                        market_id="KXDUP-ENTRY",
+                        exchange="kalshi",
+                        side="YES",
+                        requested_size=3.0,
+                        filled_size=0.0,
+                        remaining_size=3.0,
+                        price=0.41,
+                        status="open",
+                        created_at=datetime(2026, 4, 20, 17, 0, tzinfo=timezone.utc),
+                    )
+                ],
+                balance=25.0,
+            )
+            bot.open_orders = [
+                {
+                    "order_id": "local-ord-1",
+                    "market_id": "KXDUP-ENTRY",
+                    "question": "Duplicate restart state",
+                    "direction": "BUY_YES",
+                    "status": "open",
+                    "requested_size": 3.0,
+                    "filled_size": 0.0,
+                    "remaining_size": 3.0,
+                    "price": 0.41,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }
+            ]
+            bot.exchanges["kalshi"] = exchange
+
+            bot.connect_all()
+            result = bot._process_signal(
+                {
+                    "exchange": "kalshi",
+                    "market_id": "KXDUP-ENTRY",
+                    "question": "Should ambiguous startup block duplicate entry?",
+                    "direction": "BUY_YES",
+                    "market_price": 0.40,
+                    "yes_price": 0.40,
+                    "no_price": 0.60,
+                    "model_probability": 0.75,
+                    "edge": 0.25,
+                    "confidence": 0.90,
+                }
+            )
+
+            self.assertEqual(result["blocked_reason"], "reconciliation_state_blocked")
+            self.assertIn("ambiguous_local_exchange_duplicate_exposure", result["reconciliation_issues"])
+            self.assertEqual(exchange.placed_orders, [])
 
     def test_resolution_distinguishes_market_outcome_from_trade_result_for_buy_no_loss(self):
         with tempfile.TemporaryDirectory() as tmpdir:

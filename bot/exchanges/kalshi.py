@@ -10,7 +10,7 @@ from kalshi_python_sync import Configuration, KalshiClient
 from kalshi_python_sync.auth import KalshiAuth
 
 from ..http_rate_limit import RateLimitProfile, RequestThrottle, call_with_retry, http_get_with_retry
-from ..market_classification import apply_classification_metadata, classify_market_object
+from ..market_classification import apply_classification_metadata, classify_market_object, is_weather_market
 from .base import BaseExchange, Market, Order, Position, RestingOrder
 
 logger = logging.getLogger(__name__)
@@ -134,10 +134,46 @@ class KalshiExchange(BaseExchange):
     def get_markets_direct(self, limit: int = 50, page_size: int = 200, max_pages: int = 10) -> list[Market]:
         try:
             markets = []
+            seen_market_ids: set[str] = set()
             cursor = None
             pages = 0
             auth_headers = self.client.kalshi_auth.create_auth_headers('GET', '/trade-api/v2/markets')
             logger.info('Kalshi direct market pull: limit=%s page_size=%s max_pages=%s groups=%s', limit, page_size, max_pages, sorted(self._allowed_market_groups))
+
+            if 'weather' in self._allowed_market_groups:
+                weather_series = self._weather_series_tickers()
+                logger.info('Kalshi direct weather series pass: discovered=%s weather_like=%s', len(self._daily_series_tickers), len(weather_series))
+                for series_ticker in weather_series:
+                    if len(markets) >= limit:
+                        break
+                    raw_series_markets = self._fetch_direct_series_markets(
+                        auth_headers,
+                        series_ticker,
+                        limit=min(10, max(1, limit - len(markets))),
+                    )
+                    accepted = 0
+                    for raw_market in raw_series_markets:
+                        market = self._market_from_direct_listing(
+                            raw_market,
+                            source='direct_series',
+                            series_ticker=series_ticker,
+                        )
+                        if market is None or market.id in seen_market_ids:
+                            continue
+                        if self._market_allowed(market):
+                            markets.append(market)
+                            seen_market_ids.add(market.id)
+                            accepted += 1
+                            if len(markets) >= limit:
+                                break
+                    logger.info(
+                        'Kalshi direct weather series pull: series=%s fetched=%s accepted=%s total=%s',
+                        series_ticker,
+                        len(raw_series_markets),
+                        accepted,
+                        len(markets),
+                    )
+
             while len(markets) < limit and pages < max_pages:
                 pages += 1
                 params = f'?status=open&limit={max(1, min(page_size, 1000))}'
@@ -154,30 +190,12 @@ class KalshiExchange(BaseExchange):
                     break
                 page_added = 0
                 for m in raw:
-                    yes_price = _dollars_from_raw(m, 'yes_ask')
-                    no_price = _dollars_from_raw(m, 'no_ask')
-                    if yes_price <= 0 or yes_price >= 1:
+                    market = self._market_from_direct_listing(m, source='direct_paginated')
+                    if market is None or market.id in seen_market_ids:
                         continue
-                    close_time = _parse_dt_raw(m.get('close_time'))
-                    market = Market(
-                        id=m.get('ticker', ''),
-                        exchange='kalshi',
-                        question=m.get('title', ''),
-                        yes_price=yes_price,
-                        no_price=no_price,
-                        volume=float(m.get('volume_fp', 0) or 0),
-                        liquidity=_dollars_from_raw(m, 'liquidity'),
-                        closes_at=close_time,
-                        category=m.get('series_ticker', 'other'),
-                        metadata={
-                            'status': m.get('status', ''),
-                            'source': 'direct_paginated',
-                        },
-                        yes_bid=_dollars_from_raw(m, 'yes_bid'),
-                        no_bid=_dollars_from_raw(m, 'no_bid'),
-                    )
                     if self._market_allowed(market):
                         markets.append(market)
+                        seen_market_ids.add(market.id)
                         page_added += 1
                         if len(markets) >= limit:
                             break
@@ -191,6 +209,66 @@ class KalshiExchange(BaseExchange):
         except Exception as e:
             logger.error(f'Error fetching direct markets: {e}')
             return []
+
+    def _weather_series_tickers(self) -> list[str]:
+        seen: set[str] = set()
+        tickers: list[str] = []
+        for raw_ticker in self._daily_series_tickers:
+            ticker = str(raw_ticker or '').strip().upper()
+            if not ticker or ticker in seen:
+                continue
+            if self._is_weather_series_ticker(ticker):
+                seen.add(ticker)
+                tickers.append(ticker)
+        return tickers
+
+    @staticmethod
+    def _is_weather_series_ticker(series_ticker: str) -> bool:
+        normalized = str(series_ticker or '').strip().lower()
+        if not normalized:
+            return False
+        if is_weather_market(market_id=normalized, category=normalized, series=normalized):
+            return True
+        weather_prefixes = ('kxhigh', 'kxhight', 'kxlow', 'kxlowt', 'kxmintemp')
+        weather_tokens = ('weather', 'temp', 'rain', 'snow', 'wind', 'storm', 'hurricane')
+        return normalized.startswith(weather_prefixes) or any(token in normalized for token in weather_tokens)
+
+    def _fetch_direct_series_markets(self, auth_headers: dict[str, str], series_ticker: str, *, limit: int) -> list[dict]:
+        try:
+            url = f'{self.host}/markets?status=open&limit={max(1, min(limit, 50))}&series_ticker={series_ticker}'
+            resp = http_get_with_retry(url, auth_headers, throttle=self._throttle, timeout=8)
+            if not resp or resp.status_code != 200:
+                return []
+            data = resp.json()
+            markets = data.get('markets', [])
+            return markets if isinstance(markets, list) else []
+        except Exception as e:
+            logger.debug('Kalshi direct series fetch failed for %s: %s', series_ticker, e)
+            return []
+
+    def _market_from_direct_listing(self, data: dict, *, source: str, series_ticker: str | None = None) -> Optional[Market]:
+        if not isinstance(data, dict):
+            return None
+
+        market = _market_from_raw(
+            data,
+            category=series_ticker or data.get('series_ticker') or 'other',
+            metadata={
+                'status': data.get('status', ''),
+                'source': source,
+                'series': series_ticker or data.get('series_ticker'),
+                'series_ticker': series_ticker or data.get('series_ticker'),
+                'event_ticker': data.get('event_ticker'),
+                'market_subtitle': data.get('subtitle') or data.get('market_subtitle'),
+                'yes_subtitle': data.get('yes_subtitle'),
+                'no_subtitle': data.get('no_subtitle'),
+            },
+        )
+        if market is None:
+            return None
+        if market.yes_price <= 0 or market.yes_price >= 1:
+            return None
+        return market
 
     def get_markets(self, limit: int = 50, category: str = None) -> list[Market]:
         try:

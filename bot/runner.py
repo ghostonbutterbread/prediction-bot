@@ -75,6 +75,13 @@ class PredictionBot:
         self.open_orders: list[dict] = []
         self.trade_history: list[dict] = []
         self.reconciliation_gate: dict[str, dict] = {}
+        self.live_runtime_state: dict[str, object] = {
+            "state": "safe",
+            "reason": "startup",
+            "issues": [],
+            "exchange_states": {},
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
         self.live_failure_streaks: dict[str, dict[str, object]] = {}
         self.lifecycle_counters = {
             "signals_considered": 0,
@@ -125,8 +132,21 @@ class PredictionBot:
                 results[name] = exchange.connect()
                 if results[name]:
                     self._reconcile_exchange_state(name, exchange)
+                else:
+                    issues = ["exchange_connect_failed", "startup_reconciliation_not_run"]
+                    self._apply_reconciliation_runtime_state(name, "blocked", issues, source="startup_recovery")
+                    self._log_lifecycle_event(
+                        "reconciliation_failed",
+                        {"exchange": name, "status": "connect_failed", "reconciliation_issues": issues},
+                    )
             except Exception as e:
                 logger.error(f"Failed to connect to {name}: {e}")
+                issues = ["exchange_connect_failed", "startup_reconciliation_not_run"]
+                self._apply_reconciliation_runtime_state(name, "blocked", issues, source="startup_recovery")
+                self._log_lifecycle_event(
+                    "reconciliation_failed",
+                    {"exchange": name, "error": str(e), "reconciliation_issues": issues},
+                )
                 results[name] = False
         return results
 
@@ -135,12 +155,23 @@ class PredictionBot:
             snapshot = self.live_reconciliation.reconcile(exchange_name, exchange)
         except Exception as e:
             logger.error(f"Failed to fetch exchange state for reconciliation from {exchange_name}: {e}")
-            self._record_live_failure(exchange_name, "reconciliation_state_blocked", issues=["reconciliation_refresh_failed"])
+            issues = ["reconciliation_refresh_failed"]
+            self._apply_reconciliation_runtime_state(exchange_name, "blocked", issues, source="startup_reconciliation")
+            self._record_live_failure(exchange_name, "reconciliation_state_blocked", issues=issues, runtime_state="blocked")
             self._log_lifecycle_event(
                 "reconciliation_failed",
-                {"exchange": exchange_name, "error": str(e)},
+                {"exchange": exchange_name, "error": str(e), "reconciliation_issues": issues, "runtime_state": "blocked"},
             )
-            return {"exchange": exchange_name, "open_positions": 0, "open_orders": 0, "trade_history_loaded": 0, "status": "error"}
+            return {
+                "exchange": exchange_name,
+                "open_positions": 0,
+                "open_orders": 0,
+                "trade_history_loaded": 0,
+                "status": "blocked",
+                "runtime_state": "blocked",
+                "reconciliation_verdict": "blocked",
+                "reconciliation_issues": issues,
+            }
 
         self.open_positions = snapshot.open_positions
         self.open_orders = snapshot.open_orders
@@ -158,10 +189,15 @@ class PredictionBot:
         verdict = getattr(snapshot, "verdict", "safe") or "safe"
         issues = list(getattr(snapshot, "issues", []) or [])
         if verdict == "blocked":
-            self.reconciliation_gate[exchange_name] = {"verdict": verdict, "issues": issues}
-            self._record_live_failure(exchange_name, "reconciliation_state_blocked", issues=issues)
+            self._apply_reconciliation_runtime_state(exchange_name, verdict, issues, source="startup_reconciliation")
+            self._record_live_failure(
+                exchange_name,
+                "reconciliation_state_blocked",
+                issues=issues,
+                runtime_state="blocked",
+            )
         else:
-            self.reconciliation_gate.pop(exchange_name, None)
+            self._apply_reconciliation_runtime_state(exchange_name, verdict, issues, source="startup_reconciliation")
             self._clear_live_failure_streak(exchange_name)
 
         summary = {
@@ -174,7 +210,8 @@ class PredictionBot:
             "partial_fills": snapshot.partial_fills,
             "reconciliation_verdict": verdict,
             "reconciliation_issues": issues,
-            "status": "ok" if verdict != "blocked" else "blocked",
+            "runtime_state": self._live_runtime_state_for_exchange(exchange_name).get("state", verdict),
+            "status": verdict,
         }
         self._log_lifecycle_event("reconciliation_completed", summary)
         return summary
@@ -345,6 +382,21 @@ class PredictionBot:
                 }
                 for exchange, details in self.reconciliation_gate.items()
             },
+            "live_runtime_state": {
+                "state": self.live_runtime_state.get("state", "safe"),
+                "reason": self.live_runtime_state.get("reason", ""),
+                "issues": list(self.live_runtime_state.get("issues") or []),
+                "updated_at": self.live_runtime_state.get("updated_at", ""),
+            },
+            "live_exchange_states": {
+                exchange: {
+                    "state": details.get("state", "safe"),
+                    "reason": details.get("reason", ""),
+                    "issues": list(details.get("issues") or []),
+                    "updated_at": details.get("updated_at", ""),
+                }
+                for exchange, details in dict(self.live_runtime_state.get("exchange_states") or {}).items()
+            },
             "filled_event_exposure": round(sum(getattr(position, "size", 0.0) for position in self.open_positions), 2),
             "pending_event_exposure": round(sum(float(order.get("remaining_size", 0.0) or 0.0) for order in self.open_orders), 2),
             "normalized_trade_summary": normalized_trade_summary,
@@ -399,17 +451,141 @@ class PredictionBot:
         }
 
     @staticmethod
+    def _live_runtime_priority(state: str | None) -> int:
+        return {"safe": 0, "degraded": 1, "blocked": 2}.get(str(state or "safe").lower(), 1)
+
+    @staticmethod
+    def _normalize_live_runtime_state(state: str | None) -> str:
+        state = str(state or "safe").lower()
+        return state if state in {"safe", "degraded", "blocked"} else "degraded"
+
+    def _live_runtime_state_for_exchange(self, exchange_name: str) -> dict:
+        exchange_states = dict(self.live_runtime_state.get("exchange_states") or {})
+        return dict(exchange_states.get(exchange_name) or {"state": "safe", "reason": "", "issues": []})
+
+    def _block_on_degraded_runtime(self) -> bool:
+        return bool((((self.config.get("trading") or {}).get("live_reconciliation") or {}).get("block_on_degraded", False)))
+
+    def _apply_reconciliation_runtime_state(
+        self,
+        exchange_name: str,
+        verdict: str | None,
+        issues: list[str] | None,
+        *,
+        source: str,
+    ):
+        verdict = self._normalize_live_runtime_state(verdict)
+        issues = list(dict.fromkeys(issues or []))
+        if verdict == "blocked":
+            self.reconciliation_gate[exchange_name] = {"verdict": "blocked", "issues": issues}
+        else:
+            self.reconciliation_gate.pop(exchange_name, None)
+        self._update_live_runtime_state(
+            exchange_name,
+            verdict,
+            reason=f"{source}_{verdict}",
+            issues=issues,
+            details={"source": source, "reconciliation_verdict": verdict},
+        )
+
+    def _update_live_runtime_state(
+        self,
+        exchange_name: str,
+        state: str | None,
+        *,
+        reason: str,
+        issues: list[str] | None = None,
+        details: dict | None = None,
+    ):
+        if not exchange_name:
+            return
+        state = self._normalize_live_runtime_state(state)
+        issues = list(dict.fromkeys(issues or []))
+        now = datetime.now(timezone.utc).isoformat()
+        exchange_states = dict(self.live_runtime_state.get("exchange_states") or {})
+        previous_exchange = dict(exchange_states.get(exchange_name) or {})
+        exchange_states[exchange_name] = {
+            "state": state,
+            "reason": reason,
+            "issues": issues,
+            "updated_at": now,
+            "details": details or {},
+        }
+
+        aggregate_state = "safe"
+        for entry in exchange_states.values():
+            entry_state = self._normalize_live_runtime_state(entry.get("state"))
+            if self._live_runtime_priority(entry_state) > self._live_runtime_priority(aggregate_state):
+                aggregate_state = entry_state
+
+        aggregate_issues: list[str] = []
+        for entry in exchange_states.values():
+            if self._normalize_live_runtime_state(entry.get("state")) == "safe":
+                continue
+            aggregate_issues.extend(list(entry.get("issues") or []))
+        aggregate_issues = list(dict.fromkeys(aggregate_issues))
+
+        previous_state = str(self.live_runtime_state.get("state") or "safe")
+        self.live_runtime_state = {
+            "state": aggregate_state,
+            "reason": reason,
+            "issues": aggregate_issues,
+            "exchange_states": exchange_states,
+            "updated_at": now,
+        }
+
+        changed = (
+            previous_state != aggregate_state
+            or previous_exchange.get("state") != state
+            or previous_exchange.get("reason") != reason
+            or list(previous_exchange.get("issues") or []) != issues
+        )
+        if changed:
+            self._log_lifecycle_event(
+                "live_runtime_state_changed",
+                {
+                    "exchange": exchange_name,
+                    "state": aggregate_state,
+                    "exchange_state": state,
+                    "reason": reason,
+                    "issues": aggregate_issues,
+                    "exchange_issues": issues,
+                    "details": details or {},
+                },
+            )
+
+    def _live_failure_runtime_state(self, reason_code: str, count: int, threshold: int) -> str:
+        immediate_block_reasons = {
+            "reconciliation_state_blocked",
+            "duplicate_live_intent_open",
+            "duplicate_submission_suspected",
+            "placement_confirmation_uncertain",
+            "live_identity_mismatch",
+        }
+        if reason_code in immediate_block_reasons or count >= threshold:
+            return "blocked"
+        return "degraded"
+
+    @staticmethod
     def _is_critical_live_block(reason_code: str | None) -> bool:
         critical_codes = {
             "execution_failed",
             "reconciliation_state_blocked",
+            "duplicate_live_intent_open",
             "duplicate_submission_suspected",
             "placement_confirmation_uncertain",
             "live_identity_mismatch",
         }
         return str(reason_code or "") in critical_codes
 
-    def _record_live_failure(self, exchange_name: str, reason_code: str, *, issues: list[str] | None = None):
+    def _record_live_failure(
+        self,
+        exchange_name: str,
+        reason_code: str,
+        *,
+        issues: list[str] | None = None,
+        runtime_state: str | None = None,
+    ):
         cfg = self._live_safety_config()
         if not cfg.get("enabled") or not exchange_name or not self._is_critical_live_block(reason_code):
             return
@@ -418,12 +594,37 @@ class PredictionBot:
         entry["last_reason"] = reason_code
         entry["issues"] = list(dict.fromkeys((issues or []) + ([reason_code] if reason_code else [])))
         self.live_failure_streaks[exchange_name] = entry
+        failure_state = runtime_state or self._live_failure_runtime_state(
+            reason_code,
+            int(entry["count"]),
+            int(cfg["max_consecutive_critical_failures"]),
+        )
+        failure_issues = list(entry.get("issues") or [])
+        if failure_state == "blocked":
+            self.reconciliation_gate[exchange_name] = {
+                "verdict": "blocked",
+                "issues": failure_issues,
+            }
+        self._update_live_runtime_state(
+            exchange_name,
+            failure_state,
+            reason=reason_code,
+            issues=failure_issues,
+            details={"failure_count": int(entry["count"]), "max_failures": cfg["max_consecutive_critical_failures"]},
+        )
         if entry["count"] >= cfg["max_consecutive_critical_failures"]:
             gate_issues = list(dict.fromkeys(list(entry.get("issues") or []) + ["repeated_live_failures_threshold_reached"]))
             self.reconciliation_gate[exchange_name] = {
                 "verdict": "blocked",
                 "issues": gate_issues,
             }
+            self._update_live_runtime_state(
+                exchange_name,
+                "blocked",
+                reason="repeated_live_failures_threshold_reached",
+                issues=gate_issues,
+                details={"failure_count": int(entry["count"]), "max_failures": cfg["max_consecutive_critical_failures"]},
+            )
             self._log_lifecycle_event(
                 "live_safety_pause",
                 {
@@ -454,6 +655,22 @@ class PredictionBot:
                 "blocked_reason": "reconciliation_state_blocked",
                 "decision": None,
                 "reconciliation_issues": list(gate.get("issues") or []),
+            }
+
+        runtime_state = self._live_runtime_state_for_exchange(exchange_name or "")
+        if runtime_state.get("state") == "blocked":
+            return {
+                "blocked_reason": str(runtime_state.get("reason") or "live_runtime_state_blocked"),
+                "decision": None,
+                "reconciliation_issues": list(runtime_state.get("issues") or []),
+                "runtime_state": runtime_state,
+            }
+        if runtime_state.get("state") == "degraded" and self._block_on_degraded_runtime():
+            return {
+                "blocked_reason": "reconciliation_state_degraded",
+                "decision": None,
+                "reconciliation_issues": list(runtime_state.get("issues") or []),
+                "runtime_state": runtime_state,
             }
 
         context = self.live_execution.build_trade_context(signal, exchange, self.config)
@@ -622,6 +839,19 @@ class PredictionBot:
                 }
                 for exchange, details in self.reconciliation_gate.items()
             },
+            "live_runtime_state": {
+                "state": self.live_runtime_state.get("state", "safe"),
+                "reason": self.live_runtime_state.get("reason", ""),
+                "issues": list(self.live_runtime_state.get("issues") or []),
+            },
+            "live_exchange_states": {
+                exchange: {
+                    "state": details.get("state", "safe"),
+                    "reason": details.get("reason", ""),
+                    "issues": list(details.get("issues") or []),
+                }
+                for exchange, details in dict(self.live_runtime_state.get("exchange_states") or {}).items()
+            },
         }
         log_file = self.log_dir / "hourly_summary.jsonl"
         with open(log_file, "a") as f:
@@ -707,6 +937,8 @@ class PredictionBot:
             "single_trade_completed": "single_trade_events",
             "positions_resolved": "resolution_events",
             "reconciliation_completed": "reconciliation_events",
+            "reconciliation_failed": "reconciliation_events",
+            "live_runtime_state_changed": "status_events",
             "hourly_summary": "status_events",
         }
         category = category_map.get(event_type)
