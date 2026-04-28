@@ -19,6 +19,12 @@ class LiveSyncHost(Protocol):
     def _apply_reconciliation_runtime_state(self, exchange_name: str, verdict: str | None, issues: list[str] | None, *, source: str):
         ...
 
+    def _record_reconciliation_snapshot(self, exchange_name: str, snapshot: Any, *, source: str):
+        ...
+
+    def _apply_reconciliation_trade_history_corrections(self, exchange_name: str, snapshot: Any, *, source: str) -> set[str]:
+        ...
+
 
 class RunnerLiveSync:
     """Refreshes local live state from exchange truth before/after actions."""
@@ -51,7 +57,7 @@ class RunnerLiveSync:
             self.host.open_positions = snapshot.open_positions
             self.host.open_orders = snapshot.open_orders
             self.host.risk.sync_account_state(
-                current_balance=snapshot.reserved_capital + snapshot.available_cash,
+                current_balance=getattr(snapshot, "balance", snapshot.reserved_capital + snapshot.available_cash),
                 available_cash=snapshot.available_cash,
                 reserved_capital=snapshot.reserved_capital,
                 total_exposure=snapshot.reserved_capital,
@@ -59,18 +65,31 @@ class RunnerLiveSync:
             )
             verdict = getattr(snapshot, "verdict", "safe") or "safe"
             issues = list(getattr(snapshot, "issues", []) or [])
+            severity = getattr(snapshot, "severity", "none") or "none"
+            action = getattr(snapshot, "action", "log_only") or "log_only"
+            recorder = getattr(self.host, "_record_reconciliation_snapshot", None)
+            if callable(recorder):
+                recorder(exchange_name, snapshot, source="pre_trade_reconciliation")
+            correction_applier = getattr(self.host, "_apply_reconciliation_trade_history_corrections", None)
+            if callable(correction_applier):
+                correction_applier(exchange_name, snapshot, source="pre_trade_reconciliation")
             updater = getattr(self.host, "_apply_reconciliation_runtime_state", None)
             if callable(updater):
                 updater(exchange_name, verdict, issues, source="pre_trade_reconciliation")
             return {
-                "balance": round(snapshot.reserved_capital + snapshot.available_cash, 2),
+                "balance": round(getattr(snapshot, "balance", snapshot.reserved_capital + snapshot.available_cash), 2),
                 "available_cash": round(snapshot.available_cash, 2),
                 "reserved_capital": round(snapshot.reserved_capital, 2),
+                "filled_exposure": round(getattr(snapshot, "filled_exposure", 0.0), 2),
+                "pending_exposure": round(getattr(snapshot, "pending_exposure", 0.0), 2),
                 "open_positions": len(snapshot.open_positions),
                 "open_orders": len(snapshot.open_orders),
                 "partial_fills": int(getattr(snapshot, "partial_fills", 0) or 0),
                 "reconciliation_verdict": verdict,
                 "reconciliation_issues": issues,
+                "reconciliation_severity": severity,
+                "reconciliation_action": action,
+                "reconciliation_corrections": list(getattr(snapshot, "correction_events", []) or []),
                 "pre_trade_refresh": True,
             }
         except Exception:
@@ -85,6 +104,9 @@ class RunnerLiveSync:
                 "partial_fills": sum(1 for order in self.host.open_orders if (order.get("filled_size", 0.0) or 0.0) > 0 and (order.get("remaining_size", 0.0) or 0.0) > 0),
                 "reconciliation_verdict": "blocked",
                 "reconciliation_issues": issues,
+                "reconciliation_severity": "high",
+                "reconciliation_action": "block",
+                "reconciliation_corrections": [],
                 "pre_trade_refresh": False,
             })
             return fallback

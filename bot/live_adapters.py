@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
@@ -13,6 +13,7 @@ from bot.trade_audit import (
     apply_execution_audit_contract,
     canonical_execution_status,
     canonical_lifecycle_state,
+    infer_reserved_capital,
     normalize_outcome,
     trade_event_key,
 )
@@ -37,11 +38,18 @@ class LiveReconciliationSnapshot:
     open_positions: list[Any]
     open_orders: list[dict]
     trade_history_rows: list[dict]
+    balance: float
+    filled_exposure: float
+    pending_exposure: float
     reserved_capital: float
     available_cash: float
     partial_fills: int
     verdict: str = "safe"
     issues: list[str] | None = None
+    severity: str = "none"
+    action: str = "log_only"
+    correction_events: list[dict] = field(default_factory=list)
+    state_flags: list[str] = field(default_factory=list)
 
 
 class RunnerLiveStateAdapter:
@@ -116,6 +124,20 @@ class RunnerLiveStateAdapter:
 
 class RunnerLiveReconciliationAdapter:
     """Normalizes live exchange state into runner state."""
+
+    HIGH_SEVERITY_ISSUES = {
+        "duplicate_active_order_ids",
+        "negative_available_cash_after_reconcile",
+        "ambiguous_local_exchange_duplicate_exposure",
+    }
+    MEDIUM_SEVERITY_ISSUES = {
+        "local_open_orders_missing_from_exchange",
+        "local_positions_missing_from_exchange",
+        "local_order_status_corrected_from_exchange",
+        "local_order_filled_size_corrected_from_exchange",
+        "local_order_remaining_size_corrected_from_exchange",
+        "local_order_reserved_capital_corrected_from_exchange",
+    }
 
     def __init__(self, host: LiveRunnerHost):
         self.host = host
@@ -197,14 +219,16 @@ class RunnerLiveReconciliationAdapter:
             for order in reconciled_orders
         )
         balance = self.host._coerce_float(getattr(exchange, "get_balance", lambda: 0.0)(), default=self.host.risk.state.current_balance)
-        reserved_positions = sum(position.size for position in reconciled_positions)
-        reserved_orders = sum(order.get("remaining_size", 0.0) for order in active_open_orders)
-        reserved_total = reserved_positions + reserved_orders
+        filled_exposure = sum(position.size for position in reconciled_positions)
+        pending_exposure = sum(order.get("remaining_size", 0.0) for order in active_open_orders)
+        reserved_total = filled_exposure + pending_exposure
         raw_available_cash = balance - reserved_total
         available_cash = max(0.0, raw_available_cash)
         partial_fills = sum(1 for order in active_open_orders if order.get("filled_size", 0.0) > 0 and order.get("remaining_size", 0.0) > 0)
-        verdict, issues = self._classify_reconciliation_verdict(
+        contract = self._classify_reconciliation_contract(
+            exchange_name=exchange_name,
             reconciled_positions=reconciled_positions,
+            reconciled_orders=reconciled_orders,
             active_open_orders=active_open_orders,
             balance=balance,
             raw_available_cash=raw_available_cash,
@@ -215,23 +239,34 @@ class RunnerLiveReconciliationAdapter:
             open_positions=reconciled_positions,
             open_orders=active_open_orders,
             trade_history_rows=trade_history_rows,
+            balance=round(balance, 2),
+            filled_exposure=round(filled_exposure, 2),
+            pending_exposure=round(pending_exposure, 2),
             reserved_capital=round(reserved_total, 2),
             available_cash=round(available_cash, 2),
             partial_fills=partial_fills,
-            verdict=verdict,
-            issues=issues,
+            verdict=contract["verdict"],
+            issues=contract["issues"],
+            severity=contract["severity"],
+            action=contract["action"],
+            correction_events=contract["correction_events"],
+            state_flags=contract["state_flags"],
         )
 
-    def _classify_reconciliation_verdict(
+    def _classify_reconciliation_contract(
         self,
         *,
+        exchange_name: str,
         reconciled_positions: list[Any],
+        reconciled_orders: list[dict],
         active_open_orders: list[dict],
         balance: float,
         raw_available_cash: float,
         partial_fills: int,
-    ) -> tuple[str, list[str]]:
+    ) -> dict[str, Any]:
         issues: list[str] = []
+        correction_events: list[dict] = []
+        state_flags: list[str] = []
 
         order_ids = [str(order.get("order_id") or "") for order in active_open_orders if str(order.get("order_id") or "")]
         if len(order_ids) != len(set(order_ids)):
@@ -242,13 +277,43 @@ class RunnerLiveReconciliationAdapter:
 
         local_order_ids = {str(order.get("order_id") or "") for order in getattr(self.host, "open_orders", []) if str(order.get("order_id") or "")}
         exchange_order_ids = set(order_ids)
+        terminal_exchange_order_ids = {
+            str(order.get("order_id") or "")
+            for order in reconciled_orders
+            if str(order.get("order_id") or "") and str(order.get("status") or "") in {"canceled", "stale", "failed", "resolved"}
+        }
         if local_order_ids and (local_order_ids - exchange_order_ids):
             issues.append("local_open_orders_missing_from_exchange")
+            for missing_id in sorted(local_order_ids - exchange_order_ids):
+                exchange_state = "absent_from_active_open_orders"
+                if missing_id in terminal_exchange_order_ids:
+                    matched_terminal = next((order for order in reconciled_orders if str(order.get("order_id") or "") == missing_id), None)
+                    if matched_terminal:
+                        exchange_state = f"terminal:{matched_terminal.get('status')}"
+                correction_events.append({
+                    "severity": "medium",
+                    "action": "correct_and_continue",
+                    "issue": "local_open_orders_missing_from_exchange",
+                    "exchange": exchange_name,
+                    "order_id": missing_id,
+                    "local_state": "open_order",
+                    "exchange_state": exchange_state,
+                })
 
         local_position_ids = {str(getattr(position, "order_id", "") or "") for position in getattr(self.host, "open_positions", []) if str(getattr(position, "order_id", "") or "")}
         exchange_position_ids = {str(getattr(position, "order_id", "") or "") for position in reconciled_positions if str(getattr(position, "order_id", "") or "")}
         if local_position_ids and (local_position_ids - exchange_position_ids):
             issues.append("local_positions_missing_from_exchange")
+            for missing_id in sorted(local_position_ids - exchange_position_ids):
+                correction_events.append({
+                    "severity": "medium",
+                    "action": "correct_and_continue",
+                    "issue": "local_positions_missing_from_exchange",
+                    "exchange": exchange_name,
+                    "position_id": missing_id,
+                    "local_state": "open_position",
+                    "exchange_state": "absent_from_open_positions",
+                })
 
         local_entries = []
         for position in getattr(self.host, "open_positions", []):
@@ -290,15 +355,104 @@ class RunnerLiveReconciliationAdapter:
             issues.append("ambiguous_local_exchange_duplicate_exposure")
 
         if partial_fills > 0:
-            issues.append("partial_fill_exposure_present")
+            state_flags.append("partial_fill_exposure_present")
         if active_open_orders:
-            issues.append("resting_orders_present")
+            state_flags.append("resting_orders_present")
 
-        if any(issue in {"duplicate_active_order_ids", "negative_available_cash_after_reconcile", "ambiguous_local_exchange_duplicate_exposure"} for issue in issues):
-            return "blocked", issues
-        if issues:
-            return "degraded", issues
-        return "safe", issues
+        exchange_orders_by_id = {
+            str(order.get("order_id") or ""): order
+            for order in reconciled_orders
+            if str(order.get("order_id") or "")
+        }
+        for local_order in getattr(self.host, "open_orders", []):
+            order_id = str(local_order.get("order_id") or "")
+            exchange_order = exchange_orders_by_id.get(order_id)
+            if not order_id or not exchange_order:
+                continue
+            field_issue_map = {
+                "status": "local_order_status_corrected_from_exchange",
+                "filled_size": "local_order_filled_size_corrected_from_exchange",
+                "remaining_size": "local_order_remaining_size_corrected_from_exchange",
+            }
+            for field_name, issue_code in field_issue_map.items():
+                local_value = local_order.get(field_name)
+                exchange_value = exchange_order.get(field_name)
+                if field_name == "status":
+                    local_status = canonical_execution_status(
+                        local_value,
+                        filled_size=local_order.get("filled_size"),
+                        placed_size=local_order.get("placed_size"),
+                        remaining_size=local_order.get("remaining_size"),
+                    )
+                    changed = str(local_status or "").lower() != str(exchange_value or "").lower()
+                else:
+                    changed = round(self.host._coerce_float(local_value, 0.0), 4) != round(self.host._coerce_float(exchange_value, 0.0), 4)
+                if not changed:
+                    continue
+                issues.append(issue_code)
+                correction_events.append({
+                    "severity": "medium",
+                    "action": "correct_and_continue",
+                    "issue": issue_code,
+                    "exchange": exchange_name,
+                    "order_id": order_id,
+                    "field": field_name,
+                    "local_value": local_value,
+                    "exchange_value": exchange_value,
+                })
+            local_reserved = self.host._coerce_float(local_order.get("reserved_capital"), None)
+            if local_reserved is not None:
+                exchange_reserved = infer_reserved_capital(
+                    exchange_order.get("status"),
+                    filled_size=exchange_order.get("filled_size"),
+                    remaining_size=exchange_order.get("remaining_size"),
+                    current_value=exchange_order.get("reserved_capital"),
+                )
+                if round(local_reserved, 4) != round(exchange_reserved, 4):
+                    issues.append("local_order_reserved_capital_corrected_from_exchange")
+                    correction_events.append({
+                        "severity": "medium",
+                        "action": "correct_and_continue",
+                        "issue": "local_order_reserved_capital_corrected_from_exchange",
+                        "exchange": exchange_name,
+                        "order_id": order_id,
+                        "field": "reserved_capital",
+                        "local_value": local_reserved,
+                        "exchange_value": exchange_reserved,
+                    })
+
+        issues = list(dict.fromkeys(issues + state_flags))
+        severity = self._contract_severity(issues)
+        action = {
+            "high": "block",
+            "medium": "correct_and_continue",
+            "low": "log_only",
+            "none": "log_only",
+        }[severity]
+        if severity == "high":
+            verdict = "blocked"
+        elif severity == "medium" or state_flags:
+            verdict = "degraded"
+        else:
+            verdict = "safe"
+        return {
+            "verdict": verdict,
+            "issues": issues,
+            "severity": severity,
+            "action": action,
+            "correction_events": correction_events,
+            "state_flags": state_flags,
+        }
+
+    def _contract_severity(self, issues: list[str]) -> str:
+        if any(issue in self.HIGH_SEVERITY_ISSUES for issue in issues):
+            return "high"
+        if any(issue in self.MEDIUM_SEVERITY_ISSUES for issue in issues):
+            return "medium"
+        low_flags = {"partial_fill_exposure_present", "resting_orders_present"}
+        if any(issue in low_flags for issue in issues):
+            return "low"
+        return "none"
 
     def settle(self, exchange_name: str, exchange: BaseExchange, open_positions: list[Any]) -> list[ResolutionEvent]:
         events: list[ResolutionEvent] = []

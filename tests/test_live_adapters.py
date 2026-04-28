@@ -84,8 +84,60 @@ class LiveAdaptersTests(unittest.TestCase):
             self.assertEqual(snapshot.available_cash, 10.0)
             self.assertEqual(snapshot.partial_fills, 1)
             self.assertEqual(snapshot.verdict, "degraded")
+            self.assertEqual(snapshot.severity, "low")
+            self.assertEqual(snapshot.action, "log_only")
+            self.assertEqual(snapshot.filled_exposure, 2.0)
+            self.assertEqual(snapshot.pending_exposure, 3.0)
             self.assertIn("partial_fill_exposure_present", snapshot.issues)
             self.assertIn("resting_orders_present", snapshot.issues)
+
+    def test_reconciliation_contract_marks_exchange_corrections_as_medium(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = self._make_bot(tmpdir)
+            bot.open_orders = [
+                {
+                    "order_id": "ord-local",
+                    "market_id": "M-CORRECT",
+                    "question": "Will local order be corrected?",
+                    "direction": "BUY_YES",
+                    "status": "placed",
+                    "requested_size": 4.0,
+                    "filled_size": 0.0,
+                    "remaining_size": 4.0,
+                    "reserved_capital": 4.0,
+                    "price": 0.45,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }
+            ]
+            adapter = RunnerLiveReconciliationAdapter(bot)
+            exchange = FakeExchange(
+                orders=[
+                    RestingOrder(
+                        order_id="ord-local",
+                        market_id="M-CORRECT",
+                        exchange="kalshi",
+                        side="YES",
+                        requested_size=4.0,
+                        filled_size=1.5,
+                        remaining_size=2.5,
+                        price=0.45,
+                        status="partial",
+                        created_at=datetime(2026, 4, 20, 18, 1, tzinfo=timezone.utc),
+                    )
+                ],
+                balance=25.0,
+            )
+
+            snapshot = adapter.reconcile("kalshi", exchange)
+
+            self.assertEqual(snapshot.severity, "medium")
+            self.assertEqual(snapshot.action, "correct_and_continue")
+            self.assertEqual(snapshot.verdict, "degraded")
+            self.assertIn("local_order_status_corrected_from_exchange", snapshot.issues)
+            self.assertIn("local_order_filled_size_corrected_from_exchange", snapshot.issues)
+            self.assertIn("local_order_remaining_size_corrected_from_exchange", snapshot.issues)
+            self.assertNotIn("local_order_reserved_capital_corrected_from_exchange", snapshot.issues)
+            self.assertTrue(any(event["issue"] == "local_order_status_corrected_from_exchange" for event in snapshot.correction_events))
 
     def test_reconciliation_normalizes_submitted_and_resting_orders_to_placed_open(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -133,6 +185,21 @@ class LiveAdaptersTests(unittest.TestCase):
     def test_reconciliation_keeps_closed_order_outcomes_in_history_but_not_open_orders(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             bot = self._make_bot(tmpdir)
+            bot.open_orders = [
+                {
+                    "order_id": "ord-cancel-partial",
+                    "market_id": "M3",
+                    "question": "Closed order should be terminal",
+                    "direction": "BUY_YES",
+                    "status": "partial",
+                    "requested_size": 4.0,
+                    "filled_size": 1.5,
+                    "remaining_size": 2.5,
+                    "reserved_capital": 4.0,
+                    "price": 0.45,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }
+            ]
             adapter = RunnerLiveReconciliationAdapter(bot)
             exchange = FakeExchange(
                 orders=[
@@ -175,6 +242,8 @@ class LiveAdaptersTests(unittest.TestCase):
             self.assertEqual(partial_cancel["lifecycle_state"], "canceled_partial")
             self.assertEqual(expired["status"], "stale")
             self.assertEqual(expired["lifecycle_state"], "stale_open_order")
+            cancel_event = next(event for event in snapshot.correction_events if event.get("order_id") == "ord-cancel-partial")
+            self.assertEqual(cancel_event["exchange_state"], "terminal:canceled")
 
     def test_reconciliation_marks_negative_effective_cash_as_blocked(self):
         with tempfile.TemporaryDirectory() as tmpdir:

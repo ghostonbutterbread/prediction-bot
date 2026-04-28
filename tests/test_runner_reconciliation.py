@@ -391,6 +391,145 @@ class RunnerReconciliationTests(unittest.TestCase):
             self.assertEqual(bot.trade_history[1]["market_id"], "KXNEW-1")
             self.assertTrue(bot.trade_history[1]["reconciled"])
 
+    def test_reconciliation_corrects_local_trade_row_when_exchange_reports_partial(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = self._make_bot(tmpdir)
+            bot.open_orders = [
+                {
+                    "order_id": "ord-local-partial",
+                    "exchange": "kalshi",
+                    "market_id": "KXCORRECT-1",
+                    "question": "Will local row be corrected?",
+                    "direction": "BUY_YES",
+                    "status": "placed",
+                    "requested_size": 4.0,
+                    "placed_size": 4.0,
+                    "filled_size": 0.0,
+                    "remaining_size": 4.0,
+                    "reserved_capital": 4.0,
+                    "price": 0.41,
+                    "created_at": "2026-04-20T00:00:00+00:00",
+                }
+            ]
+            bot.trade_history = [
+                {
+                    "timestamp": "2026-04-20T00:00:00+00:00",
+                    "trade_id": "ord-local-partial",
+                    "order_id": "ord-local-partial",
+                    "exchange": "kalshi",
+                    "market_id": "KXCORRECT-1",
+                    "question": "Will local row be corrected?",
+                    "direction": "BUY_YES",
+                    "status": "placed",
+                    "lifecycle_state": "placed_open",
+                    "requested_size": 4.0,
+                    "approved_size": 4.0,
+                    "placed_size": 4.0,
+                    "filled_size": 0.0,
+                    "remaining_size": 4.0,
+                    "reserved_capital": 4.0,
+                    "price": 0.41,
+                    "market_price": 0.41,
+                    "entry_price": 0.41,
+                    "fill_price": None,
+                    "resolved": False,
+                    "decision_reason_code": "approved",
+                    "reconciled": False,
+                }
+            ]
+            bot.exchanges["kalshi"] = FakeReconExchange(
+                orders=[
+                    RestingOrder(
+                        order_id="ord-local-partial",
+                        market_id="KXCORRECT-1",
+                        exchange="kalshi",
+                        question="Will local row be corrected?",
+                        side="YES",
+                        requested_size=4.0,
+                        filled_size=1.5,
+                        remaining_size=2.5,
+                        price=0.41,
+                        status="partial",
+                        created_at=datetime(2026, 4, 20, 0, 0, tzinfo=timezone.utc),
+                    )
+                ],
+                balance=25.0,
+            )
+
+            bot.connect_all()
+
+            self.assertEqual(len(bot.trade_history), 1)
+            corrected = bot.trade_history[0]
+            self.assertTrue(corrected["reconciliation_corrected"])
+            self.assertEqual(corrected["status"], "partial")
+            self.assertEqual(corrected["lifecycle_state"], "partial_open")
+            self.assertEqual(corrected["filled_size"], 1.5)
+            self.assertEqual(corrected["remaining_size"], 2.5)
+            self.assertEqual(corrected["reserved_capital"], 4.0)
+            self.assertEqual(corrected["reconciliation_contract"]["severity"], "medium")
+
+            with open(f"{tmpdir}/live/reconciliation.jsonl") as f:
+                snapshots = [json.loads(line) for line in f if line.strip()]
+            self.assertEqual(snapshots[-1]["severity"], "medium")
+            self.assertEqual(snapshots[-1]["action"], "correct_and_continue")
+            self.assertEqual(snapshots[-1]["filled_exposure"], 0.0)
+            self.assertEqual(snapshots[-1]["pending_exposure"], 2.5)
+            self.assertTrue(any(event["issue"] == "local_order_status_corrected_from_exchange" for event in snapshots[-1]["corrections"]))
+
+    def test_reconciliation_does_not_duplicate_matching_local_trade_row(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = self._make_bot(tmpdir)
+            bot.trade_history = [
+                {
+                    "timestamp": "2026-04-20T00:00:00+00:00",
+                    "trade_id": "ord-match-1",
+                    "order_id": "ord-match-1",
+                    "exchange": "kalshi",
+                    "market_id": "KXMATCH-1",
+                    "question": "Will matching rows stay deduped?",
+                    "direction": "BUY_YES",
+                    "status": "partial",
+                    "lifecycle_state": "partial_open",
+                    "requested_size": 4.0,
+                    "approved_size": 4.0,
+                    "placed_size": 4.0,
+                    "filled_size": 1.5,
+                    "remaining_size": 2.5,
+                    "reserved_capital": 4.0,
+                    "price": 0.41,
+                    "market_price": 0.41,
+                    "entry_price": 0.41,
+                    "fill_price": None,
+                    "resolved": False,
+                    "decision_reason_code": "approved",
+                    "reconciled": False,
+                }
+            ]
+            bot.exchanges["kalshi"] = FakeReconExchange(
+                orders=[
+                    RestingOrder(
+                        order_id="ord-match-1",
+                        market_id="KXMATCH-1",
+                        exchange="kalshi",
+                        question="Will matching rows stay deduped?",
+                        side="YES",
+                        requested_size=4.0,
+                        filled_size=1.5,
+                        remaining_size=2.5,
+                        price=0.41,
+                        status="partial",
+                        created_at=datetime(2026, 4, 20, 0, 0, tzinfo=timezone.utc),
+                    )
+                ],
+                balance=25.0,
+            )
+
+            bot.connect_all()
+
+            self.assertEqual(len(bot.trade_history), 1)
+            self.assertEqual(bot.trade_history[0]["trade_id"], "ord-match-1")
+            self.assertFalse(bot.trade_history[0].get("reconciled", False))
+
 
 if __name__ == "__main__":
     unittest.main()

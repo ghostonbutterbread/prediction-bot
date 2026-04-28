@@ -175,9 +175,18 @@ class PredictionBot:
 
         self.open_positions = snapshot.open_positions
         self.open_orders = snapshot.open_orders
-        self.trade_history = [trade for trade in self.trade_history if not trade.get("reconciled")] + snapshot.trade_history_rows
+        corrected_trade_ids = self._apply_reconciliation_trade_history_corrections(
+            exchange_name,
+            snapshot,
+            source="startup_reconciliation",
+        )
+        snapshot_rows = [
+            row for row in snapshot.trade_history_rows
+            if str(row.get("trade_id") or row.get("order_id") or "") not in corrected_trade_ids
+        ]
+        self.trade_history = [trade for trade in self.trade_history if not trade.get("reconciled")] + snapshot_rows
 
-        balance = self._coerce_float(getattr(exchange, "get_balance", lambda: 0.0)(), default=self.risk.state.current_balance)
+        balance = self._coerce_float(getattr(snapshot, "balance", None), default=self.risk.state.current_balance)
         self.risk.sync_account_state(
             current_balance=balance,
             available_cash=snapshot.available_cash,
@@ -205,14 +214,21 @@ class PredictionBot:
             "open_positions": len(snapshot.open_positions),
             "open_orders": len(snapshot.open_orders),
             "trade_history_loaded": len(snapshot.trade_history_rows),
+            "balance": getattr(snapshot, "balance", balance),
+            "filled_exposure": getattr(snapshot, "filled_exposure", 0.0),
+            "pending_exposure": getattr(snapshot, "pending_exposure", 0.0),
             "reserved_capital": snapshot.reserved_capital,
             "available_cash": snapshot.available_cash,
             "partial_fills": snapshot.partial_fills,
             "reconciliation_verdict": verdict,
             "reconciliation_issues": issues,
+            "reconciliation_severity": getattr(snapshot, "severity", "none"),
+            "reconciliation_action": getattr(snapshot, "action", "log_only"),
+            "reconciliation_corrections": list(getattr(snapshot, "correction_events", []) or []),
             "runtime_state": self._live_runtime_state_for_exchange(exchange_name).get("state", verdict),
             "status": verdict,
         }
+        self._record_reconciliation_snapshot(exchange_name, snapshot, source="startup_reconciliation")
         self._log_lifecycle_event("reconciliation_completed", summary)
         return summary
 
@@ -487,6 +503,122 @@ class PredictionBot:
             issues=issues,
             details={"source": source, "reconciliation_verdict": verdict},
         )
+
+    def _record_reconciliation_snapshot(self, exchange_name: str, snapshot, *, source: str):
+        payload = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "source": source,
+            "exchange": exchange_name,
+            "verdict": getattr(snapshot, "verdict", "safe"),
+            "severity": getattr(snapshot, "severity", "none"),
+            "action": getattr(snapshot, "action", "log_only"),
+            "issues": list(getattr(snapshot, "issues", []) or []),
+            "state_flags": list(getattr(snapshot, "state_flags", []) or []),
+            "balance": round(self._coerce_float(getattr(snapshot, "balance", 0.0), 0.0), 2),
+            "available_cash": round(self._coerce_float(getattr(snapshot, "available_cash", 0.0), 0.0), 2),
+            "reserved_capital": round(self._coerce_float(getattr(snapshot, "reserved_capital", 0.0), 0.0), 2),
+            "filled_exposure": round(self._coerce_float(getattr(snapshot, "filled_exposure", 0.0), 0.0), 2),
+            "pending_exposure": round(self._coerce_float(getattr(snapshot, "pending_exposure", 0.0), 0.0), 2),
+            "open_positions": len(getattr(snapshot, "open_positions", []) or []),
+            "open_orders": len(getattr(snapshot, "open_orders", []) or []),
+            "partial_fills": int(getattr(snapshot, "partial_fills", 0) or 0),
+            "corrections": list(getattr(snapshot, "correction_events", []) or []),
+        }
+        log_file = self.log_dir / "reconciliation.jsonl"
+        with open(log_file, "a") as f:
+            f.write(json.dumps(payload) + "\n")
+
+    def _apply_reconciliation_trade_history_corrections(self, exchange_name: str, snapshot, *, source: str) -> set[str]:
+        exchange_rows: dict[str, dict] = {}
+        for row in getattr(snapshot, "trade_history_rows", []) or []:
+            row_id = str(row.get("trade_id") or row.get("order_id") or "")
+            if row_id:
+                exchange_rows[row_id] = row
+
+        matched_ids: set[str] = set()
+        corrected_ids: set[str] = set()
+        if not exchange_rows or not self.trade_history:
+            return matched_ids
+
+        now = datetime.now(timezone.utc).isoformat()
+        correction_fields = (
+            "status",
+            "lifecycle_state",
+            "placed_size",
+            "filled_size",
+            "remaining_size",
+            "reserved_capital",
+            "fill_price",
+            "entry_price",
+            "price",
+            "market_price",
+            "direction",
+            "exchange",
+            "event_key",
+        )
+        for index, trade in enumerate(list(self.trade_history)):
+            if trade.get("reconciled"):
+                continue
+            row_id = str(trade.get("order_id") or trade.get("trade_id") or "")
+            exchange_row = exchange_rows.get(row_id)
+            if not row_id or not exchange_row:
+                continue
+
+            matched_ids.add(row_id)
+            changed_fields: list[str] = []
+            before: dict[str, object] = {}
+            for field_name in correction_fields:
+                if field_name not in exchange_row:
+                    continue
+                local_value = trade.get(field_name)
+                exchange_value = exchange_row.get(field_name)
+                if self._reconciliation_values_equal(local_value, exchange_value):
+                    continue
+                before[field_name] = local_value
+                trade[field_name] = exchange_value
+                changed_fields.append(field_name)
+
+            if not changed_fields:
+                continue
+
+            trade["reconciliation_corrected"] = True
+            trade["reconciliation_corrected_at"] = now
+            trade["reconciliation_source"] = source
+            trade["reconciliation_exchange"] = exchange_name
+            trade["reconciliation_previous_values"] = before
+            trade["reconciliation_corrected_fields"] = changed_fields
+            trade["reconciliation_contract"] = {
+                "verdict": getattr(snapshot, "verdict", "safe"),
+                "severity": getattr(snapshot, "severity", "none"),
+                "action": getattr(snapshot, "action", "log_only"),
+                "issues": list(getattr(snapshot, "issues", []) or []),
+            }
+            self.trade_history[index] = apply_execution_audit_contract(trade)
+            corrected_ids.add(row_id)
+
+        if corrected_ids:
+            self._log_lifecycle_event(
+                "reconciliation_corrections_applied",
+                {
+                    "exchange": exchange_name,
+                    "source": source,
+                    "corrected_trade_ids": sorted(corrected_ids),
+                    "correction_events": [
+                        event for event in list(getattr(snapshot, "correction_events", []) or [])
+                        if str(event.get("order_id") or event.get("position_id") or "") in corrected_ids
+                    ],
+                },
+            )
+        return matched_ids
+
+    @staticmethod
+    def _reconciliation_values_equal(left, right) -> bool:
+        if isinstance(left, (int, float)) or isinstance(right, (int, float)):
+            try:
+                return round(float(left or 0.0), 4) == round(float(right or 0.0), 4)
+            except (TypeError, ValueError):
+                return False
+        return left == right
 
     def _update_live_runtime_state(
         self,
