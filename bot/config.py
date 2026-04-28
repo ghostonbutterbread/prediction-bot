@@ -67,6 +67,7 @@ def _default_prediction_lab_config() -> dict[str, Any]:
         "strategy_version": "v1",
         "hypothetical_notional_mode": "flat",
         "flat_notional_usd": 10.0,
+        "fresh_wallet_bankroll_usd": 100.0,
         "use_sizing_logic": False,
         "min_confidence_to_record": 0.0,
         "min_edge_to_record": 0.0,
@@ -151,7 +152,11 @@ def _normalize_storage_config(config: dict) -> dict:
     prediction_lab["max_new_predictions_per_seed"] = max(1, int(prediction_lab.get("max_new_predictions_per_seed", 500) or 500))
     prediction_lab["experiment_id"] = str(prediction_lab.get("experiment_id", "default") or "default")
     prediction_lab["strategy_version"] = str(prediction_lab.get("strategy_version", "v1") or "v1")
+    hypothetical_mode = str(prediction_lab.get("hypothetical_notional_mode", "flat") or "flat").strip().lower()
+    prediction_lab["hypothetical_notional_mode"] = "fresh_kelly" if hypothetical_mode in {"fresh_kelly", "kelly"} else "flat"
     prediction_lab["flat_notional_usd"] = float(prediction_lab.get("flat_notional_usd", 10.0) or 10.0)
+    fresh_wallet_bankroll = prediction_lab.get("fresh_wallet_bankroll_usd", 100.0)
+    prediction_lab["fresh_wallet_bankroll_usd"] = float(100.0 if fresh_wallet_bankroll is None else fresh_wallet_bankroll)
     prediction_lab["min_confidence_to_record"] = float(prediction_lab.get("min_confidence_to_record", 0.0) or 0.0)
     prediction_lab["min_edge_to_record"] = float(prediction_lab.get("min_edge_to_record", 0.0) or 0.0)
     prediction_lab["record_all_scored"] = bool(prediction_lab.get("record_all_scored", True))

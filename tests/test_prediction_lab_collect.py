@@ -484,7 +484,168 @@ class PredictionLabCollectorTests(unittest.TestCase):
             self.assertEqual(prediction_lab["collector_interval_seconds"], 900)
             self.assertEqual(prediction_lab["collection_storage_cap_gb"], 25)
             self.assertEqual(prediction_lab["collector_fetch_mode"], "direct_markets")
+            self.assertEqual(prediction_lab["hypothetical_notional_mode"], "fresh_kelly")
+            self.assertEqual(prediction_lab["fresh_wallet_bankroll_usd"], 100.0)
             self.assertFalse(config.get("trading_enabled", False))
+
+    def test_prediction_lab_config_defaults_and_aliases_fresh_wallet_kelly(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            default_path = Path(tmpdir) / "default.yaml"
+            default_path.write_text("prediction_lab:\n  enabled: true\n")
+            default_config = load_config(default_path)
+
+            alias_path = Path(tmpdir) / "alias.yaml"
+            alias_path.write_text("prediction_lab:\n  hypothetical_notional_mode: kelly\n  fresh_wallet_bankroll_usd: 250\n")
+            alias_config = load_config(alias_path)
+
+            self.assertEqual(default_config["prediction_lab"]["hypothetical_notional_mode"], "flat")
+            self.assertEqual(default_config["prediction_lab"]["fresh_wallet_bankroll_usd"], 100.0)
+            self.assertEqual(alias_config["prediction_lab"]["hypothetical_notional_mode"], "fresh_kelly")
+            self.assertEqual(alias_config["prediction_lab"]["fresh_wallet_bankroll_usd"], 250.0)
+
+    def test_prediction_lab_rows_include_fresh_wallet_kelly_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "data_dir": tmpdir,
+                "prediction_lab": {
+                    "enabled": True,
+                    "mode": "collector",
+                    "groups": ["weather"],
+                    "score_only": False,
+                    "hypothetical_notional_mode": "kelly",
+                    "fresh_wallet_bankroll_usd": 100,
+                },
+                "strategy": {"enable_news": False, "enable_social": False, "enable_ai": False},
+                "kalshi_fee_rate": 0.07,
+            }
+            with patch.dict(os.environ, {"KALSHI_USE_DEMO": "true"}, clear=False):
+                lab = PredictionLab(config)
+            market = SimpleNamespace(
+                id="KXHIGHTSEA-26APR26-T64",
+                question="Will the maximum temperature be >64° on Apr 26?",
+                category="weather",
+                yes_price=0.5,
+                no_price=0.5,
+                volume=100,
+                metadata={"market_group": "weather", "series": "daily_temperature"},
+            )
+            signal = {
+                "direction": "BUY_YES",
+                "confidence": 0.8,
+                "edge": 0.25,
+                "model_probability": 0.75,
+                "market_price": 0.5,
+                "yes_market_price": 0.5,
+                "no_market_price": 0.5,
+                "signals": {},
+            }
+
+            row = lab._build_prediction_row("run-1", market, signal, decision_type="buy_yes")
+            hypothetical = row["hypothetical"]
+
+            self.assertEqual(hypothetical["mode"], "fresh_kelly")
+            self.assertEqual(hypothetical["sizing_method"], "fresh_wallet_kelly")
+            self.assertEqual(hypothetical["bankroll_usd"], 100.0)
+            self.assertEqual(hypothetical["entry_price"], 0.5)
+            self.assertEqual(hypothetical["win_probability"], 0.75)
+            self.assertEqual(hypothetical["requested_position_size_usd"], 10.0)
+            self.assertEqual(hypothetical["approved_position_size_usd"], 10.0)
+            self.assertEqual(hypothetical["position_size_usd"], 10.0)
+            self.assertIsNone(hypothetical["zero_reason"])
+            self.assertEqual(hypothetical["kelly"]["requested_position_size_usd"], 10.0)
+
+    def test_prediction_lab_fresh_wallet_kelly_records_zero_reason(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "data_dir": tmpdir,
+                "prediction_lab": {
+                    "enabled": True,
+                    "mode": "collector",
+                    "groups": ["weather"],
+                    "score_only": False,
+                    "hypothetical_notional_mode": "fresh_kelly",
+                    "fresh_wallet_bankroll_usd": 100,
+                },
+                "strategy": {"enable_news": False, "enable_social": False, "enable_ai": False},
+            }
+            lab = PredictionLab(config)
+            market = SimpleNamespace(
+                id="KXHIGHTSEA-26APR26-T64",
+                question="Will the maximum temperature be >64° on Apr 26?",
+                category="weather",
+                yes_price=0.5,
+                no_price=0.5,
+                volume=100,
+                metadata={"market_group": "weather", "series": "daily_temperature"},
+            )
+            signal = {
+                "direction": "BUY_YES",
+                "confidence": 0.8,
+                "edge": 0.0,
+                "model_probability": 0.5,
+                "market_price": 0.5,
+                "yes_market_price": 0.5,
+                "no_market_price": 0.5,
+                "signals": {},
+            }
+
+            row = lab._build_prediction_row("run-1", market, signal, decision_type="buy_yes")
+
+            self.assertEqual(row["hypothetical"]["approved_position_size_usd"], 0.0)
+            self.assertEqual(row["hypothetical"]["requested_position_size_usd"], 0.0)
+            self.assertEqual(row["hypothetical"]["reason_if_zero"], "kelly_zero_size")
+
+    def test_prediction_lab_resolution_uses_stored_position_size_for_pnl(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "data_dir": tmpdir,
+                "prediction_lab": {
+                    "enabled": True,
+                    "mode": "collector",
+                    "groups": ["weather"],
+                    "score_only": False,
+                    "flat_notional_usd": 10,
+                },
+                "strategy": {"enable_news": False, "enable_social": False, "enable_ai": False},
+                "kalshi_fee_rate": 0.07,
+            }
+            lab = PredictionLab(config)
+            append_jsonl(
+                lab.predictions_path,
+                {
+                    "prediction_id": "pred-1",
+                    "status": "open",
+                    "market_id": "KXHIGHTSEA-26APR26-T64",
+                    "direction": "BUY_YES",
+                    "experiment_id": "default",
+                    "strategy_version": "v1",
+                    "yes_market_price": 0.5,
+                    "no_market_price": 0.5,
+                    "hypothetical": {
+                        "mode": "fresh_kelly",
+                        "position_size_usd": 20.0,
+                        "approved_position_size_usd": 20.0,
+                        "notional_usd": 20.0,
+                    },
+                },
+            )
+            exchange = SimpleNamespace(
+                _fetch_market_raw=lambda market_id: {
+                    "status": "settled",
+                    "result": "YES",
+                    "close_price": 1.0,
+                }
+            )
+
+            result = lab.resolve_open_predictions(exchange)
+            rows = load_jsonl(lab.predictions_path)
+            resolutions = load_jsonl(lab.resolutions_path)
+
+            self.assertEqual(result["resolved"], 1)
+            self.assertAlmostEqual(result["net_pnl"], 18.6)
+            self.assertEqual(rows[0]["status"], "resolved")
+            self.assertAlmostEqual(rows[0]["resolution"]["position_size"], 20.0)
+            self.assertAlmostEqual(resolutions[0]["resolution"]["net_pnl"], 18.6)
 
     def test_prediction_lab_rows_include_weather_risk_metadata_when_derivable(self):
         with tempfile.TemporaryDirectory() as tmpdir:

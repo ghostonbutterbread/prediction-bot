@@ -10,8 +10,9 @@ prediction_lab:
   seed_daily_temp_first: true
   allow_non_weather: false
 
-  hypothetical_notional_mode: flat
+  hypothetical_notional_mode: fresh_kelly
   flat_notional_usd: 10
+  fresh_wallet_bankroll_usd: 100
   use_sizing_logic: false
 
   # Overnight run should create resolvable prediction rows, including SKIP rows,
