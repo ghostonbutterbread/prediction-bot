@@ -80,6 +80,8 @@ def canonical_execution_status(
             "accepted": "placed",
             "submitted": "placed",
             "resting": "placed",
+            "pending": "placed",
+            "pending_confirmation": "placed",
             "partial_fill": "partial",
             "partially_filled": "partial",
             "partially-filled": "partial",
@@ -95,6 +97,10 @@ def canonical_execution_status(
             return "partial"
         if canonical == "placed" and filled > 0 and remaining <= 0:
             return "filled"
+        if canonical == "partial" and filled > 0 and remaining <= 0:
+            return "filled"
+        if canonical == "partial" and filled <= 0 and remaining > 0:
+            return "placed"
         return canonical
 
     if filled > 0 and remaining > 0:
@@ -134,7 +140,8 @@ def canonical_lifecycle_state(
     if normalized_status == "stale":
         return "stale_open_order"
     if normalized_status == "failed":
-        return "placement_failed"
+        stage = str(failure_stage or "placement").strip().lower() or "placement"
+        return f"{stage}_failed"
     if normalized_status == "resolved":
         return "resolved_position"
     return normalized_status or "candidate"
@@ -155,8 +162,10 @@ def infer_reserved_capital(
     filled = max(0.0, float(coerce_float(filled_size, default=0.0) or 0.0))
     remaining = max(0.0, float(coerce_float(remaining_size, default=0.0) or 0.0))
     current = coerce_float(current_value, default=None)
-    if normalized_status in {"rejected", "failed", "canceled", "resolved", "candidate", "approved"}:
+    if normalized_status in {"rejected", "failed", "resolved", "candidate", "approved"}:
         return 0.0
+    if normalized_status == "canceled":
+        return filled
     if normalized_status == "filled":
         return filled
     if normalized_status == "partial":
@@ -275,39 +284,67 @@ def apply_execution_audit_contract(trade: dict) -> dict:
     approved_size = coerce_float(trade.get("approved_size"), default=None)
     placed_size = coerce_float(trade.get("placed_size"), default=None)
     filled_size = coerce_float(trade.get("filled_size"), default=None)
+    remaining_size = coerce_float(trade.get("remaining_size"), default=None)
+    explicit_filled_size = filled_size
+    explicit_remaining_size = remaining_size
     position_size = coerce_float(trade.get("position_size"), default=None)
+    size_value = coerce_float(trade.get("size"), default=None)
+    raw_status = trade.get("status")
+    if raw_status is None and trade.get("resolved"):
+        raw_status = "resolved"
+    status_hint = canonical_execution_status(raw_status)
 
     if requested_size is None:
         requested_size = position_size if position_size is not None else coerce_float(trade.get("size"), default=0.0)
     if approved_size is None:
         approved_size = requested_size
-    if filled_size is None:
-        filled_size = position_size if position_size is not None else 0.0
     if placed_size is None:
-        placed_size = filled_size
-
-    raw_status = trade.get("status")
-    if raw_status is None and trade.get("resolved"):
-        raw_status = "resolved"
+        if status_hint in {"placed", "partial", "canceled", "stale"}:
+            placed_size = approved_size if approved_size is not None else requested_size
+        elif status_hint in {"filled", "resolved"}:
+            placed_size = position_size if position_size is not None else (size_value if size_value is not None else approved_size)
+        elif raw_status is None and position_size is not None:
+            placed_size = position_size
+        else:
+            placed_size = 0.0
+    if filled_size is None:
+        if status_hint == "partial" and remaining_size is not None:
+            filled_size = max(0.0, float(placed_size or 0.0) - max(0.0, float(remaining_size or 0.0)))
+        elif status_hint in {"filled", "resolved"} or (raw_status is None and position_size is not None):
+            filled_size = position_size if position_size is not None else (size_value if size_value is not None else placed_size)
+        else:
+            filled_size = 0.0
 
     status = canonical_execution_status(
         raw_status,
         filled_size=filled_size,
         placed_size=placed_size,
-        remaining_size=trade.get("remaining_size"),
+        remaining_size=remaining_size,
     )
-    if status == "rejected":
+    if status in {"rejected", "failed"}:
         placed_size = 0.0
         filled_size = 0.0
+        remaining_size = 0.0
 
     requested_size = max(0.0, float(requested_size or 0.0))
     approved_size = max(0.0, min(float(approved_size or 0.0), requested_size))
     placed_size = max(0.0, min(float(placed_size or 0.0), approved_size))
     filled_size = max(0.0, min(float(filled_size or 0.0), placed_size))
 
-    remaining_size = coerce_float(trade.get("remaining_size"), default=None)
     if remaining_size is None or remaining_size < 0:
         remaining_size = max(placed_size - filled_size, 0.0)
+    if status == "placed":
+        filled_size = 0.0
+        remaining_size = placed_size
+    elif status == "filled":
+        if explicit_filled_size is None:
+            filled_size = placed_size
+        if explicit_remaining_size is None or explicit_remaining_size < 0:
+            remaining_size = 0.0
+    elif status in {"rejected", "failed"}:
+        placed_size = 0.0
+        filled_size = 0.0
+        remaining_size = 0.0
 
     trade["status"] = status
     trade["lifecycle_state"] = str(
@@ -429,18 +466,33 @@ def validate_execution_audit_row(trade: dict) -> list[str]:
         issues.append("invalid_status")
     if status == "rejected" and (filled_size or 0.0) > 0:
         issues.append("rejected_with_fill")
+    if status == "failed" and ((filled_size or 0.0) > 0 or (remaining_size or 0.0) > 0):
+        issues.append("failed_with_active_size")
     if status == "placed" and (placed_size or 0.0) <= 0:
         issues.append("placed_without_size")
+    if status == "placed" and (filled_size or 0.0) != 0:
+        issues.append("placed_with_fill")
+    if status == "placed" and (remaining_size or 0.0) != (placed_size or 0.0):
+        issues.append("placed_remaining_mismatch")
     if status == "filled" and ((filled_size or 0.0) <= 0 or (remaining_size or 0.0) != 0):
         issues.append("filled_with_remaining")
     if status == "partial" and ((filled_size or 0.0) <= 0 or (remaining_size or 0.0) <= 0):
         issues.append("partial_without_split_fill")
+    if status == "partial" and None not in (placed_size, filled_size, remaining_size):
+        if abs((filled_size or 0.0) + (remaining_size or 0.0) - (placed_size or 0.0)) > 0.0001:
+            issues.append("partial_size_sum_mismatch")
     if status == "resolved":
         if not trade.get("resolved"):
             issues.append("resolved_without_flag")
         if not trade.get("resolved_at"):
             issues.append("resolved_without_timestamp")
     lifecycle_state = str(trade.get("lifecycle_state") or "")
+    if status == "placed" and lifecycle_state and lifecycle_state != "placed_open":
+        issues.append("placed_lifecycle_mismatch")
+    if status == "partial" and lifecycle_state and lifecycle_state != "partial_open":
+        issues.append("partial_lifecycle_mismatch")
+    if status == "filled" and lifecycle_state and lifecycle_state != "filled_open":
+        issues.append("filled_lifecycle_mismatch")
     if status == "canceled":
         expected_lifecycle = "canceled_partial" if (filled_size or 0.0) > 0 else "canceled_unfilled"
         if lifecycle_state and lifecycle_state != expected_lifecycle:
@@ -449,6 +501,10 @@ def validate_execution_audit_row(trade: dict) -> list[str]:
         issues.append("stale_lifecycle_mismatch")
     if status == "resolved" and lifecycle_state and lifecycle_state != "resolved_position":
         issues.append("resolved_lifecycle_mismatch")
+    if status == "rejected" and lifecycle_state and not lifecycle_state.endswith("_rejected"):
+        issues.append("rejected_lifecycle_mismatch")
+    if status == "failed" and lifecycle_state and not lifecycle_state.endswith("_failed"):
+        issues.append("failed_lifecycle_mismatch")
 
     if not trade.get("decision_reason_code"):
         issues.append("missing_decision_reason_code")

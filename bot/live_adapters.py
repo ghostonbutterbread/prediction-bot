@@ -9,7 +9,13 @@ from typing import Any, Protocol
 
 from bot.exchanges.base import BaseExchange, Position, RestingOrder
 from bot.shared_core import AccountState, OrderState, PositionState, ResolutionEvent
-from bot.trade_audit import apply_execution_audit_contract, canonical_execution_status, normalize_outcome, trade_event_key
+from bot.trade_audit import (
+    apply_execution_audit_contract,
+    canonical_execution_status,
+    canonical_lifecycle_state,
+    normalize_outcome,
+    trade_event_key,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -396,17 +402,30 @@ class RunnerLiveReconciliationAdapter:
             created_at_text = created_at.astimezone(timezone.utc).isoformat()
         else:
             created_at_text = str(created_at or datetime.now(timezone.utc).isoformat())
+        placed_size = max(0.0, float(filled_size or 0.0) + float(remaining_size or 0.0))
+        canonical_status = canonical_execution_status(
+            status,
+            filled_size=filled_size,
+            placed_size=placed_size,
+            remaining_size=remaining_size,
+        )
         return {
             "order_id": str(order_id),
             "exchange": exchange_name,
             "market_id": str(market_id),
             "question": str(question),
             "direction": "BUY_NO" if side == "NO" else "BUY_YES",
-            "status": status,
+            "status": canonical_status,
             "requested_size": requested_size,
+            "placed_size": placed_size,
             "filled_size": filled_size,
             "remaining_size": remaining_size,
             "price": price,
             "created_at": created_at_text,
+            "lifecycle_state": canonical_lifecycle_state(
+                canonical_status,
+                filled_size=filled_size,
+                remaining_size=remaining_size,
+            ),
             "event_key": trade_event_key({"market_id": str(market_id), "question": str(question)}),
         }

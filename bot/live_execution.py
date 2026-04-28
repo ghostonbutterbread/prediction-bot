@@ -13,6 +13,7 @@ from bot.trade_audit import (
     apply_execution_audit_contract,
     build_signal_snapshot,
     canonical_execution_status,
+    canonical_lifecycle_state,
     infer_reserved_capital,
     trade_event_key,
 )
@@ -628,12 +629,7 @@ class RunnerLiveExecutionAdapter:
             }
 
         order_id = raw_order_id
-        order_status = canonical_execution_status(
-            getattr(order, "status", None),
-            filled_size=getattr(order, "filled_size", None),
-            placed_size=size,
-            remaining_size=getattr(order, "remaining_size", None),
-        )
+        raw_order_status_value = getattr(order, "status", None)
         filled_size = self.host._coerce_float(getattr(order, "filled_size", None), default=None)
         remaining_size = self.host._coerce_float(getattr(order, "remaining_size", None), default=None)
         if filled_size is None and remaining_size is None:
@@ -648,6 +644,12 @@ class RunnerLiveExecutionAdapter:
         if filled_size + remaining_size > size:
             overflow = filled_size + remaining_size - size
             remaining_size = max(0.0, remaining_size - overflow)
+        order_status = canonical_execution_status(
+            raw_order_status_value,
+            filled_size=filled_size,
+            placed_size=size,
+            remaining_size=remaining_size,
+        )
         if order_status == "filled":
             filled_size = size
             remaining_size = 0.0
@@ -659,6 +661,11 @@ class RunnerLiveExecutionAdapter:
         elif order_status == "placed":
             filled_size = 0.0
             remaining_size = size
+        elif order_status == "canceled":
+            remaining_size = 0.0
+        elif order_status == "failed":
+            filled_size = 0.0
+            remaining_size = 0.0
 
         timestamp = datetime.now(timezone.utc).isoformat()
         if filled_size > 0:
@@ -682,8 +689,9 @@ class RunnerLiveExecutionAdapter:
                     "market_id": market_id,
                     "question": signal.get("question", ""),
                     "direction": decision.action,
-                    "status": getattr(order, "status", None) or ("partial" if filled_size > 0 else "open"),
+                    "status": order_status,
                     "requested_size": float(decision.requested_position_size or size),
+                    "placed_size": size,
                     "filled_size": filled_size,
                     "remaining_size": remaining_size,
                     "price": price,
@@ -707,6 +715,11 @@ class RunnerLiveExecutionAdapter:
             "resolved": False,
             "order_id": order_id,
             "status": order_status,
+            "lifecycle_state": canonical_lifecycle_state(
+                order_status,
+                filled_size=filled_size,
+                remaining_size=remaining_size,
+            ),
             "failure_stage": None,
             "decision_reason": decision.reason,
             "decision_reason_code": decision.reason_code,
@@ -804,7 +817,12 @@ class RunnerLiveExecutionAdapter:
             "resolved": False,
             "order_id": None,
             "status": status,
-            "lifecycle_state": f"{failure_stage}_rejected",
+            "lifecycle_state": canonical_lifecycle_state(
+                status,
+                failure_stage=failure_stage,
+                filled_size=0.0,
+                remaining_size=0.0,
+            ),
             "failure_stage": failure_stage,
             "decision_reason": getattr(decision, "reason", message),
             "decision_reason_code": getattr(decision, "reason_code", "unknown"),

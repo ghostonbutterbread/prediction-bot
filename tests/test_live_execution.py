@@ -469,6 +469,54 @@ class LiveExecutionTests(unittest.TestCase):
             self.assertEqual(len(bot.open_positions), 1)
             self.assertEqual(len(bot.open_orders), 1)
 
+    def test_execute_open_order_with_reported_fill_derives_partial_remaining(self):
+        class OpenPartialExchange(FakeExchange):
+            def place_order(self, market_id, side, price, size):
+                order = SimpleNamespace(id="ord-open-partial", status="open", filled_size=0.4)
+                self.orders.append({"market_id": market_id, "side": side, "price": price, "size": size})
+                return order
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = self._make_bot(tmpdir)
+            adapter = RunnerLiveExecutionAdapter(bot)
+            exchange = OpenPartialExchange()
+            signal = {
+                "exchange": "kalshi",
+                "market_id": "m-open-partial",
+                "question": "Will open order report a partial fill?",
+                "direction": "BUY_YES",
+                "market_price": 0.40,
+                "yes_price": 0.40,
+                "no_price": 0.60,
+                "model_probability": 0.70,
+                "edge": 0.30,
+                "confidence": 0.90,
+            }
+            decision = SimpleNamespace(
+                action="BUY_YES",
+                approved=True,
+                position_size=2.5,
+                entry_price=0.40,
+                win_probability=0.70,
+                reason="ok",
+                reason_code="approved",
+                requested_position_size=2.5,
+                reasoning={},
+            )
+
+            result = adapter.execute(signal, decision, exchange)
+
+            self.assertIsNotNone(result)
+            self.assertEqual(len(bot.open_positions), 1)
+            self.assertEqual(len(bot.open_orders), 1)
+            trade_row = bot.trade_history[0]
+            self.assertEqual(trade_row["status"], "partial")
+            self.assertEqual(trade_row["lifecycle_state"], "partial_open")
+            self.assertEqual(trade_row["placed_size"], 1.0)
+            self.assertEqual(trade_row["filled_size"], 0.4)
+            self.assertEqual(trade_row["remaining_size"], 0.6)
+            self.assertEqual(trade_row["reserved_capital"], 1.0)
+
     def test_build_trade_context_threads_price_improvement_and_book_inputs(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             bot = self._make_bot(tmpdir)
