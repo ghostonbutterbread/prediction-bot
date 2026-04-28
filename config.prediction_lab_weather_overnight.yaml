@@ -1,0 +1,45 @@
+prediction_lab:
+  enabled: true
+  mode: collector
+  observer_mode: true
+  groups:
+    - weather
+  max_markets_per_run: 1000
+  max_new_predictions_per_seed: 500
+  record_all_scored: true
+  seed_daily_temp_first: true
+  allow_non_weather: false
+
+  hypothetical_notional_mode: flat
+  flat_notional_usd: 10
+  use_sizing_logic: false
+
+  # Overnight run should create resolvable prediction rows, including SKIP rows,
+  # so tomorrow's analysis can inspect winners skipped / losers skipped.
+  score_only: false
+  min_confidence_to_record: 0.0
+  min_edge_to_record: -1.0
+
+  disable_news: true
+  disable_social: true
+  disable_ai: true
+
+  continue_collecting: true
+  collector_interval_seconds: 900
+  collector_fetch_mode: direct_markets
+  collector_direct_page_size: 200
+  collector_max_pages: 10
+  collector_record_market_snapshots: true
+  collector_record_predictions: true
+
+  collection_storage_cap_gb: 25
+  collection_warning_threshold_pct: 90
+  auto_pause_collection_on_storage_cap: true
+
+  resolve_interval_seconds: 1800
+  send_telegram_updates: false
+  telegram_summary_on_pause: false
+
+scan:
+  allowed_market_groups:
+    - weather

@@ -11,6 +11,12 @@ from typing import Any, Optional
 from bot.file_ops import append_jsonl, atomic_write_json, load_jsonl, locked_file, rewrite_jsonl
 from bot.strategies.enhanced import EnhancedStrategyEngine
 from bot.market_classification import apply_classification_metadata, classify_market_object
+from bot.shared_core.resolution import detect_market_outcome
+from bot.shared_core.weather_risk import (
+    assess_weather_market_risk,
+    build_weather_source_confidence_evidence,
+    classify_weather_market,
+)
 from bot.weather import WeatherMarketCityMapper
 from bot.weather.replay import ReplayFeeModel, score_replay_answer
 
@@ -33,6 +39,7 @@ class PredictionLab:
         self.lab_cfg = (self.config.get("prediction_lab", {}) or {})
         self.mode = str(self.lab_cfg.get("mode", "seed_and_watch") or "seed_and_watch").lower()
         self.paused = bool(self.lab_cfg.get("paused", False))
+        self.observer_mode = bool(self.lab_cfg.get("observer_mode", False))
         strategy_cfg = dict((self.config.get("strategy", {}) or {}))
         if self.lab_cfg.get("disable_news", True):
             strategy_cfg["enable_news"] = False
@@ -49,6 +56,7 @@ class PredictionLab:
         self.allow_non_weather = bool(self.lab_cfg.get("allow_non_weather", False))
         self.score_only = bool(self.lab_cfg.get("score_only", True))
         self.use_sizing_logic = bool(self.lab_cfg.get("use_sizing_logic", False))
+        self.collector_interval_seconds = int(self.lab_cfg.get("collector_interval_seconds", 900) or 900)
         self.collector_record_market_snapshots = bool(self.lab_cfg.get("collector_record_market_snapshots", True))
         self.collector_record_predictions = bool(self.lab_cfg.get("collector_record_predictions", True))
         self.collector_fetch_mode = str(self.lab_cfg.get("collector_fetch_mode", "direct_markets") or "direct_markets").lower()
@@ -128,9 +136,10 @@ class PredictionLab:
 
             decision_type = self._decision_type(signal)
             prediction_recorded = False
+            observation_mode = self._observation_semantics_enabled()
             should_record_prediction = (
-                decision_type in {"buy_yes", "buy_no"}
-                and (self.mode != "collector" or self.collector_record_predictions)
+                (decision_type in {"buy_yes", "buy_no"} or self.record_all_scored)
+                and (not observation_mode or self.collector_record_predictions)
                 and not self.score_only
             )
             if should_record_prediction:
@@ -139,7 +148,7 @@ class PredictionLab:
                 if prediction_recorded:
                     recorded += 1
 
-            if self.mode == "collector" and self.collector_record_market_snapshots:
+            if observation_mode and self.collector_record_market_snapshots:
                 with self._prediction_ledger_lock():
                     append_jsonl(self.market_snapshots_path, self._build_market_snapshot_row(run_id, market, signal, decision_type=decision_type, prediction_recorded=prediction_recorded))
 
@@ -301,10 +310,11 @@ class PredictionLab:
                     }
             except Exception:
                 context = None
-        return {
+        timestamp = datetime.now(timezone.utc).isoformat()
+        row = {
             "prediction_id": f"{run_id}_{market.id}",
             "run_id": run_id,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": timestamp,
             "status": "open",
             "group": metadata.get("market_group", "unknown"),
             "series": metadata.get("series") or getattr(market, "category", "unknown"),
@@ -327,13 +337,21 @@ class PredictionLab:
                 "mode": self.hypothetical_mode,
                 "notional_usd": self.flat_notional_usd,
             },
+            **self._observation_metadata(),
         }
+        weather_risk = self._build_weather_risk_metadata(market, signal, weather_context=context)
+        if weather_risk is not None:
+            row["weather_risk"] = weather_risk
+        return row
 
     def _build_market_snapshot_row(self, run_id: str, market, signal: dict[str, Any], *, decision_type: str, prediction_recorded: bool) -> dict[str, Any]:
         metadata = dict(getattr(market, "metadata", {}) or {})
-        return {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+        timestamp = datetime.now(timezone.utc).isoformat()
+        row = {
+            "timestamp": timestamp,
+            "observed_at": timestamp,
             "run_id": run_id,
+            "snapshot_key": str(market.id),
             "market_id": market.id,
             "group": metadata.get("market_group", "unknown"),
             "series": metadata.get("series") or getattr(market, "category", "unknown"),
@@ -345,11 +363,80 @@ class PredictionLab:
             "direction": signal.get("direction"),
             "decision_type": decision_type,
             "recorded_prediction": prediction_recorded,
+            "collector_interval_seconds": self.collector_interval_seconds,
+            **self._observation_metadata(),
+        }
+        weather_risk = self._build_weather_risk_metadata(market, signal)
+        if weather_risk is not None:
+            row["weather_risk"] = weather_risk
+        return row
+
+    def _build_weather_risk_metadata(
+        self,
+        market,
+        signal: dict[str, Any],
+        *,
+        weather_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        existing = dict(signal.get("weather_risk") or {}) if isinstance(signal.get("weather_risk"), dict) else {}
+        question = str(getattr(market, "question", "") or "")
+        market_id = str(getattr(market, "id", "") or "")
+        market_metadata = dict(getattr(market, "metadata", {}) or {})
+        if (
+            market_metadata.get("market_group") != "weather"
+            and classify_weather_market(question, market_id) == "unknown"
+            and not existing
+        ):
+            return None
+
+        weather_signal = {
+            **dict(signal or {}),
+            "market_id": market_id,
+            "question": question,
+        }
+        if weather_signal.get("market_volume") is None:
+            weather_signal["market_volume"] = getattr(market, "volume", None)
+        if weather_context:
+            weather_signal.setdefault("weather_context", dict(weather_context))
+
+        evidence = build_weather_source_confidence_evidence(weather_signal)
+        normalized = self._normalize_weather_trade_signal(market, signal)
+        weather_assessment = assess_weather_market_risk(
+            {**weather_signal, **evidence},
+            entry_price=normalized.get("entry_price"),
+            win_probability=normalized.get("win_probability"),
+        )
+        return {
+            **existing,
+            **weather_assessment.to_dict(),
+            "evidence": evidence,
+        }
+
+    @staticmethod
+    def _normalize_weather_trade_signal(market, signal: dict[str, Any]) -> dict[str, float | None]:
+        direction = str(signal.get("direction") or "SKIP").upper()
+        yes_price = PredictionLab._coerce_unit_float(signal.get("yes_market_price", getattr(market, "yes_price", None)))
+        no_price = PredictionLab._coerce_unit_float(signal.get("no_market_price", getattr(market, "no_price", None)))
+        model_probability = PredictionLab._coerce_unit_float(signal.get("model_probability"))
+
+        if direction == "BUY_NO":
+            entry_price = no_price if no_price is not None else (1 - yes_price if yes_price is not None else None)
+            win_probability = (1 - model_probability) if model_probability is not None else None
+        elif direction == "BUY_YES":
+            entry_price = yes_price
+            win_probability = model_probability
+        else:
+            entry_price = None
+            win_probability = None
+
+        return {
+            "entry_price": entry_price,
+            "win_probability": win_probability,
         }
 
     def _get_candidate_markets(self, exchange) -> list[Any]:
         direct_fetch = getattr(exchange, "get_markets_direct", None)
-        if self.mode == "collector" and self.collector_fetch_mode == "direct_markets" and callable(direct_fetch):
+        if self._observation_semantics_enabled() and self.collector_fetch_mode == "direct_markets" and callable(direct_fetch):
             return direct_fetch(
                 limit=self.max_markets_per_run,
                 page_size=self.collector_direct_page_size,
@@ -389,7 +476,7 @@ class PredictionLab:
         state_lock = self.root_dir / "prediction_lab.state.lock"
         with locked_file(state_lock, "a+"):
             current_state = self._load_state_unlocked()
-            self.state = {**current_state, **updates}
+            self.state = {**current_state, **self._observation_metadata(), **updates}
             atomic_write_json(self.state_path, self.state)
 
     def _count_open_predictions(self, rows: Optional[list[dict[str, Any]]] = None) -> int:
@@ -455,7 +542,18 @@ class PredictionLab:
             "seed_complete": False,
             "experiment_id": self.experiment_id,
             "strategy_version": self.strategy_version,
+            **self._observation_metadata(),
         }
+
+    def _observation_metadata(self) -> dict[str, Any]:
+        return {
+            "observer_mode": self._observation_semantics_enabled(),
+            "trading_enabled": False,
+            "order_execution_enabled": False,
+        }
+
+    def _observation_semantics_enabled(self) -> bool:
+        return self.observer_mode or self.mode == "collector"
 
     def _fetch_market_outcome(self, exchange, market_id: str) -> Optional[str]:
         fetch_raw = getattr(exchange, "_fetch_market_raw", None)
@@ -464,22 +562,7 @@ class PredictionLab:
         raw = fetch_raw(market_id)
         if not isinstance(raw, dict):
             return None
-        result = str(raw.get("result") or raw.get("settlement_value") or "").upper()
-        if result in {"YES", "NO", "VOID", "CANCELLED", "CANCELED"}:
-            return "VOID" if result in {"VOID", "CANCELLED", "CANCELED"} else result
-        close_price = raw.get("close_price")
-        if close_price in (1, 1.0, "1", "1.0"):
-            return "YES"
-        if close_price in (0, 0.0, "0", "0.0"):
-            return "NO"
-        status = str(raw.get("status") or "").lower()
-        if status in {"cancelled", "canceled", "voided", "void"}:
-            return "VOID"
-        if status == "settled":
-            yes_sub_title = str(raw.get("subtitle") or "")
-            if "yes" in yes_sub_title.lower():
-                return "YES"
-        return None
+        return detect_market_outcome(raw)
 
     def _group_allowed(self, group: str) -> bool:
         normalized = str(group or "unknown").lower()
@@ -521,3 +604,15 @@ class PredictionLab:
         if direction == "BUY_NO":
             return "buy_no"
         return "skip"
+
+    @staticmethod
+    def _coerce_unit_float(value: Any) -> float | None:
+        try:
+            if value is None:
+                return None
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        if 0 <= numeric <= 1:
+            return numeric
+        return None

@@ -35,6 +35,16 @@ def build_prediction_lab_exchange(config: dict, *, demo: bool = False, verbose: 
         bot.close()
         raise SystemExit('No exchanges connected')
     exchange = next(iter(bot.exchanges.values()))
+    allowed_groups = [
+        str(group).strip().lower()
+        for group in ((config.get('scan', {}) or {}).get('allowed_market_groups') or [])
+        if str(group).strip()
+    ]
+    setter = getattr(exchange, 'set_allowed_market_groups', None)
+    if callable(setter) and allowed_groups:
+        setter(allowed_groups)
+        if verbose:
+            logger.info('prediction_lab_support: applied allowed_market_groups=%s', allowed_groups)
     if verbose:
         logger.info('prediction_lab_support: selected exchange=%s', getattr(exchange, 'name', type(exchange).__name__))
     return bot, exchange
