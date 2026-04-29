@@ -153,6 +153,11 @@ risk:
   daily_loss_limit_pct: 35
   max_drawdown_pct: 60
   max_open_positions: 15
+parity_mode:
+  enabled: false
+  # production = live runtime keeps live risk preset
+  # identical_risk = live runtime intentionally uses the paper risk preset for apples-to-apples comparison
+  comparison_mode: production
 runtime:
   base_dir: data
 

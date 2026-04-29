@@ -132,6 +132,14 @@ Required:
 - a clean identical-risk comparison lane
 - fixtures proving equivalent decisions under intentionally matched inputs
 
+Interpretation contract:
+- `normal paper` means paper runtime under paper risk limits
+- `parity paper` means paper runtime with parity instrumentation under paper risk limits
+- `live` means live runtime under live risk limits
+- `identical-risk comparison` means live runtime intentionally using paper risk limits so behavior differences are more apples-to-apples
+
+This avoids overreacting to expected preset-driven diffs and makes suspicious diffs stand out faster.
+
 ### B3. Persist richer before/after account-state context
 Required:
 - before/after account state around placement attempts

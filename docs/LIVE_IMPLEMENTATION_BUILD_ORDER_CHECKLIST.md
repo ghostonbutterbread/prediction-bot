@@ -330,14 +330,14 @@ Bring live settlement/accounting closer to paper-grade trustworthiness.
 Make live-vs-paper differences explicit so comparisons are interpretable.
 
 ### Build items
-- [ ] Document intentional live-vs-paper risk preset differences clearly.
-- [ ] Add a clean identical-risk comparison mode/config path.
-- [ ] Add fixtures proving equivalent paper/live decisions under intentionally matched inputs.
-- [ ] Make reports/status surfaces show when a run is:
-  - [ ] normal paper
-  - [ ] parity paper
-  - [ ] identical-risk comparison
-  - [ ] live
+- [x] Document intentional live-vs-paper risk preset differences clearly.
+- [x] Add a clean identical-risk comparison mode/config path.
+- [x] Add fixtures proving equivalent paper/live decisions under intentionally matched inputs.
+- [x] Make reports/status surfaces show when a run is:
+  - [x] normal paper
+  - [x] parity paper
+  - [x] identical-risk comparison
+  - [x] live
 
 ### Main code/doc targets
 - config docs
@@ -349,8 +349,8 @@ Make live-vs-paper differences explicit so comparisons are interpretable.
 - mode/report labeling checks
 
 ### Exit criteria
-- [ ] Humans can tell whether a difference is expected or suspicious.
-- [ ] Paper/live comparison becomes more apples-to-apples when desired.
+- [x] Humans can tell whether a difference is expected or suspicious.
+- [x] Paper/live comparison becomes more apples-to-apples when desired.
 
 ---
 
