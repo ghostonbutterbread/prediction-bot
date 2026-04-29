@@ -415,6 +415,8 @@ def apply_execution_audit_contract(trade: dict) -> dict:
         or None
     )
     trade["resolved"] = bool(trade.get("resolved", status == "resolved"))
+    if trade["resolved"] or status == "resolved":
+        canonicalize_resolved_resolution_fields(trade)
     if status != "resolved" and not trade["resolved"]:
         trade["resolved_at"] = trade.get("resolved_at")
     return trade
@@ -489,7 +491,7 @@ def validate_execution_audit_row(trade: dict) -> list[str]:
         if not trade.get("resolved_at"):
             issues.append("resolved_without_timestamp")
         resolution_type = str(trade.get("resolution_type") or "")
-        if resolution_type != "manual_mark_close" and normalize_outcome(trade.get("outcome")) is None:
+        if resolution_type != "manual_mark_close" and normalize_market_outcome(trade.get("outcome")) is None:
             issues.append("resolved_without_outcome")
         if coerce_float(trade.get("pnl"), default=None) is None:
             issues.append("resolved_without_pnl")
@@ -541,6 +543,18 @@ def is_trade_effective_row(trade: dict) -> bool:
 
 
 def normalize_outcome(value) -> Optional[str]:
+    outcome = normalize_market_outcome(value)
+    if outcome is not None:
+        return outcome
+    result = normalize_resolution_result(value)
+    if result == "won":
+        return "YES"
+    if result == "lost":
+        return "NO"
+    return None
+
+
+def normalize_market_outcome(value) -> Optional[str]:
     if isinstance(value, bool):
         return "YES" if value else "NO"
     if isinstance(value, (int, float)) and value in (0, 1):
@@ -551,15 +565,81 @@ def normalize_outcome(value) -> Optional[str]:
             "NO": "NO",
             "TRUE": "YES",
             "FALSE": "NO",
-            "WIN": "YES",
-            "LOSE": "NO",
-            "WON": "YES",
-            "LOST": "NO",
             "1": "YES",
             "0": "NO",
         }
         return aliases.get(value.strip().upper())
     return None
+
+
+def normalize_resolution_result(value) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    aliases = {
+        "WIN": "won",
+        "WON": "won",
+        "WINNER": "won",
+        "LOSE": "lost",
+        "LOSS": "lost",
+        "LOST": "lost",
+    }
+    return aliases.get(value.strip().upper())
+
+
+def resolution_result_for_outcome(direction: str, outcome: str) -> Optional[str]:
+    if direction not in VALID_DIRECTIONS or outcome not in VALID_OUTCOMES:
+        return None
+    won = (direction == "BUY_YES" and outcome == "YES") or (direction == "BUY_NO" and outcome == "NO")
+    return "won" if won else "lost"
+
+
+def market_outcome_for_resolution_result(direction: str, result: Optional[str]) -> Optional[str]:
+    if direction not in VALID_DIRECTIONS or result not in {"won", "lost"}:
+        return None
+    if direction == "BUY_YES":
+        return "YES" if result == "won" else "NO"
+    return "NO" if result == "won" else "YES"
+
+
+def canonicalize_resolved_resolution_fields(trade: dict) -> dict:
+    if not trade.get("resolved") and canonical_execution_status(trade.get("status")) != "resolved":
+        return trade
+
+    resolution_type = str(trade.get("resolution_type") or "")
+    manual_mark_close = resolution_type == "manual_mark_close"
+    direction = str(trade.get("direction", "") or "").upper()
+
+    explicit_resolution_outcome = normalize_market_outcome(trade.get("resolution_outcome"))
+    outcome = explicit_resolution_outcome or normalize_market_outcome(trade.get("outcome"))
+    explicit_result = normalize_resolution_result(trade.get("resolution_result")) or normalize_resolution_result(
+        trade.get("outcome")
+    )
+
+    if manual_mark_close:
+        if explicit_resolution_outcome is not None:
+            trade["resolution_outcome"] = explicit_resolution_outcome
+        if outcome is not None:
+            trade["outcome"] = outcome
+        if explicit_result is not None:
+            trade["resolution_result"] = explicit_result
+        return trade
+
+    if outcome is None:
+        outcome = market_outcome_for_resolution_result(direction, explicit_result)
+    if outcome is None:
+        return trade
+
+    trade["outcome"] = outcome
+    trade["resolution_outcome"] = outcome
+
+    result = resolution_result_for_outcome(direction, outcome)
+    if result is not None:
+        trade["resolution_result"] = result
+
+    if coerce_float(trade.get("exit_price"), default=None) is None:
+        trade["exit_price"] = 1.0 if outcome == "YES" else 0.0
+
+    return trade
 
 
 def calculate_contracts(entry_price: float, position_size: float) -> float:
@@ -704,7 +784,9 @@ def enrich_trade_audit_fields(trade: dict, fee_rate: float = 0.07) -> dict:
     resolution_type = str(trade.get("resolution_type") or "")
     manual_mark_close = resolution_type == "manual_mark_close"
 
-    outcome = normalize_outcome(trade.get("outcome"))
+    canonicalize_resolved_resolution_fields(trade)
+
+    outcome = normalize_market_outcome(trade.get("outcome"))
     if outcome is None:
         if not manual_mark_close:
             issues.append("invalid_outcome")

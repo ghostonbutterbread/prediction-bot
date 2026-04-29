@@ -37,6 +37,72 @@ class ParityAuditTests(unittest.TestCase):
         self.assertEqual(enriched["gross_pnl"], 4.0)
         self.assertEqual(enriched["fee_paid"], 0.28)
         self.assertEqual(enriched["expected_pnl"], 3.72)
+        self.assertEqual(enriched["outcome"], "YES")
+        self.assertEqual(enriched["resolution_outcome"], "YES")
+        self.assertEqual(enriched["resolution_result"], "won")
+        self.assertEqual(enriched["exit_price"], 1.0)
+        self.assertEqual(enriched["integrity_status"], "ok")
+        self.assertEqual(enriched["integrity_errors"], [])
+
+    def test_resolved_enrichment_canonicalizes_legacy_trade_result_outcome(self):
+        row = {
+            "trade_id": "resolved-legacy-result",
+            "timestamp": "2026-04-23T00:00:00+00:00",
+            "market_id": "m-legacy-result",
+            "question": "Did legacy outcome mean the trade result?",
+            "exchange": "kalshi",
+            "direction": "BUY_NO",
+            "status": "resolved",
+            "resolved": True,
+            "resolved_at": "2026-04-24T00:00:00+00:00",
+            "market_price": 0.6,
+            "entry_price": 0.6,
+            "position_size": 6.0,
+            "outcome": "won",
+            "pnl": 3.72,
+            "settlement_value": 9.72,
+            "resolution_type": "settled",
+            "decision_reason_code": "approved",
+        }
+
+        enriched = enrich_trade_audit_fields(row, fee_rate=0.07)
+
+        self.assertEqual(enriched["outcome"], "NO")
+        self.assertEqual(enriched["resolution_outcome"], "NO")
+        self.assertEqual(enriched["resolution_result"], "won")
+        self.assertEqual(enriched["exit_price"], 0.0)
+        self.assertEqual(enriched["settlement_value"], 9.72)
+        self.assertEqual(enriched["integrity_status"], "ok")
+        self.assertEqual(enriched["integrity_errors"], [])
+
+    def test_manual_mark_close_does_not_infer_market_resolution_from_trade_result(self):
+        row = {
+            "trade_id": "manual-close-result",
+            "timestamp": "2026-04-23T00:00:00+00:00",
+            "market_id": "m-manual-close",
+            "question": "Was this manually closed?",
+            "exchange": "kalshi",
+            "direction": "BUY_NO",
+            "status": "resolved",
+            "resolved": True,
+            "resolved_at": "2026-04-24T00:00:00+00:00",
+            "market_price": 0.6,
+            "entry_price": 0.6,
+            "position_size": 6.0,
+            "outcome": "won",
+            "pnl": 1.25,
+            "settlement_value": 7.25,
+            "resolution_type": "manual_mark_close",
+            "decision_reason_code": "approved",
+        }
+
+        enriched = enrich_trade_audit_fields(row, fee_rate=0.07)
+
+        self.assertEqual(enriched["outcome"], "won")
+        self.assertEqual(enriched["resolution_result"], "won")
+        self.assertNotIn("resolution_outcome", enriched)
+        self.assertNotIn("exit_price", enriched)
+        self.assertEqual(enriched["settlement_value"], 7.25)
         self.assertEqual(enriched["integrity_status"], "ok")
         self.assertEqual(enriched["integrity_errors"], [])
 
