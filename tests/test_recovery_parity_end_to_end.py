@@ -219,11 +219,16 @@ class RecoveryParityEndToEndTests(unittest.TestCase):
             self.assertTrue(resolved_row["resolved"])
             self.assertEqual(resolved_row["outcome"], "YES")
             self.assertIsNotNone(resolved_row["resolved_at"])
-            self.assertEqual(resolved_row["settlement_value"], 4.8)
+            self.assertEqual(resolved_row["settlement_value"], 7.185)
             self.assertEqual(resolved_row["exit_price"], 1.0)
             self.assertEqual(resolved_row["resolution_type"], "settled")
             self.assertEqual(resolved_row["resolution_result"], "won")
-            self.assertEqual(resolved_row["pnl"], 1.8)
+            self.assertEqual(resolved_row["pnl"], 4.185)
+            self.assertEqual(resolved_row["gross_pnl"], 4.5)
+            self.assertEqual(resolved_row["fee_paid"], 0.315)
+            self.assertEqual(resolved_row["expected_pnl"], 4.185)
+            self.assertEqual(resolved_row["net_pnl"], 4.185)
+            self.assertEqual(resolved_row["integrity_status"], "ok")
 
     def test_live_end_to_end_restart_reconcile_then_status_and_next_decision_preserve_constraints(self):
         with tempfile.TemporaryDirectory() as tmpdir:

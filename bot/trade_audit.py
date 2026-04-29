@@ -481,11 +481,20 @@ def validate_execution_audit_row(trade: dict) -> list[str]:
     if status == "partial" and None not in (placed_size, filled_size, remaining_size):
         if abs((filled_size or 0.0) + (remaining_size or 0.0) - (placed_size or 0.0)) > 0.0001:
             issues.append("partial_size_sum_mismatch")
+    if trade.get("resolved") and status != "resolved":
+        issues.append("resolved_flag_status_mismatch")
     if status == "resolved":
         if not trade.get("resolved"):
             issues.append("resolved_without_flag")
         if not trade.get("resolved_at"):
             issues.append("resolved_without_timestamp")
+        resolution_type = str(trade.get("resolution_type") or "")
+        if resolution_type != "manual_mark_close" and normalize_outcome(trade.get("outcome")) is None:
+            issues.append("resolved_without_outcome")
+        if coerce_float(trade.get("pnl"), default=None) is None:
+            issues.append("resolved_without_pnl")
+        if coerce_float(trade.get("settlement_value"), default=None) is None:
+            issues.append("resolved_without_settlement_value")
     lifecycle_state = str(trade.get("lifecycle_state") or "")
     if status == "placed" and lifecycle_state and lifecycle_state != "placed_open":
         issues.append("placed_lifecycle_mismatch")
@@ -650,6 +659,11 @@ def enrich_trade_audit_fields(trade: dict, fee_rate: float = 0.07) -> dict:
         trade["direction"] = direction
 
     size = coerce_float(trade.get("position_size"), default=None)
+    if size is None:
+        size = coerce_float(
+            trade.get("size"),
+            default=coerce_float(trade.get("filled_size"), default=coerce_float(trade.get("placed_size"), default=None)),
+        )
     if size is not None and size > 0:
         trade["position_size"] = round(size, 2)
     elif trade.get("resolved"):
@@ -661,13 +675,22 @@ def enrich_trade_audit_fields(trade: dict, fee_rate: float = 0.07) -> dict:
     if reserved_capital is not None and reserved_capital >= 0:
         trade["reserved_capital"] = round(reserved_capital, 2)
 
-    entry_price = coerce_float(trade.get("market_price"), default=None)
+    market_price = coerce_float(trade.get("market_price"), default=None)
+    entry_price = coerce_float(
+        trade.get("entry_price"),
+        default=coerce_float(trade.get("fill_price"), default=market_price),
+    )
+    if market_price is not None and 0 < market_price < 1:
+        trade["market_price"] = round(market_price, 4)
+    elif trade.get("resolved"):
+        issues.append("invalid_market_price")
+
     if entry_price is not None and 0 < entry_price < 1:
-        trade["market_price"] = round(entry_price, 4)
+        trade["entry_price"] = round(entry_price, 4)
         if size is not None and size > 0:
             trade["contracts"] = round(calculate_contracts(entry_price, size), 4)
     elif trade.get("resolved"):
-        issues.append("invalid_market_price")
+        issues.append("invalid_entry_price")
 
     if not trade.get("resolved"):
         issues.extend(validate_execution_audit_row(trade))

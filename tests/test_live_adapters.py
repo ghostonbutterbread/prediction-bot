@@ -439,7 +439,107 @@ class LiveAdaptersTests(unittest.TestCase):
             self.assertEqual(len(events), 1)
             self.assertEqual(events[0].outcome, "YES")
             self.assertEqual(events[0].metadata["resolution_result"], "won")
-            self.assertEqual(events[0].pnl, 1.2)
+            self.assertEqual(events[0].metadata["fee_paid"], 0.21)
+            self.assertEqual(events[0].pnl, 2.79)
+            self.assertEqual(events[0].settlement_value, 4.79)
+
+    def test_settle_respects_explicit_zero_fee_rate(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = self._make_bot(tmpdir)
+            bot.kelly.fee_rate = 0.0
+            adapter = RunnerLiveReconciliationAdapter(bot)
+            exchange = FakeExchange(
+                market_map={
+                    "M1": Market(
+                        id="M1",
+                        exchange="kalshi",
+                        question="Will it rain?",
+                        yes_price=0.4,
+                        no_price=0.6,
+                        volume=0,
+                        liquidity=0,
+                        closes_at=datetime.now(timezone.utc),
+                        category="weather",
+                        metadata={"result": "YES"},
+                        close_price=1.0,
+                    )
+                }
+            )
+            open_positions = [
+                LivePosition(
+                    market_id="M1",
+                    question="Will it rain?",
+                    direction="BUY_YES",
+                    price=0.4,
+                    size=2.0,
+                    order_id="ord-pos",
+                    created_at=datetime.now(timezone.utc).isoformat(),
+                )
+            ]
+
+            [event] = adapter.settle("kalshi", exchange, open_positions)
+            self.assertEqual(event.metadata["fee_paid"], 0.0)
+            self.assertEqual(event.metadata["net_pnl"], 3.0)
+            self.assertEqual(event.pnl, 3.0)
+            self.assertEqual(event.settlement_value, 5.0)
+
+    def test_settle_skips_closed_unsettled_terminal_quotes_without_result(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = self._make_bot(tmpdir)
+            adapter = RunnerLiveReconciliationAdapter(bot)
+            exchange = FakeExchange(
+                market_map={
+                    "M1": {
+                        "id": "M1",
+                        "status": "closed",
+                        "close_price": 1.0,
+                        "metadata": {"result": ""},
+                    }
+                }
+            )
+            open_positions = [
+                LivePosition(
+                    market_id="M1",
+                    question="Will it rain?",
+                    direction="BUY_YES",
+                    price=0.4,
+                    size=2.0,
+                    order_id="ord-pos",
+                    created_at=datetime.now(timezone.utc).isoformat(),
+                )
+            ]
+
+            events = adapter.settle("kalshi", exchange, open_positions)
+            self.assertEqual(events, [])
+
+    def test_settle_skips_void_markets_instead_of_forcing_yes_no(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = self._make_bot(tmpdir)
+            adapter = RunnerLiveReconciliationAdapter(bot)
+            exchange = FakeExchange(
+                market_map={
+                    "M1": {
+                        "id": "M1",
+                        "status": "canceled",
+                        "close_price": 1.0,
+                        "metadata": {"result": "cancelled"},
+                    }
+                }
+            )
+            open_positions = [
+                LivePosition(
+                    market_id="M1",
+                    question="Will it rain?",
+                    direction="BUY_YES",
+                    price=0.4,
+                    size=2.0,
+                    order_id="ord-pos",
+                    created_at=datetime.now(timezone.utc).isoformat(),
+                )
+            ]
+
+            events = adapter.settle("kalshi", exchange, open_positions)
+            self.assertEqual(events, [])
 
 
 if __name__ == "__main__":
