@@ -80,6 +80,7 @@ class PredictionBot:
         self.open_orders: list[dict] = []
         self.trade_history: list[dict] = []
         self.reconciliation_gate: dict[str, dict] = {}
+        self.startup_reconciliation_status: dict[str, dict] = {}
         self.live_runtime_state: dict[str, object] = {
             "state": "safe",
             "reason": "startup",
@@ -141,6 +142,17 @@ class PredictionBot:
                 else:
                     issues = ["exchange_connect_failed", "startup_reconciliation_not_run"]
                     self._apply_reconciliation_runtime_state(name, "blocked", issues, source="startup_recovery")
+                    self._record_startup_reconciliation_status(
+                        name,
+                        {
+                            "status": "blocked",
+                            "runtime_state": "blocked",
+                            "reconciliation_verdict": "blocked",
+                            "reconciliation_issues": issues,
+                        },
+                        source="startup_recovery",
+                        completed=False,
+                    )
                     self._log_lifecycle_event(
                         "reconciliation_failed",
                         {"exchange": name, "status": "connect_failed", "reconciliation_issues": issues},
@@ -149,6 +161,18 @@ class PredictionBot:
                 logger.error(f"Failed to connect to {name}: {e}")
                 issues = ["exchange_connect_failed", "startup_reconciliation_not_run"]
                 self._apply_reconciliation_runtime_state(name, "blocked", issues, source="startup_recovery")
+                self._record_startup_reconciliation_status(
+                    name,
+                    {
+                        "status": "blocked",
+                        "runtime_state": "blocked",
+                        "reconciliation_verdict": "blocked",
+                        "reconciliation_issues": issues,
+                        "error": str(e),
+                    },
+                    source="startup_recovery",
+                    completed=False,
+                )
                 self._log_lifecycle_event(
                     "reconciliation_failed",
                     {"exchange": name, "error": str(e), "reconciliation_issues": issues},
@@ -164,11 +188,7 @@ class PredictionBot:
             issues = ["reconciliation_refresh_failed"]
             self._apply_reconciliation_runtime_state(exchange_name, "blocked", issues, source="startup_reconciliation")
             self._record_live_failure(exchange_name, "reconciliation_state_blocked", issues=issues, runtime_state="blocked")
-            self._log_lifecycle_event(
-                "reconciliation_failed",
-                {"exchange": exchange_name, "error": str(e), "reconciliation_issues": issues, "runtime_state": "blocked"},
-            )
-            return {
+            summary = {
                 "exchange": exchange_name,
                 "open_positions": 0,
                 "open_orders": 0,
@@ -178,6 +198,17 @@ class PredictionBot:
                 "reconciliation_verdict": "blocked",
                 "reconciliation_issues": issues,
             }
+            self._record_startup_reconciliation_status(
+                exchange_name,
+                summary,
+                source="startup_reconciliation",
+                completed=False,
+            )
+            self._log_lifecycle_event(
+                "reconciliation_failed",
+                {"exchange": exchange_name, "error": str(e), "reconciliation_issues": issues, "runtime_state": "blocked"},
+            )
+            return summary
 
         self.open_positions = snapshot.open_positions
         self.open_orders = snapshot.open_orders
@@ -203,19 +234,23 @@ class PredictionBot:
 
         verdict = getattr(snapshot, "verdict", "safe") or "safe"
         issues = list(getattr(snapshot, "issues", []) or [])
-        invariant_issues = self._enforce_live_runtime_invariants(exchange_name, source="startup_reconciliation")
-        if invariant_issues:
-            verdict = "blocked"
-            issues = list(dict.fromkeys(issues + invariant_issues))
+        invariant_issues: list[str] = []
+        if verdict != "blocked":
+            invariant_issues = self._enforce_live_runtime_invariants(exchange_name, source="startup_reconciliation")
+            if invariant_issues:
+                verdict = "blocked"
+                issues = list(dict.fromkeys(issues + invariant_issues))
 
         if verdict == "blocked":
             self._apply_reconciliation_runtime_state(exchange_name, verdict, issues, source="startup_reconciliation")
-            self._record_live_failure(
-                exchange_name,
-                "reconciliation_state_blocked",
-                issues=issues,
-                runtime_state="blocked",
-            )
+            failure_reason = "runtime_invariant_violation" if "runtime_invariant_violation" in set(issues) else "reconciliation_state_blocked"
+            if failure_reason != "runtime_invariant_violation":
+                self._record_live_failure(
+                    exchange_name,
+                    failure_reason,
+                    issues=issues,
+                    runtime_state="blocked",
+                )
         else:
             self._apply_reconciliation_runtime_state(exchange_name, verdict, issues, source="startup_reconciliation")
             if verdict == "safe":
@@ -241,6 +276,12 @@ class PredictionBot:
             "status": verdict,
         }
         self._record_reconciliation_snapshot(exchange_name, snapshot, source="startup_reconciliation")
+        self._record_startup_reconciliation_status(
+            exchange_name,
+            summary,
+            source="startup_reconciliation",
+            completed=True,
+        )
         self._log_lifecycle_event("reconciliation_completed", summary)
         return summary
 
@@ -414,6 +455,33 @@ class PredictionBot:
                 }
                 for exchange, details in self.reconciliation_gate.items()
             },
+            "startup_reconciliation": {
+                exchange: {
+                    "completed": bool(details.get("completed")),
+                    "source": details.get("source", ""),
+                    "status": details.get("status", "pending"),
+                    "runtime_state": details.get("runtime_state", "pending"),
+                    "reconciliation_verdict": details.get("reconciliation_verdict", "pending"),
+                    "reconciliation_issues": list(details.get("reconciliation_issues") or []),
+                    "updated_at": details.get("updated_at", ""),
+                }
+                for exchange, details in {
+                    **{
+                        name: {
+                            "completed": False,
+                            "source": "not_run",
+                            "status": "pending",
+                            "runtime_state": "pending",
+                            "reconciliation_verdict": "pending",
+                            "reconciliation_issues": ["startup_reconciliation_not_run"],
+                            "updated_at": "",
+                        }
+                        for name in self.exchanges.keys()
+                        if self._is_live_mode()
+                    },
+                    **self.startup_reconciliation_status,
+                }.items()
+            },
             "live_runtime_state": {
                 "state": self.live_runtime_state.get("state", "safe"),
                 "reason": self.live_runtime_state.get("reason", ""),
@@ -506,12 +574,46 @@ class PredictionBot:
     def _block_on_degraded_runtime(self) -> bool:
         return bool((((self.config.get("trading") or {}).get("live_reconciliation") or {}).get("block_on_degraded", False)))
 
+    def _is_live_mode(self) -> bool:
+        return str((self.config.get("trading") or {}).get("mode", "paper")).strip().lower() == "live"
+
+    def _record_startup_reconciliation_status(
+        self,
+        exchange_name: str,
+        summary: dict,
+        *,
+        source: str,
+        completed: bool,
+    ):
+        if not exchange_name:
+            return
+        self.startup_reconciliation_status[exchange_name] = {
+            "completed": bool(completed),
+            "source": source,
+            "status": summary.get("status", summary.get("reconciliation_verdict", "unknown")),
+            "runtime_state": summary.get("runtime_state", summary.get("status", "unknown")),
+            "reconciliation_verdict": summary.get("reconciliation_verdict", summary.get("status", "unknown")),
+            "reconciliation_issues": list(summary.get("reconciliation_issues") or []),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def _ensure_live_startup_reconciled_before_trade(self, exchange_name: str, exchange: BaseExchange) -> dict | None:
+        if not self._is_live_mode() or not exchange_name:
+            return None
+        gate = self.reconciliation_gate.get(exchange_name) or {}
+        if str(gate.get("verdict") or "").lower() == "blocked":
+            return None
+        status = self.startup_reconciliation_status.get(exchange_name) or {}
+        if status.get("completed"):
+            return None
+        return self._reconcile_exchange_state(exchange_name, exchange)
+
     @staticmethod
     def _requires_manual_review(issues: list[str] | None = None, recovery_state: str | None = None) -> bool:
         if str(recovery_state or "") == "manual_review_required":
             return True
         issue_set = {str(issue) for issue in (issues or [])}
-        return "runtime_invariant_violation" in issue_set or any(issue.startswith("negative_") for issue in issue_set)
+        return "runtime_invariant_violation" in issue_set
 
     def _apply_reconciliation_runtime_state(
         self,
@@ -906,7 +1008,7 @@ class PredictionBot:
         state = PredictionBot._normalize_live_runtime_state(state)
         issue_set = set(issues or [])
         if state == "blocked":
-            if "runtime_invariant_violation" in issue_set or any(str(issue).startswith("negative_") for issue in issue_set):
+            if "runtime_invariant_violation" in issue_set:
                 return "manual_review_required"
             return "requires_safe_reconciliation"
         if state == "degraded":
@@ -947,7 +1049,7 @@ class PredictionBot:
             "retry_allowed": not active and not self._block_on_degraded_runtime(),
             "recovery_hint": (
                 "manual_review_then_safe_reconciliation_required"
-                if active and any(issue.startswith("negative_") or issue == "runtime_invariant_violation" for issue in issues)
+                if active and "runtime_invariant_violation" in issues
                 else "safe_reconciliation_clears_pause"
                 if active
                 else "none"
@@ -1040,16 +1142,17 @@ class PredictionBot:
         )
         if entry["count"] >= cfg["max_consecutive_critical_failures"]:
             gate_issues = list(dict.fromkeys(list(entry.get("issues") or []) + ["repeated_live_failures_threshold_reached"]))
+            gate_reason = reason_code if reason_code == "runtime_invariant_violation" else "repeated_live_failures_threshold_reached"
             self.reconciliation_gate[exchange_name] = {
                 "verdict": "blocked",
                 "issues": gate_issues,
-                "reason": "repeated_live_failures_threshold_reached",
+                "reason": gate_reason,
                 "recovery_state": "manual_review_required" if reason_code == "runtime_invariant_violation" else "requires_safe_reconciliation",
             }
             self._update_live_runtime_state(
                 exchange_name,
                 "blocked",
-                reason="repeated_live_failures_threshold_reached",
+                reason=gate_reason,
                 issues=gate_issues,
                 details={"failure_count": int(entry["count"]), "max_failures": cfg["max_consecutive_critical_failures"]},
             )
@@ -1106,6 +1209,35 @@ class PredictionBot:
                 "runtime_state": runtime_state,
             }
 
+        self._ensure_live_startup_reconciled_before_trade(exchange_name or "", exchange)
+
+        gate = self.reconciliation_gate.get(exchange_name or "") or {}
+        if (gate.get("verdict") or "") == "blocked":
+            gate_reason = str(gate.get("reason") or "reconciliation_state_blocked")
+            blocked_reason = "runtime_invariant_violation" if gate_reason == "runtime_invariant_violation" else "reconciliation_state_blocked"
+            return {
+                "blocked_reason": blocked_reason,
+                "decision": None,
+                "reconciliation_issues": list(gate.get("issues") or []),
+                "recovery_state": gate.get("recovery_state", "requires_safe_reconciliation"),
+            }
+
+        runtime_state = self._live_runtime_state_for_exchange(exchange_name or "")
+        if runtime_state.get("state") == "blocked":
+            return {
+                "blocked_reason": str(runtime_state.get("reason") or "live_runtime_state_blocked"),
+                "decision": None,
+                "reconciliation_issues": list(runtime_state.get("issues") or []),
+                "runtime_state": runtime_state,
+            }
+        if runtime_state.get("state") == "degraded" and self._block_on_degraded_runtime():
+            return {
+                "blocked_reason": "reconciliation_state_degraded",
+                "decision": None,
+                "reconciliation_issues": list(runtime_state.get("issues") or []),
+                "runtime_state": runtime_state,
+            }
+
         invariant_issues = self._enforce_live_runtime_invariants(exchange_name or "", source="pre_signal")
         if invariant_issues:
             return {
@@ -1114,6 +1246,33 @@ class PredictionBot:
                 "reconciliation_issues": invariant_issues,
                 "recovery_state": "manual_review_required",
                 "runtime_state": self._live_runtime_state_for_exchange(exchange_name or ""),
+            }
+
+        gate = self.reconciliation_gate.get(exchange_name or "") or {}
+        if (gate.get("verdict") or "") == "blocked":
+            gate_reason = str(gate.get("reason") or "reconciliation_state_blocked")
+            blocked_reason = "runtime_invariant_violation" if gate_reason == "runtime_invariant_violation" else "reconciliation_state_blocked"
+            return {
+                "blocked_reason": blocked_reason,
+                "decision": None,
+                "reconciliation_issues": list(gate.get("issues") or []),
+                "recovery_state": gate.get("recovery_state", "requires_safe_reconciliation"),
+            }
+
+        runtime_state = self._live_runtime_state_for_exchange(exchange_name or "")
+        if runtime_state.get("state") == "blocked":
+            return {
+                "blocked_reason": str(runtime_state.get("reason") or "live_runtime_state_blocked"),
+                "decision": None,
+                "reconciliation_issues": list(runtime_state.get("issues") or []),
+                "runtime_state": runtime_state,
+            }
+        if runtime_state.get("state") == "degraded" and self._block_on_degraded_runtime():
+            return {
+                "blocked_reason": "reconciliation_state_degraded",
+                "decision": None,
+                "reconciliation_issues": list(runtime_state.get("issues") or []),
+                "runtime_state": runtime_state,
             }
 
         context = self.live_execution.build_trade_context(signal, exchange, self.config)

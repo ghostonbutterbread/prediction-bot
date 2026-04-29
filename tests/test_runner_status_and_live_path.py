@@ -143,6 +143,15 @@ class RunnerLivePathTests(unittest.TestCase):
     def test_live_path_blocks_negative_available_cash_runtime_invariant(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             bot = self._make_bot(tmpdir)
+            bot.startup_reconciliation_status["kalshi"] = {
+                "completed": True,
+                "source": "test",
+                "status": "safe",
+                "runtime_state": "safe",
+                "reconciliation_verdict": "safe",
+                "reconciliation_issues": [],
+                "updated_at": "",
+            }
             bot.risk.state.available_cash = -0.25
             signal = {
                 "exchange": "kalshi",
@@ -172,6 +181,15 @@ class RunnerLivePathTests(unittest.TestCase):
     def test_live_path_blocks_duplicate_open_order_exposure_runtime_invariant(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             bot = self._make_bot(tmpdir)
+            bot.startup_reconciliation_status["kalshi"] = {
+                "completed": True,
+                "source": "test",
+                "status": "safe",
+                "runtime_state": "safe",
+                "reconciliation_verdict": "safe",
+                "reconciliation_issues": [],
+                "updated_at": "",
+            }
             bot.open_orders = [
                 {
                     "order_id": "ord-a",
@@ -372,6 +390,17 @@ class RunnerLivePathTests(unittest.TestCase):
             self.assertEqual(result["blocked_reason"], "trading_disabled")
             self.assertEqual(len(bot.exchanges["kalshi"].orders), 0)
 
+    def test_status_snapshot_marks_startup_reconciliation_pending_before_attempt(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = self._make_bot(tmpdir)
+
+            snapshot = bot.build_status_snapshot(reason="pre-startup", scan_num=0)
+
+            self.assertIn("startup_reconciliation", snapshot.extra)
+            self.assertEqual(snapshot.extra["startup_reconciliation"]["kalshi"]["status"], "pending")
+            self.assertFalse(snapshot.extra["startup_reconciliation"]["kalshi"]["completed"])
+            self.assertIn("startup_reconciliation_not_run", snapshot.extra["startup_reconciliation"]["kalshi"]["reconciliation_issues"])
+
     def test_safe_reconciliation_does_not_clear_manual_review_pause(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             bot = self._make_bot(tmpdir)
@@ -388,6 +417,15 @@ class RunnerLivePathTests(unittest.TestCase):
     def test_live_path_surfaces_runtime_invariant_from_pre_trade_refresh(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             bot = self._make_bot(tmpdir)
+            bot.startup_reconciliation_status["kalshi"] = {
+                "completed": True,
+                "source": "test",
+                "status": "safe",
+                "runtime_state": "safe",
+                "reconciliation_verdict": "safe",
+                "reconciliation_issues": [],
+                "updated_at": "",
+            }
             bot.trade_history = [
                 {
                     "trade_id": "bad-cancel-1",
@@ -423,6 +461,49 @@ class RunnerLivePathTests(unittest.TestCase):
             self.assertEqual(result["blocked_reason"], "runtime_invariant_violation")
             self.assertIn("runtime_invariant_violation", result["reconciliation_issues"])
             self.assertEqual(result.get("recovery_state"), "manual_review_required")
+            self.assertEqual(bot.reconciliation_gate["kalshi"]["reason"], "runtime_invariant_violation")
+            self.assertEqual(bot.live_failure_streaks["kalshi"]["count"], 1)
+
+    def test_runtime_invariant_threshold_one_keeps_root_cause_reason(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = self._make_bot(
+                tmpdir,
+                trading={
+                    "mode": "live",
+                    "trading_enabled": True,
+                    "live_safety": {"enabled": True, "max_consecutive_critical_failures": 1},
+                },
+            )
+            bot.startup_reconciliation_status["kalshi"] = {
+                "completed": True,
+                "source": "test",
+                "status": "safe",
+                "runtime_state": "safe",
+                "reconciliation_verdict": "safe",
+                "reconciliation_issues": [],
+                "updated_at": "",
+            }
+            bot.risk.state.available_cash = -0.25
+            signal = {
+                "exchange": "kalshi",
+                "market_id": "m-threshold-one",
+                "question": "Should runtime invariant preserve root cause at threshold one?",
+                "direction": "BUY_YES",
+                "market_price": 0.40,
+                "yes_price": 0.40,
+                "no_price": 0.60,
+                "model_probability": 0.70,
+                "edge": 0.20,
+                "confidence": 0.90,
+            }
+
+            with patch.object(bot.kelly, "calculate", return_value=5.0):
+                result = bot._process_signal(signal)
+
+            self.assertEqual(result["blocked_reason"], "runtime_invariant_violation")
+            self.assertEqual(bot.reconciliation_gate["kalshi"]["reason"], "runtime_invariant_violation")
+            self.assertIn("repeated_live_failures_threshold_reached", bot.reconciliation_gate["kalshi"]["issues"])
+            self.assertEqual(bot.live_runtime_state["recovery_state"], "manual_review_required")
 
     def test_build_status_snapshot_uses_shared_shape(self):
         with tempfile.TemporaryDirectory() as tmpdir:
