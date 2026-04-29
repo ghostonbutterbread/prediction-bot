@@ -105,6 +105,18 @@ Goal:
 - make it explicit when paper/live are intentionally using different presets
 - add a straightforward way to run parity comparisons under identical risk assumptions when that is the question
 
+Operator-facing rule of thumb:
+- `normal paper` = paper runtime + paper risk preset
+- `parity paper` = paper runtime + parity instrumentation + paper risk preset
+- `live` = live runtime + live risk preset
+- `identical-risk comparison` = live runtime + paper risk preset, specifically to isolate execution/reconciliation drift from preset differences
+
+Intentional preset differences that should not be mistaken for bugs:
+- paper uses larger Kelly / bet / exposure / drawdown limits for exploration
+- live uses smaller Kelly / bet / exposure / drawdown limits for bankroll protection
+- a paper-vs-live behavior delta is expected when those presets differ
+- if the question is "would the live runtime behave the same under the same risk assumptions?", use `parity_mode.comparison_mode: identical_risk`
+
 This is less about core parity correctness and more about operator clarity.
 
 ### Step 3: Continue live lifecycle + settlement hardening
