@@ -296,9 +296,15 @@ class ParityAuditTests(unittest.TestCase):
                 '{"timestamp":"2026-04-23T00:10:00+00:00","market_id":"m2","question":"Q","exchange":"kalshi","direction":"BUY_YES","blocked_reason":"kelly_zero_size","decision_reason":"Rejected","decision_reason_code":"kelly_zero_size"}\n'
             )
 
-            view = build_parity_view(data_dir)
+            view = build_parity_view(
+                data_dir,
+                config={"trading": {"mode": "live"}, "parity_mode": {"enabled": True, "comparison_mode": "identical_risk"}},
+            )
 
             self.assertEqual(view["paper_summary"]["total_rows"], 1)
+            self.assertEqual(view["comparison_context"]["paper_mode_label"], "parity paper")
+            self.assertEqual(view["comparison_context"]["live_mode_label"], "identical-risk comparison")
+            self.assertTrue(view["comparison_context"]["apples_to_apples"])
             self.assertEqual(view["live_summary"]["total_rows"], 2)
             self.assertEqual(view["comparison"]["paper_rows"], 1)
             self.assertEqual(view["comparison"]["live_rows"], 2)
@@ -365,9 +371,15 @@ class ParityAuditTests(unittest.TestCase):
             self.assertEqual(view["live_summary"]["execution_price_delta_rows"], 1)
             self.assertEqual(view["live_summary"]["top_decision_delta_pairs"][0][0], "approved -> price_above_threshold")
 
-            artifact = write_parity_comparison_artifact(data_dir)
+            artifact = write_parity_comparison_artifact(
+                data_dir,
+                config={"trading": {"mode": "live"}, "parity_mode": {"enabled": True, "comparison_mode": "identical_risk"}},
+            )
             self.assertTrue(artifact.exists())
-            self.assertIn('"comparison"', artifact.read_text())
+            artifact_text = artifact.read_text()
+            self.assertIn('"comparison"', artifact_text)
+            self.assertIn('"comparison_context"', artifact_text)
+            self.assertIn('"live_mode_label": "identical-risk comparison"', artifact_text)
 
 
 if __name__ == "__main__":

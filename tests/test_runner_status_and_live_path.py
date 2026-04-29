@@ -507,8 +507,7 @@ class RunnerLivePathTests(unittest.TestCase):
 
     def test_build_status_snapshot_uses_shared_shape(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = self._make_bot(tmpdir)
-            bot.config["parity_mode"] = {"enabled": True}
+            bot = self._make_bot(tmpdir, parity_mode={"enabled": True, "comparison_mode": "identical_risk"})
             bot.trade_history = [
                 {
                     "resolved": False,
@@ -561,6 +560,9 @@ class RunnerLivePathTests(unittest.TestCase):
             self.assertEqual(snapshot.resolved_trades, 1)
             self.assertEqual(snapshot.total_trades, 2)
             self.assertIn("source", snapshot.extra)
+            self.assertEqual(snapshot.extra["mode_label"], "identical-risk comparison")
+            self.assertEqual(snapshot.extra["risk_preset_mode"], "paper")
+            self.assertEqual(snapshot.extra["parity_comparison_mode"], "identical_risk")
             self.assertIn("live_failure_streaks", snapshot.extra)
             self.assertIn("reconciliation_gate", snapshot.extra)
             self.assertIn("live_runtime_state", snapshot.extra)
@@ -580,8 +582,8 @@ class RunnerLivePathTests(unittest.TestCase):
             self.assertEqual(snapshot.extra["parity_summary"]["lifecycle_state_counts"]["revalidation_rejected"], 1)
             self.assertEqual(snapshot.extra["normalized_trade_summary"]["execution_revalidation_outcome_counts"]["approved"], 1)
             self.assertEqual(snapshot.extra["normalized_trade_summary"]["execution_revalidation_outcome_counts"]["rejected"], 1)
-            self.assertEqual(snapshot.extra["parity_summary"]["invalid_contract_rows"], 0)
-            self.assertEqual(snapshot.extra["parity_summary"]["top_contract_issues"], [])
+            self.assertEqual(snapshot.extra["parity_summary"]["invalid_contract_rows"], 1)
+            self.assertEqual(snapshot.extra["parity_summary"]["top_contract_issues"], [("resolved_flag_status_mismatch", 1)])
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from bot.config import get_operating_mode_label, get_parity_comparison_mode, get_runtime_mode
 from bot.trade_audit import (
     EXECUTION_AUDIT_SCHEMA_NAME,
     EXECUTION_AUDIT_SCHEMA_VERSION,
@@ -285,15 +286,40 @@ def load_live_rows(data_dir: str | Path) -> list[dict[str, Any]]:
     return rows
 
 
-def build_parity_view(data_dir: str | Path) -> dict[str, Any]:
+def build_comparison_context(config: dict[str, Any] | None = None) -> dict[str, Any]:
+    config = config or {}
+    parity_mode = config.get("parity_mode", {}) or {}
+    parity_enabled = bool(parity_mode.get("enabled", False))
+    comparison_mode = get_parity_comparison_mode(config)
+    runtime_mode = get_runtime_mode(config)
+    live_mode_label = get_operating_mode_label(config)
+    live_risk_preset_mode = "paper" if runtime_mode == "live" and comparison_mode == "identical_risk" else ("live" if runtime_mode == "live" else "paper")
+    paper_config = {**config, "trading": {**(config.get("trading", {}) or {}), "mode": "paper"}}
+    paper_mode_label = get_operating_mode_label(paper_config)
+    return {
+        "parity_mode_enabled": parity_enabled,
+        "parity_comparison_mode": comparison_mode,
+        "runtime_mode": runtime_mode,
+        "paper_mode_label": paper_mode_label,
+        "live_mode_label": live_mode_label,
+        "paper_risk_preset_mode": "paper",
+        "live_risk_preset_mode": live_risk_preset_mode,
+        "apples_to_apples": live_risk_preset_mode == "paper",
+        "differences_expected": live_risk_preset_mode != "paper",
+    }
+
+
+def build_parity_view(data_dir: str | Path, *, config: dict[str, Any] | None = None) -> dict[str, Any]:
     data_path = Path(data_dir)
     paper_rows = [normalize_parity_trade_row(row, source="paper") for row in load_latest_paper_session_rows(data_dir)]
     live_rows = [normalize_parity_trade_row(row, source="live") for row in load_live_rows(data_dir)]
+    comparison_context = build_comparison_context(config)
     return {
         "paper_rows": paper_rows,
         "live_rows": live_rows,
         "paper_summary": summarize_normalized_rows(paper_rows),
         "live_summary": summarize_normalized_rows(live_rows),
+        "comparison_context": comparison_context,
         "comparison": build_paper_live_comparison(paper_rows, live_rows),
         "comparison_artifact_path": str(default_comparison_artifact_path(data_path)),
     }
@@ -575,8 +601,13 @@ def default_comparison_artifact_path(data_dir: str | Path) -> Path:
     return Path(data_dir) / "parity_comparison.json"
 
 
-def write_parity_comparison_artifact(data_dir: str | Path, output_path: str | Path | None = None) -> Path:
+def write_parity_comparison_artifact(
+    data_dir: str | Path,
+    output_path: str | Path | None = None,
+    *,
+    config: dict[str, Any] | None = None,
+) -> Path:
     path = Path(output_path) if output_path is not None else default_comparison_artifact_path(data_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(build_parity_view(data_dir), indent=2, sort_keys=True))
+    path.write_text(json.dumps(build_parity_view(data_dir, config=config), indent=2, sort_keys=True))
     return path

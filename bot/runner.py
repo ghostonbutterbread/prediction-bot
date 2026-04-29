@@ -432,6 +432,9 @@ class PredictionBot:
         ])
         extra = {
             "source": self.config.get("trading", {}).get("mode", "paper"),
+            "mode_label": status.get("mode_label", "live" if self._is_live_mode() else "normal paper"),
+            "risk_preset_mode": status.get("risk_preset_mode", "live" if self._is_live_mode() else "paper"),
+            "parity_comparison_mode": status.get("parity_comparison_mode", "production"),
             "blocked_last_scan": sum(self.last_block_reasons.values()),
             "signals_considered": self.lifecycle_counters.get("signals_considered", 0),
             "trades_executed": self.lifecycle_counters.get("trades_executed", 0),

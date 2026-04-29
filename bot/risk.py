@@ -20,6 +20,8 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 
+from bot.config import get_operating_mode_label, get_parity_comparison_mode
+
 
 STANDBY_REASON_MAX_POSITIONS = "max_positions"
 STANDBY_REASON_TRADABLE_BALANCE = "tradable_balance"
@@ -204,7 +206,10 @@ class RiskManager:
         else:
             paper_mode = os.getenv("PAPER_MODE", "true").lower() == "true"
             self.is_live = not paper_mode
-        preset = get_preset(self.is_live)
+        self.parity_comparison_mode = get_parity_comparison_mode(config)
+        self.operating_mode_label = get_operating_mode_label(config)
+        self.risk_preset_mode = "paper" if self.is_live and self.parity_comparison_mode == "identical_risk" else ("live" if self.is_live else "paper")
+        preset = get_preset(self.risk_preset_mode == "live")
 
         # Resolve limits: env vars override preset, explicit config overrides both
         def resolve_float(key: str, default: float) -> float:
@@ -297,9 +302,9 @@ class RiskManager:
         self.state.max_tradable_balance = self.max_tradable_balance
         self.state.max_position_size_usd = self.max_position_size_usd
 
-        mode_label = "🔴 LIVE" if self.is_live else "🟡 PAPER"
+        mode_label = self.get_mode_display()
         logger.info(
-            f"{mode_label} risk mode | Kelly={self.kelly_fraction:.0%} "
+            f"{mode_label} risk mode | preset={self.risk_preset_mode} | Kelly={self.kelly_fraction:.0%} "
             f"max_bet={self.max_bet_pct:.0%} daily_loss={self.daily_loss_limit_pct:.0%}"
         )
 
@@ -1043,10 +1048,20 @@ class RiskManager:
             "standby_reason_codes": list(self.state.standby_reason_codes),
         }
 
+    def get_mode_display(self) -> str:
+        if self.operating_mode_label == "identical-risk comparison":
+            return "🟣 IDENTICAL-RISK COMPARISON"
+        if self.operating_mode_label == "parity paper":
+            return "🟠 PARITY PAPER"
+        return "🔴 LIVE" if self.is_live else "🟡 PAPER"
+
     def get_status(self) -> dict:
         """Get current risk status summary."""
         return {
-            "mode": "🔴 LIVE" if self.is_live else "🟡 PAPER",
+            "mode": self.get_mode_display(),
+            "mode_label": self.operating_mode_label,
+            "risk_preset_mode": self.risk_preset_mode,
+            "parity_comparison_mode": self.parity_comparison_mode,
             "trading_enabled": self.state.trading_enabled,
             "max_tradable_balance": f"${self.max_tradable_balance:.2f}" if self.max_tradable_balance > 0 else "unlimited",
             "max_position_size_usd": f"${self.max_position_size_usd:.2f}" if self.max_position_size_usd > 0 else "unlimited",
