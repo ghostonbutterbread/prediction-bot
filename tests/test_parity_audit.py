@@ -3,10 +3,43 @@ import unittest
 from pathlib import Path
 
 from bot.parity_audit import build_parity_view, normalize_parity_trade_row, write_parity_comparison_artifact
-from bot.trade_audit import apply_execution_audit_contract, validate_execution_audit_row
+from bot.trade_audit import apply_execution_audit_contract, enrich_trade_audit_fields, validate_execution_audit_row
 
 
 class ParityAuditTests(unittest.TestCase):
+    def test_resolved_enrichment_prefers_entry_price_over_market_snapshot_price(self):
+        row = {
+            "trade_id": "resolved-price-basis",
+            "timestamp": "2026-04-23T00:00:00+00:00",
+            "market_id": "m-entry",
+            "question": "Did we use the actual fill price?",
+            "exchange": "kalshi",
+            "direction": "BUY_YES",
+            "status": "resolved",
+            "resolved": True,
+            "resolved_at": "2026-04-24T00:00:00+00:00",
+            "market_price": 0.5,
+            "entry_price": 0.6,
+            "fill_price": 0.6,
+            "position_size": 6.0,
+            "outcome": "YES",
+            "pnl": 3.72,
+            "settlement_value": 9.72,
+            "resolution_type": "settled",
+            "decision_reason_code": "approved",
+        }
+
+        enriched = enrich_trade_audit_fields(row, fee_rate=0.07)
+
+        self.assertEqual(enriched["entry_price"], 0.6)
+        self.assertEqual(enriched["market_price"], 0.5)
+        self.assertEqual(enriched["contracts"], 10.0)
+        self.assertEqual(enriched["gross_pnl"], 4.0)
+        self.assertEqual(enriched["fee_paid"], 0.28)
+        self.assertEqual(enriched["expected_pnl"], 3.72)
+        self.assertEqual(enriched["integrity_status"], "ok")
+        self.assertEqual(enriched["integrity_errors"], [])
+
     def test_normalize_parity_trade_row_preserves_core_fields(self):
         row = {
             "id": "paper-1",
@@ -177,6 +210,35 @@ class ParityAuditTests(unittest.TestCase):
 
         issues = validate_execution_audit_row(row)
         self.assertIn("resolved_without_timestamp", issues)
+        self.assertIn("resolved_without_outcome", issues)
+        self.assertIn("resolved_without_pnl", issues)
+        self.assertIn("resolved_without_settlement_value", issues)
+
+    def test_execution_contract_flags_resolved_flag_without_resolved_status(self):
+        row = apply_execution_audit_contract(
+            {
+                "trade_id": "resolved-flag-mismatch",
+                "timestamp": "2026-04-23T00:00:00+00:00",
+                "market_id": "m6",
+                "direction": "BUY_YES",
+                "status": "filled",
+                "resolved": True,
+                "resolved_at": "2026-04-24T00:00:00+00:00",
+                "outcome": "YES",
+                "pnl": 1.0,
+                "settlement_value": 2.0,
+                "requested_size": 1.0,
+                "approved_size": 1.0,
+                "placed_size": 1.0,
+                "filled_size": 1.0,
+                "remaining_size": 0.0,
+                "market_price": 0.5,
+                "decision_reason_code": "approved",
+            }
+        )
+
+        issues = validate_execution_audit_row(row)
+        self.assertIn("resolved_flag_status_mismatch", issues)
 
     def test_execution_contract_distinguishes_canceled_partial_and_stale(self):
         canceled = apply_execution_audit_contract(

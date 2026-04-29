@@ -9,8 +9,10 @@ from typing import Any, Protocol
 
 from bot.exchanges.base import BaseExchange, Position, RestingOrder
 from bot.shared_core import AccountState, OrderState, PositionState, ResolutionEvent
+from bot.shared_core.resolution import detect_market_outcome, has_definitive_market_outcome
 from bot.trade_audit import (
     apply_execution_audit_contract,
+    calculate_realized_accounting,
     canonical_execution_status,
     canonical_lifecycle_state,
     infer_reserved_capital,
@@ -460,30 +462,29 @@ class RunnerLiveReconciliationAdapter:
             market = getattr(exchange, "get_market", lambda market_id: None)(position.market_id)
             if market is None:
                 continue
-            raw_outcome = market.metadata.get("result") or market.metadata.get("outcome")
-            if market.close_price is None and not raw_outcome:
+            if not has_definitive_market_outcome(market):
+                continue
+            market_outcome = detect_market_outcome(market)
+            if market_outcome not in {"YES", "NO"}:
                 continue
             settlement_value = market.close_price
-            market_outcome = normalize_outcome(raw_outcome)
             if settlement_value is None:
-                if market_outcome == "YES":
-                    settlement_value = 1.0
-                elif market_outcome == "NO":
-                    settlement_value = 0.0
-                else:
-                    continue
-            if market_outcome is None:
-                if settlement_value >= 1.0:
-                    market_outcome = "YES"
-                elif settlement_value <= 0.0:
-                    market_outcome = "NO"
-                else:
-                    continue
+                settlement_value = 1.0 if market_outcome == "YES" else 0.0
             won = (position.direction == "BUY_YES" and market_outcome == "YES") or (
                 position.direction == "BUY_NO" and market_outcome == "NO"
             )
             exit_price = settlement_value
-            pnl = round((settlement_value - position.price) * position.size if position.direction == "BUY_YES" else ((1.0 - settlement_value) - position.price) * position.size, 2)
+            fee_rate = getattr(getattr(self.host, "kelly", None), "fee_rate", None)
+            if fee_rate is None:
+                fee_rate = 0.07
+            accounting = calculate_realized_accounting(
+                direction=position.direction,
+                entry_price=position.price,
+                position_size=position.size,
+                outcome=market_outcome,
+                fee_rate=float(fee_rate),
+            )
+            pnl = round(accounting["net_pnl"], 4)
             settled_cash_value = round(position.size + pnl, 4)
             events.append(
                 ResolutionEvent(
@@ -500,6 +501,10 @@ class RunnerLiveReconciliationAdapter:
                         "resolution_result": "won" if won else "lost",
                         "resolution_type": "settled",
                         "exit_price": exit_price,
+                        "contracts": round(accounting["contracts"], 4),
+                        "gross_pnl": round(accounting["gross_pnl"], 4),
+                        "fee_paid": round(accounting["fee_paid"], 4),
+                        "net_pnl": round(accounting["net_pnl"], 4),
                     },
                 )
             )

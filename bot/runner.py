@@ -26,6 +26,7 @@ from bot.trade_audit import (
     build_risk_block_audit_row,
     build_scan_candidate_summary,
     canonical_execution_status,
+    enrich_trade_audit_fields,
 )
 from bot.strategies.enhanced import EnhancedStrategyEngine, KellySizer
 
@@ -1342,7 +1343,13 @@ class PredictionBot:
                             trade["resolution_type"] = event.metadata.get("resolution_type")
                         if event.metadata.get("exit_price") is not None:
                             trade["exit_price"] = event.metadata.get("exit_price")
-                    apply_execution_audit_contract(trade)
+                    fee_rate = getattr(getattr(self, "kelly", None), "fee_rate", None)
+                    if fee_rate is None:
+                        fee_rate = 0.07
+                    enrich_trade_audit_fields(
+                        trade,
+                        fee_rate=float(fee_rate),
+                    )
                     self.risk.record_trade_result(trade.get("order_id"), event.pnl or 0.0)
             total_pnl = sum(float(event.pnl or 0.0) for event in resolution_events)
             self._log_lifecycle_event(

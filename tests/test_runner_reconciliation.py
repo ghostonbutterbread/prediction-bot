@@ -357,8 +357,61 @@ class RunnerReconciliationTests(unittest.TestCase):
             self.assertEqual(resolved_row["resolution_result"], "lost")
             self.assertEqual(resolved_row["resolution_type"], "settled")
             self.assertEqual(resolved_row["exit_price"], 1.0)
-            self.assertEqual(resolved_row["settlement_value"], 0.76)
-            self.assertEqual(resolved_row["pnl"], -1.24)
+            self.assertEqual(resolved_row["settlement_value"], 0.0)
+            self.assertEqual(resolved_row["pnl"], -2.0)
+            self.assertEqual(resolved_row["gross_pnl"], -2.0)
+            self.assertEqual(resolved_row["fee_paid"], 0.0)
+            self.assertEqual(resolved_row["expected_pnl"], -2.0)
+            self.assertEqual(resolved_row["net_pnl"], -2.0)
+            self.assertEqual(resolved_row["contracts"], 3.2258)
+            self.assertEqual(resolved_row["integrity_status"], "ok")
+            self.assertEqual(resolved_row["integrity_errors"], [])
+
+    def test_resolution_enrichment_respects_explicit_zero_fee_rate(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = self._make_bot(tmpdir)
+            bot.kelly.fee_rate = 0.0
+            bot.exchanges["kalshi"] = FakeReconExchange(
+                positions=[
+                    Position(
+                        market_id="KXZEROFEE-1",
+                        exchange="kalshi",
+                        question="Zero fee settlement",
+                        side="YES",
+                        entry_price=0.40,
+                        size=2.0,
+                        current_price=0.40,
+                        pnl=0.0,
+                        opened_at=datetime(2026, 4, 20, 17, 0, tzinfo=timezone.utc),
+                    )
+                ],
+                market_map={
+                    "KXZEROFEE-1": Market(
+                        id="KXZEROFEE-1",
+                        exchange="kalshi",
+                        question="Zero fee settlement",
+                        yes_price=1.0,
+                        no_price=0.0,
+                        volume=0,
+                        liquidity=0,
+                        closes_at=datetime.now(timezone.utc),
+                        category="weather",
+                        metadata={"result": "YES"},
+                        close_price=1.0,
+                    )
+                },
+                balance=25.0,
+            )
+
+            bot.connect_all()
+            bot._sync_resolved_positions()
+
+            resolved_row = next(row for row in bot.trade_history if row["trade_id"].startswith("reconciled:kalshi:KXZEROFEE-1"))
+            self.assertEqual(resolved_row["fee_paid"], 0.0)
+            self.assertEqual(resolved_row["expected_pnl"], 3.0)
+            self.assertEqual(resolved_row["net_pnl"], 3.0)
+            self.assertEqual(resolved_row["settlement_value"], 5.0)
+            self.assertEqual(resolved_row["integrity_status"], "ok")
 
     def test_reconciliation_replaces_previous_reconciled_snapshot(self):
         with tempfile.TemporaryDirectory() as tmpdir:
