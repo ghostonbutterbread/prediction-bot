@@ -405,20 +405,23 @@ def build_trade_decision(
         requested_size,
         available_cash=context.account_state.available_cash,
     )
+    risk_metadata = dict(getattr(risk_decision, "metadata", {}) or {})
     reasoning["risk"] = {
         "approved": bool(getattr(risk_decision, "approved", False)),
         "reason": getattr(risk_decision, "reason", ""),
         "risk_score": float(getattr(risk_decision, "risk_score", 0.0) or 0.0),
         "warnings": list(getattr(risk_decision, "warnings", []) or []),
         "adjusted_size": _coerce_optional_float(getattr(risk_decision, "adjusted_size", None)),
+        "metadata": risk_metadata,
     }
 
     if not getattr(risk_decision, "approved", False):
         reason = getattr(risk_decision, "reason", "Risk rejected")
+        reason_code = str(risk_metadata.get("reason_code") or reason_to_key(reason, prefix="risk"))
         return TradeDecision(
             action="SKIP",
             approved=False,
-            reason_code=reason_to_key(reason, prefix="risk"),
+            reason_code=reason_code,
             reason=reason,
             edge=edge,
             confidence=confidence,

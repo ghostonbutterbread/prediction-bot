@@ -367,6 +367,24 @@ class RiskManager:
             self.state.available_cash if available_cash is None else available_cash,
             self.state.available_cash,
         )
+
+        if spendable_cash < -0.01 or self.state.available_cash < -0.01:
+            return RiskDecision(
+                approved=False,
+                reason="Negative available cash invariant breach",
+                original_size=original_size,
+                risk_score=1.0,
+                metadata={"reason_code": "negative_available_cash_invariant"},
+            )
+        if self.state.reserved_capital < -0.01 or self.state.total_exposure < -0.01:
+            return RiskDecision(
+                approved=False,
+                reason="Negative accounting invariant breach",
+                original_size=original_size,
+                risk_score=1.0,
+                metadata={"reason_code": "negative_accounting_invariant"},
+            )
+
         effective_tradable_cash = spendable_cash
         if self.max_tradable_balance and self.max_tradable_balance > 0:
             effective_tradable_cash = min(effective_tradable_cash, self.max_tradable_balance)

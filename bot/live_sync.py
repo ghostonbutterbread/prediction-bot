@@ -25,6 +25,9 @@ class LiveSyncHost(Protocol):
     def _apply_reconciliation_trade_history_corrections(self, exchange_name: str, snapshot: Any, *, source: str) -> set[str]:
         ...
 
+    def _enforce_live_runtime_invariants(self, exchange_name: str | None, *, source: str) -> list[str]:
+        ...
+
 
 class RunnerLiveSync:
     """Refreshes local live state from exchange truth before/after actions."""
@@ -32,7 +35,7 @@ class RunnerLiveSync:
     def __init__(self, host: LiveSyncHost):
         self.host = host
 
-    def refresh_account_state_from_exchange(self, exchange: BaseExchange) -> dict[str, float]:
+    def refresh_account_state_from_exchange(self, exchange: BaseExchange, exchange_name: str | None = None) -> dict[str, float]:
         balance = self.host._coerce_float(getattr(exchange, "get_balance", lambda: 0.0)(), default=self.host.risk.state.current_balance)
         reserved_positions = sum(position.size for position in self.host.open_positions)
         reserved_orders = sum(order.get("remaining_size", 0.0) for order in self.host.open_orders)
@@ -45,6 +48,9 @@ class RunnerLiveSync:
             total_exposure=reserved_total,
             open_positions=len(self.host.open_positions),
         )
+        invariant_checker = getattr(self.host, "_enforce_live_runtime_invariants", None)
+        if callable(invariant_checker):
+            invariant_checker(exchange_name or getattr(exchange, "name", None) or "", source="account_refresh")
         return {
             "balance": round(balance, 2),
             "available_cash": available_cash,
@@ -76,6 +82,22 @@ class RunnerLiveSync:
             updater = getattr(self.host, "_apply_reconciliation_runtime_state", None)
             if callable(updater):
                 updater(exchange_name, verdict, issues, source="pre_trade_reconciliation")
+                gate = getattr(self.host, "reconciliation_gate", {}) or {}
+                exchange_gate = gate.get(exchange_name) if isinstance(gate, dict) else None
+                if isinstance(exchange_gate, dict) and str(exchange_gate.get("verdict") or "").lower() == "blocked":
+                    verdict = "blocked"
+                    severity = "high"
+                    action = "block"
+                    issues = list(dict.fromkeys(list(exchange_gate.get("issues") or issues)))
+            invariant_checker = getattr(self.host, "_enforce_live_runtime_invariants", None)
+            invariant_issues = []
+            if callable(invariant_checker):
+                invariant_issues = invariant_checker(exchange_name, source="pre_trade_reconciliation")
+            if invariant_issues:
+                verdict = "blocked"
+                severity = "high"
+                action = "block"
+                issues = list(dict.fromkeys(issues + invariant_issues))
             return {
                 "balance": round(getattr(snapshot, "balance", snapshot.reserved_capital + snapshot.available_cash), 2),
                 "available_cash": round(snapshot.available_cash, 2),
@@ -93,7 +115,7 @@ class RunnerLiveSync:
                 "pre_trade_refresh": True,
             }
         except Exception:
-            fallback = self.refresh_account_state_from_exchange(exchange)
+            fallback = self.refresh_account_state_from_exchange(exchange, exchange_name=exchange_name)
             issues = ["reconciliation_refresh_failed"]
             updater = getattr(self.host, "_apply_reconciliation_runtime_state", None)
             if callable(updater):
@@ -111,5 +133,5 @@ class RunnerLiveSync:
             })
             return fallback
 
-    def refresh_after_execution(self, exchange: BaseExchange) -> dict[str, float]:
-        return self.refresh_account_state_from_exchange(exchange)
+    def refresh_after_execution(self, exchange: BaseExchange, exchange_name: str | None = None) -> dict[str, float]:
+        return self.refresh_account_state_from_exchange(exchange, exchange_name=exchange_name)

@@ -623,13 +623,14 @@ class LiveExecutionTests(unittest.TestCase):
             result = adapter.execute(signal, decision, exchange)
 
             self.assertIsNotNone(result)
-            self.assertEqual(result["blocked_reason"], "reconciliation_state_blocked")
+            self.assertEqual(result["blocked_reason"], "runtime_invariant_violation")
+            self.assertEqual(result["recovery_state"], "manual_review_required")
             self.assertEqual(exchange.orders, [])
             self.assertEqual(len(bot.trade_history), 1)
             trade_row = bot.trade_history[0]
             self.assertEqual(trade_row["status"], "rejected")
             self.assertEqual(trade_row["failure_stage"], "reconciliation")
-            self.assertEqual(trade_row["decision_reason_code"], "reconciliation_state_blocked")
+            self.assertEqual(trade_row["decision_reason_code"], "runtime_invariant_violation")
             self.assertFalse(trade_row["execution_revalidated"])
 
     def test_execute_blocks_uncertain_existing_order_until_reconcile_clears(self):
