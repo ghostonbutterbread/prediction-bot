@@ -287,6 +287,8 @@ class RunnerLiveExecutionAdapter:
             self.host.reconciliation_gate[exchange_name] = {
                 "verdict": "blocked",
                 "issues": gate_issues,
+                "reason": reason_code,
+                "recovery_state": "requires_safe_reconciliation",
             }
         runtime_updater = getattr(self.host, "_update_live_runtime_state", None)
         if callable(runtime_updater):
@@ -301,6 +303,8 @@ class RunnerLiveExecutionAdapter:
 
     @staticmethod
     def _blocked_gate_reason(issues: list[str]) -> str:
+        if "runtime_invariant_violation" in issues or any(str(issue).startswith("negative_") for issue in issues):
+            return "runtime_invariant_violation"
         for reason in ("duplicate_live_intent_open", "duplicate_submission_suspected", "placement_confirmation_uncertain"):
             if reason in issues:
                 return reason
@@ -351,7 +355,8 @@ class RunnerLiveExecutionAdapter:
         if isinstance(exchange_gate, dict) and str(exchange_gate.get("verdict") or "").lower() == "blocked":
             gate_issues = list(exchange_gate.get("issues") or [])
             reason_code = self._blocked_gate_reason(gate_issues)
-            reason = "Live execution is blocked until reconciliation clears duplicate or uncertain placement risk"
+            recovery_state = str(exchange_gate.get("recovery_state") or "requires_safe_reconciliation")
+            reason = f"Live execution is blocked until reconciliation clears exchange state ({recovery_state})"
             gated_decision = SimpleNamespace(
                 action=getattr(decision, "action", signal.get("direction", "BUY_YES")),
                 approved=False,
@@ -361,7 +366,7 @@ class RunnerLiveExecutionAdapter:
                 win_probability=getattr(decision, "win_probability", signal.get("model_probability")),
                 reason=reason,
                 reason_code=reason_code,
-                reasoning={"reconciliation_gate": {"verdict": "blocked", "issues": gate_issues}},
+                reasoning={"reconciliation_gate": {"verdict": "blocked", "issues": gate_issues, "recovery_state": recovery_state}},
             )
             self._append_rejected_trade_row(
                 signal=signal,
@@ -380,6 +385,7 @@ class RunnerLiveExecutionAdapter:
                 "blocked_reason": reason_code,
                 "decision": gated_decision,
                 "reconciliation_issues": gate_issues,
+                "recovery_state": recovery_state,
             }
 
         pre_trade_refresh = self.host.live_sync.refresh_before_execution(exchange_name, exchange)
@@ -389,8 +395,14 @@ class RunnerLiveExecutionAdapter:
         refresh_action = str(pre_trade_refresh.get("reconciliation_action") or "log_only").lower()
         strict_degraded = bool((((self.host.config.get("trading") or {}).get("live_reconciliation") or {}).get("block_on_degraded", False)))
         if refresh_action == "block" or refresh_verdict == "blocked" or (refresh_verdict == "degraded" and strict_degraded):
-            reason_code = "reconciliation_state_blocked" if refresh_action == "block" or refresh_verdict == "blocked" else "reconciliation_state_degraded"
-            reason = "Live reconciliation blocked order placement" if reason_code == "reconciliation_state_blocked" else "Live reconciliation degraded state blocked by policy"
+            recovery_state = "requires_safe_reconciliation"
+            if "runtime_invariant_violation" in refresh_issues or any(str(issue).startswith("negative_") for issue in refresh_issues):
+                reason_code = "runtime_invariant_violation"
+                reason = "Live runtime invariant violation blocked order placement pending manual review"
+                recovery_state = "manual_review_required"
+            else:
+                reason_code = "reconciliation_state_blocked" if refresh_action == "block" or refresh_verdict == "blocked" else "reconciliation_state_degraded"
+                reason = "Live reconciliation blocked order placement" if reason_code == "reconciliation_state_blocked" else "Live reconciliation degraded state blocked by policy"
             gated_decision = SimpleNamespace(
                 action=getattr(decision, "action", signal.get("direction", "BUY_YES")),
                 approved=False,
@@ -427,6 +439,7 @@ class RunnerLiveExecutionAdapter:
                 "blocked_reason": reason_code,
                 "decision": gated_decision,
                 "reconciliation_issues": refresh_issues,
+                "recovery_state": recovery_state,
                 "refresh": {"pre_trade_refresh": dict(pre_trade_refresh)},
             }
 
@@ -711,7 +724,7 @@ class RunnerLiveExecutionAdapter:
             )
         decision_trace = dict(getattr(decision, "reasoning", {}) or {})
         parity_mode = dict((decision_trace or {}).get("parity_mode", {}) or {})
-        refresh = self.host.live_sync.refresh_after_execution(exchange)
+        refresh = self.host.live_sync.refresh_after_execution(exchange, exchange_name=exchange_name)
         refresh["pre_trade_refresh"] = dict(pre_trade_refresh)
         available_cash_after_entry = refresh.get("available_cash", 0.0)
         executed_row = {
