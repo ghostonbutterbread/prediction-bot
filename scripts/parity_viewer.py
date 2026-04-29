@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from bot.config import load_config
 from bot.parity_audit import build_parity_view, write_parity_comparison_artifact
 
 DATA_DIR = ROOT / "data"
@@ -52,8 +53,15 @@ def _render_summary(title: str, summary: dict) -> str:
 
 def _render_comparison(view: dict) -> str:
     comparison = view.get("comparison", {})
+    context = view.get("comparison_context", {})
     items = [
         f"<li><b>Artifact path:</b> <code>{html.escape(str(view.get('comparison_artifact_path') or ''))}</code> (<a href=\"/export\">write</a>)</li>",
+        f"<li><b>Paper run label:</b> {html.escape(str(context.get('paper_mode_label') or 'normal paper'))}</li>",
+        f"<li><b>Live run label:</b> {html.escape(str(context.get('live_mode_label') or 'live'))}</li>",
+        f"<li><b>Paper risk preset:</b> {html.escape(str(context.get('paper_risk_preset_mode') or 'paper'))}</li>",
+        f"<li><b>Live risk preset:</b> {html.escape(str(context.get('live_risk_preset_mode') or 'live'))}</li>",
+        f"<li><b>Comparison mode:</b> {html.escape(str(context.get('parity_comparison_mode') or 'production'))}</li>",
+        f"<li><b>Apples-to-apples:</b> {'yes' if context.get('apples_to_apples') else 'no'}</li>",
         f"<li><b>Paper rows:</b> {comparison.get('paper_rows', 0)}</li>",
         f"<li><b>Live rows:</b> {comparison.get('live_rows', 0)}</li>",
         f"<li><b>Matched keys:</b> {comparison.get('matched_keys', 0)}</li>",
@@ -106,7 +114,7 @@ def _render_rows(title: str, rows: list[dict]) -> str:
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
-        view = build_parity_view(DATA_DIR)
+        view = build_parity_view(DATA_DIR, config=load_config())
         if parsed.path == "/data":
             payload = json.dumps(view, indent=2)
             self.send_response(200)
@@ -122,7 +130,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(payload.encode())
             return
         if parsed.path == "/export":
-            path = write_parity_comparison_artifact(DATA_DIR)
+            path = write_parity_comparison_artifact(DATA_DIR, config=load_config())
             payload = json.dumps({"written": str(path)}, indent=2)
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -181,7 +189,7 @@ def main() -> None:
     HOST = args.host
     PORT = args.port
     if args.export is not None:
-        path = write_parity_comparison_artifact(DATA_DIR, output_path=args.export or None)
+        path = write_parity_comparison_artifact(DATA_DIR, output_path=args.export or None, config=load_config())
         print(f"Wrote parity comparison artifact to {path}")
         return
 

@@ -96,6 +96,7 @@ def _default_prediction_lab_config() -> dict[str, Any]:
 def _default_parity_mode_config() -> dict[str, Any]:
     return {
         "enabled": False,
+        "comparison_mode": "production",
         "record_revalidation_snapshot": True,
         "require_book_prices": False,
         "fallback_to_signal_prices": True,
@@ -128,6 +129,12 @@ def _normalize_storage_config(config: dict) -> dict:
 
     parity_mode = _deep_merge(_default_parity_mode_config(), config.get("parity_mode", {}) or {})
     parity_mode["enabled"] = bool(parity_mode.get("enabled", False))
+    comparison_mode = str(
+        parity_mode.get("comparison_mode", parity_mode.get("risk_mode", "production")) or "production"
+    ).strip().lower()
+    if comparison_mode not in {"production", "identical_risk"}:
+        comparison_mode = "identical_risk" if comparison_mode in {"identical", "matched", "paper_equivalent"} else "production"
+    parity_mode["comparison_mode"] = comparison_mode
     parity_mode["record_revalidation_snapshot"] = bool(parity_mode.get("record_revalidation_snapshot", True))
     parity_mode["require_book_prices"] = bool(parity_mode.get("require_book_prices", False))
     parity_mode["fallback_to_signal_prices"] = bool(parity_mode.get("fallback_to_signal_prices", True))
@@ -323,6 +330,27 @@ def _runtime_mode(config: dict) -> str:
     trading = config.get("trading", {}) or {}
     mode = str(trading.get("mode") or config.get("TRADING_MODE") or os.getenv("TRADING_MODE") or "paper").strip().lower()
     return "live" if mode == "live" else "paper"
+
+
+def get_runtime_mode(config: dict) -> str:
+    return _runtime_mode(config)
+
+
+def get_parity_comparison_mode(config: dict) -> str:
+    parity_mode = config.get("parity_mode", {}) or {}
+    mode = str(parity_mode.get("comparison_mode", "production") or "production").strip().lower()
+    return "identical_risk" if mode == "identical_risk" else "production"
+
+
+def get_operating_mode_label(config: dict) -> str:
+    runtime_mode = get_runtime_mode(config)
+    parity_mode = config.get("parity_mode", {}) or {}
+    parity_enabled = bool(parity_mode.get("enabled", False))
+    comparison_mode = get_parity_comparison_mode(config)
+
+    if runtime_mode == "live":
+        return "identical-risk comparison" if parity_enabled and comparison_mode == "identical_risk" else "live"
+    return "parity paper" if parity_enabled else "normal paper"
 
 
 def ensure_mode_storage_dir(path: str | Path, mode: str) -> Path:

@@ -29,6 +29,40 @@ class RiskConfigModeTests(unittest.TestCase):
             self.assertFalse(risk.trading_enabled)
             self.assertFalse(risk.state.trading_enabled)
 
+    def test_parity_paper_mode_gets_explicit_label(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            risk = RiskManager(
+                {
+                    "data_dir": tmpdir,
+                    "starting_balance": 100.0,
+                    "trading": {"mode": "paper", "trading_enabled": True},
+                    "parity_mode": {"enabled": True},
+                }
+            )
+            status = risk.get_status()
+            self.assertEqual(status["mode"], "🟠 PARITY PAPER")
+            self.assertEqual(status["mode_label"], "parity paper")
+            self.assertEqual(status["risk_preset_mode"], "paper")
+            self.assertEqual(status["parity_comparison_mode"], "production")
+
+    def test_identical_risk_live_mode_uses_paper_preset_and_label(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            risk = RiskManager(
+                {
+                    "data_dir": tmpdir,
+                    "starting_balance": 100.0,
+                    "trading": {"mode": "live", "trading_enabled": True},
+                    "parity_mode": {"enabled": True, "comparison_mode": "identical_risk"},
+                }
+            )
+            status = risk.get_status()
+            self.assertTrue(risk.is_live)
+            self.assertEqual(status["mode"], "🟣 IDENTICAL-RISK COMPARISON")
+            self.assertEqual(status["mode_label"], "identical-risk comparison")
+            self.assertEqual(status["risk_preset_mode"], "paper")
+            self.assertEqual(risk.kelly_fraction, 0.50)
+            self.assertEqual(risk.max_bet_pct, 0.10)
+
     def test_event_retrade_settings_load_from_nested_risk_config(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             risk = RiskManager(
