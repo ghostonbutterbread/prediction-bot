@@ -57,6 +57,21 @@ def coerce_float(value, default: Optional[float] = 0.0) -> Optional[float]:
     return value if isfinite(value) else default
 
 
+def coerce_bool(value, *, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    normalized = str(value).strip().lower()
+    if normalized in {"true", "1", "yes", "y"}:
+        return True
+    if normalized in {"false", "0", "no", "n", ""}:
+        return False
+    return default
+
+
 def canonical_execution_snapshot_source(value) -> str:
     normalized = str(value or "unknown").strip().lower()
     return normalized if normalized in VALID_EXECUTION_SNAPSHOT_SOURCES else "unknown"
@@ -290,7 +305,8 @@ def apply_execution_audit_contract(trade: dict) -> dict:
     position_size = coerce_float(trade.get("position_size"), default=None)
     size_value = coerce_float(trade.get("size"), default=None)
     raw_status = trade.get("status")
-    if raw_status is None and trade.get("resolved"):
+    resolved_flag = coerce_bool(trade.get("resolved"), default=False)
+    if resolved_flag:
         raw_status = "resolved"
     status_hint = canonical_execution_status(raw_status)
 
@@ -347,14 +363,15 @@ def apply_execution_audit_contract(trade: dict) -> dict:
         remaining_size = 0.0
 
     trade["status"] = status
-    trade["lifecycle_state"] = str(
-        trade.get("lifecycle_state")
-        or canonical_lifecycle_state(
-            status,
-            failure_stage=trade.get("failure_stage"),
-            filled_size=filled_size,
-            remaining_size=remaining_size,
-        )
+    canonical_lifecycle = canonical_lifecycle_state(
+        status,
+        failure_stage=trade.get("failure_stage"),
+        filled_size=filled_size,
+        remaining_size=remaining_size,
+    )
+    existing_lifecycle = str(trade.get("lifecycle_state") or "")
+    trade["lifecycle_state"] = (
+        canonical_lifecycle if status == "resolved" else existing_lifecycle or canonical_lifecycle
     )
     trade["requested_size"] = round(requested_size, 4)
     trade["approved_size"] = round(approved_size, 4)
@@ -414,7 +431,7 @@ def apply_execution_audit_contract(trade: dict) -> dict:
         or parity_mode.get("execution_decision_reason_code")
         or None
     )
-    trade["resolved"] = bool(trade.get("resolved", status == "resolved"))
+    trade["resolved"] = coerce_bool(trade.get("resolved"), default=status == "resolved")
     if trade["resolved"] or status == "resolved":
         canonicalize_resolved_resolution_fields(trade)
     if status != "resolved" and not trade["resolved"]:

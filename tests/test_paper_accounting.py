@@ -243,6 +243,17 @@ class PaperAccountingTests(unittest.TestCase):
         self.assertEqual(resolver._determine_outcome(settled_yes), "YES")
         self.assertEqual(resolver._determine_outcome(settled_no), "NO")
 
+    def test_resolver_does_not_treat_bot_relative_result_as_market_outcome(self):
+        resolver = TradeResolver()
+
+        settled_won = FakeMarket(status="settled", result="won", close_price=None)
+        settled_lost = FakeMarket(status="settled", result="lost", close_price=None)
+
+        self.assertFalse(resolver._has_result(settled_won))
+        self.assertFalse(resolver._has_result(settled_lost))
+        self.assertEqual(resolver._determine_outcome(settled_won), "UNKNOWN")
+        self.assertEqual(resolver._determine_outcome(settled_lost), "UNKNOWN")
+
     def test_resolver_does_not_settle_closed_market_without_result(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             session_id = "20260423_123000"

@@ -512,6 +512,35 @@ class LiveAdaptersTests(unittest.TestCase):
             events = adapter.settle("kalshi", exchange, open_positions)
             self.assertEqual(events, [])
 
+    def test_settle_skips_bot_relative_result_aliases_without_market_truth(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = self._make_bot(tmpdir)
+            adapter = RunnerLiveReconciliationAdapter(bot)
+            exchange = FakeExchange(
+                market_map={
+                    "M1": {
+                        "id": "M1",
+                        "status": "settled",
+                        "close_price": None,
+                        "metadata": {"result": "won"},
+                    }
+                }
+            )
+            open_positions = [
+                LivePosition(
+                    market_id="M1",
+                    question="Will it rain?",
+                    direction="BUY_NO",
+                    price=0.4,
+                    size=2.0,
+                    order_id="ord-pos",
+                    created_at=datetime.now(timezone.utc).isoformat(),
+                )
+            ]
+
+            events = adapter.settle("kalshi", exchange, open_positions)
+            self.assertEqual(events, [])
+
     def test_settle_skips_void_markets_instead_of_forcing_yes_no(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             bot = self._make_bot(tmpdir)

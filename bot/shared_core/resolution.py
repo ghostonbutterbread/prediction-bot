@@ -13,10 +13,6 @@ _OUTCOME_ALIASES = {
     "NO": "NO",
     "TRUE": "YES",
     "FALSE": "NO",
-    "WIN": "YES",
-    "LOSE": "NO",
-    "WON": "YES",
-    "LOST": "NO",
     "1": "YES",
     "1.0": "YES",
     "0": "NO",
@@ -29,6 +25,12 @@ _OUTCOME_ALIASES = {
 
 
 def normalize_outcome_alias(value: Any) -> Optional[str]:
+    """Normalize market-truth outcome aliases only.
+
+    Bot-relative labels such as ``won`` and ``lost`` are intentionally excluded;
+    callers that need legacy trade-result migration must do it with direction
+    context.
+    """
     if isinstance(value, bool):
         return "YES" if value else "NO"
     if isinstance(value, (int, float)) and value in (0, 1):
