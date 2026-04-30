@@ -2,6 +2,13 @@
 
 from .market_mapping import WeatherMarketCityMapper, WeatherMarketContext
 from .observation_log import ObservationLog
+from .historical_provider import HistoricalOpenMeteoWeatherEngine
+from .date_matcher import (
+    DateMatchValidationResult,
+    derive_market_date,
+    derive_weather_date,
+    validate_weather_date_match,
+)
 from .replay import (
     DEFAULT_REPLAY_FEE_RATE,
     ReplayFeeModel,
@@ -52,6 +59,8 @@ __all__ = [
     "STATIC_BASELINE_STATION_MAPPINGS",
     "DEFAULT_REPLAY_FEE_RATE",
     "DEFAULT_SOURCE_PILOT_DIR",
+    "DateMatchValidationResult",
+    "HistoricalOpenMeteoWeatherEngine",
     "ReplayFeeModel",
     "StructuralTrainingPolicy",
     "TemperatureTrainingPolicy",
@@ -69,6 +78,8 @@ __all__ = [
     "build_weather_replay_dataset",
     "build_weather_replay_record",
     "build_temperature_training_samples",
+    "derive_market_date",
+    "derive_weather_date",
     "iter_weather_replay_records",
     "load_source_validation_pilot",
     "load_source_validation_pilots",
@@ -84,4 +95,5 @@ __all__ = [
     "run_temperature_training_from_samples",
     "score_replay_answer",
     "score_replay_answers",
+    "validate_weather_date_match",
 ]
