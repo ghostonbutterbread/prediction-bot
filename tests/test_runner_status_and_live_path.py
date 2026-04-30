@@ -327,8 +327,10 @@ class RunnerLivePathTests(unittest.TestCase):
                 second = bot._process_signal(signal)
                 third = bot._process_signal(signal)
 
-            self.assertEqual(first["blocked_reason"], "execution_failed")
-            self.assertEqual(second["blocked_reason"], "execution_failed")
+            self.assertEqual(first["blocked_reason"], "placement_failed")
+            self.assertEqual(second["blocked_reason"], "placement_failed")
+            self.assertIn("decision_artifact", first)
+            self.assertIn("decision_artifact", second)
             self.assertEqual(bot.live_failure_streaks["kalshi"]["count"], 2)
             self.assertEqual(bot.reconciliation_gate["kalshi"]["verdict"], "blocked")
             self.assertIn("repeated_live_failures_threshold_reached", bot.reconciliation_gate["kalshi"]["issues"])

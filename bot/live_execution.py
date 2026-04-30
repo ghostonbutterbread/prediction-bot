@@ -60,6 +60,14 @@ class RunnerLiveExecutionAdapter:
             "private_key_path": getattr(exchange, "private_key_path", None),
         }
 
+    @staticmethod
+    def _redact_runtime_identity(identity: dict[str, object]) -> dict[str, object]:
+        redacted = dict(identity)
+        for key in ("api_key_id", "private_key_path"):
+            if redacted.get(key):
+                redacted[key] = "<redacted>"
+        return redacted
+
     def _identity_gate_result(self, exchange_name: str, exchange: BaseExchange) -> tuple[bool, str | None, str | None, dict[str, object]]:
         trading_cfg = self.host.config.get("trading") or {}
         expected = (trading_cfg.get("live_identity") or {}) if isinstance(trading_cfg, dict) else {}
@@ -350,7 +358,7 @@ class RunnerLiveExecutionAdapter:
                 win_probability=getattr(decision, "win_probability", signal.get("model_probability")),
                 reason=identity_reason,
                 reason_code=identity_reason_code,
-                reasoning={"live_identity": {"runtime": runtime_identity}},
+                reasoning={"live_identity": {"runtime": self._redact_runtime_identity(runtime_identity)}},
             )
             decision_artifact = self._build_decision_artifact(signal=signal, decision=identity_decision)
             self._append_rejected_trade_row(
@@ -370,7 +378,7 @@ class RunnerLiveExecutionAdapter:
             return {
                 "blocked_reason": identity_reason_code,
                 "decision": identity_decision,
-                "identity": runtime_identity,
+                "identity": self._redact_runtime_identity(runtime_identity),
                 "decision_artifact": decision_artifact,
             }
 
@@ -581,7 +589,7 @@ class RunnerLiveExecutionAdapter:
         )
         if not live_decision.approved:
             logger.info(f"🛑 Live revalidation skipped: {live_decision.reason}")
-            self._append_rejected_trade_row(
+            canonical_row = self._append_rejected_trade_row(
                 signal=signal,
                 exchange=exchange,
                 decision=live_decision,
@@ -595,33 +603,67 @@ class RunnerLiveExecutionAdapter:
                 execution_revalidation_outcome="rejected",
                 decision_artifact=live_decision_artifact,
             )
-            return None
+            return self._blocked_execution_result(
+                blocked_reason=live_decision.reason_code,
+                decision=live_decision,
+                decision_artifact=live_decision_artifact,
+                audit_row=canonical_row,
+                failure_stage="revalidation",
+            )
 
         price = max(0.01, min(float(live_decision.entry_price or 0.0), 0.99))
         size = float(live_decision.position_size or 0.0)
 
         if size < 1:
-            logger.info(f"Position too small after shared risk controls: ${size:.2f}")
-            self._append_rejected_trade_row(
+            reason_code = "position_too_small"
+            reason = "Position too small after shared risk controls"
+            logger.info(f"{reason}: ${size:.2f}")
+            sizing_decision = SimpleNamespace(
+                action=getattr(live_decision, "action", getattr(decision, "action", signal.get("direction", "BUY_YES"))),
+                approved=False,
+                position_size=size,
+                requested_position_size=float(getattr(live_decision, "requested_position_size", 0.0) or size),
+                entry_price=getattr(live_decision, "entry_price", execution_snapshot.get("market_price")),
+                win_probability=getattr(live_decision, "win_probability", signal.get("model_probability")),
+                reason=reason,
+                reason_code=reason_code,
+                reasoning={
+                    **dict(getattr(live_decision, "reasoning", {}) or {}),
+                    "live_execution": {"failure_stage": "sizing", "computed_size": size},
+                },
+            )
+            sizing_decision_artifact = self._build_decision_artifact(
+                signal=live_signal,
+                decision=sizing_decision,
+                context=live_context,
+                execution_snapshot=execution_snapshot,
+            )
+            canonical_row = self._append_rejected_trade_row(
                 signal=signal,
                 exchange=exchange,
-                decision=live_decision,
+                decision=sizing_decision,
                 initial_decision=initial_decision,
                 initial_signal_snapshot=initial_signal_snapshot,
                 execution_snapshot=execution_snapshot,
                 status="rejected",
-                message="Position too small after shared risk controls",
+                message=reason,
                 failure_stage="sizing",
                 execution_revalidated=True,
                 execution_revalidation_outcome="approved",
-                decision_artifact=live_decision_artifact,
+                decision_artifact=sizing_decision_artifact,
             )
-            return None
+            return self._blocked_execution_result(
+                blocked_reason=reason_code,
+                decision=sizing_decision,
+                decision_artifact=sizing_decision_artifact,
+                audit_row=canonical_row,
+                failure_stage="sizing",
+            )
 
         decision = live_decision
         order = exchange.place_order(market_id, side, price, size)
         if not order:
-            self._append_rejected_trade_row(
+            canonical_row = self._append_rejected_trade_row(
                 signal=signal,
                 exchange=exchange,
                 decision=decision,
@@ -635,7 +677,13 @@ class RunnerLiveExecutionAdapter:
                 execution_revalidation_outcome="approved",
                 decision_artifact=live_decision_artifact,
             )
-            return None
+            return self._blocked_execution_result(
+                blocked_reason="placement_failed",
+                decision=decision,
+                decision_artifact=live_decision_artifact,
+                audit_row=canonical_row,
+                failure_stage="placement",
+            )
 
         from bot.runner import LivePosition
 
@@ -871,7 +919,7 @@ class RunnerLiveExecutionAdapter:
         execution_revalidated: bool,
         execution_revalidation_outcome: str | None,
         decision_artifact: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> dict[str, Any]:
         decision_trace = dict(getattr(decision, "reasoning", {}) or {})
         parity_mode = dict((decision_trace or {}).get("parity_mode", {}) or {})
         balance = self.host._coerce_float(getattr(exchange, "get_balance", lambda: 0.0)(), default=0.0)
@@ -935,3 +983,21 @@ class RunnerLiveExecutionAdapter:
         canonical_row = apply_execution_audit_contract(rejected_row)
         self.host.trade_history.append(canonical_row)
         self.host._log_trade(signal, None, decision, 0.0, canonical_row.get("entry_price") or canonical_row.get("market_price") or 0.0, audit_row=canonical_row)
+        return canonical_row
+
+    @staticmethod
+    def _blocked_execution_result(
+        *,
+        blocked_reason: str | None,
+        decision: TradeDecision,
+        decision_artifact: dict[str, Any] | None,
+        audit_row: dict[str, Any],
+        failure_stage: str,
+    ) -> dict[str, Any]:
+        return {
+            "blocked_reason": blocked_reason or "execution_failed",
+            "decision": decision,
+            "decision_artifact": decision_artifact,
+            "audit_row": audit_row,
+            "failure_stage": failure_stage,
+        }

@@ -363,7 +363,9 @@ class LiveExecutionTests(unittest.TestCase):
 
             result = adapter.execute(signal, decision, exchange)
 
-            self.assertIsNone(result)
+            self.assertIsNotNone(result)
+            self.assertEqual(result["blocked_reason"], "entry_price_above_cap")
+            self.assertIn("decision_artifact", result)
             self.assertEqual(exchange.orders, [])
             self.assertEqual(len(bot.trade_history), 1)
             trade_row = bot.trade_history[0]
@@ -1030,7 +1032,9 @@ class LiveExecutionTests(unittest.TestCase):
 
             result = adapter.execute(signal, decision, exchange)
 
-            self.assertIsNone(result)
+            self.assertIsNotNone(result)
+            self.assertIn("blocked_reason", result)
+            self.assertIn("decision_artifact", result)
             self.assertEqual(exchange.orders, [])
             self.assertEqual(len(bot.open_orders), 1)
             self.assertEqual(bot.open_orders[0]["order_id"], "ord-existing")
@@ -1085,7 +1089,9 @@ class LiveExecutionTests(unittest.TestCase):
 
             result = adapter.execute(signal, decision, exchange)
 
-            self.assertIsNone(result)
+            self.assertIsNotNone(result)
+            self.assertIn("blocked_reason", result)
+            self.assertIn("decision_artifact", result)
             self.assertEqual(exchange.orders, [])
             self.assertEqual(len(bot.trade_history), 1)
             trade_row = bot.trade_history[0]
@@ -1093,6 +1099,49 @@ class LiveExecutionTests(unittest.TestCase):
             self.assertEqual(trade_row["failure_stage"], "revalidation")
             self.assertIn(trade_row["decision_reason_code"], {"event_exposure_limit", "event_exposure_limit_reached", "entry_price_above_cap"})
             self.assertEqual(trade_row["reserved_capital"], 0.0)
+
+    def test_execute_sizing_failure_returns_structured_block_with_skip_artifact(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = self._make_bot(tmpdir)
+            adapter = RunnerLiveExecutionAdapter(bot)
+            exchange = FakeExchange()
+            signal = {
+                "exchange": "kalshi",
+                "market_id": "m-small-size",
+                "question": "Will sizing be too small?",
+                "direction": "BUY_YES",
+                "market_price": 0.40,
+                "yes_price": 0.40,
+                "no_price": 0.60,
+                "model_probability": 0.70,
+                "edge": 0.30,
+                "confidence": 0.90,
+                "signals": {},
+            }
+            decision = SimpleNamespace(
+                action="BUY_YES",
+                approved=True,
+                position_size=0.5,
+                entry_price=0.40,
+                win_probability=0.70,
+                reason="ok",
+                reason_code="approved",
+                requested_position_size=0.5,
+                reasoning={},
+            )
+
+            with patch("bot.shared_core.build_trade_decision", return_value=decision):
+                result = adapter.execute(signal, decision, exchange)
+
+            self.assertIsNotNone(result)
+            self.assertEqual(result["blocked_reason"], "position_too_small")
+            self.assertEqual(result["decision_artifact"]["final_action"], "SKIP")
+            self.assertEqual(result["decision_artifact"]["final_reason_code"], "position_too_small")
+            trade_row = bot.trade_history[0]
+            self.assertEqual(trade_row["failure_stage"], "sizing")
+            self.assertEqual(trade_row["decision_reason_code"], "position_too_small")
+            self.assertEqual(trade_row["decision_artifact"]["final_reason_code"], "position_too_small")
+            self.assertEqual(exchange.orders, [])
 
     def test_execute_tracks_partial_fill_when_exchange_reports_it(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1183,7 +1232,9 @@ class LiveExecutionTests(unittest.TestCase):
 
             result = adapter.execute(signal, decision, exchange)
 
-            self.assertIsNone(result)
+            self.assertIsNotNone(result)
+            self.assertEqual(result["blocked_reason"], "placement_failed")
+            self.assertIn("decision_artifact", result)
             self.assertEqual(len(bot.trade_history), 1)
             trade_row = bot.trade_history[0]
             self.assertEqual(trade_row["status"], "failed")

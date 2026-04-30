@@ -999,6 +999,7 @@ class PredictionBot:
     def _is_critical_live_block(reason_code: str | None) -> bool:
         critical_codes = {
             "execution_failed",
+            "placement_failed",
             "reconciliation_state_blocked",
             "reconciliation_state_degraded",
             "runtime_invariant_violation",
