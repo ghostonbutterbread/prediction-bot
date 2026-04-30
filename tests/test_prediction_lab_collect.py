@@ -12,8 +12,11 @@ from unittest.mock import patch
 from bot.file_ops import append_jsonl, load_jsonl
 
 from bot.config import load_config
+from bot.decision_pipeline import DecisionPipelineEvaluator
 from bot.prediction_lab import PredictionLab, PredictionLabRunResult
 from bot.prediction_lab_collect import PredictionLabCollectorDaemon
+from bot.risk import RiskDecision
+from bot.strategies.enhanced import StrategyTrace
 from scripts import prediction_lab_collect as prediction_lab_collect_script
 
 
@@ -44,6 +47,53 @@ class _FakeClock:
 class _FakeBot:
     def close(self):
         return None
+
+
+class _FixedKelly:
+    fee_rate = 0.07
+
+    def __init__(self, size: float = 10.0):
+        self.size = size
+
+    def calculate(self, win_probability: float, entry_price: float, bankroll: float) -> float:
+        return self.size
+
+
+class _AllowRisk:
+    def check_trade(self, signal: dict, position_size: float, *, available_cash: float | None = None):
+        return RiskDecision(
+            approved=True,
+            reason="Approved",
+            adjusted_size=position_size,
+            original_size=position_size,
+        )
+
+
+class _DenyRisk:
+    def check_trade(self, signal: dict, position_size: float, *, available_cash: float | None = None):
+        return RiskDecision(
+            approved=False,
+            reason="Shared core unit denial",
+            adjusted_size=0.0,
+            original_size=position_size,
+            metadata={"reason_code": "risk_unit_denied"},
+        )
+
+
+class _TracedSignalStrategy:
+    def __init__(self, signal: dict | None, *, skip_reason_code: str | None = None):
+        self.signal = signal
+        self.skip_reason_code = skip_reason_code
+
+    def analyze_market_with_trace(self, market, order_book=None):
+        trace = StrategyTrace(
+            raw_signals={"unit": {"provided": self.signal is not None}},
+            accepted_signals={"unit": dict(self.signal)} if self.signal else {},
+            rejected_signals={"unit": {"reason": self.skip_reason_code}} if self.signal is None else {},
+            ensemble_signal=dict(self.signal) if self.signal else None,
+            skip_reason_code=self.skip_reason_code,
+        )
+        return (dict(self.signal) if self.signal else None), trace
 
 
 class PredictionLabCollectorTests(unittest.TestCase):
@@ -227,6 +277,41 @@ class PredictionLabCollectorTests(unittest.TestCase):
 
             self.assertEqual(exchange.calls[0], ("get_markets_direct", lab.max_markets_per_run, 150, 4))
 
+    def test_prediction_lab_default_off_uses_legacy_strategy_analyze_market_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "data_dir": tmpdir,
+                "prediction_lab": {
+                    "enabled": True,
+                    "mode": "collector",
+                    "groups": ["weather"],
+                    "score_only": True,
+                    "use_shared_pipeline": False,
+                },
+                "strategy": {"enable_news": False, "enable_social": False, "enable_ai": False},
+            }
+            lab = PredictionLab(config)
+            market = SimpleNamespace(
+                id="KXHIGHTSEA-26APR26-T64",
+                exchange="kalshi",
+                question="Will the maximum temperature be <64° on Apr 26?",
+                category="weather",
+                yes_price=0.03,
+                no_price=0.97,
+                volume=0,
+                closes_at=datetime.now(timezone.utc) + timedelta(hours=6),
+                metadata={"market_group": "weather", "series": "daily_temperature"},
+            )
+            exchange = SimpleNamespace(
+                get_markets_direct=lambda **kwargs: [market],
+                get_order_book=lambda market_id: (_ for _ in ()).throw(AssertionError("legacy path should not fetch order book")),
+            )
+
+            with patch.object(lab.strategy, "analyze_market", return_value=None) as analyze_market:
+                lab.run(exchange)
+
+            analyze_market.assert_called_once_with(market, None)
+
     def test_prediction_lab_rejects_multiple_groups_in_v1(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = {
@@ -276,6 +361,450 @@ class PredictionLabCollectorTests(unittest.TestCase):
             self.assertFalse(rows[0]["trading_enabled"])
             self.assertFalse(rows[0]["order_execution_enabled"])
             self.assertIn("weather_risk", rows[0])
+
+    def test_prediction_lab_shared_pipeline_records_skip_artifact_with_snapshots(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "data_dir": tmpdir,
+                "prediction_lab": {
+                    "enabled": True,
+                    "mode": "collector",
+                    "observer_mode": True,
+                    "groups": ["weather"],
+                    "score_only": False,
+                    "record_all_scored": True,
+                    "collector_record_predictions": True,
+                    "collector_record_market_snapshots": True,
+                    "use_shared_pipeline": True,
+                },
+                "strategy": {"enable_news": False, "enable_social": False, "enable_ai": False},
+            }
+            lab = PredictionLab(config)
+            lab.decision_evaluator = DecisionPipelineEvaluator(
+                lab.config,
+                strategy=_TracedSignalStrategy(None, skip_reason_code="unit_no_signal"),
+                kelly_sizer=_FixedKelly(),
+                risk_policy=_AllowRisk(),
+            )
+            market = SimpleNamespace(
+                id="KXHIGHTSEA-26APR26-T64",
+                exchange="kalshi",
+                question="Will the maximum temperature be <64° on Apr 26?",
+                category="weather",
+                yes_price=0.03,
+                no_price=0.97,
+                volume=0,
+                closes_at=datetime.now(timezone.utc) + timedelta(hours=6),
+                metadata={"market_group": "weather", "series": "daily_temperature"},
+            )
+            exchange = SimpleNamespace(get_markets_direct=lambda **kwargs: [market])
+
+            result = lab.run(exchange)
+            prediction_rows = load_jsonl(lab.predictions_path)
+            snapshot_rows = load_jsonl(lab.market_snapshots_path)
+
+            self.assertEqual(result.recorded_predictions, 1)
+            self.assertEqual(prediction_rows[0]["direction"], "SKIP")
+            self.assertEqual(prediction_rows[0]["decision_type"], "skip")
+            self.assertEqual(prediction_rows[0]["shared_pipeline"]["final_action"], "SKIP")
+            self.assertEqual(prediction_rows[0]["decision_artifact"]["final_reason_code"], "unit_no_signal")
+            self.assertEqual(prediction_rows[0]["decision_artifact"]["source_context"]["source"], "provided")
+            self.assertIn("market_metadata", prediction_rows[0]["decision_artifact"]["source_context"]["data"])
+            self.assertEqual(prediction_rows[0]["decision_artifact"]["order_book_snapshot"]["source"], "missing")
+            self.assertEqual(snapshot_rows[0]["decision_artifact"]["final_reason_code"], "unit_no_signal")
+
+    def test_prediction_lab_shared_pipeline_records_buy_artifact_and_preserves_prediction_schema(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "data_dir": tmpdir,
+                "prediction_lab": {
+                    "enabled": True,
+                    "mode": "collector",
+                    "groups": ["sports"],
+                    "score_only": False,
+                    "record_all_scored": True,
+                    "collector_record_predictions": True,
+                    "use_shared_pipeline": True,
+                },
+                "strategy": {"min_edge": 0.01, "min_confidence": 0.5, "enable_news": False, "enable_social": False, "enable_ai": False},
+                "max_entry_price": 0.7,
+            }
+            lab = PredictionLab(config)
+            signal = {
+                "market_id": "KXNBATEST-26APR29-HOME",
+                "exchange": "kalshi",
+                "question": "Will the NBA test team win?",
+                "direction": "BUY_YES",
+                "model_probability": 0.7,
+                "market_price": 0.4,
+                "yes_market_price": 0.4,
+                "no_market_price": 0.6,
+                "edge": 0.3,
+                "confidence": 0.9,
+                "signals": {"unit": 0.7},
+            }
+            lab.decision_evaluator = DecisionPipelineEvaluator(
+                lab.config,
+                strategy=_TracedSignalStrategy(signal),
+                kelly_sizer=_FixedKelly(10.0),
+                risk_policy=_AllowRisk(),
+            )
+            market = SimpleNamespace(
+                id="KXNBATEST-26APR29-HOME",
+                exchange="kalshi",
+                question="Will the NBA test team win?",
+                category="sports",
+                yes_price=0.4,
+                no_price=0.6,
+                volume=1000,
+                closes_at=datetime.now(timezone.utc) + timedelta(hours=6),
+                metadata={"market_group": "sports", "series": "nba"},
+            )
+            exchange = SimpleNamespace(
+                get_markets_direct=lambda **kwargs: [market],
+                get_order_book=lambda market_id: {
+                    "best_yes_ask": 0.41,
+                    "best_yes_bid": 0.4,
+                    "best_no_ask": 0.61,
+                    "best_no_bid": 0.6,
+                },
+            )
+
+            lab.run(exchange)
+            row = load_jsonl(lab.predictions_path)[0]
+
+            legacy_prediction_keys = {
+                "prediction_id",
+                "run_id",
+                "timestamp",
+                "status",
+                "group",
+                "series",
+                "event_ticker",
+                "market_id",
+                "question",
+                "direction",
+                "decision_type",
+                "confidence",
+                "edge",
+                "model_probability",
+                "market_price",
+                "yes_market_price",
+                "no_market_price",
+                "signals",
+                "signal_details",
+                "weather_context",
+                "experiment_id",
+                "strategy_version",
+                "hypothetical",
+                "observer_mode",
+                "trading_enabled",
+                "order_execution_enabled",
+            }
+            self.assertTrue(legacy_prediction_keys.issubset(row.keys()))
+            self.assertEqual(row["decision_type"], "buy_yes")
+            self.assertEqual(row["shared_pipeline"]["final_action"], "BUY_YES")
+            self.assertEqual(row["decision_artifact"]["order_book_snapshot"]["source"], "book")
+            self.assertEqual(row["decision_artifact"]["execution_snapshot_source"], "book")
+            self.assertEqual(row["decision_artifact"]["source_context"]["source"], "provided")
+
+    def test_prediction_lab_shared_pipeline_vetoed_signal_is_stored_skip_safe(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "data_dir": tmpdir,
+                "prediction_lab": {
+                    "enabled": True,
+                    "mode": "collector",
+                    "observer_mode": True,
+                    "groups": ["sports"],
+                    "score_only": False,
+                    "record_all_scored": True,
+                    "collector_record_predictions": True,
+                    "collector_record_market_snapshots": True,
+                    "use_shared_pipeline": True,
+                    "hypothetical_notional_mode": "flat",
+                    "flat_notional_usd": 10,
+                },
+                "strategy": {"min_edge": 0.01, "min_confidence": 0.5, "enable_news": False, "enable_social": False, "enable_ai": False},
+                "max_entry_price": 0.7,
+            }
+            lab = PredictionLab(config)
+            signal = {
+                "market_id": "KXNBATEST-26APR29-HOME",
+                "exchange": "kalshi",
+                "question": "Will the NBA test team win?",
+                "direction": "BUY_YES",
+                "model_probability": 0.7,
+                "market_price": 0.4,
+                "yes_market_price": 0.4,
+                "no_market_price": 0.6,
+                "edge": 0.3,
+                "confidence": 0.9,
+                "signals": {"unit": 0.7},
+            }
+            lab.decision_evaluator = DecisionPipelineEvaluator(
+                lab.config,
+                strategy=_TracedSignalStrategy(signal),
+                kelly_sizer=_FixedKelly(0.0),
+                risk_policy=_AllowRisk(),
+            )
+            market = SimpleNamespace(
+                id="KXNBATEST-26APR29-HOME",
+                exchange="kalshi",
+                question="Will the NBA test team win?",
+                category="sports",
+                yes_price=0.4,
+                no_price=0.6,
+                volume=1000,
+                closes_at=datetime.now(timezone.utc) + timedelta(hours=6),
+                metadata={"market_group": "sports", "series": "nba"},
+            )
+            exchange = SimpleNamespace(
+                get_markets_direct=lambda **kwargs: [market],
+                get_order_book=lambda market_id: {
+                    "best_yes_ask": 0.41,
+                    "best_yes_bid": 0.4,
+                    "best_no_ask": 0.61,
+                    "best_no_bid": 0.6,
+                },
+                _fetch_market_raw=lambda market_id: {
+                    "status": "settled",
+                    "result": "YES",
+                    "close_price": 1.0,
+                },
+            )
+
+            lab.run(exchange)
+            prediction_row = load_jsonl(lab.predictions_path)[0]
+            snapshot_row = load_jsonl(lab.market_snapshots_path)[0]
+            resolve_result = lab.resolve_open_predictions(exchange)
+            resolved_row = load_jsonl(lab.predictions_path)[0]
+
+            self.assertEqual(prediction_row["direction"], "SKIP")
+            self.assertEqual(snapshot_row["direction"], "SKIP")
+            self.assertEqual(prediction_row["decision_type"], "skip")
+            self.assertEqual(prediction_row["hypothetical"]["position_size_usd"], 0.0)
+            self.assertEqual(prediction_row["hypothetical"]["approved_position_size_usd"], 0.0)
+            self.assertEqual(prediction_row["hypothetical"]["requested_position_size_usd"], 0.0)
+            self.assertEqual(prediction_row["decision_artifact"]["strategy_signal"]["direction"], "BUY_YES")
+            self.assertEqual(prediction_row["decision_artifact"]["final_action"], "SKIP")
+            self.assertEqual(prediction_row["decision_artifact"]["final_reason_code"], "kelly_zero_size")
+            self.assertEqual(prediction_row["shared_pipeline"]["final_reason_code"], "kelly_zero_size")
+            self.assertEqual(resolve_result["skipped"], 1)
+            self.assertEqual(resolved_row["resolution"]["is_correct"], None)
+            self.assertEqual(resolved_row["resolution"]["position_size"], 0.0)
+
+    def test_prediction_lab_shared_pipeline_risk_denial_with_positive_kelly_is_stored_skip_safe(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "data_dir": tmpdir,
+                "prediction_lab": {
+                    "enabled": True,
+                    "mode": "collector",
+                    "observer_mode": True,
+                    "groups": ["sports"],
+                    "score_only": False,
+                    "record_all_scored": True,
+                    "collector_record_predictions": True,
+                    "collector_record_market_snapshots": True,
+                    "use_shared_pipeline": True,
+                    "hypothetical_notional_mode": "flat",
+                    "flat_notional_usd": 10,
+                },
+                "strategy": {"min_edge": 0.01, "min_confidence": 0.5, "enable_news": False, "enable_social": False, "enable_ai": False},
+                "max_entry_price": 0.7,
+            }
+            lab = PredictionLab(config)
+            signal = {
+                "market_id": "KXNBATEST-26APR29-HOME",
+                "exchange": "kalshi",
+                "question": "Will the NBA test team win?",
+                "direction": "BUY_YES",
+                "model_probability": 0.7,
+                "market_price": 0.4,
+                "yes_market_price": 0.4,
+                "no_market_price": 0.6,
+                "edge": 0.3,
+                "confidence": 0.9,
+                "signals": {"unit": 0.7},
+            }
+            lab.decision_evaluator = DecisionPipelineEvaluator(
+                lab.config,
+                strategy=_TracedSignalStrategy(signal),
+                kelly_sizer=_FixedKelly(10.0),
+                risk_policy=_DenyRisk(),
+            )
+            market = SimpleNamespace(
+                id="KXNBATEST-26APR29-HOME",
+                exchange="kalshi",
+                question="Will the NBA test team win?",
+                category="sports",
+                yes_price=0.4,
+                no_price=0.6,
+                volume=1000,
+                closes_at=datetime.now(timezone.utc) + timedelta(hours=6),
+                metadata={"market_group": "sports", "series": "nba"},
+            )
+            exchange = SimpleNamespace(
+                get_markets_direct=lambda **kwargs: [market],
+                get_order_book=lambda market_id: {
+                    "best_yes_ask": 0.41,
+                    "best_yes_bid": 0.4,
+                    "best_no_ask": 0.61,
+                    "best_no_bid": 0.6,
+                },
+            )
+
+            lab.run(exchange)
+            prediction_row = load_jsonl(lab.predictions_path)[0]
+            snapshot_row = load_jsonl(lab.market_snapshots_path)[0]
+
+            self.assertEqual(prediction_row["direction"], "SKIP")
+            self.assertEqual(snapshot_row["direction"], "SKIP")
+            self.assertEqual(prediction_row["decision_type"], "skip")
+            self.assertEqual(snapshot_row["decision_type"], "skip")
+            self.assertEqual(prediction_row["hypothetical"]["position_size_usd"], 0.0)
+            self.assertEqual(prediction_row["hypothetical"]["approved_position_size_usd"], 0.0)
+            self.assertEqual(prediction_row["hypothetical"]["requested_position_size_usd"], 0.0)
+            self.assertEqual(prediction_row["decision_artifact"]["strategy_signal"]["direction"], "BUY_YES")
+            self.assertEqual(prediction_row["decision_artifact"]["shared_core_decision"]["requested_position_size"], 10.0)
+            self.assertEqual(prediction_row["decision_artifact"]["final_action"], "SKIP")
+            self.assertEqual(prediction_row["decision_artifact"]["final_reason_code"], "risk_unit_denied")
+            self.assertEqual(prediction_row["shared_pipeline"]["final_reason_code"], "risk_unit_denied")
+            self.assertEqual(snapshot_row["decision_artifact"]["strategy_signal"]["direction"], "BUY_YES")
+            self.assertEqual(snapshot_row["decision_artifact"]["final_reason_code"], "risk_unit_denied")
+
+    def test_prediction_lab_shared_pipeline_falls_back_to_bid_ask_when_order_book_missing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "data_dir": tmpdir,
+                "prediction_lab": {
+                    "enabled": True,
+                    "mode": "collector",
+                    "groups": ["sports"],
+                    "score_only": False,
+                    "record_all_scored": True,
+                    "collector_record_predictions": True,
+                    "use_shared_pipeline": True,
+                },
+                "strategy": {"min_edge": 0.01, "min_confidence": 0.5, "enable_news": False, "enable_social": False, "enable_ai": False},
+                "max_entry_price": 0.7,
+            }
+            lab = PredictionLab(config)
+            signal = {
+                "market_id": "KXNBATEST-26APR29-HOME",
+                "exchange": "kalshi",
+                "question": "Will the NBA test team win?",
+                "direction": "BUY_YES",
+                "model_probability": 0.7,
+                "market_price": 0.4,
+                "yes_market_price": 0.4,
+                "no_market_price": 0.6,
+                "edge": 0.3,
+                "confidence": 0.9,
+                "signals": {"unit": 0.7},
+            }
+            lab.decision_evaluator = DecisionPipelineEvaluator(
+                lab.config,
+                strategy=_TracedSignalStrategy(signal),
+                kelly_sizer=_FixedKelly(10.0),
+                risk_policy=_AllowRisk(),
+            )
+            market = SimpleNamespace(
+                id="KXNBATEST-26APR29-HOME",
+                exchange="kalshi",
+                question="Will the NBA test team win?",
+                category="sports",
+                yes_price=0.4,
+                no_price=0.6,
+                volume=1000,
+                closes_at=datetime.now(timezone.utc) + timedelta(hours=6),
+                metadata={"market_group": "sports", "series": "nba"},
+            )
+            exchange = SimpleNamespace(
+                get_markets_direct=lambda **kwargs: [market],
+                get_order_book=lambda market_id: None,
+                get_market_bid_ask=lambda market_id: {
+                    "best_yes_ask": 0.42,
+                    "best_yes_bid": 0.41,
+                    "best_no_ask": 0.59,
+                    "best_no_bid": 0.58,
+                },
+            )
+
+            lab.run(exchange)
+            row = load_jsonl(lab.predictions_path)[0]
+
+            self.assertEqual(row["decision_artifact"]["order_book_snapshot"]["source"], "book")
+            self.assertEqual(row["decision_artifact"]["order_book_snapshot"]["data"]["best_yes_ask"], 0.42)
+            self.assertEqual(row["decision_artifact"]["execution_snapshot_source"], "book")
+            self.assertEqual(row["shared_pipeline"]["order_book_source"], "book")
+
+    def test_prediction_lab_shared_pipeline_falls_back_to_bid_ask_when_order_book_raises(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "data_dir": tmpdir,
+                "prediction_lab": {
+                    "enabled": True,
+                    "mode": "collector",
+                    "groups": ["sports"],
+                    "score_only": False,
+                    "record_all_scored": True,
+                    "collector_record_predictions": True,
+                    "use_shared_pipeline": True,
+                },
+                "strategy": {"min_edge": 0.01, "min_confidence": 0.5, "enable_news": False, "enable_social": False, "enable_ai": False},
+                "max_entry_price": 0.7,
+            }
+            lab = PredictionLab(config)
+            signal = {
+                "market_id": "KXNBATEST-26APR29-HOME",
+                "exchange": "kalshi",
+                "question": "Will the NBA test team win?",
+                "direction": "BUY_YES",
+                "model_probability": 0.7,
+                "market_price": 0.4,
+                "yes_market_price": 0.4,
+                "no_market_price": 0.6,
+                "edge": 0.3,
+                "confidence": 0.9,
+                "signals": {"unit": 0.7},
+            }
+            lab.decision_evaluator = DecisionPipelineEvaluator(
+                lab.config,
+                strategy=_TracedSignalStrategy(signal),
+                kelly_sizer=_FixedKelly(10.0),
+                risk_policy=_AllowRisk(),
+            )
+            market = SimpleNamespace(
+                id="KXNBATEST-26APR29-HOME",
+                exchange="kalshi",
+                question="Will the NBA test team win?",
+                category="sports",
+                yes_price=0.4,
+                no_price=0.6,
+                volume=1000,
+                closes_at=datetime.now(timezone.utc) + timedelta(hours=6),
+                metadata={"market_group": "sports", "series": "nba"},
+            )
+            exchange = SimpleNamespace(
+                get_markets_direct=lambda **kwargs: [market],
+                get_order_book=lambda market_id: (_ for _ in ()).throw(RuntimeError("book unavailable")),
+                get_market_bid_ask=lambda market_id: {
+                    "best_yes_ask": 0.42,
+                    "best_yes_bid": 0.41,
+                    "best_no_ask": 0.59,
+                    "best_no_bid": 0.58,
+                },
+            )
+
+            lab.run(exchange)
+            row = load_jsonl(lab.predictions_path)[0]
+
+            self.assertEqual(row["decision_artifact"]["order_book_snapshot"]["source"], "book")
+            self.assertEqual(row["decision_artifact"]["order_book_snapshot"]["data"]["best_yes_ask"], 0.42)
+            self.assertEqual(row["decision_artifact"]["execution_snapshot_source"], "book")
+            self.assertEqual(row["shared_pipeline"]["order_book_source"], "book")
 
     def test_prediction_lab_snapshot_rows_include_observer_metadata_and_are_not_deduped(self):
         with tempfile.TemporaryDirectory() as tmpdir:

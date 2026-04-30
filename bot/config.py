@@ -69,6 +69,7 @@ def _default_prediction_lab_config() -> dict[str, Any]:
         "flat_notional_usd": 10.0,
         "fresh_wallet_bankroll_usd": 100.0,
         "use_sizing_logic": False,
+        "use_shared_pipeline": False,
         "min_confidence_to_record": 0.0,
         "min_edge_to_record": 0.0,
         "record_all_scored": True,
@@ -167,6 +168,7 @@ def _normalize_storage_config(config: dict) -> dict:
     prediction_lab["min_confidence_to_record"] = float(prediction_lab.get("min_confidence_to_record", 0.0) or 0.0)
     prediction_lab["min_edge_to_record"] = float(prediction_lab.get("min_edge_to_record", 0.0) or 0.0)
     prediction_lab["record_all_scored"] = bool(prediction_lab.get("record_all_scored", True))
+    prediction_lab["use_shared_pipeline"] = bool(prediction_lab.get("use_shared_pipeline", False))
     prediction_lab["seed_daily_temp_first"] = bool(prediction_lab.get("seed_daily_temp_first", True))
     prediction_lab["allow_non_weather"] = bool(prediction_lab.get("allow_non_weather", False))
     prediction_lab["disable_news"] = bool(prediction_lab.get("disable_news", True))
