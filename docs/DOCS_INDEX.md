@@ -1,6 +1,6 @@
 # Prediction Bot Docs Index
 
-_Last updated: 2026-04-26_
+_Last updated: 2026-04-29_
 
 ## Why this file exists
 
@@ -13,11 +13,11 @@ Use it when you need to answer:
 - what is the planned direction of the project from here?
 
 This index reflects the current direction:
-- the current `feature/prediction-lab` branch should be cleaned, committed, and merged
-- Prediction Lab is considered good enough if it supports long-run scaled decision capture
-- parity is materially improved but not fully finished
-- the next branch should focus on live lifecycle hardening
-- deferred parity follow-ups remain tracked and intentional
+- Prediction Lab is now a primary trade-finding and calibration surface
+- parity and live-lifecycle groundwork are materially improved but not fully finished
+- tiny supervised live is plausible with strict caps
+- unattended live still needs more lifecycle/reconciliation/audit hardening
+- the immediate high-value direction is to use Prediction Lab evidence to improve trade selection
 
 ---
 
@@ -27,11 +27,11 @@ This index reflects the current direction:
 Start here for the big picture.
 
 Use it to understand:
-- what this branch is trying to achieve
-- why Prediction Lab and parity are related but distinct
-- what is good enough to checkpoint now
-- why live hardening is the next branch
-- what parity work is intentionally deferred, not abandoned
+- where the project is now
+- why Prediction Lab, parity, and live hardening are related but distinct
+- why Prediction Lab is now the main trade-finding surface
+- why tiny supervised live is plausible but unattended live is still premature
+- what work remains intentionally active
 
 If you only read one doc first, read this one.
 
@@ -89,18 +89,29 @@ This is the low-level contract doc.
 ---
 
 ### 6. `docs/LIVE_LIFECYCLE_HARDENING_SPEC.md`
-Read this when starting the next branch.
+Read this when working on the remaining live-safety gap.
 
 Use it to understand:
-- why live correctness is now the main blocker
-- what work belongs in the next branch
+- why live correctness is still the blocker for unattended deployment
 - how to harden reconciliation, lifecycle transitions, startup safety, settlement, and failure handling
 
-This is the main spec for the upcoming live-hardening workstream.
+This is the main spec for the remaining live-hardening workstream.
 
 ---
 
-### 7. `docs/LIVE_DEPLOYMENT_READINESS_PLAN.md`
+### 7. `docs/PREDICTION_LAB_TUNING_DIRECTION_SPEC.md`
+Read this for the current immediate strategy direction.
+
+Use it to understand:
+- why Prediction Lab should now drive trade-finding improvements
+- how to use broad paper evidence without overtrusting live anecdotes
+- how to promote only strong logic changes into supervised live
+
+This is the strategy-iteration bridge between current readiness and future deployment.
+
+---
+
+### 8. `docs/LIVE_DEPLOYMENT_READINESS_PLAN.md`
 Read this when the question becomes "what must be true before unattended or true deployment is responsible?"
 
 Use it to understand:
@@ -113,7 +124,7 @@ This is the main bridge from current hardening work to real deployment readiness
 
 ---
 
-### 8. `docs/LIVE_IMPLEMENTATION_BUILD_ORDER_CHECKLIST.md`
+### 9. `docs/LIVE_IMPLEMENTATION_BUILD_ORDER_CHECKLIST.md`
 Read this when you want the concrete implementation order.
 
 Use it to understand:
@@ -126,7 +137,7 @@ This is the execution checklist that turns the broader specs into a practical bu
 
 ---
 
-### 9. `docs/LIVE_CANARY_READINESS.md`
+### 10. `docs/LIVE_CANARY_READINESS.md`
 Read this only when preparing a tiny supervised live test.
 
 Use it to understand:
@@ -143,6 +154,7 @@ This is a launch-readiness note, not a build spec.
 ### Strategic layer
 These tell us where the project is going:
 - `docs/OVERALL_DIRECTION_SPEC.md`
+- `docs/PREDICTION_LAB_TUNING_DIRECTION_SPEC.md`
 - `LIVE_PARITY_CHECKLIST.md`
 - `docs/LIVE_DEPLOYMENT_READINESS_PLAN.md`
 - `docs/LIVE_IMPLEMENTATION_BUILD_ORDER_CHECKLIST.md`
@@ -165,6 +177,7 @@ These are narrower supporting specs for adjacent workstreams:
 - `docs/architecture/event_retrade_v2_spec.md` — stronger retrade follow-up pass
 - `docs/architecture/paper_live_rollout_log.md` — rollout logging concept
 - `docs/architecture/paper_live_rollout_log_and_standby_spec.md` — rollout + standby design
+- `docs/architecture/prediction_lab_shared_pipeline_spec.md` — shared collector/replay/paper/live decision-pipeline architecture for Prediction Lab as a wrapper, not duplicated logic
 - `docs/architecture/prediction_lab_long_run_collection_spec.md` — Prediction Lab long-run collection direction
 - `docs/architecture/prediction_lab_long_run_collection_v1_spec.md` — earlier/v1 collection version
 
@@ -178,6 +191,7 @@ Primary role:
 - periodic market scanning
 - broad decision capture
 - training/review visibility
+- trade-finding calibration
 - not overloading the market/API
 
 Success for now means it can:
@@ -185,6 +199,7 @@ Success for now means it can:
 - scan on controlled intervals like 15 minutes
 - record decisions and snapshots at scale
 - help us inspect what the bot would do across the market
+- highlight where the logic should be tightened, relaxed, or re-ranked
 
 ### Parity
 Primary role:
@@ -202,18 +217,19 @@ Primary role:
 - protect against reconciliation drift, uncertain orders, restart ambiguity, and lifecycle mistakes
 
 Current state:
-- next priority after this branch is merged
+- still required for unattended live
+- should continue, but does not replace the immediate need to improve trade selection via Prediction Lab
 
 ---
 
 ## Simple rule for future changes
 
-### Put work on the current/merge branch if it mostly improves:
+### Prioritize work now if it mostly improves:
 - Prediction Lab long-run usefulness
-- branch cleanup and merge readiness
+- trade-finding analysis and calibration
 - parity visibility that is needed to explain current behavior clearly
 
-### Put work on the next branch if it mostly improves:
+### Treat work as deployment-hardening lane if it mostly improves:
 - live lifecycle correctness
 - restart/recovery safety
 - reconciliation severity behavior
@@ -232,8 +248,8 @@ If you are unsure where to start:
 5. use `docs/LIVE_IMPLEMENTATION_BUILD_ORDER_CHECKLIST.md` for the concrete build order
 
 That reading path matches the current plan:
-- merge this branch
-- then do live hardening
-- then use the deployment-readiness plan to sequence rollout and proof
-- then use the build-order checklist to drive implementation
-- then return for deferred parity cleanup where needed
+- use Prediction Lab to improve trade-finding logic deliberately
+- keep tiny supervised live conservative
+- continue the remaining live-hardening work needed for unattended deployment
+- use the deployment-readiness plan to sequence rollout and proof
+- use the build-order checklist when doing heavier lifecycle/reconciliation implementation
