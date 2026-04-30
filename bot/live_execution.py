@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, Protocol
 
+from bot.decision_pipeline import build_pre_execution_decision_artifact
 from bot.exchanges.base import BaseExchange
 from bot.shared_core import TradeContext, TradeDecision, build_execution_snapshot
 from bot.trade_audit import (
@@ -253,6 +254,26 @@ class RunnerLiveExecutionAdapter:
     def _intent_fingerprint(self, exchange_name: str, market_id: str, direction: str) -> str:
         return f"{exchange_name}:{market_id}:{self._normalize_direction(direction)}"
 
+    def _build_decision_artifact(
+        self,
+        *,
+        signal: dict,
+        decision: Any,
+        context: TradeContext | None = None,
+        execution_snapshot: dict[str, Any] | None = None,
+        warnings: list[str] | None = None,
+    ) -> dict[str, Any]:
+        return build_pre_execution_decision_artifact(
+            mode="live",
+            context=context,
+            decision=decision,
+            signal=signal,
+            source_context=signal,
+            execution_snapshot=execution_snapshot,
+            config_snapshot=self.host.config,
+            warnings=warnings,
+        )
+
     def _matching_open_intent_orders(self, exchange_name: str, market_id: str, direction: str) -> list[dict]:
         fingerprint = self._intent_fingerprint(exchange_name, market_id, direction)
         terminal_statuses = {"canceled", "cancelled", "closed", "expired", "failed", "filled", "rejected", "resolved"}
@@ -331,6 +352,7 @@ class RunnerLiveExecutionAdapter:
                 reason_code=identity_reason_code,
                 reasoning={"live_identity": {"runtime": runtime_identity}},
             )
+            decision_artifact = self._build_decision_artifact(signal=signal, decision=identity_decision)
             self._append_rejected_trade_row(
                 signal=signal,
                 exchange=exchange,
@@ -343,11 +365,13 @@ class RunnerLiveExecutionAdapter:
                 failure_stage="identity",
                 execution_revalidated=False,
                 execution_revalidation_outcome=None,
+                decision_artifact=decision_artifact,
             )
             return {
                 "blocked_reason": identity_reason_code,
                 "decision": identity_decision,
                 "identity": runtime_identity,
+                "decision_artifact": decision_artifact,
             }
 
         existing_gate = getattr(self.host, "reconciliation_gate", {}) or {}
@@ -368,6 +392,7 @@ class RunnerLiveExecutionAdapter:
                 reason_code=reason_code,
                 reasoning={"reconciliation_gate": {"verdict": "blocked", "issues": gate_issues, "recovery_state": recovery_state}},
             )
+            decision_artifact = self._build_decision_artifact(signal=signal, decision=gated_decision)
             self._append_rejected_trade_row(
                 signal=signal,
                 exchange=exchange,
@@ -380,12 +405,14 @@ class RunnerLiveExecutionAdapter:
                 failure_stage="reconciliation",
                 execution_revalidated=False,
                 execution_revalidation_outcome=None,
+                decision_artifact=decision_artifact,
             )
             return {
                 "blocked_reason": reason_code,
                 "decision": gated_decision,
                 "reconciliation_issues": gate_issues,
                 "recovery_state": recovery_state,
+                "decision_artifact": decision_artifact,
             }
 
         pre_trade_refresh = self.host.live_sync.refresh_before_execution(exchange_name, exchange)
@@ -422,6 +449,7 @@ class RunnerLiveExecutionAdapter:
                     }
                 },
             )
+            decision_artifact = self._build_decision_artifact(signal=signal, decision=gated_decision)
             self._append_rejected_trade_row(
                 signal=signal,
                 exchange=exchange,
@@ -434,6 +462,7 @@ class RunnerLiveExecutionAdapter:
                 failure_stage="reconciliation",
                 execution_revalidated=False,
                 execution_revalidation_outcome=None,
+                decision_artifact=decision_artifact,
             )
             return {
                 "blocked_reason": reason_code,
@@ -441,6 +470,7 @@ class RunnerLiveExecutionAdapter:
                 "reconciliation_issues": refresh_issues,
                 "recovery_state": recovery_state,
                 "refresh": {"pre_trade_refresh": dict(pre_trade_refresh)},
+                "decision_artifact": decision_artifact,
             }
 
         duplicate_orders = self._matching_open_intent_orders(exchange_name, market_id, decision.action)
@@ -476,6 +506,7 @@ class RunnerLiveExecutionAdapter:
                     }
                 },
             )
+            decision_artifact = self._build_decision_artifact(signal=signal, decision=duplicate_decision)
             self._append_rejected_trade_row(
                 signal=signal,
                 exchange=exchange,
@@ -488,6 +519,7 @@ class RunnerLiveExecutionAdapter:
                 failure_stage="idempotency",
                 execution_revalidated=False,
                 execution_revalidation_outcome=None,
+                decision_artifact=decision_artifact,
             )
             return {
                 "blocked_reason": reason_code,
@@ -495,6 +527,7 @@ class RunnerLiveExecutionAdapter:
                 "reconciliation_issues": gate_issues,
                 "duplicate_intent": duplicate_decision.reasoning["duplicate_intent"],
                 "refresh": {"pre_trade_refresh": dict(pre_trade_refresh)},
+                "decision_artifact": decision_artifact,
             }
 
         bid_ask = None
@@ -540,6 +573,12 @@ class RunnerLiveExecutionAdapter:
             min_confidence=strategy_cfg.get("min_confidence", self.host.config.get("min_confidence", 0.50)),
             max_entry_price=self.host.config.get("max_entry_price", 0.70),
         )
+        live_decision_artifact = self._build_decision_artifact(
+            signal=live_signal,
+            decision=live_decision,
+            context=live_context,
+            execution_snapshot=execution_snapshot,
+        )
         if not live_decision.approved:
             logger.info(f"🛑 Live revalidation skipped: {live_decision.reason}")
             self._append_rejected_trade_row(
@@ -554,6 +593,7 @@ class RunnerLiveExecutionAdapter:
                 failure_stage="revalidation",
                 execution_revalidated=True,
                 execution_revalidation_outcome="rejected",
+                decision_artifact=live_decision_artifact,
             )
             return None
 
@@ -574,6 +614,7 @@ class RunnerLiveExecutionAdapter:
                 failure_stage="sizing",
                 execution_revalidated=True,
                 execution_revalidation_outcome="approved",
+                decision_artifact=live_decision_artifact,
             )
             return None
 
@@ -592,6 +633,7 @@ class RunnerLiveExecutionAdapter:
                 failure_stage="placement",
                 execution_revalidated=True,
                 execution_revalidation_outcome="approved",
+                decision_artifact=live_decision_artifact,
             )
             return None
 
@@ -631,6 +673,12 @@ class RunnerLiveExecutionAdapter:
                     }
                 },
             )
+            decision_artifact = self._build_decision_artifact(
+                signal=live_signal,
+                decision=uncertain_decision,
+                context=live_context,
+                execution_snapshot=execution_snapshot,
+            )
             self._append_rejected_trade_row(
                 signal=signal,
                 exchange=exchange,
@@ -643,12 +691,14 @@ class RunnerLiveExecutionAdapter:
                 failure_stage="placement",
                 execution_revalidated=True,
                 execution_revalidation_outcome="approved",
+                decision_artifact=decision_artifact,
             )
             return {
                 "blocked_reason": uncertainty_reason,
                 "decision": uncertain_decision,
                 "reconciliation_issues": gate_issues,
                 "refresh": {"pre_trade_refresh": dict(pre_trade_refresh), "post_uncertainty_refresh": dict(post_uncertainty_refresh)},
+                "decision_artifact": decision_artifact,
             }
 
         order_id = raw_order_id
@@ -774,6 +824,7 @@ class RunnerLiveExecutionAdapter:
             "available_cash_before": max(0.0, available_cash_after_entry + infer_reserved_capital(order_status, filled_size=filled_size, remaining_size=remaining_size)),
             "available_cash_after_entry": available_cash_after_entry,
             "event_key": trade_event_key(signal),
+            "decision_artifact": live_decision_artifact,
         }
         canonical_row = apply_execution_audit_contract(executed_row)
         self.host.trade_history.append(canonical_row)
@@ -819,6 +870,7 @@ class RunnerLiveExecutionAdapter:
         failure_stage: str,
         execution_revalidated: bool,
         execution_revalidation_outcome: str | None,
+        decision_artifact: dict[str, Any] | None = None,
     ) -> None:
         decision_trace = dict(getattr(decision, "reasoning", {}) or {})
         parity_mode = dict((decision_trace or {}).get("parity_mode", {}) or {})
@@ -878,6 +930,7 @@ class RunnerLiveExecutionAdapter:
             "available_cash_after_entry": available_cash,
             "event_key": trade_event_key(signal),
             "message": message,
+            "decision_artifact": decision_artifact,
         }
         canonical_row = apply_execution_audit_contract(rejected_row)
         self.host.trade_history.append(canonical_row)
