@@ -9,7 +9,12 @@ from math import isfinite
 from pathlib import Path
 from typing import Any, Optional
 
-from bot.decision_pipeline import DecisionPipelineEvaluator, build_fixed_opportunity_account_state
+from bot.decision_pipeline import (
+    DecisionPipelineEvaluator,
+    FixedOpportunityAccountStateProvider,
+    OPPORTUNITY_MODE,
+    PAPER_LAB_MODE,
+)
 from bot.file_ops import append_jsonl, atomic_write_json, load_jsonl, locked_file, rewrite_jsonl
 from bot.strategies.enhanced import EnhancedStrategyEngine, KellySizer
 from bot.market_classification import apply_classification_metadata, classify_market_object
@@ -70,9 +75,15 @@ class PredictionLab:
         self.min_confidence_to_record = float(self.lab_cfg.get("min_confidence_to_record", 0.0) or 0.0)
         self.min_edge_to_record = float(self.lab_cfg.get("min_edge_to_record", 0.0) or 0.0)
         self.hypothetical_mode = self._normalize_hypothetical_mode(self.lab_cfg.get("hypothetical_notional_mode", "flat"))
+        self.paper_lab_mode = self._normalize_paper_lab_mode(self.lab_cfg.get("paper_lab_mode", OPPORTUNITY_MODE))
         self.flat_notional_usd = float(self.lab_cfg.get("flat_notional_usd", 10.0) or 10.0)
-        fresh_wallet_bankroll = self.lab_cfg.get("fresh_wallet_bankroll_usd", 100.0)
-        self.fresh_wallet_bankroll_usd = float(100.0 if fresh_wallet_bankroll is None else fresh_wallet_bankroll)
+        opportunity_bankroll = self.lab_cfg.get("opportunity_bankroll_usd", self.lab_cfg.get("fresh_wallet_bankroll_usd", 100.0))
+        self.opportunity_bankroll_usd = float(100.0 if opportunity_bankroll is None else opportunity_bankroll)
+        self.fresh_wallet_bankroll_usd = self.opportunity_bankroll_usd
+        self.opportunity_account_provider = FixedOpportunityAccountStateProvider(
+            bankroll_usd=self.opportunity_bankroll_usd,
+            mode=PAPER_LAB_MODE,
+        )
         economics_cfg = self.config.get("trade_economics", {}) or {}
         self.kelly = KellySizer(
             fee_rate=self.config.get("kalshi_fee_rate"),
@@ -386,6 +397,8 @@ class PredictionLab:
             "experiment_id": self.experiment_id,
             "strategy_version": self.strategy_version,
             "hypothetical": self._build_hypothetical_metadata(market, signal),
+            "paper_lab": self._paper_lab_row_metadata(decision_artifact),
+            "opportunity_mode": self._opportunity_row_metadata(decision_artifact),
             **self._observation_metadata(),
         }
         weather_risk = self._build_weather_risk_metadata(market, signal, weather_context=context)
@@ -425,6 +438,8 @@ class PredictionLab:
             "decision_type": decision_type,
             "recorded_prediction": prediction_recorded,
             "collector_interval_seconds": self.collector_interval_seconds,
+            "paper_lab": self._paper_lab_row_metadata(decision_artifact),
+            "opportunity_mode": self._opportunity_row_metadata(decision_artifact),
             **self._observation_metadata(),
         }
         weather_risk = self._build_weather_risk_metadata(market, signal)
@@ -439,17 +454,23 @@ class PredictionLab:
         if self.decision_evaluator is None:
             raise RuntimeError("Shared decision pipeline is not enabled")
         metadata = dict(getattr(market, "metadata", {}) or {})
-        account_state = build_fixed_opportunity_account_state(self.fresh_wallet_bankroll_usd)
+        account_state = self.opportunity_account_provider.get_account_state()
         order_book = self._fetch_order_book(exchange, market)
         artifact = self.decision_evaluator.evaluate(
             market,
             account_state=account_state,
             order_book=order_book,
-            source_context={"market_metadata": metadata},
-            mode="prediction_lab",
+            source_context={
+                "market_metadata": metadata,
+                "paper_lab": self._paper_lab_config_metadata(),
+            },
+            mode=PAPER_LAB_MODE,
             config_snapshot=self.config,
         )
-        return artifact.to_dict()
+        artifact_dict = artifact.to_dict()
+        artifact_dict["paper_lab"] = self._paper_lab_row_metadata(artifact_dict)
+        artifact_dict["opportunity_mode"] = self._opportunity_row_metadata(artifact_dict)
+        return artifact_dict
 
     @staticmethod
     def _fetch_order_book(exchange: Any | None, market: Any) -> dict[str, Any] | None:
@@ -503,12 +524,70 @@ class PredictionLab:
 
     @staticmethod
     def _shared_pipeline_summary(decision_artifact: dict[str, Any]) -> dict[str, Any]:
+        shared_core_decision = decision_artifact.get("shared_core_decision") if isinstance(decision_artifact.get("shared_core_decision"), dict) else {}
+        opportunity = decision_artifact.get("opportunity_mode") if isinstance(decision_artifact.get("opportunity_mode"), dict) else {}
         return {
             "enabled": True,
+            "mode": decision_artifact.get("mode"),
             "final_action": decision_artifact.get("final_action"),
             "final_reason_code": decision_artifact.get("final_reason_code"),
             "execution_snapshot_source": decision_artifact.get("execution_snapshot_source"),
             "order_book_source": (decision_artifact.get("order_book_snapshot") or {}).get("source"),
+            "opportunity_mode": opportunity.get("mode"),
+            "account_state_provider": opportunity.get("account_state_provider"),
+            "bankroll_usd": opportunity.get("bankroll_usd"),
+            "kelly_position_size_usd": (opportunity.get("kelly") or {}).get("requested_size")
+            if isinstance(opportunity.get("kelly"), dict)
+            else None,
+            "requested_position_size_usd": shared_core_decision.get("requested_position_size"),
+            "approved_position_size_usd": shared_core_decision.get("position_size"),
+        }
+
+    def _paper_lab_config_metadata(self) -> dict[str, Any]:
+        return {
+            "mode": PAPER_LAB_MODE,
+            "paper_lab_mode": self.paper_lab_mode,
+            "opportunity_bankroll_usd": round(max(0.0, self.opportunity_bankroll_usd), 4),
+            "hypothetical_notional_mode": self.hypothetical_mode,
+            "legacy_fresh_wallet_bankroll_usd": round(max(0.0, self.fresh_wallet_bankroll_usd), 4),
+        }
+
+    def _paper_lab_row_metadata(self, decision_artifact: dict[str, Any] | None = None) -> dict[str, Any]:
+        opportunity = self._opportunity_row_metadata(decision_artifact)
+        return {
+            **self._paper_lab_config_metadata(),
+            "account_state_provider": opportunity["account_state_provider"],
+            "isolated_bankroll": opportunity["isolated_bankroll"],
+            "mutates_portfolio_account": opportunity["mutates_portfolio_account"],
+        }
+
+    def _opportunity_row_metadata(self, decision_artifact: dict[str, Any] | None = None) -> dict[str, Any]:
+        artifact_opportunity = (
+            decision_artifact.get("opportunity_mode")
+            if isinstance(decision_artifact, dict) and isinstance(decision_artifact.get("opportunity_mode"), dict)
+            else {}
+        )
+        account_snapshot = (
+            decision_artifact.get("account_state_snapshot")
+            if isinstance(decision_artifact, dict) and isinstance(decision_artifact.get("account_state_snapshot"), dict)
+            else {}
+        )
+        account_metadata = account_snapshot.get("metadata") if isinstance(account_snapshot.get("metadata"), dict) else {}
+        bankroll = artifact_opportunity.get(
+            "bankroll_usd",
+            account_metadata.get("effective_tradable_cash", self.opportunity_bankroll_usd),
+        )
+        return {
+            "mode": OPPORTUNITY_MODE,
+            "paper_lab_mode": PAPER_LAB_MODE,
+            "account_state_provider": artifact_opportunity.get(
+                "account_state_provider",
+                account_metadata.get("account_state_provider", "fixed_opportunity"),
+            ),
+            "bankroll_usd": round(max(0.0, float(bankroll or 0.0)), 4),
+            "isolated_bankroll": True,
+            "mutates_portfolio_account": False,
+            "kelly": artifact_opportunity.get("kelly"),
         }
 
     def _build_weather_risk_metadata(
@@ -600,6 +679,8 @@ class PredictionLab:
             approved_size = self.flat_notional_usd if is_trade_direction else 0.0
             return {
                 "mode": "flat",
+                "paper_lab_mode": PAPER_LAB_MODE,
+                "opportunity_mode": self.paper_lab_mode,
                 "sizing_method": "flat",
                 "notional_usd": self.flat_notional_usd,
                 "position_size_usd": round(approved_size, 4),
@@ -608,11 +689,12 @@ class PredictionLab:
                 "entry_price": entry_price,
                 "win_probability": win_probability,
                 "bankroll_usd": None,
+                "opportunity_bankroll_usd": round(max(0.0, self.opportunity_bankroll_usd), 4),
                 "zero_reason": None if approved_size > 0 else "not_trade_direction",
                 "reason_if_zero": None if approved_size > 0 else "not_trade_direction",
             }
 
-        bankroll = max(0.0, self.fresh_wallet_bankroll_usd)
+        bankroll = max(0.0, self.opportunity_bankroll_usd)
         requested_size = 0.0
         approved_size = 0.0
         zero_reason = None
@@ -640,7 +722,12 @@ class PredictionLab:
         approved_size = round(approved_size if isfinite(approved_size) and approved_size > 0 else 0.0, 4)
         return {
             "mode": "fresh_kelly",
+            "paper_lab_mode": PAPER_LAB_MODE,
+            "opportunity_mode": self.paper_lab_mode,
             "sizing_method": "fresh_wallet_kelly",
+            "account_state_provider": "fixed_opportunity",
+            "isolated_bankroll": True,
+            "mutates_portfolio_account": False,
             "notional_usd": approved_size,
             "position_size_usd": approved_size,
             "approved_position_size_usd": approved_size,
@@ -648,6 +735,7 @@ class PredictionLab:
             "entry_price": entry_price,
             "win_probability": win_probability,
             "bankroll_usd": round(bankroll, 4),
+            "opportunity_bankroll_usd": round(bankroll, 4),
             "zero_reason": zero_reason,
             "reason_if_zero": zero_reason,
             "kelly": {
@@ -860,9 +948,16 @@ class PredictionLab:
     @staticmethod
     def _normalize_hypothetical_mode(value: Any) -> str:
         normalized = str(value or "flat").strip().lower()
-        if normalized in {"fresh_kelly", "kelly"}:
+        if normalized in {"fresh_kelly", "kelly", "opportunity", "paper_lab"}:
             return "fresh_kelly"
         return "flat"
+
+    @staticmethod
+    def _normalize_paper_lab_mode(value: Any) -> str:
+        normalized = str(value or OPPORTUNITY_MODE).strip().lower()
+        if normalized in {"paper_lab", "opportunity", "opportunity_mode"}:
+            return OPPORTUNITY_MODE
+        return normalized or OPPORTUNITY_MODE
 
     @staticmethod
     def _coerce_unit_float(value: Any) -> float | None:

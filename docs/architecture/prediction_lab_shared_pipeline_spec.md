@@ -600,6 +600,12 @@ Exit criteria:
 - Kelly size is visible.
 - Result does not mutate a portfolio account.
 
+Implementation checkpoint 2026-04-30:
+
+- Phase 3 replay criteria are covered by `bot/prediction_lab_replay.py`, `scripts/prediction_lab_replay.py`, and `tests/test_prediction_lab_replay.py`.
+- Phase 4 is implemented through `FixedOpportunityAccountStateProvider`, explicit `paper_lab` / `opportunity` metadata, configurable `prediction_lab.opportunity_bankroll_usd`, and Prediction Lab row/artifact fields showing isolated bankroll, Kelly sizing, and `mutates_portfolio_account: false`.
+- Verification gate: `PYTHONPATH=. pytest -q tests/test_prediction_lab_collect.py tests/test_prediction_lab_replay.py tests/test_decision_pipeline.py`.
+
 ### Phase 5 — Paper portfolio/live alignment
 
 - Paper portfolio and live use the runner for the same pre-execution decision artifact.

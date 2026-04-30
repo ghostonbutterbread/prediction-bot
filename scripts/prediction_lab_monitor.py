@@ -124,15 +124,19 @@ def collector_matches(cmdline: list[str], expected: list[str] = EXPECTED_COLLECT
     for index, part in enumerate(cmdline):
         if part == "--config" and index + 1 < len(cmdline):
             return Path(cmdline[index + 1]).name == Path(expected_config).name
-    return False
+    return Path(expected_config).name == "config.yaml"
 
 
-def find_collector_processes(cmdlines: list[tuple[int, list[str]]] | None = None) -> list[dict[str, Any]]:
+def find_collector_processes(
+    cmdlines: list[tuple[int, list[str]]] | None = None,
+    *,
+    expected: list[str] = EXPECTED_COLLECTOR_ARGV,
+) -> list[dict[str, Any]]:
     if cmdlines is None:
         cmdlines = read_proc_cmdlines()
     matches = []
     for pid, cmdline in cmdlines:
-        if collector_matches(cmdline):
+        if collector_matches(cmdline, expected=expected):
             matches.append({"pid": pid, "cmdline": cmdline})
     return matches
 
@@ -192,7 +196,13 @@ def evaluate_health(
         if actual != expected:
             issues.append(MonitorIssue("config_drift", f"prediction_lab.{key}={actual!r}, expected {expected!r}", severity="warning"))
 
-    processes = find_collector_processes(cmdlines)
+    expected_collector_argv = [
+        "python3",
+        "scripts/prediction_lab_collect.py",
+        "--config",
+        str(config_path),
+    ]
+    processes = find_collector_processes(cmdlines, expected=expected_collector_argv)
     details["collector_processes"] = processes
     if not processes:
         issues.append(MonitorIssue("collector_not_running", "collector process is not running"))

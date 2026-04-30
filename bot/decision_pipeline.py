@@ -13,6 +13,10 @@ from bot.shared_core import AccountState, TradeContext, build_execution_snapshot
 from bot.strategies.enhanced import EnhancedStrategyEngine, KellySizer, StrategyTrace
 from bot.trade_audit import trade_event_key
 
+PAPER_LAB_MODE = "paper_lab"
+OPPORTUNITY_MODE = "opportunity"
+FIXED_OPPORTUNITY_ACCOUNT_SOURCE = "fixed_opportunity"
+
 
 @dataclass(slots=True)
 class DecisionPipelineInput:
@@ -35,6 +39,8 @@ class DecisionPipelineResult:
     strategy_trace: dict[str, Any]
     strategy_signal: dict[str, Any] | None
     source_context: dict[str, Any]
+    account_state_snapshot: dict[str, Any]
+    opportunity_mode: dict[str, Any] | None
     order_book: dict[str, Any] | None
     order_book_snapshot: dict[str, Any]
     execution_snapshot: dict[str, Any] | None
@@ -120,6 +126,8 @@ class DecisionPipelineEvaluator:
                 strategy_trace=trace.to_dict(),
                 strategy_signal=None,
                 source_context=source_context,
+                account_state_snapshot=_account_state_snapshot(pipeline_input.account_state),
+                opportunity_mode=_opportunity_mode_metadata(pipeline_input.account_state, pipeline_input.mode),
                 order_book=pipeline_input.order_book,
                 order_book_snapshot=order_book_snapshot,
                 execution_snapshot=None,
@@ -166,6 +174,8 @@ class DecisionPipelineEvaluator:
             strategy_trace=trace.to_dict(),
             strategy_signal=normalized_signal,
             source_context=source_context,
+            account_state_snapshot=_account_state_snapshot(pipeline_input.account_state),
+            opportunity_mode=_opportunity_mode_metadata(pipeline_input.account_state, pipeline_input.mode, decision_dict),
             order_book=pipeline_input.order_book,
             order_book_snapshot=order_book_snapshot,
             execution_snapshot=execution_snapshot,
@@ -233,7 +243,18 @@ class DecisionPipelineEvaluator:
         )
 
 
-def build_fixed_opportunity_account_state(bankroll_usd: float = 100.0) -> AccountState:
+@dataclass(slots=True)
+class FixedOpportunityAccountStateProvider:
+    """Provides a fresh isolated bankroll snapshot for one Paper Lab opportunity."""
+
+    bankroll_usd: float = 100.0
+    mode: str = PAPER_LAB_MODE
+
+    def get_account_state(self) -> AccountState:
+        return build_fixed_opportunity_account_state(self.bankroll_usd, mode=self.mode)
+
+
+def build_fixed_opportunity_account_state(bankroll_usd: float = 100.0, *, mode: str = PAPER_LAB_MODE) -> AccountState:
     bankroll = max(0.0, float(bankroll_usd or 0.0))
     return AccountState(
         starting_balance=bankroll,
@@ -243,11 +264,49 @@ def build_fixed_opportunity_account_state(bankroll_usd: float = 100.0) -> Accoun
         total_exposure=0.0,
         open_positions=0,
         metadata={
-            "mode": "paper_lab",
+            "mode": mode,
+            "paper_lab_mode": PAPER_LAB_MODE,
+            "opportunity_mode": OPPORTUNITY_MODE,
+            "account_state_provider": FIXED_OPPORTUNITY_ACCOUNT_SOURCE,
             "effective_tradable_cash": bankroll,
-            "source": "fixed_opportunity",
+            "source": FIXED_OPPORTUNITY_ACCOUNT_SOURCE,
+            "isolated_bankroll": True,
+            "mutates_portfolio_account": False,
         },
     )
+
+
+def _account_state_snapshot(account_state: AccountState) -> dict[str, Any]:
+    return {
+        "starting_balance": round(float(account_state.starting_balance), 4),
+        "current_balance": round(float(account_state.current_balance), 4),
+        "available_cash": round(float(account_state.available_cash), 4),
+        "reserved_capital": round(float(account_state.reserved_capital), 4),
+        "total_exposure": round(float(account_state.total_exposure), 4),
+        "open_positions": int(account_state.open_positions),
+        "metadata": dict(account_state.metadata or {}),
+    }
+
+
+def _opportunity_mode_metadata(
+    account_state: AccountState,
+    mode: str,
+    decision: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    metadata = dict(account_state.metadata or {})
+    if metadata.get("account_state_provider") != FIXED_OPPORTUNITY_ACCOUNT_SOURCE and metadata.get("source") != FIXED_OPPORTUNITY_ACCOUNT_SOURCE:
+        return None
+    shared_core_kelly = ((decision or {}).get("reasoning") or {}).get("kelly")
+    return {
+        "mode": OPPORTUNITY_MODE,
+        "paper_lab_mode": PAPER_LAB_MODE,
+        "runner_mode": mode,
+        "account_state_provider": FIXED_OPPORTUNITY_ACCOUNT_SOURCE,
+        "bankroll_usd": round(float(metadata.get("effective_tradable_cash", account_state.available_cash) or 0.0), 4),
+        "isolated_bankroll": True,
+        "mutates_portfolio_account": False,
+        "kelly": dict(shared_core_kelly) if isinstance(shared_core_kelly, dict) else None,
+    }
 
 
 def build_source_snapshot_envelope(

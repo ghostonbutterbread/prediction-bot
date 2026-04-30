@@ -66,7 +66,9 @@ def _default_prediction_lab_config() -> dict[str, Any]:
         "experiment_id": "default",
         "strategy_version": "v1",
         "hypothetical_notional_mode": "flat",
+        "paper_lab_mode": "opportunity",
         "flat_notional_usd": 10.0,
+        "opportunity_bankroll_usd": 100.0,
         "fresh_wallet_bankroll_usd": 100.0,
         "use_sizing_logic": False,
         "use_shared_pipeline": False,
@@ -143,7 +145,8 @@ def _normalize_storage_config(config: dict) -> dict:
         parity_mode["fallback_to_signal_prices"] = False
     config["parity_mode"] = parity_mode
 
-    prediction_lab = _deep_merge(_default_prediction_lab_config(), config.get("prediction_lab", {}) or {})
+    raw_prediction_lab = config.get("prediction_lab", {}) or {}
+    prediction_lab = _deep_merge(_default_prediction_lab_config(), raw_prediction_lab)
     groups = prediction_lab.get("groups") or []
     if isinstance(groups, str):
         groups = [part.strip() for part in groups.split(",") if part.strip()]
@@ -161,10 +164,23 @@ def _normalize_storage_config(config: dict) -> dict:
     prediction_lab["experiment_id"] = str(prediction_lab.get("experiment_id", "default") or "default")
     prediction_lab["strategy_version"] = str(prediction_lab.get("strategy_version", "v1") or "v1")
     hypothetical_mode = str(prediction_lab.get("hypothetical_notional_mode", "flat") or "flat").strip().lower()
-    prediction_lab["hypothetical_notional_mode"] = "fresh_kelly" if hypothetical_mode in {"fresh_kelly", "kelly"} else "flat"
+    prediction_lab["hypothetical_notional_mode"] = (
+        "fresh_kelly" if hypothetical_mode in {"fresh_kelly", "kelly", "opportunity", "paper_lab"} else "flat"
+    )
+    paper_lab_mode = str(prediction_lab.get("paper_lab_mode", "opportunity") or "opportunity").strip().lower()
+    prediction_lab["paper_lab_mode"] = "opportunity" if paper_lab_mode in {"opportunity", "paper_lab"} else paper_lab_mode
     prediction_lab["flat_notional_usd"] = float(prediction_lab.get("flat_notional_usd", 10.0) or 10.0)
-    fresh_wallet_bankroll = prediction_lab.get("fresh_wallet_bankroll_usd", 100.0)
-    prediction_lab["fresh_wallet_bankroll_usd"] = float(100.0 if fresh_wallet_bankroll is None else fresh_wallet_bankroll)
+    if "opportunity_bankroll_usd" in raw_prediction_lab:
+        opportunity_bankroll = raw_prediction_lab.get("opportunity_bankroll_usd")
+    else:
+        opportunity_bankroll = prediction_lab.get("fresh_wallet_bankroll_usd", 100.0)
+    opportunity_bankroll_value = float(100.0 if opportunity_bankroll is None else opportunity_bankroll)
+    prediction_lab["opportunity_bankroll_usd"] = opportunity_bankroll_value
+    if "fresh_wallet_bankroll_usd" in raw_prediction_lab:
+        fresh_wallet_bankroll = raw_prediction_lab.get("fresh_wallet_bankroll_usd")
+        prediction_lab["fresh_wallet_bankroll_usd"] = float(100.0 if fresh_wallet_bankroll is None else fresh_wallet_bankroll)
+    else:
+        prediction_lab["fresh_wallet_bankroll_usd"] = opportunity_bankroll_value
     prediction_lab["min_confidence_to_record"] = float(prediction_lab.get("min_confidence_to_record", 0.0) or 0.0)
     prediction_lab["min_edge_to_record"] = float(prediction_lab.get("min_edge_to_record", 0.0) or 0.0)
     prediction_lab["record_all_scored"] = bool(prediction_lab.get("record_all_scored", True))

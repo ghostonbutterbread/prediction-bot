@@ -92,8 +92,11 @@ def _build_position_performance(trades: list[dict]) -> dict:
     }
 
 
-def analyze() -> dict:
-    """Run full analysis and return structured insights."""
+def analyze(*, prune_logs: bool = True) -> dict:
+    """Run full analysis and return structured insights.
+
+    Set prune_logs=False for read-only report contexts.
+    """
     
     sessions = load_sessions()
     latest = sessions[-1] if sessions else {}
@@ -154,7 +157,7 @@ def analyze() -> dict:
     }
 
     config = load_config(PROJECT_ROOT / "config.yaml")
-    prune_result = prune_log_storage(config, project_root=PROJECT_ROOT)
+    prune_result = prune_log_storage(config, project_root=PROJECT_ROOT) if prune_logs else None
     storage_summary = summarize_log_storage(config, project_root=PROJECT_ROOT)
     if storage_summary:
         result["storage"] = {
