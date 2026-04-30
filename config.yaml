@@ -162,7 +162,7 @@ runtime:
   base_dir: data
 
 scan:
-  markets_per_exchange: 300
+  markets_per_exchange: 1000
   summary_sample_per_exchange: 25
   allowed_market_groups:
     - weather

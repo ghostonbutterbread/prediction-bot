@@ -76,6 +76,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from dotenv import load_dotenv
 load_dotenv()
 
+from bot.config import ensure_mode_storage_dir, load_config
 from bot.runner import PredictionBot
 from bot.simulator import Simulator
 from bot.dashboard import render_simple
@@ -108,52 +109,90 @@ def _env_int(name: str, default: int) -> int:
     return int(raw)
 
 
-def get_config():
+def get_config(config_path: str | Path | None = None):
+    config = load_config(config_path)
     paper_mode = os.getenv("PAPER_MODE", "true").lower() == "true"
     mode_dir = "paper" if paper_mode else "live"
 
-    trading_enabled = _env_bool("TRADING_ENABLED", True)
-    max_tradable_balance = _env_float("MAX_TRADABLE_BALANCE_USD", 0.0)
-    max_position_size_usd = _env_float("MAX_POSITION_SIZE_USD", 0.0)
-    status_update_interval_minutes = _env_int("STATUS_UPDATE_INTERVAL_MINUTES", 60)
+    loaded_trading = config.get("trading", {}) or {}
+    trading_enabled = _env_bool(
+        "TRADING_ENABLED",
+        bool(loaded_trading.get("enabled", loaded_trading.get("trading_enabled", config.get("trading_enabled", True)))),
+    )
+    max_tradable_balance = _env_float(
+        "MAX_TRADABLE_BALANCE_USD",
+        float(config.get("max_tradable_balance_usd", config.get("max_tradable_balance", 0.0)) or 0.0),
+    )
+    max_position_size_usd = _env_float(
+        "MAX_POSITION_SIZE_USD",
+        float(config.get("max_position_size_usd", 0.0) or 0.0),
+    )
+    loaded_alerts = config.get("alerts", {}) or {}
+    status_update_interval_minutes = _env_int(
+        "STATUS_UPDATE_INTERVAL_MINUTES",
+        int(loaded_alerts.get("status_update_interval_minutes", config.get("status_update_interval_minutes", 60)) or 60),
+    )
 
-    return {
-        "strategy": {
-            "min_edge": float(os.getenv("MIN_EDGE", "0.05")),
-            "min_confidence": float(os.getenv("MIN_CONFIDENCE", "0.50")),
-            "news_weight": float(os.getenv("NEWS_WEIGHT", "0.15")),
-            "ai_weight": float(os.getenv("AI_WEIGHT", "0.20")),
-            # News uses fallback sources (Yahoo Finance RSS, Bing News RSS).
-            # If all fail, paper mode fails closed instead of silently trading on
-            # redistributed lower-quality signals.
-            "enable_news": os.getenv("ENABLE_NEWS_FALLBACK", "true").lower() != "false",
-            "fail_closed_on_news_source_failure": _env_bool("FAIL_CLOSED_ON_NEWS_SOURCE_FAILURE", True),
-            "enable_weather_hidden_gem_safety_guard": _env_bool("ENABLE_WEATHER_HIDDEN_GEM_SAFETY_GUARD", True),
-            "enable_ai": False,   # Still off — AI calls depend on external LLM quota
-            "enable_social": False,  # Still off — Twitter/X API not configured
-        },
-        "kelly_fraction": float(os.getenv("KELLY_FRACTION", "0.5")),
-        "max_position_pct": float(os.getenv("MAX_POSITION_PCT", "0.10")),
-        "max_entry_price": float(os.getenv("MAX_ENTRY_PRICE", "0.70")),  # Entry price cap
-        "log_dir": os.getenv("LOG_DIR", f"data/{mode_dir}"),
-        "data_dir": os.getenv("DATA_DIR", f"data/{mode_dir}"),
-        "starting_balance": float(os.getenv("STARTING_BALANCE", "100.0")),
-        "enable_time_decay_ranking": os.getenv("TIME_DECAY_RANKING", "true").lower() == "true",
-        "paper_mode": paper_mode,
-        "trading_enabled": trading_enabled,
-        "max_tradable_balance_usd": max_tradable_balance,
-        "max_position_size_usd": max_position_size_usd,
-        "status_update_interval_minutes": status_update_interval_minutes,
-        "trading": {
-            "mode": "paper" if paper_mode else "live",
-            "trading_enabled": trading_enabled,
-        },
-        "alerts": {
-            "enabled": _env_bool("STATUS_ALERTS_ENABLED", True),
-            "status_update_interval_minutes": status_update_interval_minutes,
-            "send_hourly_status": _env_bool("SEND_HOURLY_STATUS", False),
-        },
-    }
+    strategy = dict(config.get("strategy", {}) or {})
+    strategy.setdefault("min_edge", 0.05)
+    strategy.setdefault("min_confidence", 0.50)
+    strategy.setdefault("news_weight", 0.15)
+    strategy.setdefault("ai_weight", 0.20)
+    strategy["min_edge"] = float(os.getenv("MIN_EDGE", strategy["min_edge"]))
+    strategy["min_confidence"] = float(os.getenv("MIN_CONFIDENCE", strategy["min_confidence"]))
+    strategy["news_weight"] = float(os.getenv("NEWS_WEIGHT", strategy["news_weight"]))
+    strategy["ai_weight"] = float(os.getenv("AI_WEIGHT", strategy["ai_weight"]))
+    # News uses fallback sources (Yahoo Finance RSS, Bing News RSS). If all fail,
+    # paper mode fails closed instead of silently trading on redistributed lower-quality signals.
+    strategy["enable_news"] = os.getenv("ENABLE_NEWS_FALLBACK", str(strategy.get("enable_news", True))).lower() != "false"
+    strategy["fail_closed_on_news_source_failure"] = _env_bool(
+        "FAIL_CLOSED_ON_NEWS_SOURCE_FAILURE",
+        bool(strategy.get("fail_closed_on_news_source_failure", True)),
+    )
+    strategy["enable_weather_hidden_gem_safety_guard"] = _env_bool(
+        "ENABLE_WEATHER_HIDDEN_GEM_SAFETY_GUARD",
+        bool(strategy.get("enable_weather_hidden_gem_safety_guard", True)),
+    )
+    strategy.setdefault("enable_ai", False)
+    strategy.setdefault("enable_social", False)
+    config["strategy"] = strategy
+
+    config["kelly_fraction"] = float(os.getenv("KELLY_FRACTION", config.get("kelly_fraction", 0.5)))
+    config["max_position_pct"] = float(os.getenv("MAX_POSITION_PCT", config.get("max_position_pct", 0.10)))
+    config["max_entry_price"] = float(os.getenv("MAX_ENTRY_PRICE", config.get("max_entry_price", 0.70)))
+    config["starting_balance"] = float(os.getenv("STARTING_BALANCE", config.get("starting_balance", 100.0)))
+    config["enable_time_decay_ranking"] = os.getenv(
+        "TIME_DECAY_RANKING",
+        str(config.get("enable_time_decay_ranking", True)),
+    ).lower() == "true"
+    config["paper_mode"] = paper_mode
+    config["trading_enabled"] = trading_enabled
+    config["max_tradable_balance_usd"] = max_tradable_balance
+    config["max_position_size_usd"] = max_position_size_usd
+    config["status_update_interval_minutes"] = status_update_interval_minutes
+
+    data_dir = os.getenv("DATA_DIR", config.get("data_dir", f"data/{mode_dir}"))
+    log_dir = os.getenv("LOG_DIR", config.get("log_dir", f"data/{mode_dir}"))
+    config["data_dir"] = str(ensure_mode_storage_dir(data_dir, mode_dir))
+    config["log_dir"] = str(ensure_mode_storage_dir(log_dir, mode_dir))
+    config.setdefault("runtime", {})["mode"] = mode_dir
+    config["runtime"]["mode_dir"] = config["data_dir"]
+    config.setdefault("logging", {})["log_dir"] = config["log_dir"]
+
+    trading = dict(config.get("trading", {}) or {})
+    trading["mode"] = mode_dir
+    trading["trading_enabled"] = trading_enabled
+    trading["enabled"] = trading_enabled
+    config["trading"] = trading
+
+    alerts = dict(config.get("alerts", {}) or {})
+    alerts["enabled"] = _env_bool("STATUS_ALERTS_ENABLED", bool(alerts.get("enabled", True)))
+    alerts["status_update_interval_minutes"] = status_update_interval_minutes
+    alerts["send_hourly_status"] = _env_bool("SEND_HOURLY_STATUS", bool(alerts.get("send_hourly_status", False)))
+    config["alerts"] = alerts
+
+    return config
+
 
 
 def create_bot_and_sim():

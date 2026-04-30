@@ -353,7 +353,9 @@ class Simulator:
                 },
             }
 
-        markets = exchange.get_markets(limit=100)
+        scan_cfg = self.config.get("scan", {}) or {}
+        markets_per_exchange = int(scan_cfg.get("markets_per_exchange", 100) or 100)
+        markets = exchange.get_markets(limit=markets_per_exchange)
         if not markets:
             return {"markets": 0, "signals": 0, "trades": 0}
         blockers = Counter()
