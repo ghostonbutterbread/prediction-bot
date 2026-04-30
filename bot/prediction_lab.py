@@ -9,6 +9,7 @@ from math import isfinite
 from pathlib import Path
 from typing import Any, Optional
 
+from bot.decision_pipeline import DecisionPipelineEvaluator, build_fixed_opportunity_account_state
 from bot.file_ops import append_jsonl, atomic_write_json, load_jsonl, locked_file, rewrite_jsonl
 from bot.strategies.enhanced import EnhancedStrategyEngine, KellySizer
 from bot.market_classification import apply_classification_metadata, classify_market_object
@@ -57,6 +58,7 @@ class PredictionLab:
         self.allow_non_weather = bool(self.lab_cfg.get("allow_non_weather", False))
         self.score_only = bool(self.lab_cfg.get("score_only", True))
         self.use_sizing_logic = bool(self.lab_cfg.get("use_sizing_logic", False))
+        self.use_shared_pipeline = bool(self.lab_cfg.get("use_shared_pipeline", False))
         self.collector_interval_seconds = int(self.lab_cfg.get("collector_interval_seconds", 900) or 900)
         self.collector_record_market_snapshots = bool(self.lab_cfg.get("collector_record_market_snapshots", True))
         self.collector_record_predictions = bool(self.lab_cfg.get("collector_record_predictions", True))
@@ -76,6 +78,11 @@ class PredictionLab:
             fee_rate=self.config.get("kalshi_fee_rate"),
             min_position_size_usd=economics_cfg.get("min_position_size_usd", 1.0),
             min_expected_net_profit_usd=economics_cfg.get("min_expected_net_profit_usd", 0.0),
+        )
+        self.decision_evaluator = (
+            DecisionPipelineEvaluator(self.config, strategy=self.strategy, kelly_sizer=self.kelly)
+            if self.use_shared_pipeline
+            else None
         )
         self.experiment_id = str(self.lab_cfg.get("experiment_id") or "default")
         self.strategy_version = str(self.lab_cfg.get("strategy_version") or "v1")
@@ -120,7 +127,12 @@ class PredictionLab:
             group_counts[market_group] += 1
             series = str((getattr(market, "metadata", {}) or {}).get("series") or getattr(market, "category", "unknown"))
             series_counts[series] += 1
-            signal = self.strategy.analyze_market(market, None)
+            decision_artifact = None
+            if self.use_shared_pipeline:
+                decision_artifact = self._evaluate_shared_pipeline(market, exchange=exchange)
+                signal = decision_artifact.get("strategy_signal") if isinstance(decision_artifact, dict) else None
+            else:
+                signal = self.strategy.analyze_market(market, None)
             if signal is None and not self.record_all_scored:
                 continue
             if signal is None:
@@ -137,6 +149,8 @@ class PredictionLab:
                     "signals": {},
                     "question": market.question,
                 }
+                if decision_artifact is not None:
+                    signal["skip_reason_code"] = decision_artifact.get("final_reason_code")
 
             confidence = float(signal.get("confidence", 0.0) or 0.0)
             edge = float(signal.get("edge", 0.0) or 0.0)
@@ -144,6 +158,9 @@ class PredictionLab:
                 continue
 
             decision_type = self._decision_type(signal)
+            if decision_artifact is not None and decision_artifact.get("final_action") == "SKIP":
+                decision_type = "skip"
+                signal = self._skip_safe_signal(signal, decision_artifact)
             prediction_recorded = False
             observation_mode = self._observation_semantics_enabled()
             should_record_prediction = (
@@ -152,14 +169,30 @@ class PredictionLab:
                 and not self.score_only
             )
             if should_record_prediction:
-                row = self._build_prediction_row(run_id, market, signal, decision_type=decision_type)
+                row = self._build_prediction_row(
+                    run_id,
+                    market,
+                    signal,
+                    decision_type=decision_type,
+                    decision_artifact=decision_artifact,
+                )
                 prediction_recorded = self._append_prediction_if_absent(row)
                 if prediction_recorded:
                     recorded += 1
 
             if observation_mode and self.collector_record_market_snapshots:
                 with self._prediction_ledger_lock():
-                    append_jsonl(self.market_snapshots_path, self._build_market_snapshot_row(run_id, market, signal, decision_type=decision_type, prediction_recorded=prediction_recorded))
+                    append_jsonl(
+                        self.market_snapshots_path,
+                        self._build_market_snapshot_row(
+                            run_id,
+                            market,
+                            signal,
+                            decision_type=decision_type,
+                            prediction_recorded=prediction_recorded,
+                            decision_artifact=decision_artifact,
+                        ),
+                    )
 
             if self.mode == "seed_and_watch" and recorded >= self.max_new_predictions_per_seed:
                 break
@@ -211,7 +244,7 @@ class PredictionLab:
                     scored = {"is_correct": None, "net_pnl": 0.0, "gross_pnl": 0.0, "entry_price": None, "quoted_entry_price": None}
                     row["status"] = "voided"
                 else:
-                    action = row.get("direction", "SKIP")
+                    action = self._stored_replay_action(row)
                     fee_model = ReplayFeeModel(profit_fee_rate=float(self.config.get("kalshi_fee_rate", 0.07) or 0.07))
                     position_size = self._stored_position_size(row)
                     scored = score_replay_answer(
@@ -307,7 +340,15 @@ class PredictionLab:
             "confidence_buckets": dict(confidence_buckets),
         }
 
-    def _build_prediction_row(self, run_id: str, market, signal: dict[str, Any], *, decision_type: str) -> dict[str, Any]:
+    def _build_prediction_row(
+        self,
+        run_id: str,
+        market,
+        signal: dict[str, Any],
+        *,
+        decision_type: str,
+        decision_artifact: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         metadata = dict(getattr(market, "metadata", {}) or {})
         context = None
         if metadata.get("market_group") == "weather":
@@ -340,6 +381,7 @@ class PredictionLab:
             "yes_market_price": signal.get("yes_market_price", getattr(market, "yes_price", None)),
             "no_market_price": signal.get("no_market_price", getattr(market, "no_price", None)),
             "signals": signal.get("signals", {}),
+            "signal_details": signal.get("signal_details", {}),
             "weather_context": context,
             "experiment_id": self.experiment_id,
             "strategy_version": self.strategy_version,
@@ -349,9 +391,21 @@ class PredictionLab:
         weather_risk = self._build_weather_risk_metadata(market, signal, weather_context=context)
         if weather_risk is not None:
             row["weather_risk"] = weather_risk
+        if decision_artifact is not None:
+            row["shared_pipeline"] = self._shared_pipeline_summary(decision_artifact)
+            row["decision_artifact"] = decision_artifact
         return row
 
-    def _build_market_snapshot_row(self, run_id: str, market, signal: dict[str, Any], *, decision_type: str, prediction_recorded: bool) -> dict[str, Any]:
+    def _build_market_snapshot_row(
+        self,
+        run_id: str,
+        market,
+        signal: dict[str, Any],
+        *,
+        decision_type: str,
+        prediction_recorded: bool,
+        decision_artifact: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         metadata = dict(getattr(market, "metadata", {}) or {})
         timestamp = datetime.now(timezone.utc).isoformat()
         row = {
@@ -376,7 +430,86 @@ class PredictionLab:
         weather_risk = self._build_weather_risk_metadata(market, signal)
         if weather_risk is not None:
             row["weather_risk"] = weather_risk
+        if decision_artifact is not None:
+            row["shared_pipeline"] = self._shared_pipeline_summary(decision_artifact)
+            row["decision_artifact"] = decision_artifact
         return row
+
+    def _evaluate_shared_pipeline(self, market, *, exchange: Any | None = None) -> dict[str, Any]:
+        if self.decision_evaluator is None:
+            raise RuntimeError("Shared decision pipeline is not enabled")
+        metadata = dict(getattr(market, "metadata", {}) or {})
+        account_state = build_fixed_opportunity_account_state(self.fresh_wallet_bankroll_usd)
+        order_book = self._fetch_order_book(exchange, market)
+        artifact = self.decision_evaluator.evaluate(
+            market,
+            account_state=account_state,
+            order_book=order_book,
+            source_context={"market_metadata": metadata},
+            mode="prediction_lab",
+            config_snapshot=self.config,
+        )
+        return artifact.to_dict()
+
+    @staticmethod
+    def _fetch_order_book(exchange: Any | None, market: Any) -> dict[str, Any] | None:
+        market_id = getattr(market, "id", None)
+        if not market_id:
+            return None
+        order_book = None
+        fetch_order_book = getattr(exchange, "get_order_book", None)
+        if callable(fetch_order_book):
+            try:
+                order_book = fetch_order_book(market_id)
+            except Exception as exc:
+                logger.debug("Prediction Lab shared pipeline order book fetch failed for %s: %s", market_id, exc)
+        if not PredictionLab._usable_order_book(order_book):
+            fetch_bid_ask = getattr(exchange, "get_market_bid_ask", None)
+            if callable(fetch_bid_ask):
+                try:
+                    order_book = fetch_bid_ask(market_id)
+                except Exception as exc:
+                    logger.debug("Prediction Lab shared pipeline bid/ask fallback failed for %s: %s", market_id, exc)
+                    return None
+        if not PredictionLab._usable_order_book(order_book):
+            return None
+        return dict(order_book)
+
+    @staticmethod
+    def _usable_order_book(order_book: Any) -> bool:
+        if not isinstance(order_book, dict):
+            return False
+        book_fields = (
+            "best_yes_ask",
+            "best_yes_bid",
+            "best_no_ask",
+            "best_no_bid",
+            "mid_yes",
+            "spread",
+            "spread_pct",
+        )
+        return any(order_book.get(field) is not None for field in book_fields)
+
+    @staticmethod
+    def _skip_safe_signal(signal: dict[str, Any], decision_artifact: dict[str, Any]) -> dict[str, Any]:
+        safe_signal = dict(signal)
+        raw_direction = safe_signal.get("direction")
+        safe_signal["direction"] = "SKIP"
+        safe_signal["skip_reason_code"] = decision_artifact.get("final_reason_code")
+        safe_signal["final_reason_code"] = decision_artifact.get("final_reason_code")
+        if raw_direction is not None:
+            safe_signal["raw_strategy_direction"] = raw_direction
+        return safe_signal
+
+    @staticmethod
+    def _shared_pipeline_summary(decision_artifact: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "enabled": True,
+            "final_action": decision_artifact.get("final_action"),
+            "final_reason_code": decision_artifact.get("final_reason_code"),
+            "execution_snapshot_source": decision_artifact.get("execution_snapshot_source"),
+            "order_book_source": (decision_artifact.get("order_book_snapshot") or {}).get("source"),
+        }
 
     def _build_weather_risk_metadata(
         self,
@@ -403,6 +536,21 @@ class PredictionLab:
         }
         if weather_signal.get("market_volume") is None:
             weather_signal["market_volume"] = getattr(market, "volume", None)
+        live_details = (signal.get("signal_details") or {}).get("live") if isinstance(signal.get("signal_details"), dict) else None
+        if isinstance(live_details, dict):
+            live_data = live_details.get("data") if isinstance(live_details.get("data"), dict) else {}
+            weather_signal.setdefault("weather", live_details)
+            weather_signal.setdefault("data", live_data)
+            for key in (
+                "station_id",
+                "station_cli",
+                "source_agreement_score",
+                "agreement",
+                "weather_confidence",
+                "weather_station_mapping",
+            ):
+                if weather_signal.get(key) in (None, "") and signal.get(key) not in (None, ""):
+                    weather_signal[key] = signal.get(key)
         if weather_context:
             weather_signal.setdefault("weather_context", dict(weather_context))
 
@@ -516,6 +664,8 @@ class PredictionLab:
         }
 
     def _stored_position_size(self, row: dict[str, Any]) -> float:
+        if self._stored_replay_action(row) == "SKIP":
+            return 0.0
         hypothetical = row.get("hypothetical") if isinstance(row.get("hypothetical"), dict) else {}
         for key in ("position_size_usd", "approved_position_size_usd", "notional_usd"):
             value = hypothetical.get(key)
@@ -525,6 +675,16 @@ class PredictionLab:
             except (TypeError, ValueError):
                 continue
         return max(0.0, self.flat_notional_usd)
+
+    @staticmethod
+    def _stored_replay_action(row: dict[str, Any]) -> str:
+        decision_type = str(row.get("decision_type") or "").lower()
+        if decision_type == "skip":
+            return "SKIP"
+        action = str(row.get("direction") or "SKIP").upper()
+        if action in {"BUY_YES", "BUY_NO"}:
+            return action
+        return "SKIP"
 
     def _get_candidate_markets(self, exchange) -> list[Any]:
         direct_fetch = getattr(exchange, "get_markets_direct", None)

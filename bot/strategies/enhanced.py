@@ -2,6 +2,7 @@
 
 import logging
 import math
+from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
 
@@ -13,6 +14,30 @@ from bot.strategies.signal_validator import SignalAuditLog, SignalValidator
 from bot.weather import ObservationLog, WeatherMarketCityMapper
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class StrategyTrace:
+    """Inspectable strategy decision trace for research/evaluator modes."""
+
+    raw_signals: dict[str, dict] = field(default_factory=dict)
+    validation_results: dict[str, dict] = field(default_factory=dict)
+    accepted_signals: dict[str, dict] = field(default_factory=dict)
+    rejected_signals: dict[str, dict] = field(default_factory=dict)
+    ensemble_signal: dict | None = None
+    skip_reason_code: str | None = None
+    warnings: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "raw_signals": dict(self.raw_signals),
+            "validation_results": dict(self.validation_results),
+            "accepted_signals": dict(self.accepted_signals),
+            "rejected_signals": dict(self.rejected_signals),
+            "ensemble_signal": dict(self.ensemble_signal) if isinstance(self.ensemble_signal, dict) else None,
+            "skip_reason_code": self.skip_reason_code,
+            "warnings": list(self.warnings),
+        }
 
 
 class EnhancedStrategyEngine:
@@ -226,8 +251,12 @@ class EnhancedStrategyEngine:
                 getattr(market, "id", ""),
             )
             return None
+        if self._weather_live_signal_vetoes_direction(live_signal_for_gate, direction):
+            logger.debug("Weather live signal vetoed opposite-side tail trade for %s", getattr(market, "id", ""))
+            return None
 
-        return {
+        signal_details = {k: dict(s) for k, s in validated_signals.items()}
+        result = {
             "market_id": market.id,
             "exchange": market.exchange,
             "direction": direction,
@@ -238,8 +267,237 @@ class EnhancedStrategyEngine:
             "edge": round(edge, 4),
             "confidence": round(weighted_confidence, 4),
             "signals": {k: s["predicted_prob"] for k, s in validated_signals.items()},
+            "signal_details": signal_details,
             "question": market.question,
         }
+        live_details = signal_details.get("live", {})
+        live_data = live_details.get("data") if isinstance(live_details.get("data"), dict) else {}
+        if live_data:
+            result["weather_confidence"] = live_details.get("confidence")
+            result["agreement"] = live_data.get("agreement")
+            result["station_id"] = live_data.get("station_id")
+            result["station_cli"] = live_data.get("station_cli")
+            result["weather_station_mapping"] = "exact" if live_data.get("station_id") else "inferred"
+            result["source_agreement_score"] = live_data.get("agreement")
+        return result
+
+    def analyze_market_with_trace(self, market, order_book: dict = None) -> tuple[Optional[dict], StrategyTrace]:
+        """Analyze a market and return strategy-level trace metadata.
+
+        This intentionally mirrors ``analyze_market`` for Phase 1 consumers while
+        keeping the existing live/paper call path unchanged.
+        """
+        trace = StrategyTrace()
+        signals = {}
+        weights = {}
+
+        price_signal = self._price_signal(market, order_book)
+        if price_signal:
+            signals["price"] = price_signal
+            weights["price"] = 0.40
+
+        if self.enable_news:
+            news_signal = self._news_signal(market)
+            if news_signal:
+                signals["news"] = news_signal
+                weights["news"] = self.news_weight
+
+        if self.enable_social:
+            social_signal = self._social_signal(market)
+            if social_signal:
+                signals["social"] = social_signal
+                weights["social"] = self.social_weight
+
+        live_signal = self._live_data_signal(market)
+        if live_signal:
+            signals["live"] = live_signal
+            weights["live"] = 0.50
+
+        volume_signal = self._volume_signal(market)
+        if volume_signal:
+            signals["volume"] = volume_signal
+            weights["volume"] = 0.15
+
+        time_signal = self._time_signal(market)
+        if time_signal:
+            signals["time"] = time_signal
+            weights["time"] = 0.10
+
+        if self.enable_ai:
+            ai_signal = self._ai_signal(market)
+            if ai_signal:
+                signals["ai"] = ai_signal
+                weights["ai"] = self.ai_weight
+
+        trace.raw_signals = {name: dict(signal) for name, signal in signals.items()}
+        if not signals:
+            trace.skip_reason_code = "no_raw_signals"
+            return None, trace
+
+        if "news" in signals and self.enable_news:
+            news_feed_obj = getattr(self, "news", None)
+            if news_feed_obj is not None and getattr(news_feed_obj, "all_sources_failed", False):
+                redistributed = weights.pop("news", 0)
+                signals.pop("news", None)
+                if weights and redistributed > 0:
+                    remaining_total = sum(weights.values())
+                    if remaining_total > 0:
+                        for k in list(weights.keys()):
+                            weights[k] += redistributed * (weights[k] / remaining_total)
+                trace.warnings.append("news_sources_failed_weight_redistributed")
+                logger.debug(
+                    f"News unavailable — redistributed {redistributed:.0%} weight "
+                    f"to remaining signals: {list(weights.keys())}"
+                )
+
+        if not signals:
+            trace.skip_reason_code = "no_signals_after_news_redistribution"
+            return None, trace
+
+        validation_results = self.validator.validate_all(signals, market)
+        raw_predictions = {
+            name: round(float(signal.get("predicted_prob", 0.5) or 0.5), 4)
+            for name, signal in signals.items()
+        }
+        validated_signals = {}
+        validated_weights = {}
+
+        for name, sig in signals.items():
+            validation = validation_results[name]
+            trace.validation_results[name] = self._validation_result_to_trace(validation)
+            self.signal_audit.write(market, name, sig, raw_predictions, validation)
+            if validation.accepted:
+                self._record_weather_observation(market, name, sig)
+                adjusted = dict(sig)
+                adjusted["predicted_prob"] = validation.adjusted_prob
+                adjusted["confidence"] = validation.adjusted_confidence
+                if validation.warnings:
+                    adjusted.setdefault("warnings", []).extend(validation.warnings)
+                validated_signals[name] = adjusted
+                validated_weights[name] = weights[name]
+                trace.accepted_signals[name] = dict(adjusted)
+            else:
+                rejected = dict(sig)
+                rejected["rejection_reason"] = validation.rejection_reason
+                rejected["warnings"] = list(validation.warnings or [])
+                trace.rejected_signals[name] = rejected
+                logger.debug(f"Signal REJECTED [{name}]: {validation.rejection_reason}")
+
+        if not validated_signals:
+            trace.skip_reason_code = "no_validated_signals"
+            return None, trace
+
+        total_weight = sum(validated_weights.values())
+        if total_weight == 0:
+            trace.skip_reason_code = "zero_validated_weight"
+            return None, trace
+
+        weighted_prob = sum(
+            s["predicted_prob"] * validated_weights[k]
+            for k, s in validated_signals.items()
+        ) / total_weight
+
+        weighted_confidence = sum(
+            s["confidence"] * validated_weights[k]
+            for k, s in validated_signals.items()
+        ) / total_weight
+
+        yes_price = market.yes_price
+        no_price = getattr(market, "no_price", None)
+        no_prob = 1 - weighted_prob
+        yes_edge = weighted_prob - yes_price
+        no_edge = no_prob - no_price if no_price is not None else -yes_edge
+
+        if yes_edge >= no_edge:
+            direction = "BUY_YES"
+            edge = yes_edge
+            entry_price = yes_price
+        else:
+            direction = "BUY_NO"
+            edge = no_edge
+            entry_price = no_price if no_price is not None else yes_price
+
+        signal_details = {k: dict(s) for k, s in validated_signals.items()}
+        result = {
+            "market_id": market.id,
+            "exchange": market.exchange,
+            "direction": direction,
+            "model_probability": round(weighted_prob, 4),
+            "market_price": round(entry_price, 4),
+            "yes_market_price": yes_price,
+            "no_market_price": no_price,
+            "edge": round(edge, 4),
+            "confidence": round(weighted_confidence, 4),
+            "signals": {k: s["predicted_prob"] for k, s in validated_signals.items()},
+            "signal_details": signal_details,
+            "question": market.question,
+        }
+        trace.ensemble_signal = dict(result)
+
+        if edge < self.min_edge:
+            trace.skip_reason_code = "edge_below_threshold"
+            return None, trace
+        if weighted_confidence < self.min_confidence:
+            trace.skip_reason_code = "confidence_below_threshold"
+            return None, trace
+
+        live_signal_for_gate = validated_signals.get("live")
+        if self._weather_live_signal_vetoes_direction(live_signal_for_gate, direction):
+            trace.skip_reason_code = "weather_live_signal_veto"
+            logger.debug("Weather live signal vetoed opposite-side tail trade for %s", getattr(market, "id", ""))
+            return None, trace
+
+        live_details = signal_details.get("live", {})
+        live_data = live_details.get("data") if isinstance(live_details.get("data"), dict) else {}
+        if live_data:
+            result["weather_confidence"] = live_details.get("confidence")
+            result["agreement"] = live_data.get("agreement")
+            result["station_id"] = live_data.get("station_id")
+            result["station_cli"] = live_data.get("station_cli")
+            result["weather_station_mapping"] = "exact" if live_data.get("station_id") else "inferred"
+            result["source_agreement_score"] = live_data.get("agreement")
+            trace.ensemble_signal = dict(result)
+        return result, trace
+
+    @staticmethod
+    def _validation_result_to_trace(validation) -> dict[str, Any]:
+        return {
+            "accepted": bool(validation.accepted),
+            "adjusted_confidence": validation.adjusted_confidence,
+            "adjusted_prob": validation.adjusted_prob,
+            "warnings": list(validation.warnings or []),
+            "rejection_reason": validation.rejection_reason,
+        }
+
+    @staticmethod
+    def _weather_live_signal_vetoes_direction(live_signal: dict | None, direction: str) -> bool:
+        if not isinstance(live_signal, dict):
+            return False
+        if live_signal.get("signal_type") != "weather":
+            return False
+        try:
+            probability = float(live_signal.get("predicted_prob"))
+            confidence = float(live_signal.get("confidence") or 0.0)
+        except (TypeError, ValueError):
+            return False
+        data = live_signal.get("data") if isinstance(live_signal.get("data"), dict) else {}
+        source_quality = str(data.get("source_quality") or "")
+        is_official_daily = source_quality == "settlement_station_official_daily"
+        has_strong_source = source_quality.startswith("settlement_station") or bool(data.get("station_id"))
+        if not has_strong_source:
+            return False
+        if confidence < 0.85 and not is_official_daily:
+            return False
+        normalized_direction = str(direction or "").upper()
+        if is_official_daily and probability < 0.50 and normalized_direction == "BUY_YES":
+            return True
+        if is_official_daily and probability > 0.50 and normalized_direction == "BUY_NO":
+            return True
+        if probability >= 0.80 and normalized_direction == "BUY_NO":
+            return True
+        if probability <= 0.20 and normalized_direction == "BUY_YES":
+            return True
+        return False
 
     def _record_weather_observation(self, market, signal_name: str, signal: dict) -> None:
         if not self.enable_weather_observation_log or self.weather_observation_log is None:
@@ -524,7 +782,8 @@ class EnhancedStrategyEngine:
             result = self.live_feeds.get_signal(
                 market.question,
                 market.yes_price,
-                getattr(market, 'category', '')
+                getattr(market, 'category', ''),
+                market_id=getattr(market, 'id', ''),
             )
             if result:
                 return result
