@@ -530,7 +530,7 @@ class RunnerLivePathTests(unittest.TestCase):
                     "execution_snapshot": {"market_price": 0.41, "source": "book"},
                 },
                 {
-                    "resolved": True,
+                    "resolved": "False",
                     "status": "rejected",
                     "lifecycle_state": "revalidation_rejected",
                     "trade_id": "live-2",
@@ -549,6 +549,26 @@ class RunnerLivePathTests(unittest.TestCase):
                     "execution_decision_reason_code": "price_above_threshold",
                     "execution_snapshot": {"market_price": 0.47, "source": "fallback"},
                 },
+                {
+                    "resolved": True,
+                    "status": "resolved",
+                    "lifecycle_state": "resolved_position",
+                    "trade_id": "live-3",
+                    "market_id": "m-3",
+                    "direction": "BUY_YES",
+                    "requested_size": 1.0,
+                    "approved_size": 1.0,
+                    "placed_size": 1.0,
+                    "filled_size": 1.0,
+                    "remaining_size": 0.0,
+                    "reserved_capital": 0.0,
+                    "resolved_at": "2026-04-30T00:00:00+00:00",
+                    "outcome": "YES",
+                    "pnl": 0.5,
+                    "settlement_value": 1.5,
+                    "resolution_type": "settled",
+                    "decision_reason_code": "approved",
+                },
             ]
             bot.open_positions = [
                 SimpleNamespace(size=4.0),
@@ -558,7 +578,7 @@ class RunnerLivePathTests(unittest.TestCase):
             self.assertEqual(snapshot.scan_num, 7)
             self.assertEqual(snapshot.open_trades, 1)
             self.assertEqual(snapshot.resolved_trades, 1)
-            self.assertEqual(snapshot.total_trades, 2)
+            self.assertEqual(snapshot.total_trades, 3)
             self.assertIn("source", snapshot.extra)
             self.assertEqual(snapshot.extra["mode_label"], "identical-risk comparison")
             self.assertEqual(snapshot.extra["risk_preset_mode"], "paper")
@@ -570,7 +590,7 @@ class RunnerLivePathTests(unittest.TestCase):
             self.assertEqual(snapshot.extra["filled_event_exposure"], 4.0)
             self.assertEqual(snapshot.extra["pending_event_exposure"], 0.0)
             self.assertIn("normalized_trade_summary", snapshot.extra)
-            self.assertEqual(snapshot.extra["normalized_trade_summary"]["total_rows"], 2)
+            self.assertEqual(snapshot.extra["normalized_trade_summary"]["total_rows"], 3)
             self.assertIn("parity_summary", snapshot.extra)
             self.assertTrue(snapshot.extra["parity_summary"]["parity_mode_enabled"])
             self.assertEqual(snapshot.extra["parity_summary"]["execution_revalidated_rows"], 2)
@@ -580,10 +600,11 @@ class RunnerLivePathTests(unittest.TestCase):
             self.assertEqual(snapshot.extra["parity_summary"]["snapshot_source_counts"]["fallback"], 1)
             self.assertEqual(snapshot.extra["parity_summary"]["lifecycle_state_counts"]["filled_open"], 1)
             self.assertEqual(snapshot.extra["parity_summary"]["lifecycle_state_counts"]["revalidation_rejected"], 1)
+            self.assertEqual(snapshot.extra["parity_summary"]["lifecycle_state_counts"]["resolved_position"], 1)
             self.assertEqual(snapshot.extra["normalized_trade_summary"]["execution_revalidation_outcome_counts"]["approved"], 1)
             self.assertEqual(snapshot.extra["normalized_trade_summary"]["execution_revalidation_outcome_counts"]["rejected"], 1)
-            self.assertEqual(snapshot.extra["parity_summary"]["invalid_contract_rows"], 1)
-            self.assertEqual(snapshot.extra["parity_summary"]["top_contract_issues"], [("resolved_flag_status_mismatch", 1)])
+            self.assertEqual(snapshot.extra["parity_summary"]["invalid_contract_rows"], 0)
+            self.assertEqual(snapshot.extra["parity_summary"]["top_contract_issues"], [])
 
 
 if __name__ == "__main__":

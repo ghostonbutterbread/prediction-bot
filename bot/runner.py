@@ -27,6 +27,7 @@ from bot.trade_audit import (
     build_risk_block_audit_row,
     build_scan_candidate_summary,
     canonical_execution_status,
+    coerce_bool,
     enrich_trade_audit_fields,
 )
 from bot.strategies.enhanced import EnhancedStrategyEngine, KellySizer
@@ -423,7 +424,7 @@ class PredictionBot:
     def build_status_snapshot(self, *, reason: str = "status", scan_num: int | None = None):
         status = self.risk.get_status()
         total_trades = len(self.trade_history)
-        resolved_trades = sum(1 for trade in self.trade_history if trade.get("resolved"))
+        resolved_trades = sum(1 for trade in self.trade_history if coerce_bool(trade.get("resolved"), default=False))
         open_trades = max(0, len(self.open_positions))
         balance_value = self._coerce_float(status.get("balance"), default=self.risk.state.current_balance)
         pnl_text = status.get("pnl", "$0.00 (+0.0%)")
