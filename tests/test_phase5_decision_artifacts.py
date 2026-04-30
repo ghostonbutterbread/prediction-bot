@@ -163,6 +163,9 @@ class Phase5DecisionArtifactTests(unittest.TestCase):
         self.assertEqual(artifact["final_reason_code"], "live_identity_mismatch")
         self.assertIsNone(artifact["trade_context"])
         self.assertIn("live_identity", artifact["shared_core_decision"]["reasoning"])
+        runtime_identity = artifact["shared_core_decision"]["reasoning"]["live_identity"]["runtime"]
+        self.assertEqual(runtime_identity["api_key_id"], "<redacted>")
+        self.assertEqual(runtime_identity["private_key_path"], "<redacted>")
 
     def test_runner_live_identity_gate_threads_artifact_to_risk_block_row(self):
         signal = self._signal()
@@ -198,6 +201,41 @@ class Phase5DecisionArtifactTests(unittest.TestCase):
         self.assertEqual(row["decision_artifact"]["artifact_kind"], "pre_execution_decision")
         self.assertEqual(row["decision_artifact"]["final_action"], "SKIP")
         self.assertEqual(row["decision_artifact"]["final_reason_code"], "live_identity_mismatch")
+        self.assertEqual(row["decision_artifact"]["final_reason_code"], row["decision_reason_code"])
+
+    def test_runner_live_revalidation_skip_threads_artifact_to_risk_block_row(self):
+        class HighAskExchange(ArtifactExchange):
+            def get_market_bid_ask(self, market_id):
+                return {
+                    "best_yes_ask": 0.80,
+                    "best_no_ask": 0.20,
+                    "best_yes_bid": 0.79,
+                    "best_no_bid": 0.19,
+                }
+
+        signal = self._signal()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = self._make_live_bot(tmpdir)
+            exchange = HighAskExchange()
+            bot.exchanges["kalshi"] = exchange
+            bot.startup_reconciliation_status["kalshi"] = {
+                "completed": True,
+                "status": "safe",
+                "runtime_state": "safe",
+                "reconciliation_verdict": "safe",
+                "reconciliation_issues": [],
+            }
+
+            with patch.object(bot.kelly, "calculate", return_value=2.0):
+                result = bot._process_signal(signal)
+                bot._log_risk_block_event(signal, result)
+            row = json.loads((Path(tmpdir) / "live" / "risk_blocks.jsonl").read_text().strip())
+
+        self.assertEqual(exchange.orders, [])
+        self.assertEqual(result["blocked_reason"], "entry_price_above_cap")
+        self.assertIn("decision_artifact", result)
+        self.assertIn("decision_artifact", row)
+        self.assertEqual(row["decision_artifact"]["final_reason_code"], "entry_price_above_cap")
         self.assertEqual(row["decision_artifact"]["final_reason_code"], row["decision_reason_code"])
 
     def test_runner_live_shared_decision_skip_threads_artifact_to_risk_block_row(self):

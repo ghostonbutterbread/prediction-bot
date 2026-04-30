@@ -152,6 +152,45 @@ class LiveRepeatabilityReportTests(unittest.TestCase):
         self.assertEqual(report["sessions_reviewed"], 2)
         self.assertTrue(report["summary"]["direct_reconciliation_fields_present"])
 
+    def test_legacy_string_false_resolved_trade_does_not_fail_repeatability(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir)
+            write_jsonl(data_dir / "lifecycle.jsonl", clean_lifecycle())
+            write_jsonl(data_dir / "reconciliation.jsonl", clean_reconciliation())
+            write_jsonl(data_dir / "hourly_summary.jsonl", clean_hourly())
+            write_jsonl(
+                data_dir / "trades.jsonl",
+                [
+                    {
+                        "timestamp": "2026-04-21T10:06:00+00:00",
+                        "schema_name": "execution_audit_row",
+                        "schema_version": 1,
+                        "trade_id": "legacy-string-false",
+                        "market_id": "MKT-1",
+                        "direction": "BUY_YES",
+                        "status": "filled",
+                        "lifecycle_state": "filled_open",
+                        "decision_reason_code": "approved",
+                        "requested_size": 1.0,
+                        "approved_size": 1.0,
+                        "placed_size": 1.0,
+                        "filled_size": 1.0,
+                        "remaining_size": 0.0,
+                        "reserved_capital": 1.0,
+                        "execution_revalidated": True,
+                        "execution_revalidation_outcome": "approved",
+                        "execution_snapshot_source": "book",
+                        "resolved": "False",
+                    }
+                ],
+            )
+            write_empty_jsonl(data_dir / "risk_blocks.jsonl")
+
+            report = build_live_repeatability_report(data_dir, sessions=2)
+
+        self.assertTrue(report["ready"])
+        self.assertFalse(any("resolved_flag_status_mismatch" in issue for issue in report["issues"]))
+
     def test_missing_expected_artifact_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir)

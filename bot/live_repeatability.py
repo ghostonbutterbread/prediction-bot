@@ -26,6 +26,8 @@ DIRECT_RECONCILIATION_FIELDS = {
 }
 UNSAFE_STATES = {"blocked", "degraded"}
 UNSAFE_VERDICTS = {"blocked", "degraded", "failed", "error"}
+MONEY_EPSILON_USD = 0.01
+MIN_REMAINING_EXPOSURE_USD = 0.01
 
 
 def mode_storage_dir(path: str | Path, mode: str = "live") -> Path:
@@ -340,13 +342,13 @@ def _reconciliation_issues(row: dict[str, Any]) -> list[str]:
     numeric_fields = ("balance", "available_cash", "reserved_capital", "filled_exposure", "pending_exposure")
     for field in numeric_fields:
         value = coerce_float(row.get(field), default=None)
-        if value is not None and value < -0.01:
+        if value is not None and value < -MONEY_EPSILON_USD:
             issues.append(f"negative {field} in reconciliation")
 
     reserved = coerce_float(row.get("reserved_capital"), default=None)
     filled = coerce_float(row.get("filled_exposure"), default=None)
     pending = coerce_float(row.get("pending_exposure"), default=None)
-    if None not in (reserved, filled, pending) and abs((filled or 0.0) + (pending or 0.0) - (reserved or 0.0)) > 0.01:
+    if None not in (reserved, filled, pending) and abs((filled or 0.0) + (pending or 0.0) - (reserved or 0.0)) > MONEY_EPSILON_USD:
         issues.append("reserved capital does not match filled plus pending exposure")
     return issues
 
@@ -376,9 +378,9 @@ def _audit_row_issues(row: dict[str, Any]) -> list[str]:
         placed_size=row.get("placed_size"),
         remaining_size=row.get("remaining_size"),
     )
-    if status == "canceled" and (coerce_float(row.get("remaining_size"), default=0.0) or 0.0) > 0.01:
+    if status == "canceled" and (coerce_float(row.get("remaining_size"), default=0.0) or 0.0) > MIN_REMAINING_EXPOSURE_USD:
         issues.append("canceled_order_has_remaining_exposure")
-    if status in {"rejected", "failed"} and (coerce_float(row.get("filled_size"), default=0.0) or 0.0) > 0.01:
+    if status in {"rejected", "failed"} and (coerce_float(row.get("filled_size"), default=0.0) or 0.0) > MIN_REMAINING_EXPOSURE_USD:
         issues.append(f"{status}_row_has_fill")
     return sorted(set(issues))
 

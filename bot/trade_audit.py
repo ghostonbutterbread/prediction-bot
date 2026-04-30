@@ -500,10 +500,11 @@ def validate_execution_audit_row(trade: dict) -> list[str]:
     if status == "partial" and None not in (placed_size, filled_size, remaining_size):
         if abs((filled_size or 0.0) + (remaining_size or 0.0) - (placed_size or 0.0)) > 0.0001:
             issues.append("partial_size_sum_mismatch")
-    if trade.get("resolved") and status != "resolved":
+    resolved_flag = coerce_bool(trade.get("resolved"), default=False)
+    if resolved_flag and status != "resolved":
         issues.append("resolved_flag_status_mismatch")
     if status == "resolved":
-        if not trade.get("resolved"):
+        if not resolved_flag:
             issues.append("resolved_without_flag")
         if not trade.get("resolved_at"):
             issues.append("resolved_without_timestamp")
