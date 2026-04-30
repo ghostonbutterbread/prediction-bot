@@ -59,6 +59,19 @@ class _FixedKelly:
         return self.size
 
 
+class _RecordingKelly:
+    fee_rate = 0.07
+    fraction = 0.5
+    max_bet_pct = 0.2
+
+    def __init__(self):
+        self.bankrolls = []
+
+    def calculate(self, win_probability: float, entry_price: float, bankroll: float) -> float:
+        self.bankrolls.append(bankroll)
+        return round(bankroll * 0.2, 4)
+
+
 class _AllowRisk:
     def check_trade(self, signal: dict, position_size: float, *, available_cash: float | None = None):
         return RiskDecision(
@@ -507,6 +520,97 @@ class PredictionLabCollectorTests(unittest.TestCase):
             self.assertEqual(row["decision_artifact"]["order_book_snapshot"]["source"], "book")
             self.assertEqual(row["decision_artifact"]["execution_snapshot_source"], "book")
             self.assertEqual(row["decision_artifact"]["source_context"]["source"], "provided")
+
+    def test_prediction_lab_shared_pipeline_uses_isolated_opportunity_bankroll(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "data_dir": tmpdir,
+                "prediction_lab": {
+                    "enabled": True,
+                    "mode": "collector",
+                    "groups": ["sports"],
+                    "score_only": False,
+                    "record_all_scored": True,
+                    "collector_record_predictions": True,
+                    "collector_record_market_snapshots": True,
+                    "use_shared_pipeline": True,
+                    "paper_lab_mode": "opportunity",
+                    "opportunity_bankroll_usd": 250,
+                    "hypothetical_notional_mode": "opportunity",
+                },
+                "strategy": {"min_edge": 0.01, "min_confidence": 0.5, "enable_news": False, "enable_social": False, "enable_ai": False},
+                "max_entry_price": 0.7,
+            }
+            lab = PredictionLab(config)
+            signal = {
+                "market_id": "KXNBATEST-26APR29-HOME",
+                "exchange": "kalshi",
+                "question": "Will the NBA test team win?",
+                "direction": "BUY_YES",
+                "model_probability": 0.7,
+                "market_price": 0.4,
+                "yes_market_price": 0.4,
+                "no_market_price": 0.6,
+                "edge": 0.3,
+                "confidence": 0.9,
+                "signals": {"unit": 0.7},
+            }
+            kelly = _RecordingKelly()
+            lab.decision_evaluator = DecisionPipelineEvaluator(
+                lab.config,
+                strategy=_TracedSignalStrategy(signal),
+                kelly_sizer=kelly,
+                risk_policy=_AllowRisk(),
+            )
+            market = SimpleNamespace(
+                id="KXNBATEST-26APR29-HOME",
+                exchange="kalshi",
+                question="Will the NBA test team win?",
+                category="sports",
+                yes_price=0.4,
+                no_price=0.6,
+                volume=1000,
+                closes_at=datetime.now(timezone.utc) + timedelta(hours=6),
+                metadata={"market_group": "sports", "series": "nba"},
+            )
+            exchange = SimpleNamespace(
+                get_markets_direct=lambda **kwargs: [market],
+                get_order_book=lambda market_id: {
+                    "best_yes_ask": 0.41,
+                    "best_yes_bid": 0.4,
+                    "best_no_ask": 0.61,
+                    "best_no_bid": 0.6,
+                },
+            )
+
+            lab.run(exchange)
+            prediction_row = load_jsonl(lab.predictions_path)[0]
+            snapshot_row = load_jsonl(lab.market_snapshots_path)[0]
+            artifact = prediction_row["decision_artifact"]
+            account_snapshot = artifact["account_state_snapshot"]
+            decision = artifact["shared_core_decision"]
+
+            self.assertEqual(kelly.bankrolls, [250.0])
+            self.assertEqual(artifact["mode"], "paper_lab")
+            self.assertEqual(artifact["opportunity_mode"]["mode"], "opportunity")
+            self.assertEqual(artifact["opportunity_mode"]["account_state_provider"], "fixed_opportunity")
+            self.assertEqual(artifact["opportunity_mode"]["bankroll_usd"], 250.0)
+            self.assertFalse(artifact["opportunity_mode"]["mutates_portfolio_account"])
+            self.assertEqual(account_snapshot["available_cash"], 250.0)
+            self.assertEqual(account_snapshot["reserved_capital"], 0.0)
+            self.assertEqual(account_snapshot["total_exposure"], 0.0)
+            self.assertEqual(account_snapshot["open_positions"], 0)
+            self.assertEqual(decision["reasoning"]["kelly"]["requested_size"], 50.0)
+            self.assertEqual(decision["requested_position_size"], 25.0)
+            self.assertEqual(decision["position_size"], 25.0)
+            self.assertEqual(decision["reasoning"]["kelly"]["bankroll"], 250.0)
+            self.assertEqual(prediction_row["shared_pipeline"]["bankroll_usd"], 250.0)
+            self.assertEqual(prediction_row["shared_pipeline"]["kelly_position_size_usd"], 50.0)
+            self.assertEqual(prediction_row["shared_pipeline"]["requested_position_size_usd"], 25.0)
+            self.assertEqual(prediction_row["paper_lab"]["paper_lab_mode"], "opportunity")
+            self.assertEqual(prediction_row["opportunity_mode"]["account_state_provider"], "fixed_opportunity")
+            self.assertFalse(prediction_row["opportunity_mode"]["mutates_portfolio_account"])
+            self.assertEqual(snapshot_row["opportunity_mode"]["bankroll_usd"], 250.0)
 
     def test_prediction_lab_shared_pipeline_vetoed_signal_is_stored_skip_safe(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1028,9 +1132,23 @@ class PredictionLabCollectorTests(unittest.TestCase):
             alias_config = load_config(alias_path)
 
             self.assertEqual(default_config["prediction_lab"]["hypothetical_notional_mode"], "flat")
+            self.assertEqual(default_config["prediction_lab"]["paper_lab_mode"], "opportunity")
+            self.assertEqual(default_config["prediction_lab"]["opportunity_bankroll_usd"], 100.0)
             self.assertEqual(default_config["prediction_lab"]["fresh_wallet_bankroll_usd"], 100.0)
             self.assertEqual(alias_config["prediction_lab"]["hypothetical_notional_mode"], "fresh_kelly")
+            self.assertEqual(alias_config["prediction_lab"]["paper_lab_mode"], "opportunity")
+            self.assertEqual(alias_config["prediction_lab"]["opportunity_bankroll_usd"], 250.0)
             self.assertEqual(alias_config["prediction_lab"]["fresh_wallet_bankroll_usd"], 250.0)
+
+            opportunity_path = Path(tmpdir) / "opportunity.yaml"
+            opportunity_path.write_text(
+                "prediction_lab:\n  hypothetical_notional_mode: opportunity\n  opportunity_bankroll_usd: 125\n"
+            )
+            opportunity_config = load_config(opportunity_path)
+
+            self.assertEqual(opportunity_config["prediction_lab"]["hypothetical_notional_mode"], "fresh_kelly")
+            self.assertEqual(opportunity_config["prediction_lab"]["opportunity_bankroll_usd"], 125.0)
+            self.assertEqual(opportunity_config["prediction_lab"]["fresh_wallet_bankroll_usd"], 125.0)
 
     def test_prediction_lab_rows_include_fresh_wallet_kelly_metadata(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1073,8 +1191,13 @@ class PredictionLabCollectorTests(unittest.TestCase):
             hypothetical = row["hypothetical"]
 
             self.assertEqual(hypothetical["mode"], "fresh_kelly")
+            self.assertEqual(hypothetical["paper_lab_mode"], "paper_lab")
+            self.assertEqual(hypothetical["opportunity_mode"], "opportunity")
             self.assertEqual(hypothetical["sizing_method"], "fresh_wallet_kelly")
+            self.assertEqual(hypothetical["account_state_provider"], "fixed_opportunity")
             self.assertEqual(hypothetical["bankroll_usd"], 100.0)
+            self.assertEqual(hypothetical["opportunity_bankroll_usd"], 100.0)
+            self.assertFalse(hypothetical["mutates_portfolio_account"])
             self.assertEqual(hypothetical["entry_price"], 0.5)
             self.assertEqual(hypothetical["win_probability"], 0.75)
             self.assertEqual(hypothetical["requested_position_size_usd"], 10.0)

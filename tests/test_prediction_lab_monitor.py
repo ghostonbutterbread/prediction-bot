@@ -93,6 +93,31 @@ class PredictionLabMonitorTests(unittest.TestCase):
                 ]
             )
         )
+        self.assertTrue(
+            monitor.collector_matches(
+                [
+                    "python3",
+                    "scripts/prediction_lab_collect.py",
+                    "--observer",
+                ],
+                expected=["python3", "scripts/prediction_lab_collect.py", "--config", "config.yaml"],
+            )
+        )
+        self.assertFalse(
+            monitor.collector_matches(
+                [
+                    "python3",
+                    "scripts/prediction_lab_collect.py",
+                    "--observer",
+                ],
+                expected=[
+                    "python3",
+                    "scripts/prediction_lab_collect.py",
+                    "--config",
+                    "config.prediction_lab_weather_overnight.yaml",
+                ],
+            )
+        )
 
     def test_evaluate_health_healthy_when_collector_recent_and_safe(self):
         now = datetime(2026, 4, 28, 18, 0, tzinfo=timezone.utc)
@@ -112,7 +137,7 @@ class PredictionLabMonitorTests(unittest.TestCase):
                             "python3",
                             "scripts/prediction_lab_collect.py",
                             "--config",
-                            "config.prediction_lab_weather_overnight.yaml",
+                            str(config_path),
                             "--observer",
                         ],
                     )
@@ -153,7 +178,7 @@ class PredictionLabMonitorTests(unittest.TestCase):
                             "python3",
                             "scripts/prediction_lab_collect.py",
                             "--config",
-                            "config.prediction_lab_weather_overnight.yaml",
+                            str(config_path),
                         ],
                     )
                 ],
