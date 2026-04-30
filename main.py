@@ -12,6 +12,8 @@ Usage:
     python main.py live              # Live trading (real money!)
     python main.py live --config path/to/config.yaml
     python main.py canary-preflight --config config.live_supervised.yaml
+    python main.py live-repeatability-report --config config.live_supervised.yaml
+    python main.py live-repeatability-report --data-dir data/live
     python main.py status            # Show bot status
     python main.py markets           # List active markets
     python main.py prediction-lab-run       # Score hypothetical Prediction Lab positions
@@ -559,6 +561,32 @@ def cmd_canary_preflight(config_path: str = "config.live_supervised.yaml") -> bo
     return bool(report.get("ready", False))
 
 
+def cmd_live_repeatability_report(
+    *,
+    config_path: str = "config.live_supervised.yaml",
+    data_dir: str | None = None,
+    sessions: int = 5,
+) -> bool:
+    """Read-only supervised canary evidence report; does not instantiate runtime services."""
+    import yaml
+    from bot.live_repeatability import (
+        build_live_repeatability_report,
+        data_dir_from_static_config,
+        format_live_repeatability_report,
+    )
+
+    if data_dir is None:
+        with open(config_path) as f:
+            config = yaml.safe_load(f) or {}
+        data_dir_path = data_dir_from_static_config(config)
+    else:
+        data_dir_path = Path(data_dir)
+
+    report = build_live_repeatability_report(data_dir_path, sessions=sessions)
+    print(format_live_repeatability_report(report))
+    return bool(report.get("ready", False))
+
+
 def cmd_news(query: str = None):
     """Test news feed."""
     from bot.feeds.news import NewsFeed
@@ -585,13 +613,18 @@ def main():
         return
 
     cmd = sys.argv[1].lower()
-    if cmd != "canary-preflight":
+    if cmd not in {"canary-preflight", "live-repeatability-report"}:
         load_dotenv()
 
     single_trade = "--single-trade" in sys.argv
     verbosity_override = "double_verbose" if "-vv" in sys.argv else "verbose" if "-v" in sys.argv else None
     config_path = "config.yaml"
     config_explicit = False
+    data_dir = None
+    if "--data-dir" in sys.argv:
+        idx = sys.argv.index("--data-dir")
+        if idx + 1 < len(sys.argv):
+            data_dir = sys.argv[idx + 1]
     if "--config" in sys.argv:
         idx = sys.argv.index("--config")
         if idx + 1 < len(sys.argv):
@@ -656,6 +689,19 @@ def main():
         cmd_prediction_lab_collect(config_path)
     elif cmd == "canary-preflight":
         ok = cmd_canary_preflight(config_path if config_explicit else "config.live_supervised.yaml")
+        if not ok:
+            sys.exit(1)
+    elif cmd == "live-repeatability-report":
+        sessions = 5
+        if "--sessions" in sys.argv:
+            idx = sys.argv.index("--sessions")
+            if idx + 1 < len(sys.argv):
+                sessions = int(sys.argv[idx + 1])
+        ok = cmd_live_repeatability_report(
+            config_path=config_path if config_explicit else "config.live_supervised.yaml",
+            data_dir=data_dir,
+            sessions=sessions,
+        )
         if not ok:
             sys.exit(1)
     elif cmd == "news":
