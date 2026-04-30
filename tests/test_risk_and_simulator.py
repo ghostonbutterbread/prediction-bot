@@ -24,6 +24,15 @@ class FakeStandbyExchange:
         return []
 
 
+class FakeLimitExchange:
+    def __init__(self):
+        self.last_limit = None
+
+    def get_markets(self, limit=100):
+        self.last_limit = limit
+        return []
+
+
 class RiskManagerTests(unittest.TestCase):
     def test_max_exposure_caps_size_instead_of_full_reject(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -983,6 +992,45 @@ class SimulatorSessionTests(unittest.TestCase):
             self.assertEqual(exchange.calls, 0)
             self.assertTrue(result["standby"]["active"])
             self.assertEqual(result["standby"]["reason_codes"], ["max_positions"])
+
+    def test_simulator_uses_configured_scan_market_limit(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = Simulator(
+                {
+                    "data_dir": tmpdir,
+                    "enable_social": False,
+                    "scan": {"markets_per_exchange": 37},
+                    "strategy": {
+                        "enable_news": False,
+                        "enable_social": False,
+                        "enable_ai": False,
+                    },
+                }
+            )
+            exchange = FakeLimitExchange()
+
+            sim.scan(exchange)
+
+            self.assertEqual(exchange.last_limit, 37)
+
+    def test_simulator_keeps_legacy_scan_market_limit_default(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = Simulator(
+                {
+                    "data_dir": tmpdir,
+                    "enable_social": False,
+                    "strategy": {
+                        "enable_news": False,
+                        "enable_social": False,
+                        "enable_ai": False,
+                    },
+                }
+            )
+            exchange = FakeLimitExchange()
+
+            sim.scan(exchange)
+
+            self.assertEqual(exchange.last_limit, 100)
 
 
 if __name__ == "__main__":
