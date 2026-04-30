@@ -439,6 +439,44 @@ class ParityAuditTests(unittest.TestCase):
             self.assertEqual(view["live_rows"][1]["status"], "rejected")
             self.assertFalse(view["live_rows"][1]["contract_issues"])
 
+    def test_build_parity_view_labels_enabled_false_identical_risk_live_context(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "data"
+            (data_dir / "paper").mkdir(parents=True)
+            (data_dir / "live").mkdir(parents=True)
+
+            view = build_parity_view(
+                data_dir,
+                config={"trading": {"mode": "live"}, "parity_mode": {"enabled": False, "comparison_mode": "identical_risk"}},
+            )
+            context = view["comparison_context"]
+
+            self.assertFalse(context["parity_mode_enabled"])
+            self.assertEqual(context["parity_comparison_mode"], "identical_risk")
+            self.assertEqual(context["live_mode_label"], "identical-risk comparison")
+            self.assertEqual(context["live_risk_preset_mode"], "paper")
+            self.assertTrue(context["apples_to_apples"])
+            self.assertFalse(context["differences_expected"])
+
+    def test_build_parity_view_keeps_enabled_false_production_live_context(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "data"
+            (data_dir / "paper").mkdir(parents=True)
+            (data_dir / "live").mkdir(parents=True)
+
+            view = build_parity_view(
+                data_dir,
+                config={"trading": {"mode": "live"}, "parity_mode": {"enabled": False, "comparison_mode": "production"}},
+            )
+            context = view["comparison_context"]
+
+            self.assertFalse(context["parity_mode_enabled"])
+            self.assertEqual(context["parity_comparison_mode"], "production")
+            self.assertEqual(context["live_mode_label"], "live")
+            self.assertEqual(context["live_risk_preset_mode"], "live")
+            self.assertFalse(context["apples_to_apples"])
+            self.assertTrue(context["differences_expected"])
+
     def test_build_parity_view_reads_canonical_live_risk_block_rows(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "data"

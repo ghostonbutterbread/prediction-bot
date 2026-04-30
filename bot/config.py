@@ -367,7 +367,7 @@ def get_operating_mode_label(config: dict) -> str:
     comparison_mode = get_parity_comparison_mode(config)
 
     if runtime_mode == "live":
-        return "identical-risk comparison" if parity_enabled and comparison_mode == "identical_risk" else "live"
+        return "identical-risk comparison" if comparison_mode == "identical_risk" else "live"
     return "parity paper" if parity_enabled else "normal paper"
 
 
