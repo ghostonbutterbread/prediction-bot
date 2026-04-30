@@ -233,13 +233,22 @@ The bot is ready for true deployment when all of the following are true:
 ## What to do next
 
 Recommended next implementation sequence:
-1. harden parity diff/report ergonomics
-2. harden live lifecycle + reconciliation behavior
-3. add broader runtime invariants and safety-pause coverage
-4. add restart/reconnect chaos coverage
-5. improve settlement/accounting normalization
-6. rerun supervised canary under strict caps
-7. only then discuss unattended deployment
+1. use Prediction Lab outputs to identify the highest-value trade-finding/calibration problems
+2. implement narrow, evidence-backed logic/ranking improvements one at a time
+3. harden parity diff/report ergonomics so those logic changes are easier to explain
+4. harden live lifecycle + reconciliation behavior
+5. add broader runtime invariants and safety-pause coverage
+6. add restart/reconnect chaos coverage
+7. improve settlement/accounting normalization
+
+Important framing:
+- Prediction Lab tuning is the best near-term way to improve what the bot chooses to trade
+- live hardening is still required to improve how safely the bot handles reality once it trades
+- neither lane replaces the other
+
+After the sequence above:
+8. rerun supervised canary under strict caps
+9. only then discuss unattended deployment
 
 ---
 
