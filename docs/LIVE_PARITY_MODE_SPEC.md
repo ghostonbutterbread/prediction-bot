@@ -124,7 +124,7 @@ This keeps current paper behavior unchanged unless explicitly enabled.
 
 ### Config semantics
 
-- If `parity_mode.enabled` is `false`, all parity-mode subfields are inert.
+- If `parity_mode.enabled` is `false`, revalidation and parity instrumentation fields are inert; `comparison_mode` still selects the live comparison risk lane.
 - If `parity_mode.require_book_prices` is `true`, fallback is disabled even if `fallback_to_signal_prices` is `true`.
 - If `parity_mode.enabled` is `true`, paper must run the execution-time revalidation pass before final approval.
 - Config precedence should be explicit in implementation and docs: defaults < YAML config < environment overrides < runtime/CLI overrides.
