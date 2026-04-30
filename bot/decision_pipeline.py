@@ -16,6 +16,7 @@ from bot.trade_audit import trade_event_key
 PAPER_LAB_MODE = "paper_lab"
 OPPORTUNITY_MODE = "opportunity"
 FIXED_OPPORTUNITY_ACCOUNT_SOURCE = "fixed_opportunity"
+PRE_EXECUTION_ARTIFACT_VERSION = 1
 
 
 @dataclass(slots=True)
@@ -243,6 +244,70 @@ class DecisionPipelineEvaluator:
         )
 
 
+def build_pre_execution_decision_artifact(
+    *,
+    mode: str,
+    context: TradeContext | None,
+    decision: Any,
+    signal: dict[str, Any] | None = None,
+    order_book: dict[str, Any] | None = None,
+    source_context: dict[str, Any] | None = None,
+    execution_snapshot: dict[str, Any] | None = None,
+    config_snapshot: dict[str, Any] | None = None,
+    observed_at: datetime | None = None,
+    as_of: datetime | None = None,
+    warnings: list[str] | None = None,
+) -> dict[str, Any]:
+    """Build the shared paper/live pre-execution decision artifact envelope.
+
+    The helper is intentionally serialization-only. It must not decide whether
+    paper fills or live places orders; those remain adapter concerns.
+    """
+
+    observed_at = observed_at or datetime.now(timezone.utc)
+    signal_snapshot = dict(signal or {})
+    context_source = dict(source_context or (context.source_context if context is not None else signal_snapshot) or {})
+    market_id = str(
+        (context.market_id if context is not None else None)
+        or signal_snapshot.get("market_id")
+        or ""
+    )
+    account_state_snapshot = _account_state_snapshot(context.account_state) if context is not None else None
+    decision_dict = _decision_snapshot(decision)
+    approved = bool(decision_dict.get("approved"))
+    final_action = str(decision_dict.get("action") or signal_snapshot.get("direction") or "SKIP")
+    if not approved:
+        final_action = "SKIP"
+    artifact_warnings = list(warnings or [])
+    artifact_warnings.extend(list(decision_dict.get("warnings") or []))
+    artifact = {
+        "artifact_version": PRE_EXECUTION_ARTIFACT_VERSION,
+        "artifact_kind": "pre_execution_decision",
+        "market_id": market_id,
+        "mode": mode,
+        "observed_at": _iso_or_none(observed_at),
+        "as_of": _iso_or_none(as_of),
+        "strategy_trace": {},
+        "strategy_signal": signal_snapshot or None,
+        "source_context": build_source_snapshot_envelope(context_source, mode=mode, as_of=as_of),
+        "account_state_snapshot": account_state_snapshot,
+        "opportunity_mode": _opportunity_mode_metadata(context.account_state, mode, decision_dict) if context is not None else None,
+        "order_book": dict(order_book) if isinstance(order_book, dict) else None,
+        "order_book_snapshot": build_order_book_snapshot(order_book),
+        "execution_snapshot": dict(execution_snapshot) if isinstance(execution_snapshot, dict) else None,
+        "execution_snapshot_source": (execution_snapshot or {}).get("source") if isinstance(execution_snapshot, dict) else None,
+        "trade_context": asdict(context) if context is not None else None,
+        "shared_core_decision": decision_dict,
+        "final_action": final_action,
+        "final_reason_code": decision_dict.get("reason_code"),
+        "final_reason": decision_dict.get("reason") or decision_dict.get("reason_code"),
+        "warnings": artifact_warnings,
+        "config_hash": _hash_config(config_snapshot or {}),
+        "logic_version": _logic_version(config_snapshot or {}),
+    }
+    return _json_safe(artifact)
+
+
 @dataclass(slots=True)
 class FixedOpportunityAccountStateProvider:
     """Provides a fresh isolated bankroll snapshot for one Paper Lab opportunity."""
@@ -286,6 +351,36 @@ def _account_state_snapshot(account_state: AccountState) -> dict[str, Any]:
         "open_positions": int(account_state.open_positions),
         "metadata": dict(account_state.metadata or {}),
     }
+
+
+def _decision_snapshot(decision: Any) -> dict[str, Any]:
+    if hasattr(decision, "__dataclass_fields__"):
+        snapshot = asdict(decision)
+    elif isinstance(decision, dict):
+        snapshot = dict(decision)
+    else:
+        snapshot = {
+            "action": getattr(decision, "action", None),
+            "approved": getattr(decision, "approved", None),
+            "reason_code": getattr(decision, "reason_code", None),
+            "reason": getattr(decision, "reason", ""),
+            "confidence": getattr(decision, "confidence", 0.0),
+            "edge": getattr(decision, "edge", None),
+            "entry_price": getattr(decision, "entry_price", None),
+            "win_probability": getattr(decision, "win_probability", None),
+            "requested_position_size": getattr(decision, "requested_position_size", None),
+            "position_size": getattr(decision, "position_size", None),
+            "risk_score": getattr(decision, "risk_score", 0.0),
+            "warnings": list(getattr(decision, "warnings", []) or []),
+            "reasoning": dict(getattr(decision, "reasoning", {}) or {}),
+        }
+    snapshot["action"] = snapshot.get("action") or "SKIP"
+    snapshot["approved"] = bool(snapshot.get("approved", False))
+    snapshot["reason_code"] = snapshot.get("reason_code") or "unknown"
+    snapshot["reason"] = snapshot.get("reason") or snapshot["reason_code"]
+    snapshot["warnings"] = list(snapshot.get("warnings") or [])
+    snapshot["reasoning"] = dict(snapshot.get("reasoning") or {})
+    return snapshot
 
 
 def _opportunity_mode_metadata(
@@ -449,3 +544,17 @@ def _iso_or_none(value: datetime | None) -> str | None:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value.isoformat()
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, datetime):
+        return _iso_or_none(value)
+    return str(value)

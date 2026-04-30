@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Optional
 
 from bot.config import ensure_mode_storage_dir, load_config
+from bot.decision_pipeline import build_pre_execution_decision_artifact
 from bot.exchanges.base import BaseExchange
 from bot.live_adapters import RunnerLiveReconciliationAdapter, RunnerLiveStateAdapter
 from bot.live_execution import RunnerLiveExecutionAdapter
@@ -1289,10 +1290,17 @@ class PredictionBot:
             min_confidence=strategy_cfg.get("min_confidence", self.config.get("min_confidence", 0.50)),
             max_entry_price=self.config.get("max_entry_price", 0.70),
         )
+        decision_artifact = build_pre_execution_decision_artifact(
+            mode="live" if self._is_live_mode() else "paper_portfolio",
+            context=context,
+            decision=decision,
+            signal=signal,
+            config_snapshot=self.config,
+        )
 
         if not decision.approved:
             logger.info(f"🛑 Shared decision skipped: {decision.reason}")
-            return {"blocked_reason": decision.reason_code, "decision": decision}
+            return {"blocked_reason": decision.reason_code, "decision": decision, "decision_artifact": decision_artifact}
 
         result = self.live_execution.execute(signal, decision, exchange)
         if result:
@@ -1307,6 +1315,7 @@ class PredictionBot:
                     "decision": result.get("decision") or decision,
                     "reconciliation_issues": result.get("reconciliation_issues", []),
                     "recovery_state": result.get("recovery_state"),
+                    "decision_artifact": result.get("decision_artifact"),
                 }
             self._clear_live_failure_streak(exchange_name or "")
             return {"order": result, "decision": decision}
@@ -1419,6 +1428,8 @@ class PredictionBot:
             timestamp=datetime.now(timezone.utc).isoformat(),
             available_cash=self.risk.state.available_cash,
         )
+        if result.get("decision_artifact") is not None:
+            payload["decision_artifact"] = result.get("decision_artifact")
         log_file = self.log_dir / "risk_blocks.jsonl"
         with open(log_file, "a") as f:
             f.write(json.dumps(payload) + "\n")

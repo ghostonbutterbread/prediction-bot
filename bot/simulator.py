@@ -8,6 +8,7 @@ from dataclasses import dataclass, asdict, field
 from typing import Optional
 
 from bot.config import ensure_mode_storage_dir
+from bot.decision_pipeline import build_pre_execution_decision_artifact
 from bot.paper_adapters import (
     LoadedPaperSession,
     SimulatorPaperExecutionAdapter,
@@ -78,6 +79,7 @@ class SimTrade:
     original_decision_reason_code: Optional[str] = None
     execution_decision_reason_code: Optional[str] = None
     execution_snapshot_source: Optional[str] = None
+    decision_artifact: Optional[dict] = None
 
     # Resolution (filled in later)
     resolved: bool = False
@@ -299,6 +301,7 @@ class Simulator:
             original_decision_reason_code=t_data.get("original_decision_reason_code"),
             execution_decision_reason_code=t_data.get("execution_decision_reason_code"),
             execution_snapshot_source=t_data.get("execution_snapshot_source"),
+            decision_artifact=t_data.get("decision_artifact"),
             resolved=t_data.get("resolved", False),
             outcome=t_data.get("outcome"),
             pnl=t_data.get("pnl"),
@@ -713,13 +716,23 @@ class Simulator:
             "original_entry_price": getattr(original_decision, "entry_price", None),
             "execution_entry_price": getattr(execution_decision, "entry_price", None),
         }
+        decision_artifact = build_pre_execution_decision_artifact(
+            mode="paper_portfolio",
+            context=context,
+            decision=decision,
+            signal=signal,
+            execution_snapshot=execution_snapshot,
+            config_snapshot=self.config,
+        )
 
         if not decision.approved:
             if blockers is not None:
                 blockers[decision.reason_code] += 1
             logger.info(f"  🛑 Shared decision skipped: {decision.reason}")
             if self.parity_mode.get("enabled"):
-                return self._trade_from_execution_rejection(decision, context)
+                rejected_trade = self._trade_from_execution_rejection(decision, context)
+                rejected_trade.decision_artifact = decision_artifact
+                return rejected_trade
             return None
 
         if decision.warnings:
@@ -734,6 +747,7 @@ class Simulator:
             return None
 
         trade = self._trade_from_execution_result(result)
+        trade.decision_artifact = decision_artifact
         enrich_trade_audit_fields(trade.__dict__)
         if self.single_trade_mode:
             self.single_trade_completed = True
@@ -779,6 +793,7 @@ class Simulator:
             original_decision_reason_code=metadata.get("original_decision_reason_code"),
             execution_decision_reason_code=metadata.get("execution_decision_reason_code"),
             execution_snapshot_source=metadata.get("execution_snapshot_source"),
+            decision_artifact=metadata.get("decision_artifact"),
         )
 
     def _trade_from_execution_rejection(self, decision: TradeDecision, context: TradeContext) -> SimTrade:
