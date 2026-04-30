@@ -398,6 +398,15 @@ Earn confidence through repeated calm behavior before discussing unattended depl
 - [ ] Confirm reconciliation remains trustworthy after real order history accumulates.
 - [ ] Only then allow longer supervised runs with limited babysitting.
 
+### Readiness/evidence checklist
+- [x] Add read-only repeatability report tooling for supervised canary artifacts.
+- [x] Keep the report local-artifact-only: no daemon start, no exchange connection, no bot instantiation, no `.env`, and no credential/env overrides.
+- [x] Fail closed when fewer than two supervised sessions or required artifacts are present.
+- [x] Check reviewed sessions for lifecycle/accounting contradictions, degraded reconciliation indicators, active safety pauses, and direct exchange-truth reconciliation fields when available.
+- [ ] Capture multiple real supervised canary sessions with startup, reconciliation, and shutdown artifacts.
+- [ ] Review the repeatability report output after each supervised session batch.
+- [ ] Do not treat report readiness as permission for unattended live operation; it only creates evidence for a limited-autonomy discussion.
+
 ### Exit criteria
 - [ ] The bot survives reality repeatedly, not just once.
 - [ ] Evidence is sustained, not anecdotal.
