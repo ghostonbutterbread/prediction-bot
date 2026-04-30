@@ -75,6 +75,37 @@ class ParityAuditTests(unittest.TestCase):
         self.assertEqual(enriched["integrity_status"], "ok")
         self.assertEqual(enriched["integrity_errors"], [])
 
+    def test_resolved_enrichment_forces_canonical_resolved_lifecycle(self):
+        row = {
+            "trade_id": "resolved-prior-open-state",
+            "timestamp": "2026-04-23T00:00:00+00:00",
+            "market_id": "m-prior-open",
+            "question": "Did this settle after being open?",
+            "exchange": "kalshi",
+            "direction": "BUY_YES",
+            "status": "filled",
+            "lifecycle_state": "filled_open",
+            "resolved": True,
+            "resolved_at": "2026-04-24T00:00:00+00:00",
+            "market_price": 0.6,
+            "entry_price": 0.6,
+            "position_size": 6.0,
+            "outcome": "YES",
+            "pnl": 3.72,
+            "settlement_value": 9.72,
+            "resolution_type": "settled",
+            "decision_reason_code": "approved",
+        }
+
+        enriched = enrich_trade_audit_fields(row, fee_rate=0.07)
+
+        self.assertEqual(enriched["status"], "resolved")
+        self.assertEqual(enriched["lifecycle_state"], "resolved_position")
+        self.assertEqual(enriched["outcome"], "YES")
+        self.assertEqual(enriched["resolution_result"], "won")
+        self.assertEqual(enriched["integrity_status"], "ok")
+        self.assertEqual(enriched["integrity_errors"], [])
+
     def test_manual_mark_close_does_not_infer_market_resolution_from_trade_result(self):
         row = {
             "trade_id": "manual-close-result",
@@ -280,7 +311,7 @@ class ParityAuditTests(unittest.TestCase):
         self.assertIn("resolved_without_pnl", issues)
         self.assertIn("resolved_without_settlement_value", issues)
 
-    def test_execution_contract_flags_resolved_flag_without_resolved_status(self):
+    def test_execution_contract_canonicalizes_resolved_flag_status(self):
         row = apply_execution_audit_contract(
             {
                 "trade_id": "resolved-flag-mismatch",
@@ -304,7 +335,34 @@ class ParityAuditTests(unittest.TestCase):
         )
 
         issues = validate_execution_audit_row(row)
-        self.assertIn("resolved_flag_status_mismatch", issues)
+        self.assertEqual(row["status"], "resolved")
+        self.assertEqual(row["lifecycle_state"], "resolved_position")
+        self.assertNotIn("resolved_flag_status_mismatch", issues)
+
+    def test_execution_contract_preserves_legacy_string_false_resolved_flag(self):
+        row = apply_execution_audit_contract(
+            {
+                "trade_id": "legacy-string-false-resolved",
+                "timestamp": "2026-04-23T00:00:00+00:00",
+                "market_id": "m-string-false",
+                "direction": "BUY_YES",
+                "status": "filled",
+                "resolved": "False",
+                "requested_size": 1.0,
+                "approved_size": 1.0,
+                "placed_size": 1.0,
+                "filled_size": 1.0,
+                "remaining_size": 0.0,
+                "market_price": 0.5,
+                "decision_reason_code": "approved",
+            }
+        )
+
+        issues = validate_execution_audit_row(row)
+        self.assertEqual(row["status"], "filled")
+        self.assertEqual(row["lifecycle_state"], "filled_open")
+        self.assertFalse(row["resolved"])
+        self.assertNotIn("resolved_flag_status_mismatch", issues)
 
     def test_execution_contract_distinguishes_canceled_partial_and_stale(self):
         canceled = apply_execution_audit_contract(
