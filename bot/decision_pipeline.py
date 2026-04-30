@@ -20,6 +20,7 @@ class DecisionPipelineInput:
     account_state: AccountState
     order_book: dict[str, Any] | None = None
     source_context: dict[str, Any] = field(default_factory=dict)
+    execution_snapshot: dict[str, Any] | None = None
     mode: str = "paper_lab"
     config_snapshot: dict[str, Any] = field(default_factory=dict)
     as_of: datetime | None = None
@@ -79,6 +80,7 @@ class DecisionPipelineEvaluator:
         account_state: AccountState | None = None,
         order_book: dict[str, Any] | None = None,
         source_context: dict[str, Any] | None = None,
+        execution_snapshot: dict[str, Any] | None = None,
         mode: str = "paper_lab",
         config_snapshot: dict[str, Any] | None = None,
         as_of: datetime | None = None,
@@ -88,6 +90,7 @@ class DecisionPipelineEvaluator:
             account_state=account_state or build_fixed_opportunity_account_state(),
             order_book=order_book,
             source_context=dict(source_context or {}),
+            execution_snapshot=dict(execution_snapshot) if isinstance(execution_snapshot, dict) else None,
             mode=mode,
             config_snapshot=dict(config_snapshot or self.config),
             as_of=as_of,
@@ -132,11 +135,14 @@ class DecisionPipelineEvaluator:
             )
 
         normalized_signal = _normalize_signal_prices(signal, pipeline_input.market)
-        execution_snapshot = build_execution_snapshot(
-            normalized_signal,
-            direction=str(normalized_signal.get("direction", "BUY_YES") or "BUY_YES").upper(),
-            bid_ask=_bid_ask_from_order_book(pipeline_input.order_book),
-        )
+        if isinstance(pipeline_input.execution_snapshot, dict) and pipeline_input.execution_snapshot:
+            execution_snapshot = dict(pipeline_input.execution_snapshot)
+        else:
+            execution_snapshot = build_execution_snapshot(
+                normalized_signal,
+                direction=str(normalized_signal.get("direction", "BUY_YES") or "BUY_YES").upper(),
+                bid_ask=_bid_ask_from_order_book(pipeline_input.order_book),
+            )
         context = self._build_trade_context(
             pipeline_input,
             normalized_signal,
