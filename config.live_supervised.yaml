@@ -113,11 +113,17 @@ strategy:
 kalshi_fee_rate: 0.07
 trading:
   mode: live
-  enabled: true
+  enabled: false
+  trading_enabled: false
   send_startup: true
   send_shutdown: true
   send_pause_resume: true
   single_trade_mode: true
+  live_reconciliation:
+    block_on_degraded: true
+  live_identity:
+    exchange: kalshi
+    environment: prod
 alerts:
   enabled: true
   trade_events: true
@@ -133,8 +139,9 @@ alerts:
   telegram_silent: false
 verbosity:
   level: verbose
-max_tradable_balance: 0.0
-max_position_size_usd: 0.0
+max_tradable_balance_usd: 25.0
+max_tradable_balance: 25.0
+max_position_size_usd: 2.0
 trade_economics:
   min_position_size_usd: 1.0
   min_expected_net_profit_usd: 0.1
@@ -154,9 +161,9 @@ risk:
   max_session_drawdown_pct: 0.2
   kelly_fraction: 0.5
   max_position_pct: 0.1
-  daily_loss_limit_pct: 35
-  max_drawdown_pct: 60
-  max_open_positions: 15
+  daily_loss_limit_pct: 0.05
+  max_drawdown_pct: 0.1
+  max_open_positions: 3
 parity_mode:
   enabled: false
   # production = live runtime keeps live risk preset

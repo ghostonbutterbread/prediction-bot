@@ -11,6 +11,7 @@ Usage:
     python main.py backtest [n] [m]  # Backtest on n markets
     python main.py live              # Live trading (real money!)
     python main.py live --config path/to/config.yaml
+    python main.py canary-preflight --config config.live_supervised.yaml
     python main.py status            # Show bot status
     python main.py markets           # List active markets
     python main.py prediction-lab-run       # Score hypothetical Prediction Lab positions
@@ -29,8 +30,6 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from bot.status import format_status_message
-
-load_dotenv()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -547,6 +546,19 @@ def cmd_prediction_lab_collect(config_path: str = 'config.yaml'):
     prediction_lab_collect_main()
 
 
+def cmd_canary_preflight(config_path: str = "config.live_supervised.yaml") -> bool:
+    """Read-only live canary preflight; does not instantiate runtime services."""
+    import yaml
+    from bot.live_canary import format_live_canary_report, validate_live_canary_config
+
+    with open(config_path) as f:
+        config = yaml.safe_load(f) or {}
+    config["_config_path"] = config_path
+    report = validate_live_canary_config(config)
+    print(format_live_canary_report(report))
+    return bool(report.get("ready", False))
+
+
 def cmd_news(query: str = None):
     """Test news feed."""
     from bot.feeds.news import NewsFeed
@@ -573,14 +585,18 @@ def main():
         return
 
     cmd = sys.argv[1].lower()
+    if cmd != "canary-preflight":
+        load_dotenv()
 
     single_trade = "--single-trade" in sys.argv
     verbosity_override = "double_verbose" if "-vv" in sys.argv else "verbose" if "-v" in sys.argv else None
     config_path = "config.yaml"
+    config_explicit = False
     if "--config" in sys.argv:
         idx = sys.argv.index("--config")
         if idx + 1 < len(sys.argv):
             config_path = sys.argv[idx + 1]
+            config_explicit = True
 
     if cmd == "demo":
         cmd_demo()
@@ -638,6 +654,10 @@ def main():
         cmd_prediction_lab_report(config_path)
     elif cmd == "prediction-lab-collect":
         cmd_prediction_lab_collect(config_path)
+    elif cmd == "canary-preflight":
+        ok = cmd_canary_preflight(config_path if config_explicit else "config.live_supervised.yaml")
+        if not ok:
+            sys.exit(1)
     elif cmd == "news":
         query = " ".join(sys.argv[2:]) if len(sys.argv) > 2 else None
         cmd_news(query)
