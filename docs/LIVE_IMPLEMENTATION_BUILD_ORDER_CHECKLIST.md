@@ -360,8 +360,14 @@ Make live-vs-paper differences explicit so comparisons are interpretable.
 Prove the hardened system can touch real money conservatively.
 
 ### Preconditions
-- [ ] Phases 1–7 are far enough along that live behavior is explainable.
+- [x] Phases 1–7 are far enough along that live behavior is explainable.
 - [ ] The canary notes in `docs/LIVE_CANARY_READINESS.md` are still satisfied.
+
+### Readiness checklist
+- [x] Add read-only `canary-preflight` command that only loads static config and validates readiness.
+- [x] Keep `config.live_supervised.yaml` fail-closed with `trading.enabled: false` and tiny explicit caps.
+- [x] Block whole-percent risk mistakes such as `daily_loss_limit_pct: 35`.
+- [x] Verify preflight does not instantiate the bot, connect exchanges, load `.env`, or apply env overrides.
 
 ### Canary checklist
 - [ ] Use a tiny bankroll (for example `$100`).
