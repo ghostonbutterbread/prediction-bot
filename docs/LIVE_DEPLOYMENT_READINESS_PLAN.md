@@ -194,6 +194,7 @@ Success condition:
 - restart behavior exercised safely
 - reconciliation behavior reviewed after non-trivial order history
 - reporting artifacts reviewed after runs
+- readiness reports fail closed on malformed or unwindowable artifact timestamps
 
 Success condition:
 - lifecycle rows, account state, and exchange truth stay aligned repeatedly

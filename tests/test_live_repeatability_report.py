@@ -111,6 +111,32 @@ def clean_hourly() -> list[dict]:
     ]
 
 
+def clean_trade_row(**overrides) -> dict:
+    row = {
+        "timestamp": "2026-04-21T10:06:00+00:00",
+        "schema_name": "execution_audit_row",
+        "schema_version": 1,
+        "trade_id": "trade-1",
+        "market_id": "MKT-1",
+        "direction": "BUY_YES",
+        "status": "filled",
+        "lifecycle_state": "filled_open",
+        "decision_reason_code": "approved",
+        "requested_size": 1.0,
+        "approved_size": 1.0,
+        "placed_size": 1.0,
+        "filled_size": 1.0,
+        "remaining_size": 0.0,
+        "reserved_capital": 1.0,
+        "execution_revalidated": True,
+        "execution_revalidation_outcome": "approved",
+        "execution_snapshot_source": "book",
+        "resolved": False,
+    }
+    row.update(overrides)
+    return row
+
+
 def write_empty_jsonl(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("", encoding="utf-8")
@@ -190,6 +216,38 @@ class LiveRepeatabilityReportTests(unittest.TestCase):
 
         self.assertTrue(report["ready"])
         self.assertFalse(any("resolved_flag_status_mismatch" in issue for issue in report["issues"]))
+
+    def test_unparseable_trade_time_anchor_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir)
+            write_jsonl(data_dir / "lifecycle.jsonl", clean_lifecycle())
+            write_jsonl(data_dir / "reconciliation.jsonl", clean_reconciliation())
+            write_jsonl(data_dir / "hourly_summary.jsonl", clean_hourly())
+            write_jsonl(data_dir / "trades.jsonl", [clean_trade_row(timestamp="not-a-timestamp")])
+            write_empty_jsonl(data_dir / "risk_blocks.jsonl")
+
+            report = build_live_repeatability_report(data_dir, sessions=2)
+
+        self.assertFalse(report["ready"])
+        joined = "\n".join(report["issues"])
+        self.assertIn("trades.jsonl row 1", joined)
+        self.assertIn("no parseable time anchor", joined)
+
+    def test_created_at_anchor_is_accepted_for_trade_rows(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir)
+            write_jsonl(data_dir / "lifecycle.jsonl", clean_lifecycle())
+            write_jsonl(data_dir / "reconciliation.jsonl", clean_reconciliation())
+            write_jsonl(data_dir / "hourly_summary.jsonl", clean_hourly())
+            row = clean_trade_row(created_at="2026-04-21T10:06:00+00:00")
+            row.pop("timestamp")
+            write_jsonl(data_dir / "trades.jsonl", [row])
+            write_empty_jsonl(data_dir / "risk_blocks.jsonl")
+
+            report = build_live_repeatability_report(data_dir, sessions=2)
+
+        self.assertTrue(report["ready"])
+        self.assertEqual(report["sessions"][-1]["trade_rows"], 1)
 
     def test_missing_expected_artifact_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmpdir:
