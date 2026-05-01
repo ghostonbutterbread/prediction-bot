@@ -96,6 +96,17 @@ def build_live_repeatability_report(data_dir: str | Path, *, sessions: int = 5) 
     report["summary"]["total_trade_rows"] = len(trades)
     report["summary"]["total_risk_block_rows"] = len(risk_blocks)
 
+    _validate_artifact_timestamps(
+        report,
+        {
+            "lifecycle.jsonl": lifecycle,
+            "reconciliation.jsonl": reconciliation,
+            "hourly_summary.jsonl": hourly,
+            "trades.jsonl": trades,
+            "risk_blocks.jsonl": risk_blocks,
+        },
+    )
+
     if report["issues"]:
         _finish(report)
         return report
@@ -392,7 +403,7 @@ def _rows_in_window(rows: list[dict[str, Any]], window: dict[str, Any]) -> list[
         return []
     selected: list[dict[str, Any]] = []
     for row in rows:
-        ts = _parse_ts(row.get("timestamp") or row.get("resolved_at") or row.get("created_at"))
+        ts = _row_ts(row)
         if ts is None:
             continue
         if ts < start:
@@ -422,6 +433,41 @@ def _parse_ts(value: Any) -> datetime | None:
 
 def _format_ts(value: datetime | None) -> str | None:
     return value.isoformat() if value else None
+
+
+def _validate_artifact_timestamps(report: dict[str, Any], artifacts: dict[str, list[dict[str, Any]]]) -> None:
+    for artifact_name, rows in artifacts.items():
+        for row_number, row in enumerate(rows, start=1):
+            if _row_ts(row) is not None:
+                continue
+            label = _row_label(row)
+            fields = ", ".join(_row_ts_fields(row)) or "timestamp/resolved_at/created_at"
+            _add_check(
+                report,
+                f"artifact_time:{artifact_name}",
+                False,
+                f"{artifact_name} row {row_number} ({label}) has no parseable time anchor in {fields}",
+            )
+
+
+def _row_ts(row: dict[str, Any]) -> datetime | None:
+    for field in _row_ts_fields(row):
+        parsed = _parse_ts(row.get(field))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _row_ts_fields(row: dict[str, Any]) -> list[str]:
+    return [field for field in ("timestamp", "resolved_at", "created_at") if row.get(field)]
+
+
+def _row_label(row: dict[str, Any]) -> str:
+    for field in ("session_id", "trade_id", "order_id", "market_id", "event", "source"):
+        value = row.get(field)
+        if value:
+            return f"{field}={value}"
+    return "unlabeled"
 
 
 def _nested_lower(row: dict[str, Any], *keys: str) -> str:
