@@ -10,7 +10,8 @@ from kalshi_python_sync import Configuration, KalshiClient
 from kalshi_python_sync.auth import KalshiAuth
 
 from ..http_rate_limit import RateLimitProfile, RequestThrottle, call_with_retry, http_get_with_retry
-from ..market_classification import apply_classification_metadata, classify_market_object, is_weather_market
+from ..market_classification import apply_classification_metadata, classify_market_object
+from ..market_router import DEFAULT_ALLOWED_MARKET_ROUTES, route_market
 from .base import BaseExchange, Market, Order, Position, RestingOrder
 
 logger = logging.getLogger(__name__)
@@ -31,12 +32,19 @@ class KalshiExchange(BaseExchange):
         self.client = None
         self._daily_series_tickers: list[str] = []
         self._allowed_market_groups: set[str] = {"weather", "sports"}
+        self._allowed_market_routes: set[str] = set(DEFAULT_ALLOWED_MARKET_ROUTES)
         self._account_tier = os.getenv("KALSHI_ACCOUNT_TIER", "basic")
         self._throttle = RequestThrottle(RateLimitProfile.from_account_tier(self._account_tier))
 
     def set_allowed_market_groups(self, groups: list[str] | set[str] | tuple[str, ...] | None):
         normalized = {str(group).strip().lower() for group in (groups or []) if str(group).strip()}
         self._allowed_market_groups = normalized or {"weather", "sports"}
+
+    def set_allowed_market_routes(self, routes: list[str] | set[str] | tuple[str, ...] | None):
+        if routes is None:
+            self._allowed_market_routes = set(DEFAULT_ALLOWED_MARKET_ROUTES)
+            return
+        self._allowed_market_routes = {str(route).strip().lower() for route in routes if str(route).strip()}
 
     def _refresh_rate_limit_profile(self) -> None:
         env_reads = os.getenv("KALSHI_READS_PER_SECOND")
@@ -92,9 +100,23 @@ class KalshiExchange(BaseExchange):
 
     def _market_allowed(self, market: Market) -> bool:
         classification = apply_classification_metadata(market)
+        route = route_market(market, {"scan": {"allowed_market_routes": sorted(self._allowed_market_routes)}})
+        metadata = dict(getattr(market, "metadata", {}) or {})
+        metadata["market_route"] = route.to_dict()
+        if route.group != "unknown":
+            metadata["market_group"] = route.group
+        elif classification is not None:
+            metadata["market_group"] = classification.market_group
+        if route.family:
+            metadata["market_family"] = route.family
+        elif classification is not None and getattr(classification, "family", None):
+            metadata["market_family"] = getattr(classification, "family")
+        market.metadata = metadata
+        if route.allowed:
+            return True
         if classification is None:
             return False
-        return classification.market_group in self._allowed_market_groups
+        return classification.market_group in self._allowed_market_groups and route.allowed
 
     def describe_runtime_identity(self) -> dict[str, object]:
         return {
@@ -227,11 +249,8 @@ class KalshiExchange(BaseExchange):
         normalized = str(series_ticker or '').strip().lower()
         if not normalized:
             return False
-        if is_weather_market(market_id=normalized, category=normalized, series=normalized):
-            return True
         weather_prefixes = ('kxhigh', 'kxhight', 'kxlow', 'kxlowt', 'kxmintemp')
-        weather_tokens = ('weather', 'temp', 'rain', 'snow', 'wind', 'storm', 'hurricane')
-        return normalized.startswith(weather_prefixes) or any(token in normalized for token in weather_tokens)
+        return normalized.startswith(weather_prefixes)
 
     def _fetch_direct_series_markets(self, auth_headers: dict[str, str], series_ticker: str, *, limit: int) -> list[dict]:
         try:

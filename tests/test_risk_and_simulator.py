@@ -46,7 +46,7 @@ class RiskManagerTests(unittest.TestCase):
             risk.state.current_balance = 100.0
             risk.state.total_exposure = 39.0
 
-            decision = risk.check_trade({"question": "Will BTC rise?"}, 5.0)
+            decision = risk.check_trade({"question": "Will the high temperature in New York exceed 71 degrees?"}, 5.0)
 
             self.assertTrue(decision.approved)
             self.assertEqual(decision.adjusted_size, 1.0)
@@ -63,7 +63,7 @@ class RiskManagerTests(unittest.TestCase):
             risk.state.current_balance = 100.0
             risk.state.available_cash = 3.5
 
-            decision = risk.check_trade({"question": "Will BTC rise?"}, 5.0, available_cash=3.5)
+            decision = risk.check_trade({"question": "Will the high temperature in New York exceed 71 degrees?"}, 5.0, available_cash=3.5)
 
             self.assertTrue(decision.approved)
             self.assertEqual(decision.adjusted_size, 3.5)
@@ -79,7 +79,7 @@ class RiskManagerTests(unittest.TestCase):
                 }
             )
 
-            decision = risk.check_trade({"question": "Will BTC rise?"}, 5.0)
+            decision = risk.check_trade({"question": "Will the high temperature in New York exceed 71 degrees?"}, 5.0)
 
             self.assertFalse(decision.approved)
             self.assertEqual(decision.reason, "Trading paused by operator")
@@ -97,7 +97,7 @@ class RiskManagerTests(unittest.TestCase):
             risk.state.current_balance = 100.0
             risk.state.available_cash = 50.0
 
-            decision = risk.check_trade({"question": "Will BTC rise?"}, 18.0, available_cash=50.0)
+            decision = risk.check_trade({"question": "Will the high temperature in New York exceed 71 degrees?"}, 18.0, available_cash=50.0)
 
             self.assertTrue(decision.approved)
             self.assertEqual(decision.adjusted_size, 10.0)
@@ -116,7 +116,7 @@ class RiskManagerTests(unittest.TestCase):
             risk.state.current_balance = 100.0
             risk.state.available_cash = 20.0
 
-            decision = risk.check_trade({"question": "Will BTC rise?"}, 8.0, available_cash=20.0)
+            decision = risk.check_trade({"question": "Will the high temperature in New York exceed 71 degrees?"}, 8.0, available_cash=20.0)
 
             self.assertTrue(decision.approved)
             self.assertEqual(decision.adjusted_size, 4.0)
@@ -234,13 +234,15 @@ class SimulatorSessionTests(unittest.TestCase):
 
             signal = {
                 "market_id": "test-market",
-                "question": "Will test settle YES?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "exchange": "kalshi",
                 "direction": "BUY_YES",
                 "model_probability": 0.7,
                 "market_price": 0.4,
                 "edge": 0.3,
                 "confidence": 0.9,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
                 "signals": {},
             }
 
@@ -281,7 +283,7 @@ class SimulatorSessionTests(unittest.TestCase):
 
             signal = {
                 "market_id": "test-market-no",
-                "question": "Will test settle NO?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "exchange": "kalshi",
                 "direction": "BUY_NO",
                 "model_probability": 0.3,
@@ -289,6 +291,8 @@ class SimulatorSessionTests(unittest.TestCase):
                 "no_market_price": 0.62,
                 "edge": 0.3,
                 "confidence": 0.9,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
                 "signals": {},
             }
 
@@ -324,13 +328,15 @@ class SimulatorSessionTests(unittest.TestCase):
 
             signal = {
                 "market_id": "test-market-cap",
-                "question": "Will test settle YES?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "exchange": "kalshi",
                 "direction": "BUY_YES",
                 "model_probability": 0.7,
                 "market_price": 0.4,
                 "edge": 0.3,
                 "confidence": 0.9,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
                 "signals": {},
             }
 
@@ -361,13 +367,15 @@ class SimulatorSessionTests(unittest.TestCase):
 
             signal = {
                 "market_id": "test-market-no-side-price",
-                "question": "Will test settle NO?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "exchange": "kalshi",
                 "direction": "BUY_NO",
                 "model_probability": 0.3,
                 "market_price": 0.24,
                 "edge": 0.3,
                 "confidence": 0.9,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
                 "signals": {},
             }
 
@@ -408,7 +416,7 @@ class SimulatorSessionTests(unittest.TestCase):
 
             signal = {
                 "market_id": "test-parity-market",
-                "question": "Will test settle YES?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "exchange": "kalshi",
                 "direction": "BUY_YES",
                 "market_price": 0.04,
@@ -419,6 +427,8 @@ class SimulatorSessionTests(unittest.TestCase):
                 "model_probability": 0.20,
                 "edge": 0.16,
                 "confidence": 0.9,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
                 "signals": {},
             }
 
@@ -459,7 +469,7 @@ class SimulatorSessionTests(unittest.TestCase):
 
             signal = {
                 "market_id": "test-parity-drift",
-                "question": "Will test drift reject?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "exchange": "kalshi",
                 "direction": "BUY_YES",
                 "market_price": 0.40,
@@ -470,6 +480,8 @@ class SimulatorSessionTests(unittest.TestCase):
                 "model_probability": 0.90,
                 "edge": 0.30,
                 "confidence": 0.9,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
                 "signals": {},
             }
 
@@ -526,7 +538,7 @@ class SimulatorSessionTests(unittest.TestCase):
 
             signal = {
                 "market_id": "test-parity-save",
-                "question": "Will saved paper rows keep parity fields?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "exchange": "kalshi",
                 "direction": "BUY_YES",
                 "market_price": 0.40,
@@ -537,6 +549,8 @@ class SimulatorSessionTests(unittest.TestCase):
                 "model_probability": 0.90,
                 "edge": 0.30,
                 "confidence": 0.9,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
                 "signals": {},
             }
 
@@ -584,7 +598,7 @@ class SimulatorSessionTests(unittest.TestCase):
 
             signal = {
                 "market_id": "test-parity-off",
-                "question": "Will parity off preserve old flow?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "exchange": "kalshi",
                 "direction": "BUY_YES",
                 "market_price": 0.40,
@@ -595,6 +609,8 @@ class SimulatorSessionTests(unittest.TestCase):
                 "model_probability": 0.90,
                 "edge": 0.30,
                 "confidence": 0.9,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
                 "signals": {},
             }
 
@@ -611,7 +627,7 @@ class SimulatorSessionTests(unittest.TestCase):
         signal = {
             "exchange": "kalshi",
             "market_id": "m-golden",
-            "question": "Will parity match?",
+            "question": "Will the high temperature in New York exceed 71 degrees?",
             "direction": "BUY_YES",
             "market_price": 0.40,
             "yes_price": 0.40,
@@ -619,6 +635,8 @@ class SimulatorSessionTests(unittest.TestCase):
             "model_probability": 0.70,
             "edge": 0.30,
             "confidence": 0.90,
+            "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
             "signals": {},
         }
         exchange = StaticBookExchange()
@@ -730,7 +748,7 @@ class SimulatorSessionTests(unittest.TestCase):
 
             approved_signal = {
                 "market_id": "test-parity-report-approved",
-                "question": "Will approved parity trade pass?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "exchange": "kalshi",
                 "direction": "BUY_YES",
                 "market_price": 0.04,
@@ -741,11 +759,13 @@ class SimulatorSessionTests(unittest.TestCase):
                 "model_probability": 0.20,
                 "edge": 0.16,
                 "confidence": 0.9,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
                 "signals": {},
             }
             rejected_signal = {
                 "market_id": "test-parity-report-rejected",
-                "question": "Will rejected parity trade fail?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "exchange": "kalshi",
                 "direction": "BUY_YES",
                 "market_price": 0.40,
@@ -756,6 +776,8 @@ class SimulatorSessionTests(unittest.TestCase):
                 "model_probability": 0.90,
                 "edge": 0.30,
                 "confidence": 0.9,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
                 "signals": {},
             }
 
@@ -806,12 +828,14 @@ class SimulatorSessionTests(unittest.TestCase):
 
             signal = {
                 "market_id": "test-parity-no-book",
-                "question": "Will test settle YES?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "exchange": "kalshi",
                 "direction": "BUY_YES",
                 "model_probability": 0.20,
                 "edge": 0.16,
                 "confidence": 0.9,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
                 "signals": {},
             }
 
@@ -836,18 +860,20 @@ class SimulatorSessionTests(unittest.TestCase):
             )
             first_signal = {
                 "market_id": "KXHIGHNY-26APR16-T70",
-                "question": "Will NYC high be below 70?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "exchange": "kalshi",
                 "direction": "BUY_YES",
                 "model_probability": 0.7,
                 "market_price": 0.4,
                 "edge": 0.3,
                 "confidence": 0.9,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
                 "signals": {},
             }
             second_signal = dict(first_signal)
             second_signal["market_id"] = "KXHIGHNY-26APR16-T72"
-            second_signal["question"] = "Will NYC high be below 72?"
+            second_signal["question"] = "Will the high temperature in New York be below 72 degrees?"
             with patch.object(sim.kelly, "calculate", return_value=2.0):
                 first_trade = sim._create_trade(first_signal)
                 sim.trades.append(first_trade)
@@ -874,18 +900,20 @@ class SimulatorSessionTests(unittest.TestCase):
             )
             first_signal = {
                 "market_id": "KXHIGHNY-26APR16-T70",
-                "question": "Will NYC high be below 70?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "exchange": "kalshi",
                 "direction": "BUY_YES",
                 "model_probability": 0.7,
                 "market_price": 0.4,
                 "edge": 0.3,
                 "confidence": 0.9,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
                 "signals": {},
             }
             second_signal = dict(first_signal)
             second_signal["market_id"] = "KXHIGHNY-26APR16-T72"
-            second_signal["question"] = "Will NYC high be below 72?"
+            second_signal["question"] = "Will the high temperature in New York be below 72 degrees?"
 
             with patch.object(sim.kelly, "calculate", return_value=2.0):
                 first_trade = sim._create_trade(first_signal)
@@ -913,7 +941,7 @@ class SimulatorSessionTests(unittest.TestCase):
                         "timestamp": "2026-03-21T00:00:00+00:00",
                         "exchange": "kalshi",
                         "market_id": "bad-market",
-                        "question": "Bad market",
+                        "question": "Will the high temperature in New York exceed 71 degrees?",
                         "direction": "BUY_YES",
                         "model_probability": 0.6,
                         "market_price": 0.2,
@@ -929,7 +957,7 @@ class SimulatorSessionTests(unittest.TestCase):
                         "timestamp": "2026-03-21T01:00:00+00:00",
                         "exchange": "kalshi",
                         "market_id": "good-market",
-                        "question": "Good market",
+                        "question": "Will the high temperature in New York exceed 71 degrees?",
                         "direction": "BUY_YES",
                         "model_probability": 0.6,
                         "market_price": 0.2,

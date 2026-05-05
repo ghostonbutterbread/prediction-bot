@@ -136,7 +136,7 @@ class PredictionLabCollectorTests(unittest.TestCase):
         prediction_lab_cfg = {
             "enabled": True,
             "mode": "collector",
-            "groups": ["sports"],
+            "groups": ["weather"],
             "score_only": False,
             "record_all_scored": True,
             "collector_record_predictions": True,
@@ -148,15 +148,16 @@ class PredictionLabCollectorTests(unittest.TestCase):
             prediction_lab_cfg.update(lab_patch)
         config = {
             "data_dir": tmpdir,
+                "scan": {"allowed_market_routes": ["weather.daily_temperature"]},
             "prediction_lab": prediction_lab_cfg,
             "strategy": {"min_edge": 0.01, "min_confidence": 0.5, "enable_news": False, "enable_social": False, "enable_ai": False},
             "max_entry_price": 0.7,
         }
         lab = PredictionLab(config)
         signal = {
-            "market_id": "KXNBATEST-26APR29-HOME",
+            "market_id": "KXHIGHNY-260506-T71",
             "exchange": "kalshi",
-            "question": "Will the NBA test team win?",
+            "question": "Will the high temperature in New York exceed 71 degrees?",
             "direction": "BUY_YES",
             "model_probability": 0.7,
             "market_price": 0.4,
@@ -173,15 +174,15 @@ class PredictionLabCollectorTests(unittest.TestCase):
             risk_policy=_AllowRisk(),
         )
         market = SimpleNamespace(
-            id="KXNBATEST-26APR29-HOME",
+            id="KXHIGHNY-260506-T71",
             exchange="kalshi",
-            question="Will the NBA test team win?",
-            category="sports",
+            question="Will the high temperature in New York exceed 71 degrees?",
+            category="KXHIGHNY",
             yes_price=0.4,
             no_price=0.6,
             volume=1000,
             closes_at=datetime.now(timezone.utc) + timedelta(hours=6),
-            metadata={"market_group": "sports", "series": "nba"},
+            metadata={"market_group": "weather", "market_family": "daily_temperature", "series_ticker": "KXHIGHNY", "series": "daily_temperature"},
         )
         exchange = _SequentialBookExchange(market, books)
 
@@ -232,6 +233,7 @@ class PredictionLabCollectorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = {
                 "data_dir": tmpdir,
+                "scan": {"allowed_market_routes": ["weather.daily_temperature"]},
                 "prediction_lab": {
                     "enabled": True,
                     "paused": True,
@@ -349,6 +351,7 @@ class PredictionLabCollectorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = {
                 "data_dir": tmpdir,
+                "scan": {"allowed_market_routes": ["weather.daily_temperature"]},
                 "prediction_lab": {
                     "enabled": True,
                     "mode": "collector",
@@ -371,6 +374,7 @@ class PredictionLabCollectorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = {
                 "data_dir": tmpdir,
+                "scan": {"allowed_market_routes": ["weather.daily_temperature"]},
                 "prediction_lab": {
                     "enabled": True,
                     "mode": "collector",
@@ -406,6 +410,7 @@ class PredictionLabCollectorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = {
                 "data_dir": tmpdir,
+                "scan": {"allowed_market_routes": ["weather.daily_temperature"]},
                 "prediction_lab": {"enabled": True, "mode": "collector", "groups": ["weather", "sports"]},
                 "strategy": {"enable_news": False, "enable_social": False, "enable_ai": False},
             }
@@ -417,6 +422,7 @@ class PredictionLabCollectorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = {
                 "data_dir": tmpdir,
+                "scan": {"allowed_market_routes": ["weather.daily_temperature"]},
                 "prediction_lab": {
                     "enabled": True,
                     "mode": "collector",
@@ -456,6 +462,7 @@ class PredictionLabCollectorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = {
                 "data_dir": tmpdir,
+                "scan": {"allowed_market_routes": ["weather.daily_temperature"]},
                 "prediction_lab": {
                     "enabled": True,
                     "mode": "collector",
@@ -507,6 +514,7 @@ class PredictionLabCollectorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = {
                 "data_dir": tmpdir,
+                "scan": {"allowed_market_routes": ["weather.daily_temperature"]},
                 "prediction_lab": {
                     "enabled": True,
                     "mode": "collector",
@@ -660,6 +668,7 @@ class PredictionLabCollectorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = {
                 "data_dir": tmpdir,
+                "scan": {"allowed_market_routes": ["weather.daily_temperature"]},
                 "prediction_lab": {
                     "enabled": True,
                     "mode": "collector",
@@ -733,6 +742,7 @@ class PredictionLabCollectorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = {
                 "data_dir": tmpdir,
+                "scan": {"allowed_market_routes": ["weather.daily_temperature"]},
                 "prediction_lab": {
                     "enabled": True,
                     "mode": "collector",
@@ -818,6 +828,7 @@ class PredictionLabCollectorTests(unittest.TestCase):
             lab = PredictionLab(
                 {
                     "data_dir": tmpdir,
+                "scan": {"allowed_market_routes": ["weather.daily_temperature"]},
                     "prediction_lab": {"enabled": True, "mode": "collector", "groups": ["weather"], "use_shared_pipeline": True},
                     "strategy": {"min_edge": 0.01, "min_confidence": 0.5, "enable_news": False, "enable_social": False, "enable_ai": False},
                 }
@@ -877,6 +888,7 @@ class PredictionLabCollectorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = {
                 "data_dir": tmpdir,
+                "scan": {"allowed_market_routes": ["weather.daily_temperature"]},
                 "prediction_lab": {
                     "enabled": True,
                     "mode": "collector",
@@ -983,10 +995,11 @@ class PredictionLabCollectorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = {
                 "data_dir": tmpdir,
+                "scan": {"allowed_market_routes": ["weather.daily_temperature"]},
                 "prediction_lab": {
                     "enabled": True,
                     "mode": "collector",
-                    "groups": ["sports"],
+                    "groups": ["weather"],
                     "score_only": False,
                     "record_all_scored": True,
                     "collector_record_predictions": True,
@@ -997,9 +1010,9 @@ class PredictionLabCollectorTests(unittest.TestCase):
             }
             lab = PredictionLab(config)
             signal = {
-                "market_id": "KXNBATEST-26APR29-HOME",
+                "market_id": "KXHIGHNY-260506-T71",
                 "exchange": "kalshi",
-                "question": "Will the NBA test team win?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "direction": "BUY_YES",
                 "model_probability": 0.7,
                 "market_price": 0.4,
@@ -1016,15 +1029,15 @@ class PredictionLabCollectorTests(unittest.TestCase):
                 risk_policy=_AllowRisk(),
             )
             market = SimpleNamespace(
-                id="KXNBATEST-26APR29-HOME",
+                id="KXHIGHNY-260506-T71",
                 exchange="kalshi",
-                question="Will the NBA test team win?",
-                category="sports",
+                question="Will the high temperature in New York exceed 71 degrees?",
+                category="KXHIGHNY",
                 yes_price=0.4,
                 no_price=0.6,
                 volume=1000,
                 closes_at=datetime.now(timezone.utc) + timedelta(hours=6),
-                metadata={"market_group": "sports", "series": "nba"},
+                metadata={"market_group": "weather", "market_family": "daily_temperature", "series_ticker": "KXHIGHNY", "series": "daily_temperature"},
             )
             exchange = SimpleNamespace(
                 get_markets_direct=lambda **kwargs: [market],
@@ -1140,10 +1153,11 @@ class PredictionLabCollectorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = {
                 "data_dir": tmpdir,
+                "scan": {"allowed_market_routes": ["weather.daily_temperature"]},
                 "prediction_lab": {
                     "enabled": True,
                     "mode": "collector",
-                    "groups": ["sports"],
+                    "groups": ["weather"],
                     "score_only": False,
                     "record_all_scored": True,
                     "collector_record_predictions": True,
@@ -1158,9 +1172,9 @@ class PredictionLabCollectorTests(unittest.TestCase):
             }
             lab = PredictionLab(config)
             signal = {
-                "market_id": "KXNBATEST-26APR29-HOME",
+                "market_id": "KXHIGHNY-260506-T71",
                 "exchange": "kalshi",
-                "question": "Will the NBA test team win?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "direction": "BUY_YES",
                 "model_probability": 0.7,
                 "market_price": 0.4,
@@ -1178,15 +1192,15 @@ class PredictionLabCollectorTests(unittest.TestCase):
                 risk_policy=_AllowRisk(),
             )
             market = SimpleNamespace(
-                id="KXNBATEST-26APR29-HOME",
+                id="KXHIGHNY-260506-T71",
                 exchange="kalshi",
-                question="Will the NBA test team win?",
-                category="sports",
+                question="Will the high temperature in New York exceed 71 degrees?",
+                category="KXHIGHNY",
                 yes_price=0.4,
                 no_price=0.6,
                 volume=1000,
                 closes_at=datetime.now(timezone.utc) + timedelta(hours=6),
-                metadata={"market_group": "sports", "series": "nba"},
+                metadata={"market_group": "weather", "market_family": "daily_temperature", "series_ticker": "KXHIGHNY", "series": "daily_temperature"},
             )
             exchange = SimpleNamespace(
                 get_markets_direct=lambda **kwargs: [market],
@@ -1232,10 +1246,11 @@ class PredictionLabCollectorTests(unittest.TestCase):
             Path(tmpdir, "risk_state.json").write_text(json.dumps({"max_drawdown_halt": True}), encoding="utf-8")
             config = {
                 "data_dir": tmpdir,
+                "scan": {"allowed_market_routes": ["weather.daily_temperature"]},
                 "prediction_lab": {
                     "enabled": True,
                     "mode": "collector",
-                    "groups": ["sports"],
+                    "groups": ["weather"],
                     "score_only": False,
                     "record_all_scored": True,
                     "collector_record_predictions": True,
@@ -1248,7 +1263,7 @@ class PredictionLabCollectorTests(unittest.TestCase):
             signal = {
                 "market_id": "unit-risk-isolation",
                 "exchange": "kalshi",
-                "question": "Will the NBA test team win?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "direction": "BUY_YES",
                 "model_probability": 0.7,
                 "market_price": 0.4,
@@ -1263,8 +1278,8 @@ class PredictionLabCollectorTests(unittest.TestCase):
             market = SimpleNamespace(
                 id="unit-risk-isolation",
                 exchange="kalshi",
-                question="Will the NBA test team win?",
-                category="sports",
+                question="Will the high temperature in New York exceed 71 degrees?",
+                category="KXHIGHNY",
                 yes_price=0.4,
                 no_price=0.6,
                 volume=4500,
@@ -1295,11 +1310,12 @@ class PredictionLabCollectorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = {
                 "data_dir": tmpdir,
+                "scan": {"allowed_market_routes": ["weather.daily_temperature"]},
                 "prediction_lab": {
                     "enabled": True,
                     "mode": "collector",
                     "observer_mode": True,
-                    "groups": ["sports"],
+                    "groups": ["weather"],
                     "score_only": False,
                     "record_all_scored": True,
                     "collector_record_predictions": True,
@@ -1313,9 +1329,9 @@ class PredictionLabCollectorTests(unittest.TestCase):
             }
             lab = PredictionLab(config)
             signal = {
-                "market_id": "KXNBATEST-26APR29-HOME",
+                "market_id": "KXHIGHNY-260506-T71",
                 "exchange": "kalshi",
-                "question": "Will the NBA test team win?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "direction": "BUY_YES",
                 "model_probability": 0.7,
                 "market_price": 0.4,
@@ -1332,15 +1348,15 @@ class PredictionLabCollectorTests(unittest.TestCase):
                 risk_policy=_AllowRisk(),
             )
             market = SimpleNamespace(
-                id="KXNBATEST-26APR29-HOME",
+                id="KXHIGHNY-260506-T71",
                 exchange="kalshi",
-                question="Will the NBA test team win?",
-                category="sports",
+                question="Will the high temperature in New York exceed 71 degrees?",
+                category="KXHIGHNY",
                 yes_price=0.4,
                 no_price=0.6,
                 volume=1000,
                 closes_at=datetime.now(timezone.utc) + timedelta(hours=6),
-                metadata={"market_group": "sports", "series": "nba"},
+                metadata={"market_group": "weather", "market_family": "daily_temperature", "series_ticker": "KXHIGHNY", "series": "daily_temperature"},
             )
             exchange = SimpleNamespace(
                 get_markets_direct=lambda **kwargs: [market],
@@ -1383,11 +1399,12 @@ class PredictionLabCollectorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = {
                 "data_dir": tmpdir,
+                "scan": {"allowed_market_routes": ["weather.daily_temperature"]},
                 "prediction_lab": {
                     "enabled": True,
                     "mode": "collector",
                     "observer_mode": True,
-                    "groups": ["sports"],
+                    "groups": ["weather"],
                     "score_only": False,
                     "record_all_scored": True,
                     "collector_record_predictions": True,
@@ -1401,9 +1418,9 @@ class PredictionLabCollectorTests(unittest.TestCase):
             }
             lab = PredictionLab(config)
             signal = {
-                "market_id": "KXNBATEST-26APR29-HOME",
+                "market_id": "KXHIGHNY-260506-T71",
                 "exchange": "kalshi",
-                "question": "Will the NBA test team win?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "direction": "BUY_YES",
                 "model_probability": 0.7,
                 "market_price": 0.4,
@@ -1420,15 +1437,15 @@ class PredictionLabCollectorTests(unittest.TestCase):
                 risk_policy=_DenyRisk(),
             )
             market = SimpleNamespace(
-                id="KXNBATEST-26APR29-HOME",
+                id="KXHIGHNY-260506-T71",
                 exchange="kalshi",
-                question="Will the NBA test team win?",
-                category="sports",
+                question="Will the high temperature in New York exceed 71 degrees?",
+                category="KXHIGHNY",
                 yes_price=0.4,
                 no_price=0.6,
                 volume=1000,
                 closes_at=datetime.now(timezone.utc) + timedelta(hours=6),
-                metadata={"market_group": "sports", "series": "nba"},
+                metadata={"market_group": "weather", "market_family": "daily_temperature", "series_ticker": "KXHIGHNY", "series": "daily_temperature"},
             )
             exchange = SimpleNamespace(
                 get_markets_direct=lambda **kwargs: [market],
@@ -1463,10 +1480,11 @@ class PredictionLabCollectorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = {
                 "data_dir": tmpdir,
+                "scan": {"allowed_market_routes": ["weather.daily_temperature"]},
                 "prediction_lab": {
                     "enabled": True,
                     "mode": "collector",
-                    "groups": ["sports"],
+                    "groups": ["weather"],
                     "score_only": False,
                     "record_all_scored": True,
                     "collector_record_predictions": True,
@@ -1477,9 +1495,9 @@ class PredictionLabCollectorTests(unittest.TestCase):
             }
             lab = PredictionLab(config)
             signal = {
-                "market_id": "KXNBATEST-26APR29-HOME",
+                "market_id": "KXHIGHNY-260506-T71",
                 "exchange": "kalshi",
-                "question": "Will the NBA test team win?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "direction": "BUY_YES",
                 "model_probability": 0.7,
                 "market_price": 0.4,
@@ -1496,15 +1514,15 @@ class PredictionLabCollectorTests(unittest.TestCase):
                 risk_policy=_AllowRisk(),
             )
             market = SimpleNamespace(
-                id="KXNBATEST-26APR29-HOME",
+                id="KXHIGHNY-260506-T71",
                 exchange="kalshi",
-                question="Will the NBA test team win?",
-                category="sports",
+                question="Will the high temperature in New York exceed 71 degrees?",
+                category="KXHIGHNY",
                 yes_price=0.4,
                 no_price=0.6,
                 volume=1000,
                 closes_at=datetime.now(timezone.utc) + timedelta(hours=6),
-                metadata={"market_group": "sports", "series": "nba"},
+                metadata={"market_group": "weather", "market_family": "daily_temperature", "series_ticker": "KXHIGHNY", "series": "daily_temperature"},
             )
             exchange = SimpleNamespace(
                 get_markets_direct=lambda **kwargs: [market],
@@ -1529,10 +1547,11 @@ class PredictionLabCollectorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = {
                 "data_dir": tmpdir,
+                "scan": {"allowed_market_routes": ["weather.daily_temperature"]},
                 "prediction_lab": {
                     "enabled": True,
                     "mode": "collector",
-                    "groups": ["sports"],
+                    "groups": ["weather"],
                     "score_only": False,
                     "record_all_scored": True,
                     "collector_record_predictions": True,
@@ -1543,9 +1562,9 @@ class PredictionLabCollectorTests(unittest.TestCase):
             }
             lab = PredictionLab(config)
             signal = {
-                "market_id": "KXNBATEST-26APR29-HOME",
+                "market_id": "KXHIGHNY-260506-T71",
                 "exchange": "kalshi",
-                "question": "Will the NBA test team win?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "direction": "BUY_YES",
                 "model_probability": 0.7,
                 "market_price": 0.4,
@@ -1562,15 +1581,15 @@ class PredictionLabCollectorTests(unittest.TestCase):
                 risk_policy=_AllowRisk(),
             )
             market = SimpleNamespace(
-                id="KXNBATEST-26APR29-HOME",
+                id="KXHIGHNY-260506-T71",
                 exchange="kalshi",
-                question="Will the NBA test team win?",
-                category="sports",
+                question="Will the high temperature in New York exceed 71 degrees?",
+                category="KXHIGHNY",
                 yes_price=0.4,
                 no_price=0.6,
                 volume=1000,
                 closes_at=datetime.now(timezone.utc) + timedelta(hours=6),
-                metadata={"market_group": "sports", "series": "nba"},
+                metadata={"market_group": "weather", "market_family": "daily_temperature", "series_ticker": "KXHIGHNY", "series": "daily_temperature"},
             )
             exchange = SimpleNamespace(
                 get_markets_direct=lambda **kwargs: [market],
@@ -1595,6 +1614,7 @@ class PredictionLabCollectorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = {
                 "data_dir": tmpdir,
+                "scan": {"allowed_market_routes": ["weather.daily_temperature"]},
                 "prediction_lab": {
                     "enabled": True,
                     "mode": "collector",
@@ -1640,6 +1660,7 @@ class PredictionLabCollectorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = {
                 "data_dir": tmpdir,
+                "scan": {"allowed_market_routes": ["weather.daily_temperature"]},
                 "prediction_lab": {
                     "enabled": True,
                     "mode": "seed_and_watch",
@@ -1835,6 +1856,7 @@ class PredictionLabCollectorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = {
                 "data_dir": tmpdir,
+                "scan": {"allowed_market_routes": ["weather.daily_temperature"]},
                 "prediction_lab": {
                     "enabled": True,
                     "mode": "collector",
@@ -1891,6 +1913,7 @@ class PredictionLabCollectorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = {
                 "data_dir": tmpdir,
+                "scan": {"allowed_market_routes": ["weather.daily_temperature"]},
                 "prediction_lab": {
                     "enabled": True,
                     "mode": "collector",
@@ -1932,6 +1955,7 @@ class PredictionLabCollectorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = {
                 "data_dir": tmpdir,
+                "scan": {"allowed_market_routes": ["weather.daily_temperature"]},
                 "prediction_lab": {
                     "enabled": True,
                     "mode": "collector",
@@ -1985,6 +2009,7 @@ class PredictionLabCollectorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = {
                 "data_dir": tmpdir,
+                "scan": {"allowed_market_routes": ["weather.daily_temperature"]},
                 "prediction_lab": {"enabled": True, "mode": "collector", "groups": ["weather"], "score_only": False},
                 "strategy": {"enable_news": False, "enable_social": False, "enable_ai": False},
             }
@@ -2031,6 +2056,7 @@ class PredictionLabCollectorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = {
                 "data_dir": tmpdir,
+                "scan": {"allowed_market_routes": ["weather.daily_temperature"]},
                 "prediction_lab": {"enabled": True, "mode": "collector", "groups": ["weather"], "score_only": False},
                 "strategy": {"enable_news": False, "enable_social": False, "enable_ai": False},
             }
@@ -2066,6 +2092,7 @@ class PredictionLabCollectorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = {
                 "data_dir": tmpdir,
+                "scan": {"allowed_market_routes": ["weather.daily_temperature"]},
                 "prediction_lab": {"enabled": True, "mode": "collector", "groups": ["weather"], "score_only": False},
                 "strategy": {"enable_news": False, "enable_social": False, "enable_ai": False},
             }
@@ -2084,6 +2111,7 @@ class PredictionLabCollectorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = {
                 "data_dir": tmpdir,
+                "scan": {"allowed_market_routes": ["weather.daily_temperature"]},
                 "prediction_lab": {"enabled": True, "mode": "collector", "groups": ["weather"], "score_only": False},
                 "strategy": {"enable_news": False, "enable_social": False, "enable_ai": False},
             }
@@ -2103,6 +2131,7 @@ class PredictionLabCollectorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = {
                 "data_dir": tmpdir,
+                "scan": {"allowed_market_routes": ["weather.daily_temperature"]},
                 "prediction_lab": {"enabled": True, "mode": "collector", "groups": ["weather"], "score_only": False},
                 "strategy": {"enable_news": False, "enable_social": False, "enable_ai": False},
             }
@@ -2176,6 +2205,43 @@ class PredictionLabCollectorTests(unittest.TestCase):
 
             self.assertEqual(status_two.exit_reason, "owner_locked")
             self.assertFalse(status_two.owner_lock_acquired)
+
+    def test_prediction_lab_records_disallowed_route_rejection_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "data_dir": tmpdir,
+                "scan": {"allowed_market_routes": ["weather.daily_temperature"]},
+                "prediction_lab": {
+                    "enabled": True,
+                    "mode": "collector",
+                    "groups": ["weather"],
+                    "score_only": False,
+                    "record_all_scored": True,
+                    "collector_record_predictions": True,
+                    "collector_record_market_snapshots": True,
+                },
+                "strategy": {"enable_news": False, "enable_social": False, "enable_ai": False},
+            }
+            lab = PredictionLab(config)
+            market = SimpleNamespace(
+                id="KXPRIMEENGCONSUMPTION-30-WIND",
+                exchange="kalshi",
+                question="Will wind power account for at least 30% of prime energy consumption?",
+                category="KXPRIMEENGCONSUMPTION",
+                yes_price=0.4,
+                no_price=0.6,
+                volume=1000,
+                closes_at=datetime.now(timezone.utc) + timedelta(hours=6),
+                metadata={},
+            )
+            exchange = SimpleNamespace(get_markets_direct=lambda **kwargs: [market])
+
+            result = lab.run(exchange)
+            rows = load_jsonl(lab.market_snapshots_path)
+
+            self.assertEqual(result.recorded_predictions, 0)
+            self.assertEqual(rows[0]["decision_artifact"]["final_reason_code"], "unknown_market_route")
+            self.assertEqual(rows[0]["market_route"]["group"], "unknown")
 
 
 if __name__ == "__main__":

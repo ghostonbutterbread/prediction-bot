@@ -111,6 +111,25 @@ def build_trade_decision(
         "win_probability": win_probability,
     }
 
+    route_rejection = _market_route_rejection(context, source_signal)
+    if route_rejection is not None:
+        reason_code, reason, route = route_rejection
+        reasoning["market_route"] = route
+        return TradeDecision(
+            action="SKIP",
+            approved=False,
+            reason_code=reason_code,
+            reason=reason,
+            edge=edge,
+            confidence=confidence,
+            entry_price=entry_price,
+            win_probability=win_probability,
+            reasoning=reasoning,
+        )
+    route_metadata = _route_metadata(context, source_signal)
+    if route_metadata is not None:
+        reasoning["market_route"] = route_metadata
+
     if edge < min_edge:
         return TradeDecision(
             action="SKIP",
@@ -598,6 +617,28 @@ def _retrade_policy_for_context(context: TradeContext) -> dict[str, float | bool
     policy = dict(DEFAULT_RETRADE_POLICY)
     policy.update(dict(metadata.get("retrade_policy") or {}))
     return policy
+
+
+def _route_metadata(context: TradeContext, source_signal: dict[str, Any]) -> dict[str, Any] | None:
+    for value in (
+        (context.metadata or {}).get("market_route"),
+        source_signal.get("market_route"),
+    ):
+        if isinstance(value, dict):
+            return dict(value)
+    return None
+
+
+def _market_route_rejection(context: TradeContext, source_signal: dict[str, Any]) -> tuple[str, str, dict[str, Any] | None] | None:
+    route = _route_metadata(context, source_signal)
+    if not isinstance(route, dict):
+        return "missing_market_route", "Market route is required before shared-core approval", None
+    if not route.get("allowed"):
+        reason_code = str(route.get("reason_code") or "market_route_not_allowed")
+        return reason_code, f"Market route rejected: {reason_code}", route
+    if not route.get("handler_id"):
+        return "missing_market_route_handler", "Market route is missing a handler", route
+    return None
 
 
 def normalize_trade_context(context: TradeContext) -> dict[str, float | str] | None:

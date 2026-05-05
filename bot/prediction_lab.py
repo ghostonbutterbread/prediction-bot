@@ -21,6 +21,7 @@ from bot.decision_pipeline import (
 from bot.file_ops import append_jsonl, atomic_write_json, load_jsonl, locked_file, rewrite_jsonl
 from bot.strategies.enhanced import EnhancedStrategyEngine, KellySizer
 from bot.market_classification import apply_classification_metadata, classify_market_object
+from bot.market_router import route_market
 from bot.shared_core.resolution import detect_market_outcome
 from bot.shared_core.weather_risk import (
     assess_weather_market_risk,
@@ -142,6 +143,18 @@ class PredictionLab:
         for market in markets:
             classification = apply_classification_metadata(market)
             market_group = classification.market_group if classification else "unknown"
+            market_route = route_market(market, self.config).to_dict()
+            metadata = dict(getattr(market, "metadata", {}) or {})
+            metadata["market_route"] = market_route
+            if market_route.get("group") != "unknown":
+                metadata["market_group"] = market_route.get("group")
+                market_group = str(market_route.get("group") or market_group)
+            if market_route.get("family"):
+                metadata["market_family"] = market_route.get("family")
+            market.metadata = metadata
+            if self._market_route_enforcement_enabled() and not market_route.get("allowed"):
+                self._record_market_route_rejection_snapshot(run_id, market, market_route)
+                continue
             if not self._group_allowed(market_group):
                 continue
             group_counts[market_group] += 1
@@ -379,6 +392,7 @@ class PredictionLab:
             "timestamp": timestamp,
             "status": "open",
             "group": metadata.get("market_group", "unknown"),
+            "market_route": metadata.get("market_route"),
             "series": metadata.get("series") or getattr(market, "category", "unknown"),
             "event_ticker": metadata.get("event_ticker"),
             "market_id": market.id,
@@ -409,6 +423,42 @@ class PredictionLab:
             row["decision_artifact"] = decision_artifact
         return row
 
+    def _record_market_route_rejection_snapshot(self, run_id: str, market, market_route: dict[str, Any]) -> None:
+        if not (self._observation_semantics_enabled() and self.collector_record_market_snapshots):
+            return
+        signal = {
+            "market_id": getattr(market, "id", ""),
+            "exchange": getattr(market, "exchange", "unknown"),
+            "direction": "SKIP",
+            "model_probability": None,
+            "market_price": getattr(market, "yes_price", None),
+            "yes_market_price": getattr(market, "yes_price", None),
+            "no_market_price": getattr(market, "no_price", None),
+            "edge": 0.0,
+            "confidence": 0.0,
+            "signals": {},
+            "question": getattr(market, "question", ""),
+            "skip_reason_code": str(market_route.get("reason_code") or "market_route_not_allowed"),
+        }
+        artifact = {
+            "final_action": "SKIP",
+            "final_reason_code": signal["skip_reason_code"],
+            "final_reason": f"Market route rejected: {signal['skip_reason_code']}",
+            "market_route": market_route,
+        }
+        with self._prediction_ledger_lock():
+            append_jsonl(
+                self.market_snapshots_path,
+                self._build_market_snapshot_row(
+                    run_id,
+                    market,
+                    signal,
+                    decision_type="skip",
+                    prediction_recorded=False,
+                    decision_artifact=artifact,
+                ),
+            )
+
     def _build_market_snapshot_row(
         self,
         run_id: str,
@@ -428,6 +478,7 @@ class PredictionLab:
             "snapshot_key": str(market.id),
             "market_id": market.id,
             "group": metadata.get("market_group", "unknown"),
+            "market_route": metadata.get("market_route"),
             "series": metadata.get("series") or getattr(market, "category", "unknown"),
             "question": getattr(market, "question", ""),
             "yes_price": getattr(market, "yes_price", None),
@@ -454,6 +505,7 @@ class PredictionLab:
         if self.decision_evaluator is None:
             raise RuntimeError("Shared decision pipeline is not enabled")
         metadata = dict(getattr(market, "metadata", {}) or {})
+        market_route = route_market(market, self.config).to_dict()
         account_state = self.opportunity_account_provider.get_account_state()
         decision_started = time.perf_counter()
         order_book = self._fetch_order_book(exchange, market)
@@ -463,7 +515,8 @@ class PredictionLab:
             account_state=account_state,
             order_book=order_book,
             source_context={
-                "market_metadata": metadata,
+                "market_metadata": {**metadata, "market_route": market_route},
+                "market_route": market_route,
                 "paper_lab": self._paper_lab_config_metadata(),
             },
             mode=PAPER_LAB_MODE,
@@ -1465,9 +1518,10 @@ class PredictionLab:
     def _prioritize_markets(self, markets: list[Any]) -> list[Any]:
         def score(market: Any) -> tuple[int, float]:
             metadata = dict(getattr(market, "metadata", {}) or {})
+            market_route = route_market(market, self.config)
             classification = classify_market_object(market)
-            group = classification.market_group if classification else metadata.get("market_group", "unknown")
-            family = classification.family if classification else metadata.get("market_family", "")
+            group = market_route.group if market_route.group != "unknown" else (classification.market_group if classification else metadata.get("market_group", "unknown"))
+            family = market_route.family or (classification.family if classification else metadata.get("market_family", ""))
             is_daily_temp = family == "daily_temperature"
             close_ts = getattr(market, "closes_at", None)
             close_score = 0.0
@@ -1621,6 +1675,10 @@ class PredictionLab:
         if normalized != "weather" and not self.allow_non_weather:
             return False
         return normalized in self.groups
+
+    def _market_route_enforcement_enabled(self) -> bool:
+        scan_cfg = self.config.get("scan") if isinstance(self.config, dict) else None
+        return True
 
     def _prediction_ledger_lock(self):
         return locked_file(self.root_dir / "prediction_lab.ledger.lock", "a+")

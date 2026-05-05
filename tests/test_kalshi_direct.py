@@ -54,8 +54,8 @@ class KalshiDirectMarketTests(unittest.TestCase):
                     200,
                     {
                         "markets": [
-                            _raw_market("KXHIGHNY-260427-T71", "Will the high temperature in New York exceed 71 degrees?", series_ticker="KXHIGHNY"),
-                            _raw_market("KXHIGHNY-260427-T72", "Will the high temperature in New York exceed 72 degrees?", series_ticker="KXHIGHNY"),
+                            _raw_market("KXHIGHNY-260506-T71", "Will the high temperature in New York exceed 71 degrees?", series_ticker="KXHIGHNY"),
+                            _raw_market("KXHIGHNY-260506-T72", "Will the high temperature in New York exceed 72 degrees?", series_ticker="KXHIGHNY"),
                         ]
                     },
                 )
@@ -68,7 +68,7 @@ class KalshiDirectMarketTests(unittest.TestCase):
             requested_urls,
             [f"{exchange.host}/markets?status=open&limit=2&series_ticker=KXHIGHNY"],
         )
-        self.assertEqual([market.id for market in markets], ["KXHIGHNY-260427-T71", "KXHIGHNY-260427-T72"])
+        self.assertEqual([market.id for market in markets], ["KXHIGHNY-260506-T71", "KXHIGHNY-260506-T72"])
         self.assertTrue(all(m.metadata["source"] == "direct_series" for m in markets))
         self.assertTrue(all(m.metadata["series"] == "KXHIGHNY" for m in markets))
         self.assertTrue(all(m.metadata["market_group"] == "weather" for m in markets))
@@ -85,7 +85,7 @@ class KalshiDirectMarketTests(unittest.TestCase):
                     200,
                     {
                         "markets": [
-                            _raw_market("KXHIGHMIA-260427-T88", "Will the high temperature in Miami exceed 88 degrees?", series_ticker="KXHIGHMIA"),
+                            _raw_market("KXHIGHMIA-260506-T88", "Will the high temperature in Miami exceed 88 degrees?", series_ticker="KXHIGHMIA"),
                         ]
                     },
                 )
@@ -94,8 +94,8 @@ class KalshiDirectMarketTests(unittest.TestCase):
                     200,
                     {
                         "markets": [
-                            _raw_market("MVE-NBA-260427-COMBO", "Will the Knicks win tonight?", series_ticker="MVE"),
-                            _raw_market("MVE-NBA-260427-COMBO-2", "Will the Lakers win tonight?", series_ticker="MVE"),
+                            _raw_market("MVE-NBA-260506-COMBO", "Will the Knicks win tonight?", series_ticker="MVE"),
+                            _raw_market("MVE-NBA-260506-COMBO-2", "Will the Lakers win tonight?", series_ticker="MVE"),
                         ]
                     },
                 )
@@ -106,7 +106,7 @@ class KalshiDirectMarketTests(unittest.TestCase):
 
         self.assertGreaterEqual(len(requested_urls), 2)
         self.assertIn("series_ticker=KXHIGHMIA", requested_urls[0])
-        self.assertEqual([market.id for market in markets], ["KXHIGHMIA-260427-T88"])
+        self.assertEqual([market.id for market in markets], ["KXHIGHMIA-260506-T88"])
         self.assertEqual(markets[0].metadata["source"], "direct_series")
         self.assertTrue(all("MVE" not in market.id for market in markets))
 
@@ -120,7 +120,7 @@ class KalshiDirectMarketTests(unittest.TestCase):
                     200,
                     {
                         "markets": [
-                            _raw_market("KXHIGHCHI-260427-T67", "Will the high temperature in Chicago exceed 67 degrees?", series_ticker="KXHIGHCHI"),
+                            _raw_market("KXHIGHCHI-260506-T67", "Will the high temperature in Chicago exceed 67 degrees?", series_ticker="KXHIGHCHI"),
                         ]
                     },
                 )
@@ -129,8 +129,8 @@ class KalshiDirectMarketTests(unittest.TestCase):
                     200,
                     {
                         "markets": [
-                            _raw_market("KXHIGHCHI-260427-T67", "Will the high temperature in Chicago exceed 67 degrees?", series_ticker="KXHIGHCHI"),
-                            _raw_market("KXHIGHCHI-260427-T68", "Will the high temperature in Chicago exceed 68 degrees?", series_ticker="KXHIGHCHI"),
+                            _raw_market("KXHIGHCHI-260506-T67", "Will the high temperature in Chicago exceed 67 degrees?", series_ticker="KXHIGHCHI"),
+                            _raw_market("KXHIGHCHI-260506-T68", "Will the high temperature in Chicago exceed 68 degrees?", series_ticker="KXHIGHCHI"),
                         ]
                     },
                 )
@@ -139,8 +139,12 @@ class KalshiDirectMarketTests(unittest.TestCase):
         with patch("bot.exchanges.kalshi.http_get_with_retry", side_effect=fake_http_get):
             markets = exchange.get_markets_direct(limit=2, page_size=50, max_pages=1)
 
-        self.assertEqual([market.id for market in markets], ["KXHIGHCHI-260427-T67", "KXHIGHCHI-260427-T68"])
+        self.assertEqual([market.id for market in markets], ["KXHIGHCHI-260506-T67", "KXHIGHCHI-260506-T68"])
         self.assertEqual(len({market.id for market in markets}), 2)
+
+    def test_weather_series_filter_rejects_broad_wind_energy_series(self):
+        self.assertFalse(KalshiExchange._is_weather_series_ticker("KXPRIMEENGCONSUMPTION-30-WIND"))
+        self.assertTrue(KalshiExchange._is_weather_series_ticker("KXHIGHNY"))
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ from typing import Optional
 
 from bot.config import ensure_mode_storage_dir
 from bot.decision_pipeline import build_pre_execution_decision_artifact
+from bot.market_router import DEFAULT_ALLOWED_MARKET_ROUTES
 from bot.paper_adapters import (
     LoadedPaperSession,
     SimulatorPaperExecutionAdapter,
@@ -76,6 +77,7 @@ class SimTrade:
     execution_revalidation_outcome: Optional[str] = None
     original_signal_snapshot: Optional[dict] = None
     execution_snapshot: Optional[dict] = None
+    market_route: Optional[dict] = None
     original_decision_reason_code: Optional[str] = None
     execution_decision_reason_code: Optional[str] = None
     execution_snapshot_source: Optional[str] = None
@@ -135,6 +137,8 @@ class Simulator:
                        If no session found, starts fresh.
         """
         config = config or {}
+        scan_cfg = config.setdefault("scan", {})
+        scan_cfg.setdefault("allowed_market_routes", list(DEFAULT_ALLOWED_MARKET_ROUTES))
         self.config = config
         self.strategy = EnhancedStrategyEngine(config.get("strategy", {}))
         economics_cfg = config.get("trade_economics", {}) or {}
@@ -298,6 +302,7 @@ class Simulator:
             execution_revalidation_outcome=t_data.get("execution_revalidation_outcome"),
             original_signal_snapshot=t_data.get("original_signal_snapshot"),
             execution_snapshot=t_data.get("execution_snapshot"),
+            market_route=t_data.get("market_route"),
             original_decision_reason_code=t_data.get("original_decision_reason_code"),
             execution_decision_reason_code=t_data.get("execution_decision_reason_code"),
             execution_snapshot_source=t_data.get("execution_snapshot_source"),
@@ -790,6 +795,7 @@ class Simulator:
             execution_revalidation_outcome=metadata.get("execution_revalidation_outcome"),
             original_signal_snapshot=metadata.get("original_signal_snapshot"),
             execution_snapshot=metadata.get("execution_snapshot"),
+            market_route=metadata.get("market_route"),
             original_decision_reason_code=metadata.get("original_decision_reason_code"),
             execution_decision_reason_code=metadata.get("execution_decision_reason_code"),
             execution_snapshot_source=metadata.get("execution_snapshot_source"),
@@ -840,6 +846,7 @@ class Simulator:
             execution_revalidation_outcome=parity.get("execution_revalidation_outcome"),
             original_signal_snapshot=parity.get("original_signal_snapshot"),
             execution_snapshot=parity.get("execution_snapshot"),
+            market_route=context.metadata.get("market_route"),
             original_decision_reason_code=parity.get("original_decision_reason_code"),
             execution_decision_reason_code=parity.get("execution_decision_reason_code"),
             execution_snapshot_source=parity.get("execution_snapshot_source"),

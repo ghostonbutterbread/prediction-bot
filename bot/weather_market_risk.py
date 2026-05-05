@@ -113,9 +113,9 @@ def classify_weather_market(question: str | None = None, ticker: str | None = No
         return "bucket"
 
     # Tail direction from question text is more reliable than T tickers.
-    if re.search(r"(<|less than|below|or below|under)\s*-?\d+", lower):
+    if re.search(r"(<|less than|below|or below|under|at or below|no more than)\s*-?\d+", lower):
         return "tail_low"
-    if re.search(r"(>|greater than|above|or above|over)\s*-?\d+", lower):
+    if re.search(r"(>|greater than|above|or above|over|exceed|exceeds|at least|at or above)\s*-?\d+", lower):
         return "tail_high"
 
     return "unknown"

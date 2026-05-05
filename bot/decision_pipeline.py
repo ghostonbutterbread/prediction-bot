@@ -10,6 +10,7 @@ from math import isfinite
 from typing import Any
 
 from bot.risk import RiskDecision, RiskManager
+from bot.market_router import DEFAULT_ALLOWED_MARKET_ROUTES, route_market
 from bot.shared_core import AccountState, TradeContext, build_execution_snapshot, build_trade_decision
 from bot.strategies.enhanced import EnhancedStrategyEngine, KellySizer, StrategyTrace
 from bot.trade_audit import trade_event_key
@@ -35,6 +36,7 @@ class DecisionPipelineInput:
 @dataclass(slots=True)
 class DecisionPipelineResult:
     market_id: str
+    market_route: dict[str, Any] | None
     mode: str
     observed_at: str
     as_of: str | None
@@ -72,6 +74,8 @@ class DecisionPipelineEvaluator:
         risk_policy: Any | None = None,
     ):
         self.config = config or {}
+        scan_cfg = self.config.setdefault("scan", {})
+        scan_cfg.setdefault("allowed_market_routes", list(DEFAULT_ALLOWED_MARKET_ROUTES))
         self.strategy = strategy or EnhancedStrategyEngine(self.config.get("strategy", {}) or {})
         economics_cfg = self.config.get("trade_economics", {}) or {}
         self.kelly_sizer = kelly_sizer or KellySizer(
@@ -122,6 +126,7 @@ class DecisionPipelineEvaluator:
                 trace.skip_reason_code = reason_code
             return DecisionPipelineResult(
                 market_id=str(getattr(pipeline_input.market, "id", "")),
+                market_route=route_market(pipeline_input.market, pipeline_input.config_snapshot).to_dict(),
                 mode=pipeline_input.mode,
                 observed_at=observed_at,
                 as_of=_iso_or_none(pipeline_input.as_of),
@@ -170,6 +175,7 @@ class DecisionPipelineEvaluator:
         decision_dict = asdict(decision)
         return DecisionPipelineResult(
             market_id=context.market_id,
+            market_route=(context.metadata or {}).get("market_route"),
             mode=pipeline_input.mode,
             observed_at=observed_at,
             as_of=_iso_or_none(pipeline_input.as_of),
@@ -237,6 +243,8 @@ class DecisionPipelineEvaluator:
         source_signal = dict(signal)
         source_signal["source_snapshot"] = source_context
         metadata = dict(getattr(market, "metadata", {}) or {})
+        market_route = route_market(market, pipeline_input.config_snapshot).to_dict()
+        source_signal["market_route"] = market_route
         return TradeContext(
             exchange=str(signal.get("exchange") or getattr(market, "exchange", "unknown") or "unknown"),
             market_id=str(signal.get("market_id") or getattr(market, "id", "") or ""),
@@ -254,6 +262,8 @@ class DecisionPipelineEvaluator:
                 "runner": "decision_pipeline",
                 "mode": pipeline_input.mode,
                 "category": metadata.get("category", getattr(market, "category", "")),
+                "market_route": market_route,
+                "market_route_required": _market_route_enforcement_enabled(pipeline_input.config_snapshot),
                 "event_key": event_key,
                 "market_family_key": _market_family_key(str(signal.get("market_id") or getattr(market, "id", ""))),
                 "event_snapshot": _empty_event_snapshot(event_key, signal, execution_snapshot),
@@ -302,6 +312,7 @@ def build_pre_execution_decision_artifact(
         "artifact_version": PRE_EXECUTION_ARTIFACT_VERSION,
         "artifact_kind": "pre_execution_decision",
         "market_id": market_id,
+        "market_route": _market_route_snapshot(context, signal_snapshot),
         "mode": mode,
         "observed_at": _iso_or_none(observed_at),
         "as_of": _iso_or_none(as_of),
@@ -324,6 +335,16 @@ def build_pre_execution_decision_artifact(
         "logic_version": _logic_version(config_snapshot or {}),
     }
     return _json_safe(artifact)
+
+
+def _market_route_snapshot(context: TradeContext | None, signal_snapshot: dict[str, Any]) -> dict[str, Any] | None:
+    for value in (
+        (context.metadata or {}).get("market_route") if context is not None else None,
+        signal_snapshot.get("market_route"),
+    ):
+        if isinstance(value, dict):
+            return dict(value)
+    return None
 
 
 @dataclass(slots=True)
@@ -665,6 +686,11 @@ def _hash_config(config: dict[str, Any]) -> str:
 def _market_family_key(market_id: str) -> str:
     parts = str(market_id or "").split("-")
     return "-".join(parts[:-1]) if len(parts) > 1 else str(market_id or "")
+
+
+def _market_route_enforcement_enabled(config: dict[str, Any]) -> bool:
+    scan_cfg = config.get("scan") if isinstance(config, dict) else None
+    return True
 
 
 def _iso_or_none(value: datetime | None) -> str | None:
