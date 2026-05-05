@@ -5,6 +5,9 @@ REPO="/home/ryushe/projects/prediction-bot"
 LOCK="$REPO/data/paper/prediction_lab/monitor.lock"
 LOG="$REPO/data/paper/prediction_lab/logs/monitor_cron.log"
 
+export PATH="/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+export OPENCLAW_BIN="${OPENCLAW_BIN:-/home/linuxbrew/.linuxbrew/bin/openclaw}"
+
 mkdir -p "$(dirname "$LOCK")" "$(dirname "$LOG")"
 cd "$REPO" || exit 1
 
