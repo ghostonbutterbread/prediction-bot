@@ -57,7 +57,7 @@ class DegradedExchange(FakeExchange):
                 "remaining_size": 1.0,
                 "price": 0.40,
                 "status": "open",
-                "question": "Existing resting order?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
             }
         ]
 
@@ -96,7 +96,7 @@ class RunnerLivePathTests(unittest.TestCase):
             signal = {
                 "exchange": "kalshi",
                 "market_id": "m1",
-                "question": "Will rain happen?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "direction": "BUY_YES",
                 "market_price": 0.40,
                 "yes_price": 0.40,
@@ -104,6 +104,8 @@ class RunnerLivePathTests(unittest.TestCase):
                 "model_probability": 0.70,
                 "edge": 0.30,
                 "confidence": 0.90,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
             }
 
             with patch.object(bot.kelly, "calculate", return_value=10.0):
@@ -123,7 +125,7 @@ class RunnerLivePathTests(unittest.TestCase):
             signal = {
                 "exchange": "kalshi",
                 "market_id": "m-gated",
-                "question": "Should startup gate block?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "direction": "BUY_YES",
                 "market_price": 0.35,
                 "yes_price": 0.35,
@@ -131,6 +133,8 @@ class RunnerLivePathTests(unittest.TestCase):
                 "model_probability": 0.70,
                 "edge": 0.20,
                 "confidence": 0.90,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
             }
 
             with patch.object(bot.kelly, "calculate", return_value=5.0):
@@ -156,7 +160,7 @@ class RunnerLivePathTests(unittest.TestCase):
             signal = {
                 "exchange": "kalshi",
                 "market_id": "m-negative-cash",
-                "question": "Should negative cash pause live entry?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "direction": "BUY_YES",
                 "market_price": 0.40,
                 "yes_price": 0.40,
@@ -164,6 +168,8 @@ class RunnerLivePathTests(unittest.TestCase):
                 "model_probability": 0.70,
                 "edge": 0.20,
                 "confidence": 0.90,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
             }
 
             with patch.object(bot.kelly, "calculate", return_value=5.0):
@@ -222,7 +228,7 @@ class RunnerLivePathTests(unittest.TestCase):
             signal = {
                 "exchange": "kalshi",
                 "market_id": "m-dup",
-                "question": "Should duplicate live exposure pause?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "direction": "BUY_YES",
                 "market_price": 0.40,
                 "yes_price": 0.40,
@@ -230,6 +236,8 @@ class RunnerLivePathTests(unittest.TestCase):
                 "model_probability": 0.70,
                 "edge": 0.20,
                 "confidence": 0.90,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
             }
 
             with patch.object(bot.kelly, "calculate", return_value=5.0):
@@ -247,7 +255,7 @@ class RunnerLivePathTests(unittest.TestCase):
             signal = {
                 "exchange": "kalshi",
                 "market_id": "m-refresh-fail",
-                "question": "Should failed refresh halt live entry?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "direction": "BUY_YES",
                 "market_price": 0.40,
                 "yes_price": 0.40,
@@ -255,6 +263,8 @@ class RunnerLivePathTests(unittest.TestCase):
                 "model_probability": 0.70,
                 "edge": 0.20,
                 "confidence": 0.90,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
             }
 
             with patch.object(bot.kelly, "calculate", return_value=5.0):
@@ -281,7 +291,7 @@ class RunnerLivePathTests(unittest.TestCase):
             signal = {
                 "exchange": "kalshi",
                 "market_id": "m-new",
-                "question": "Should degraded runtime block by policy?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "direction": "BUY_YES",
                 "market_price": 0.40,
                 "yes_price": 0.40,
@@ -289,6 +299,8 @@ class RunnerLivePathTests(unittest.TestCase):
                 "model_probability": 0.70,
                 "edge": 0.20,
                 "confidence": 0.90,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
             }
 
             with patch.object(bot.kelly, "calculate", return_value=5.0):
@@ -312,7 +324,7 @@ class RunnerLivePathTests(unittest.TestCase):
             signal = {
                 "exchange": "kalshi",
                 "market_id": "m-fail",
-                "question": "Will repeated live failures pause new entries?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "direction": "BUY_YES",
                 "market_price": 0.40,
                 "yes_price": 0.40,
@@ -320,6 +332,8 @@ class RunnerLivePathTests(unittest.TestCase):
                 "model_probability": 0.70,
                 "edge": 0.20,
                 "confidence": 0.90,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
             }
 
             with patch.object(bot.kelly, "calculate", return_value=5.0):
@@ -376,7 +390,7 @@ class RunnerLivePathTests(unittest.TestCase):
             signal = {
                 "exchange": "kalshi",
                 "market_id": "m2",
-                "question": "Will snow happen?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "direction": "BUY_YES",
                 "market_price": 0.35,
                 "yes_price": 0.35,
@@ -384,6 +398,8 @@ class RunnerLivePathTests(unittest.TestCase):
                 "model_probability": 0.70,
                 "edge": 0.20,
                 "confidence": 0.90,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
             }
 
             with patch.object(bot.kelly, "calculate", return_value=5.0):
@@ -447,7 +463,7 @@ class RunnerLivePathTests(unittest.TestCase):
             signal = {
                 "exchange": "kalshi",
                 "market_id": "m-runtime-refresh",
-                "question": "Should pre-trade invariants surface clearly?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "direction": "BUY_YES",
                 "market_price": 0.40,
                 "yes_price": 0.40,
@@ -455,6 +471,8 @@ class RunnerLivePathTests(unittest.TestCase):
                 "model_probability": 0.70,
                 "edge": 0.20,
                 "confidence": 0.90,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
             }
 
             with patch.object(bot.kelly, "calculate", return_value=5.0):
@@ -489,7 +507,7 @@ class RunnerLivePathTests(unittest.TestCase):
             signal = {
                 "exchange": "kalshi",
                 "market_id": "m-threshold-one",
-                "question": "Should runtime invariant preserve root cause at threshold one?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "direction": "BUY_YES",
                 "market_price": 0.40,
                 "yes_price": 0.40,
@@ -497,6 +515,8 @@ class RunnerLivePathTests(unittest.TestCase):
                 "model_probability": 0.70,
                 "edge": 0.20,
                 "confidence": 0.90,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
             }
 
             with patch.object(bot.kelly, "calculate", return_value=5.0):

@@ -5,6 +5,16 @@ from unittest.mock import Mock
 from bot.shared_core import AccountState, TradeContext, build_trade_decision
 
 
+ALLOWED_MARKET_ROUTE = {
+    "allowed": True,
+    "group": "weather",
+    "family": "daily_temperature",
+    "subcategory": "tail_high",
+    "handler_id": "weather.daily_temperature.v1",
+    "reason_code": "allowed_weather_daily_temperature",
+}
+
+
 class SharedCoreDecisionTests(unittest.TestCase):
     def test_build_trade_decision_uses_buy_no_price_and_available_cash_snapshot(self):
         account_state = AccountState(
@@ -28,6 +38,7 @@ class SharedCoreDecisionTests(unittest.TestCase):
             confidence=0.87,
             account_state=account_state,
             source_context={"question": "Will test settle NO?"},
+            metadata={"market_route": ALLOWED_MARKET_ROUTE},
         )
         kelly_sizer = Mock()
         kelly_sizer.calculate.return_value = 12.0
@@ -85,6 +96,7 @@ class SharedCoreDecisionTests(unittest.TestCase):
             confidence=0.9,
             account_state=account_state,
             source_context={"question": "Will cheap market settle YES?"},
+            metadata={"market_route": ALLOWED_MARKET_ROUTE},
         )
         kelly_sizer = Mock()
         kelly_sizer.calculate.return_value = 2.0
@@ -132,6 +144,7 @@ class SharedCoreDecisionTests(unittest.TestCase):
             confidence=0.9,
             account_state=account_state,
             source_context={"market_id": "CHEAP-NONWEATHER-1", "question": "Will a non-weather event happen?"},
+            metadata={"market_route": ALLOWED_MARKET_ROUTE},
         )
         kelly_sizer = Mock()
         kelly_sizer.calculate.return_value = 2.0
@@ -183,6 +196,7 @@ class SharedCoreDecisionTests(unittest.TestCase):
                 "question": "Will the high temp in Miami be 82-83° on Apr 26?",
                 "market_volume": 1000,
             },
+            metadata={"market_route": ALLOWED_MARKET_ROUTE},
         )
         kelly_sizer = Mock()
         kelly_sizer.calculate.return_value = 100.0
@@ -240,6 +254,7 @@ class SharedCoreDecisionTests(unittest.TestCase):
                 "market_volume": 700,
                 "weather_station_mapping": "inferred",
             },
+            metadata={"market_route": ALLOWED_MARKET_ROUTE},
         )
         kelly_sizer = Mock()
         risk_policy = Mock()
@@ -289,6 +304,7 @@ class SharedCoreDecisionTests(unittest.TestCase):
                 "signals": {"live": 0.38, "price": 0.37},
                 "confidence": 0.95,
             },
+            metadata={"market_route": ALLOWED_MARKET_ROUTE},
         )
         kelly_sizer = Mock()
         kelly_sizer.calculate.return_value = 10.0
@@ -339,6 +355,7 @@ class SharedCoreDecisionTests(unittest.TestCase):
             confidence=0.9,
             account_state=account_state,
             source_context={"question": "Will regular market settle YES?"},
+            metadata={"market_route": ALLOWED_MARKET_ROUTE},
         )
         kelly_sizer = Mock()
         risk_policy = Mock()
@@ -380,6 +397,7 @@ class SharedCoreDecisionTests(unittest.TestCase):
             account_state=account_state,
             source_context={"market_id": "KXHIGHNY-26APR16-T70"},
             metadata={
+                "market_route": ALLOWED_MARKET_ROUTE,
                 "event_snapshot": {
                     "event_key": "KXHIGHNY-26APR16",
                     "event_position_count_before": 1,
@@ -424,6 +442,7 @@ class SharedCoreDecisionTests(unittest.TestCase):
             account_state=account_state,
             source_context={"market_id": "KXHIGHNY-26APR16-T72"},
             metadata={
+                "market_route": ALLOWED_MARKET_ROUTE,
                 "event_snapshot": {
                     "event_key": "KXHIGHNY-26APR16",
                     "event_position_count_before": 2,
@@ -489,6 +508,7 @@ class SharedCoreDecisionTests(unittest.TestCase):
             account_state=account_state,
             source_context={"market_id": "KXHIGHNY-26APR16-T72", "liquidity": 20.0},
             metadata={
+                "market_route": ALLOWED_MARKET_ROUTE,
                 "event_snapshot": {
                     "event_key": "KXHIGHNY-26APR16",
                     "event_position_count_before": 1,
@@ -549,6 +569,7 @@ class SharedCoreDecisionTests(unittest.TestCase):
             account_state=account_state,
             source_context={"market_id": "KXHIGHNY-26APR16-T72"},
             metadata={
+                "market_route": ALLOWED_MARKET_ROUTE,
                 "event_snapshot": {
                     "event_key": "KXHIGHNY-26APR16",
                     "candidate_family_key": "KXHIGHNY-26APR16",
@@ -601,6 +622,7 @@ class SharedCoreDecisionTests(unittest.TestCase):
             account_state=account_state,
             source_context={"market_id": "KXHIGHNY-26APR16-T72", "liquidity": 100.0},
             metadata={
+                "market_route": ALLOWED_MARKET_ROUTE,
                 "event_snapshot": {
                     "event_key": "KXHIGHNY-26APR16",
                     "event_position_count_before": 1,
@@ -665,6 +687,7 @@ class SharedCoreDecisionTests(unittest.TestCase):
             confidence=0.9,
             account_state=account_state,
             source_context={"question": "Will test settle YES?"},
+            metadata={"market_route": ALLOWED_MARKET_ROUTE},
         )
         kelly_sizer = Mock()
         kelly_sizer.calculate.return_value = 10.0
@@ -690,6 +713,83 @@ class SharedCoreDecisionTests(unittest.TestCase):
         self.assertEqual(decision.action, "SKIP")
         self.assertEqual(decision.reason, "Max positions (15/15)")
         self.assertEqual(decision.reason_code, "risk_max_positions_15_15")
+
+    def test_build_trade_decision_fails_closed_when_market_route_missing(self):
+        account_state = AccountState(
+            starting_balance=100.0,
+            current_balance=100.0,
+            available_cash=25.0,
+            reserved_capital=0.0,
+            total_exposure=0.0,
+            open_positions=0,
+        )
+        context = TradeContext(
+            exchange="kalshi",
+            market_id="KXPRIMEENGCONSUMPTION-30-WIND",
+            question="Will wind power account for at least 30% of prime energy consumption?",
+            direction="BUY_YES",
+            market_price=0.4,
+            yes_price=0.4,
+            no_price=0.6,
+            model_probability=0.7,
+            edge=0.2,
+            confidence=0.9,
+            account_state=account_state,
+            source_context={"question": "Will wind power account for at least 30%?"},
+            metadata={"market_route_required": True},
+        )
+
+        decision = build_trade_decision(
+            context,
+            kelly_sizer=Mock(),
+            risk_policy=Mock(),
+            min_edge=0.05,
+            min_confidence=0.5,
+            max_entry_price=0.7,
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertEqual(decision.reason_code, "missing_market_route")
+
+    def test_build_trade_decision_blocks_disallowed_market_route(self):
+        account_state = AccountState(
+            starting_balance=100.0,
+            current_balance=100.0,
+            available_cash=25.0,
+            reserved_capital=0.0,
+            total_exposure=0.0,
+            open_positions=0,
+        )
+        context = TradeContext(
+            exchange="kalshi",
+            market_id="KXPRIMEENGCONSUMPTION-30-WIND",
+            question="Will wind power account for at least 30% of prime energy consumption?",
+            direction="BUY_YES",
+            market_price=0.4,
+            yes_price=0.4,
+            no_price=0.6,
+            model_probability=0.7,
+            edge=0.2,
+            confidence=0.9,
+            account_state=account_state,
+            source_context={"question": "Will wind power account for at least 30%?"},
+            metadata={
+                "market_route_required": True,
+                "market_route": {"allowed": False, "reason_code": "unknown_market_route"},
+            },
+        )
+
+        decision = build_trade_decision(
+            context,
+            kelly_sizer=Mock(),
+            risk_policy=Mock(),
+            min_edge=0.05,
+            min_confidence=0.5,
+            max_entry_price=0.7,
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertEqual(decision.reason_code, "unknown_market_route")
 
 
 if __name__ == "__main__":

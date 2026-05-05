@@ -9,6 +9,7 @@ from typing import Any, Protocol
 
 from bot.decision_pipeline import build_pre_execution_decision_artifact
 from bot.exchanges.base import BaseExchange
+from bot.market_router import route_market
 from bot.shared_core import TradeContext, TradeDecision, build_execution_snapshot
 from bot.trade_audit import (
     apply_execution_audit_contract,
@@ -143,6 +144,7 @@ class RunnerLiveExecutionAdapter:
         )
 
         event_key = trade_event_key(signal)
+        market_route = route_market(signal, config).to_dict()
         candidate_market_id = str(signal.get("market_id", "") or "")
         candidate_direction = str(signal.get("direction", "BUY_YES") or "BUY_YES").upper()
         event_entries: list[dict[str, Any]] = []
@@ -199,6 +201,8 @@ class RunnerLiveExecutionAdapter:
             source_context=dict(signal),
             metadata={
                 "runner": "live",
+                "market_route": market_route,
+                "market_route_required": self._market_route_enforcement_enabled(config),
                 "event_key": event_key,
                 "market_family_key": candidate_family_key,
                 "event_snapshot": {
@@ -258,6 +262,11 @@ class RunnerLiveExecutionAdapter:
         if value in {"NO", "BUY_NO", "SELL_YES"}:
             return "BUY_NO"
         return "BUY_YES"
+
+    @staticmethod
+    def _market_route_enforcement_enabled(config: dict[str, Any]) -> bool:
+        scan_cfg = config.get("scan") if isinstance(config, dict) else None
+        return True
 
     def _intent_fingerprint(self, exchange_name: str, market_id: str, direction: str) -> str:
         return f"{exchange_name}:{market_id}:{self._normalize_direction(direction)}"
@@ -660,6 +669,54 @@ class RunnerLiveExecutionAdapter:
                 failure_stage="sizing",
             )
 
+        market_route = route_market(live_signal, self.host.config).to_dict()
+        live_signal["market_route"] = market_route
+        if self._market_route_enforcement_enabled(self.host.config) and not market_route.get("allowed"):
+            reason_code = str(market_route.get("reason_code") or "market_route_not_allowed")
+            reason = f"Market route rejected before live placement: {reason_code}"
+            route_decision = SimpleNamespace(
+                action=getattr(live_decision, "action", getattr(decision, "action", signal.get("direction", "BUY_YES"))),
+                approved=False,
+                position_size=0.0,
+                requested_position_size=float(getattr(live_decision, "requested_position_size", 0.0) or size),
+                entry_price=getattr(live_decision, "entry_price", execution_snapshot.get("market_price")),
+                win_probability=getattr(live_decision, "win_probability", signal.get("model_probability")),
+                reason=reason,
+                reason_code=reason_code,
+                reasoning={
+                    **dict(getattr(live_decision, "reasoning", {}) or {}),
+                    "market_route": market_route,
+                    "live_execution": {"failure_stage": "market_route"},
+                },
+            )
+            route_decision_artifact = self._build_decision_artifact(
+                signal=live_signal,
+                decision=route_decision,
+                context=live_context,
+                execution_snapshot=execution_snapshot,
+            )
+            canonical_row = self._append_rejected_trade_row(
+                signal=signal,
+                exchange=exchange,
+                decision=route_decision,
+                initial_decision=initial_decision,
+                initial_signal_snapshot=initial_signal_snapshot,
+                execution_snapshot=execution_snapshot,
+                status="rejected",
+                message=reason,
+                failure_stage="market_route",
+                execution_revalidated=True,
+                execution_revalidation_outcome="rejected",
+                decision_artifact=route_decision_artifact,
+            )
+            return self._blocked_execution_result(
+                blocked_reason=reason_code,
+                decision=route_decision,
+                decision_artifact=route_decision_artifact,
+                audit_row=canonical_row,
+                failure_stage="market_route",
+            )
+
         decision = live_decision
         order = exchange.place_order(market_id, side, price, size)
         if not order:
@@ -858,6 +915,7 @@ class RunnerLiveExecutionAdapter:
             "confidence": signal.get("confidence", 0),
             "signals": signal.get("signals", {}),
             "decision_trace": decision_trace,
+            "market_route": market_route,
             "parity_mode_enabled": bool(parity_mode.get("enabled", False)),
             "execution_revalidated": True,
             "execution_revalidation_outcome": "approved",
@@ -963,6 +1021,7 @@ class RunnerLiveExecutionAdapter:
             "confidence": signal.get("confidence", 0),
             "signals": signal.get("signals", {}),
             "decision_trace": decision_trace,
+            "market_route": signal.get("market_route") or decision_trace.get("market_route"),
             "parity_mode_enabled": bool(parity_mode.get("enabled", False)),
             "execution_revalidated": execution_revalidated,
             "execution_revalidation_outcome": execution_revalidation_outcome,

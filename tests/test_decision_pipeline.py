@@ -15,11 +15,11 @@ from bot.strategies.signal_validator import ValidationResult
 class FakeMarket:
     id: str = "mkt-1"
     exchange: str = "kalshi"
-    question: str = "Will the test happen?"
+    question: str = "Will the high temperature in New York exceed 71 degrees?"
     yes_price: float = 0.4
     no_price: float = 0.6
     volume: int = 10_000
-    category: str = "test"
+    category: str = "KXHIGHNY"
     metadata: dict = field(default_factory=dict)
     closes_at = None
 
@@ -149,9 +149,9 @@ class DecisionPipelineTests(unittest.TestCase):
 
     def test_hidden_gem_rejection_and_missing_order_book_are_in_prediction_lab_artifact(self):
         signal = {
-            "market_id": "hidden-gem-1",
+            "market_id": "KXHIGHNY-260506-T71",
             "exchange": "kalshi",
-            "question": "Will the hidden gem happen?",
+            "question": "Will the high temperature in New York exceed 71 degrees?",
             "direction": "BUY_YES",
             "model_probability": 0.10,
             "market_price": 0.04,
@@ -182,11 +182,11 @@ class DecisionPipelineTests(unittest.TestCase):
                 risk_policy=AllowRisk(),
             )
             market = FakeMarket(
-                id="hidden-gem-1",
-                question="Will the hidden gem happen?",
+                id="KXHIGHNY-260506-T71",
+                question="Will the high temperature in New York exceed 71 degrees?",
                 yes_price=0.04,
                 no_price=0.96,
-                metadata={"market_group": "weather"},
+                metadata={"market_group": "weather", "market_family": "daily_temperature"},
             )
 
             artifact = lab._evaluate_shared_pipeline(market)

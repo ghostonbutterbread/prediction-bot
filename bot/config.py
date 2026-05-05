@@ -15,6 +15,7 @@ from typing import Any
 from pathlib import Path
 
 from bot.strategy_policy import normalize_strategy_policy
+from bot.market_router import normalize_allowed_market_routes
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,7 @@ def _default_scan_config() -> dict[str, Any]:
     return {
         "markets_per_exchange": 30,
         "summary_sample_per_exchange": 5,
+        "allowed_market_routes": ["weather.daily_temperature"],
         "allowed_market_groups": ["weather", "sports"],
     }
 
@@ -128,6 +130,7 @@ def _normalize_storage_config(config: dict) -> dict:
     if isinstance(allowed_groups, str):
         allowed_groups = [part.strip() for part in allowed_groups.split(",") if part.strip()]
     scan["allowed_market_groups"] = [str(group).strip().lower() for group in allowed_groups if str(group).strip()]
+    scan["allowed_market_routes"] = normalize_allowed_market_routes(scan.get("allowed_market_routes"))
     config["scan"] = scan
 
     parity_mode = _deep_merge(_default_parity_mode_config(), config.get("parity_mode", {}) or {})

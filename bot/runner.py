@@ -16,6 +16,7 @@ from bot.exchanges.base import BaseExchange
 from bot.live_adapters import RunnerLiveReconciliationAdapter, RunnerLiveStateAdapter
 from bot.live_execution import RunnerLiveExecutionAdapter
 from bot.live_sync import RunnerLiveSync
+from bot.market_router import DEFAULT_ALLOWED_MARKET_ROUTES, route_market
 from bot.notifications import build_notification, normalize_verbosity
 from bot.risk import RiskManager
 from bot.telegram_notifier import TelegramNotifier
@@ -52,6 +53,8 @@ class PredictionBot:
 
     def __init__(self, config: dict = None):
         config = config or {}
+        scan_cfg = config.setdefault("scan", {})
+        scan_cfg.setdefault("allowed_market_routes", list(DEFAULT_ALLOWED_MARKET_ROUTES))
         self.config = config
         self._config_path = Path(config.get("_config_path", "config.yaml")) if config.get("_config_path") else None
         self._config_last_mtime: float | None = None
@@ -302,12 +305,16 @@ class PredictionBot:
         summary_sample_per_exchange = int(scan_cfg.get("summary_sample_per_exchange", 5) or 5)
 
         allowed_market_groups = [str(group).strip().lower() for group in (scan_cfg.get("allowed_market_groups") or []) if str(group).strip()]
+        allowed_market_routes = [str(route).strip().lower() for route in (scan_cfg.get("allowed_market_routes") or []) if str(route).strip()]
 
         for exchange_name, exchange in self.exchanges.items():
             try:
                 setter = getattr(exchange, "set_allowed_market_groups", None)
                 if callable(setter):
                     setter(allowed_market_groups)
+                route_setter = getattr(exchange, "set_allowed_market_routes", None)
+                if callable(route_setter):
+                    route_setter(allowed_market_routes)
                 markets = exchange.get_markets(limit=markets_per_exchange)
                 if not markets:
                     continue
@@ -325,6 +332,8 @@ class PredictionBot:
                             signal["yes_price"] = getattr(market, "yes_price", signal.get("market_price"))
                             signal["no_price"] = getattr(market, "no_price", None)
                             signal["market_group"] = (getattr(market, "metadata", {}) or {}).get("market_group", "unknown")
+                            signal["market_family"] = (getattr(market, "metadata", {}) or {}).get("market_family")
+                            signal["market_route"] = (getattr(market, "metadata", {}) or {}).get("market_route")
                             all_signals.append(signal)
                     except Exception as e:
                         logger.debug(f"Error analyzing {market.id}: {e}")
@@ -1255,6 +1264,21 @@ class PredictionBot:
                 "runtime_state": self._live_runtime_state_for_exchange(exchange_name or ""),
             }
 
+        route_required = self._market_route_enforcement_enabled()
+        market_route = route_market(signal, self.config).to_dict()
+        signal["market_route"] = market_route
+        if market_route.get("group") != "unknown":
+            signal["market_group"] = market_route.get("group")
+        if market_route.get("family"):
+            signal["market_family"] = market_route.get("family")
+        if route_required and not market_route.get("allowed"):
+            reason_code = str(market_route.get("reason_code") or "market_route_not_allowed")
+            return {
+                "blocked_reason": reason_code,
+                "decision": None,
+                "market_route": market_route,
+            }
+
         gate = self.reconciliation_gate.get(exchange_name or "") or {}
         if (gate.get("verdict") or "") == "blocked":
             gate_reason = str(gate.get("reason") or "reconciliation_state_blocked")
@@ -1323,6 +1347,10 @@ class PredictionBot:
             return {"order": result, "decision": decision}
         self._record_live_failure(exchange_name or "", "execution_failed")
         return {"blocked_reason": "execution_failed", "decision": decision}
+
+    def _market_route_enforcement_enabled(self) -> bool:
+        scan_cfg = self.config.get("scan") if isinstance(self.config, dict) else None
+        return True
 
 
     def _sync_resolved_positions(self):

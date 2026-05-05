@@ -20,6 +20,7 @@ from bot.shared_core import (
     TradeDecision,
     build_execution_snapshot,
 )
+from bot.market_router import route_market
 from bot.trade_audit import calculate_contracts, enrich_trade_audit_fields, is_trade_effective_row, trade_event_key
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,7 @@ class PaperSimulatorHost(Protocol):
     data_dir: Path
     trades: list[Any]
     risk: Any
+    config: dict[str, Any]
 
 
 class PaperPersistenceHost(PaperSimulatorHost, Protocol):
@@ -348,6 +350,8 @@ class SimulatorPaperStateAdapter:
         best_yes_bid = snapshot.get("best_yes_bid")
         best_no_bid = snapshot.get("best_no_bid")
         liquidity = self._resolve_signal_liquidity(signal)
+        host_config = getattr(self.host, "config", {}) or {}
+        market_route = route_market(signal.get("_market") or signal, host_config).to_dict()
         return TradeContext(
             exchange=str(signal.get("exchange", "unknown") or "unknown"),
             market_id=candidate_market_id,
@@ -363,6 +367,8 @@ class SimulatorPaperStateAdapter:
             source_context=dict(signal),
             metadata={
                 "category": signal.get("category", ""),
+                "market_route": market_route,
+                "market_route_required": self._market_route_enforcement_enabled(host_config),
                 "event_key": event_key,
                 "market_family_key": candidate_family_key,
                 "event_snapshot": {
@@ -396,6 +402,11 @@ class SimulatorPaperStateAdapter:
                 "retrade_policy": self._retrade_policy_metadata(),
             },
         )
+
+    @staticmethod
+    def _market_route_enforcement_enabled(config: dict[str, Any]) -> bool:
+        scan_cfg = config.get("scan") if isinstance(config, dict) else None
+        return True
 
     def effective_trades(self) -> list[Any]:
         return [trade for trade in self.host.trades if self.is_trade_effective(trade)]
@@ -579,6 +590,18 @@ class SimulatorPaperExecutionAdapter:
         self.host = host
 
     def execute(self, decision: TradeDecision, context: TradeContext) -> ExecutionResult:
+        route = context.metadata.get("market_route") if isinstance(context.metadata, dict) else None
+        if not isinstance(route, dict) or not route.get("allowed") or not route.get("handler_id"):
+            reason_code = str((route or {}).get("reason_code") or "missing_market_route")
+            return ExecutionResult(
+                accepted=False,
+                action=decision.action,
+                status="rejected",
+                message=f"Market route rejected: {reason_code}",
+                requested_size=decision.requested_position_size,
+                metadata={"reason_code": reason_code, "market_route": route},
+            )
+
         if not decision.approved:
             return ExecutionResult(
                 accepted=False,
@@ -650,6 +673,7 @@ class SimulatorPaperExecutionAdapter:
                 "confidence": source_signal.get("confidence", 0),
                 "signals": source_signal.get("signals", {}),
                 "decision_trace": decision.reasoning,
+                "market_route": context.metadata.get("market_route"),
                 "parity_mode_enabled": bool((decision.reasoning or {}).get("parity_mode", {}).get("enabled", False)),
                 "execution_revalidated": bool((decision.reasoning or {}).get("parity_mode", {}).get("execution_revalidated", False)),
                 "execution_revalidation_outcome": (decision.reasoning or {}).get("parity_mode", {}).get("execution_revalidation_outcome"),

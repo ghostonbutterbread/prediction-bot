@@ -79,6 +79,7 @@ class LiveExecutionTests(unittest.TestCase):
                     "enable_social": False,
                     "enable_ai": False,
                 },
+                "scan": {"enforce_market_routes": False},
                 "max_tradable_balance_usd": 10.0,
                 "max_position_size_usd": 4.0,
             }
@@ -99,7 +100,7 @@ class LiveExecutionTests(unittest.TestCase):
             signal = {
                 "exchange": "kalshi",
                 "market_id": "m1",
-                "question": "Will rain happen?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "direction": "BUY_YES",
                 "market_price": 0.40,
                 "yes_price": 0.40,
@@ -107,6 +108,8 @@ class LiveExecutionTests(unittest.TestCase):
                 "model_probability": 0.70,
                 "edge": 0.30,
                 "confidence": 0.90,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
             }
 
             context = adapter.build_trade_context(signal, exchange, bot.config)
@@ -132,7 +135,7 @@ class LiveExecutionTests(unittest.TestCase):
                 {
                     "order_id": "ord-open",
                     "market_id": "KXHIGHNY-26APR16-T71",
-                    "question": "Will NYC high be below 71?",
+                    "question": "Will the high temperature in New York exceed 71 degrees?",
                     "direction": "BUY_YES",
                     "remaining_size": 3.0,
                     "price": 0.42,
@@ -144,7 +147,7 @@ class LiveExecutionTests(unittest.TestCase):
             signal = {
                 "exchange": "kalshi",
                 "market_id": "KXHIGHNY-26APR16-T72",
-                "question": "Will NYC high be below 72?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "direction": "BUY_YES",
                 "market_price": 0.43,
                 "yes_price": 0.43,
@@ -152,6 +155,8 @@ class LiveExecutionTests(unittest.TestCase):
                 "model_probability": 0.70,
                 "edge": 0.30,
                 "confidence": 0.90,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
             }
 
             context = adapter.build_trade_context(signal, exchange, bot.config)
@@ -176,7 +181,7 @@ class LiveExecutionTests(unittest.TestCase):
             signal = {
                 "exchange": "kalshi",
                 "market_id": "m-identity",
-                "question": "Should identity mismatch block?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "direction": "BUY_YES",
                 "market_price": 0.40,
                 "yes_price": 0.40,
@@ -184,6 +189,8 @@ class LiveExecutionTests(unittest.TestCase):
                 "model_probability": 0.70,
                 "edge": 0.30,
                 "confidence": 0.90,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
             }
             decision = SimpleNamespace(
                 action="BUY_YES",
@@ -215,7 +222,7 @@ class LiveExecutionTests(unittest.TestCase):
             signal = {
                 "exchange": "kalshi",
                 "market_id": "m-submitted",
-                "question": "Will a submitted order stay canonical?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "direction": "BUY_YES",
                 "market_price": 0.40,
                 "yes_price": 0.40,
@@ -223,6 +230,8 @@ class LiveExecutionTests(unittest.TestCase):
                 "model_probability": 0.70,
                 "edge": 0.30,
                 "confidence": 0.90,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
             }
             decision = SimpleNamespace(
                 action="BUY_YES",
@@ -251,7 +260,7 @@ class LiveExecutionTests(unittest.TestCase):
             signal = {
                 "exchange": "kalshi",
                 "market_id": "m1",
-                "question": "Will rain happen?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "direction": "BUY_YES",
                 "market_price": 0.40,
                 "yes_price": 0.40,
@@ -259,6 +268,8 @@ class LiveExecutionTests(unittest.TestCase):
                 "model_probability": 0.70,
                 "edge": 0.30,
                 "confidence": 0.90,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
             }
             decision = SimpleNamespace(
                 action="BUY_YES",
@@ -310,7 +321,7 @@ class LiveExecutionTests(unittest.TestCase):
             signal = {
                 "exchange": "kalshi",
                 "market_id": "m-parity",
-                "question": "Will parity hold?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "direction": "BUY_YES",
                 "market_price": 0.40,
                 "yes_price": 0.40,
@@ -318,6 +329,8 @@ class LiveExecutionTests(unittest.TestCase):
                 "model_probability": 0.70,
                 "edge": 0.30,
                 "confidence": 0.90,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
             }
 
             snapshot = build_execution_snapshot(
@@ -341,7 +354,7 @@ class LiveExecutionTests(unittest.TestCase):
             signal = {
                 "exchange": "kalshi",
                 "market_id": "m1",
-                "question": "Will rain happen?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "direction": "BUY_YES",
                 "market_price": 0.40,
                 "yes_price": 0.40,
@@ -349,6 +362,8 @@ class LiveExecutionTests(unittest.TestCase):
                 "model_probability": 0.90,
                 "edge": 0.30,
                 "confidence": 0.90,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
             }
             decision = SimpleNamespace(
                 action="BUY_YES",
@@ -388,7 +403,7 @@ class LiveExecutionTests(unittest.TestCase):
             signal = {
                 "exchange": "kalshi",
                 "market_id": "m-parity-history",
-                "question": "Will parity metadata persist?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "direction": "BUY_YES",
                 "market_price": 0.40,
                 "yes_price": 0.40,
@@ -396,6 +411,8 @@ class LiveExecutionTests(unittest.TestCase):
                 "model_probability": 0.70,
                 "edge": 0.30,
                 "confidence": 0.90,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
                 "signals": {},
             }
             decision = SimpleNamespace(
@@ -438,7 +455,7 @@ class LiveExecutionTests(unittest.TestCase):
             signal = {
                 "exchange": "kalshi",
                 "market_id": "m-partial",
-                "question": "Will partial fill happen?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "direction": "BUY_YES",
                 "market_price": 0.40,
                 "yes_price": 0.40,
@@ -446,6 +463,8 @@ class LiveExecutionTests(unittest.TestCase):
                 "model_probability": 0.70,
                 "edge": 0.30,
                 "confidence": 0.90,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
             }
             decision = SimpleNamespace(
                 action="BUY_YES",
@@ -485,7 +504,7 @@ class LiveExecutionTests(unittest.TestCase):
             signal = {
                 "exchange": "kalshi",
                 "market_id": "m-open-partial",
-                "question": "Will open order report a partial fill?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "direction": "BUY_YES",
                 "market_price": 0.40,
                 "yes_price": 0.40,
@@ -493,6 +512,8 @@ class LiveExecutionTests(unittest.TestCase):
                 "model_probability": 0.70,
                 "edge": 0.30,
                 "confidence": 0.90,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
             }
             decision = SimpleNamespace(
                 action="BUY_YES",
@@ -541,7 +562,7 @@ class LiveExecutionTests(unittest.TestCase):
             signal = {
                 "exchange": "kalshi",
                 "market_id": "KXHIGHNY-26APR16-T72",
-                "question": "Will NYC high be below 72?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "direction": "BUY_YES",
                 "market_price": 0.39,
                 "yes_price": 0.39,
@@ -554,6 +575,8 @@ class LiveExecutionTests(unittest.TestCase):
                 "model_probability": 0.70,
                 "edge": 0.30,
                 "confidence": 0.90,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
             }
 
             context = adapter.build_trade_context(signal, exchange, bot.config)
@@ -601,7 +624,7 @@ class LiveExecutionTests(unittest.TestCase):
             signal = {
                 "exchange": "kalshi",
                 "market_id": "m-blocked-next",
-                "question": "Should a blocked reconcile halt entry?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "direction": "BUY_YES",
                 "market_price": 0.40,
                 "yes_price": 0.40,
@@ -609,6 +632,8 @@ class LiveExecutionTests(unittest.TestCase):
                 "model_probability": 0.90,
                 "edge": 0.30,
                 "confidence": 0.90,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
             }
             decision = SimpleNamespace(
                 action="BUY_YES",
@@ -665,7 +690,7 @@ class LiveExecutionTests(unittest.TestCase):
             signal = {
                 "exchange": "kalshi",
                 "market_id": "m-existing",
-                "question": "Will an existing order be reconciled?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "direction": "BUY_YES",
                 "market_price": 0.40,
                 "yes_price": 0.40,
@@ -673,6 +698,8 @@ class LiveExecutionTests(unittest.TestCase):
                 "model_probability": 0.90,
                 "edge": 0.30,
                 "confidence": 0.90,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
             }
             decision = SimpleNamespace(
                 action="BUY_YES",
@@ -708,7 +735,7 @@ class LiveExecutionTests(unittest.TestCase):
                     "order_id": "server-open-1",
                     "exchange": "kalshi",
                     "market_id": "m-duplicate-intent",
-                    "question": "Will a duplicate be blocked?",
+                    "question": "Will the high temperature in New York exceed 71 degrees?",
                     "direction": "BUY_YES",
                     "status": "open",
                     "requested_size": 1.0,
@@ -739,7 +766,7 @@ class LiveExecutionTests(unittest.TestCase):
             signal = {
                 "exchange": "kalshi",
                 "market_id": "m-duplicate-intent",
-                "question": "Will a duplicate be blocked?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "direction": "BUY_YES",
                 "market_price": 0.40,
                 "yes_price": 0.40,
@@ -747,6 +774,8 @@ class LiveExecutionTests(unittest.TestCase):
                 "model_probability": 0.70,
                 "edge": 0.30,
                 "confidence": 0.90,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
             }
             decision = SimpleNamespace(
                 action="BUY_YES",
@@ -785,7 +814,7 @@ class LiveExecutionTests(unittest.TestCase):
                     "order_id": "stale-local-open-1",
                     "exchange": "kalshi",
                     "market_id": "m-stale-duplicate-intent",
-                    "question": "Will stale local state be cleared?",
+                    "question": "Will the high temperature in New York exceed 71 degrees?",
                     "direction": "BUY_YES",
                     "status": "open",
                     "requested_size": 1.0,
@@ -800,7 +829,7 @@ class LiveExecutionTests(unittest.TestCase):
             signal = {
                 "exchange": "kalshi",
                 "market_id": "m-stale-duplicate-intent",
-                "question": "Will stale local state be cleared?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "direction": "BUY_YES",
                 "market_price": 0.40,
                 "yes_price": 0.40,
@@ -808,6 +837,8 @@ class LiveExecutionTests(unittest.TestCase):
                 "model_probability": 0.70,
                 "edge": 0.30,
                 "confidence": 0.90,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
             }
             decision = SimpleNamespace(
                 action="BUY_YES",
@@ -843,7 +874,7 @@ class LiveExecutionTests(unittest.TestCase):
                     "order_id": "stale-local-open-1",
                     "exchange": "kalshi",
                     "market_id": "m-stale-policy",
-                    "question": "Will degraded refresh block?",
+                    "question": "Will the high temperature in New York exceed 71 degrees?",
                     "direction": "BUY_YES",
                     "status": "open",
                     "requested_size": 1.0,
@@ -858,7 +889,7 @@ class LiveExecutionTests(unittest.TestCase):
             signal = {
                 "exchange": "kalshi",
                 "market_id": "m-stale-policy",
-                "question": "Will degraded refresh block?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "direction": "BUY_YES",
                 "market_price": 0.40,
                 "yes_price": 0.40,
@@ -866,6 +897,8 @@ class LiveExecutionTests(unittest.TestCase):
                 "model_probability": 0.70,
                 "edge": 0.30,
                 "confidence": 0.90,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
             }
             decision = SimpleNamespace(
                 action="BUY_YES",
@@ -896,7 +929,7 @@ class LiveExecutionTests(unittest.TestCase):
             signal = {
                 "exchange": "kalshi",
                 "market_id": "m-pending-confirmation",
-                "question": "Will pending confirmation be retried?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "direction": "BUY_YES",
                 "market_price": 0.40,
                 "yes_price": 0.40,
@@ -904,6 +937,8 @@ class LiveExecutionTests(unittest.TestCase):
                 "model_probability": 0.70,
                 "edge": 0.30,
                 "confidence": 0.90,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
             }
             decision = SimpleNamespace(
                 action="BUY_YES",
@@ -941,7 +976,7 @@ class LiveExecutionTests(unittest.TestCase):
                     "order_id": "local-other-1",
                     "exchange": "kalshi",
                     "market_id": "m-other-intent",
-                    "question": "Will another market stay open?",
+                    "question": "Will the high temperature in New York exceed 71 degrees?",
                     "direction": "BUY_YES",
                     "status": "open",
                     "requested_size": 1.0,
@@ -956,7 +991,7 @@ class LiveExecutionTests(unittest.TestCase):
             signal = {
                 "exchange": "kalshi",
                 "market_id": "m-new-intent",
-                "question": "Will a new market place normally?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "direction": "BUY_YES",
                 "market_price": 0.40,
                 "yes_price": 0.40,
@@ -964,6 +999,8 @@ class LiveExecutionTests(unittest.TestCase):
                 "model_probability": 0.70,
                 "edge": 0.30,
                 "confidence": 0.90,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
             }
             decision = SimpleNamespace(
                 action="BUY_YES",
@@ -1010,7 +1047,7 @@ class LiveExecutionTests(unittest.TestCase):
             signal = {
                 "exchange": "kalshi",
                 "market_id": "KXHIGHNY-26APR16-T72",
-                "question": "Will NYC high be below 72?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "direction": "BUY_YES",
                 "market_price": 0.40,
                 "yes_price": 0.40,
@@ -1018,6 +1055,8 @@ class LiveExecutionTests(unittest.TestCase):
                 "model_probability": 0.90,
                 "edge": 0.30,
                 "confidence": 0.90,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
             }
             decision = SimpleNamespace(
                 action="BUY_YES",
@@ -1067,7 +1106,7 @@ class LiveExecutionTests(unittest.TestCase):
             signal = {
                 "exchange": "kalshi",
                 "market_id": "KXHIGHNY-26APR16-T72",
-                "question": "Will NYC high be below 72?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "direction": "BUY_YES",
                 "market_price": 0.40,
                 "yes_price": 0.40,
@@ -1075,6 +1114,8 @@ class LiveExecutionTests(unittest.TestCase):
                 "model_probability": 0.90,
                 "edge": 0.30,
                 "confidence": 0.90,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
             }
             decision = SimpleNamespace(
                 action="BUY_YES",
@@ -1108,7 +1149,7 @@ class LiveExecutionTests(unittest.TestCase):
             signal = {
                 "exchange": "kalshi",
                 "market_id": "m-small-size",
-                "question": "Will sizing be too small?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "direction": "BUY_YES",
                 "market_price": 0.40,
                 "yes_price": 0.40,
@@ -1116,6 +1157,8 @@ class LiveExecutionTests(unittest.TestCase):
                 "model_probability": 0.70,
                 "edge": 0.30,
                 "confidence": 0.90,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
                 "signals": {},
             }
             decision = SimpleNamespace(
@@ -1157,7 +1200,7 @@ class LiveExecutionTests(unittest.TestCase):
             signal = {
                 "exchange": "kalshi",
                 "market_id": "m-partial",
-                "question": "Will partial fill be tracked?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "direction": "BUY_YES",
                 "market_price": 0.40,
                 "yes_price": 0.40,
@@ -1165,6 +1208,8 @@ class LiveExecutionTests(unittest.TestCase):
                 "model_probability": 0.70,
                 "edge": 0.30,
                 "confidence": 0.90,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
                 "signals": {},
             }
             decision = SimpleNamespace(
@@ -1208,7 +1253,7 @@ class LiveExecutionTests(unittest.TestCase):
             signal = {
                 "exchange": "kalshi",
                 "market_id": "m-failed-placement",
-                "question": "Will placement fail?",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
                 "direction": "BUY_YES",
                 "market_price": 0.40,
                 "yes_price": 0.40,
@@ -1216,6 +1261,8 @@ class LiveExecutionTests(unittest.TestCase):
                 "model_probability": 0.70,
                 "edge": 0.30,
                 "confidence": 0.90,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
                 "signals": {},
             }
             decision = SimpleNamespace(
@@ -1245,6 +1292,41 @@ class LiveExecutionTests(unittest.TestCase):
             self.assertEqual(trade_row["filled_size"], 0.0)
             self.assertEqual(trade_row["remaining_size"], 0.0)
             self.assertEqual(trade_row["message"], "Exchange did not return an order")
+
+    def test_execute_blocks_energy_wind_route_before_order(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = self._make_bot(tmpdir)
+            adapter = RunnerLiveExecutionAdapter(bot)
+            exchange = FakeExchange()
+            signal = {
+                "exchange": "kalshi",
+                "market_id": "KXPRIMEENGCONSUMPTION-30-WIND",
+                "question": "Will wind power account for at least 30% of prime energy consumption?",
+                "direction": "BUY_YES",
+                "market_price": 0.40,
+                "yes_price": 0.40,
+                "no_price": 0.60,
+                "model_probability": 0.70,
+                "edge": 0.30,
+                "confidence": 0.90,
+                "category": "KXPRIMEENGCONSUMPTION",
+            }
+            decision = SimpleNamespace(
+                action="BUY_YES",
+                approved=True,
+                position_size=2.5,
+                entry_price=0.40,
+                win_probability=0.70,
+                reason="ok",
+                reason_code="approved",
+                requested_position_size=2.5,
+                reasoning={},
+            )
+
+            result = adapter.execute(signal, decision, exchange)
+
+            self.assertEqual(result["blocked_reason"], "unknown_market_route")
+            self.assertEqual(exchange.orders, [])
 
 
 if __name__ == "__main__":

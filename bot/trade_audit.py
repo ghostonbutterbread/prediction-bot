@@ -267,6 +267,7 @@ def build_risk_block_audit_row(
         "confidence": signal.get("confidence"),
         "signals": signal.get("signals", {}),
         "decision_trace": decision_trace,
+        "market_route": signal.get("market_route") or decision_trace.get("market_route"),
         "parity_mode_enabled": bool(parity_mode.get("enabled", False)),
         "execution_revalidated": bool(parity_mode.get("execution_revalidated", False)),
         "execution_revalidation_outcome": parity_mode.get("execution_revalidation_outcome"),

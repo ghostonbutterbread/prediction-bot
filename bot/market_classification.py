@@ -11,7 +11,6 @@ WEATHER_KEYWORDS = (
     "forecast",
     "rain",
     "snow",
-    "wind",
     "hurricane",
     "high temp",
     "low temp",
