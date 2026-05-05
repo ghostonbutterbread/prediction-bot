@@ -114,7 +114,10 @@ class SignalValidator:
         "weather": 600,
     }
 
-    def validate(self, signal: dict, market, signal_name: str = "") -> ValidationResult:
+    def __init__(self, *, as_of: datetime | None = None):
+        self.as_of = self._normalize_reference_time(as_of)
+
+    def validate(self, signal: dict, market, signal_name: str = "", *, as_of: datetime | None = None) -> ValidationResult:
         data = signal.get("data", {}) or {}
         signal_type = self._infer_signal_type(signal, market, signal_name)
         adjusted_prob = _clamp(float(signal.get("predicted_prob", 0.5) or 0.5), 0.01, 0.99)
@@ -166,6 +169,7 @@ class SignalValidator:
             signal_type,
             adjusted_confidence,
             warnings,
+            as_of=as_of,
         )
         if not accepted:
             return ValidationResult(
@@ -183,9 +187,9 @@ class SignalValidator:
             warnings=warnings,
         )
 
-    def validate_all(self, signals: dict[str, dict], market) -> dict[str, ValidationResult]:
+    def validate_all(self, signals: dict[str, dict], market, *, as_of: datetime | None = None) -> dict[str, ValidationResult]:
         results = {
-            name: self.validate(signal, market, name)
+            name: self.validate(signal, market, name, as_of=as_of)
             for name, signal in signals.items()
         }
         self._apply_cross_source_disagreement(signals, market, results)
@@ -390,6 +394,8 @@ class SignalValidator:
         signal_type: str,
         adjusted_confidence: float,
         warnings: list[str],
+        *,
+        as_of: datetime | None = None,
     ) -> tuple[bool, float]:
         data = signal.get("data", {}) or {}
         ttl_seconds = signal.get("ttl_seconds")
@@ -410,7 +416,8 @@ class SignalValidator:
         if not source_dt:
             return True, adjusted_confidence
 
-        age_seconds = (datetime.now(timezone.utc) - source_dt).total_seconds()
+        reference_time = self._normalize_reference_time(as_of) or self.as_of or datetime.now(timezone.utc)
+        age_seconds = (reference_time - source_dt).total_seconds()
         if age_seconds > ttl_seconds * 2:
             warnings.append(f"Signal is stale ({age_seconds:.0f}s old vs TTL {ttl_seconds}s)")
             return False, adjusted_confidence
@@ -418,6 +425,14 @@ class SignalValidator:
             warnings.append(f"Signal is stale ({age_seconds:.0f}s old); reducing confidence")
             adjusted_confidence = max(0.01, adjusted_confidence - 0.15)
         return True, adjusted_confidence
+
+    @staticmethod
+    def _normalize_reference_time(value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value
 
     def _apply_cross_source_disagreement(
         self,

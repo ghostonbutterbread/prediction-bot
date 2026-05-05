@@ -6,9 +6,10 @@ import hashlib
 import json
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from math import isfinite
 from typing import Any
 
-from bot.risk import RiskManager
+from bot.risk import RiskDecision, RiskManager
 from bot.shared_core import AccountState, TradeContext, build_execution_snapshot, build_trade_decision
 from bot.strategies.enhanced import EnhancedStrategyEngine, KellySizer, StrategyTrace
 from bot.trade_audit import trade_event_key
@@ -106,7 +107,7 @@ class DecisionPipelineEvaluator:
 
     def run(self, pipeline_input: DecisionPipelineInput) -> DecisionPipelineResult:
         observed_at = datetime.now(timezone.utc).isoformat()
-        signal, trace = self._analyze_with_trace(pipeline_input.market, pipeline_input.order_book)
+        signal, trace = self._analyze_with_trace(pipeline_input.market, pipeline_input.order_book, as_of=pipeline_input.as_of)
         source_context = build_source_snapshot_envelope(
             pipeline_input.source_context,
             mode=pipeline_input.mode,
@@ -191,7 +192,24 @@ class DecisionPipelineEvaluator:
             logic_version=_logic_version(pipeline_input.config_snapshot),
         )
 
-    def _analyze_with_trace(self, market: Any, order_book: dict[str, Any] | None) -> tuple[dict[str, Any] | None, StrategyTrace]:
+    def _analyze_with_trace(
+        self,
+        market: Any,
+        order_book: dict[str, Any] | None,
+        *,
+        as_of: datetime | None = None,
+    ) -> tuple[dict[str, Any] | None, StrategyTrace]:
+        validator = getattr(self.strategy, "validator", None)
+        previous_as_of = getattr(validator, "as_of", None) if validator is not None else None
+        if validator is not None and as_of is not None and hasattr(validator, "as_of"):
+            validator.as_of = as_of
+        try:
+            return self._analyze_with_trace_inner(market, order_book)
+        finally:
+            if validator is not None and as_of is not None and hasattr(validator, "as_of"):
+                validator.as_of = previous_as_of
+
+    def _analyze_with_trace_inner(self, market: Any, order_book: dict[str, Any] | None) -> tuple[dict[str, Any] | None, StrategyTrace]:
         traced = getattr(self.strategy, "analyze_market_with_trace", None)
         if callable(traced):
             signal, trace = traced(market, order_book)
@@ -319,6 +337,79 @@ class FixedOpportunityAccountStateProvider:
         return build_fixed_opportunity_account_state(self.bankroll_usd, mode=self.mode)
 
 
+@dataclass(slots=True)
+class FixedOpportunityRiskPolicy:
+    """Stateless Prediction Lab risk policy backed only by the opportunity bankroll."""
+
+    bankroll_usd: float = 100.0
+    max_bet_pct: float = 0.10
+    max_position_size_usd: float = 0.0
+    min_position_size_usd: float = 1.0
+    max_tradable_balance_usd: float = 0.0
+    max_event_exposure_pct: float = 0.10
+    max_event_positions: int = 3
+    retrade_edge_premium: float = 0.01
+    retrade_confidence_premium: float = 0.0
+    retrade_size_decay: float = 0.65
+    strict_event_overlap: bool = True
+    min_retrade_net_edge: float = 0.005
+    min_retrade_expected_profit_usd: float = 0.0
+    require_price_improvement_for_same_market_family: bool = False
+    price_improvement_ticks: float = 0.03
+
+    def check_trade(self, signal: dict[str, Any], position_size: float, *, available_cash: float | None = None) -> RiskDecision:
+        original_size = position_size
+        try:
+            requested_size = float(position_size)
+        except (TypeError, ValueError):
+            return RiskDecision(approved=False, reason="Invalid position size", original_size=original_size, risk_score=1.0)
+        if not isfinite(requested_size) or requested_size <= 0:
+            return RiskDecision(approved=False, reason="Non-positive position size", original_size=original_size, risk_score=1.0)
+
+        spendable_cash = self.bankroll_usd if available_cash is None else float(available_cash or 0.0)
+        if self.max_tradable_balance_usd and self.max_tradable_balance_usd > 0:
+            spendable_cash = min(spendable_cash, self.max_tradable_balance_usd)
+        if spendable_cash < self.min_position_size_usd:
+            return RiskDecision(
+                approved=False,
+                reason=f"Opportunity bankroll below minimum size (${spendable_cash:.2f})",
+                original_size=original_size,
+                risk_score=1.0,
+                metadata={"reason_code": "opportunity_bankroll_below_minimum", "risk_policy": "fixed_opportunity"},
+            )
+
+        warnings: list[str] = []
+        adjusted_size = requested_size
+        max_bet_size = max(0.0, spendable_cash * max(0.0, self.max_bet_pct))
+        if max_bet_size and adjusted_size > max_bet_size:
+            adjusted_size = round(max_bet_size, 2)
+            warnings.append(f"Opportunity max bet capped size to ${adjusted_size:.2f}")
+        if self.max_position_size_usd and self.max_position_size_usd > 0 and adjusted_size > self.max_position_size_usd:
+            adjusted_size = round(self.max_position_size_usd, 2)
+            warnings.append(f"Opportunity max position capped size to ${adjusted_size:.2f}")
+        if adjusted_size > spendable_cash:
+            adjusted_size = round(spendable_cash, 2)
+            warnings.append(f"Opportunity bankroll capped size to ${adjusted_size:.2f}")
+        if adjusted_size < self.min_position_size_usd:
+            return RiskDecision(
+                approved=False,
+                reason=f"Opportunity adjusted size below minimum (${adjusted_size:.2f})",
+                original_size=original_size,
+                adjusted_size=adjusted_size,
+                risk_score=1.0,
+                warnings=warnings,
+                metadata={"reason_code": "opportunity_adjusted_size_below_minimum", "risk_policy": "fixed_opportunity"},
+            )
+        return RiskDecision(
+            approved=True,
+            reason="Approved",
+            adjusted_size=adjusted_size,
+            original_size=original_size,
+            warnings=warnings,
+            metadata={"reason_code": "approved", "risk_policy": "fixed_opportunity"},
+        )
+
+
 def build_fixed_opportunity_account_state(bankroll_usd: float = 100.0, *, mode: str = PAPER_LAB_MODE) -> AccountState:
     bankroll = max(0.0, float(bankroll_usd or 0.0))
     return AccountState(
@@ -338,6 +429,30 @@ def build_fixed_opportunity_account_state(bankroll_usd: float = 100.0, *, mode: 
             "isolated_bankroll": True,
             "mutates_portfolio_account": False,
         },
+    )
+
+
+def build_fixed_opportunity_risk_policy(config: dict[str, Any] | None = None, *, bankroll_usd: float = 100.0) -> FixedOpportunityRiskPolicy:
+    config = config or {}
+    economics_cfg = config.get("trade_economics", {}) or {}
+    return FixedOpportunityRiskPolicy(
+        bankroll_usd=float(bankroll_usd or 0.0),
+        max_bet_pct=_risk_config_float(config, "max_bet_pct", 0.10),
+        max_position_size_usd=_risk_config_float(config, "max_position_size_usd", _risk_config_float(config, "max_position_size", 0.0)),
+        min_position_size_usd=float(economics_cfg.get("min_position_size_usd", config.get("min_position_size", 1.0)) or 1.0),
+        max_tradable_balance_usd=_risk_config_float(config, "max_tradable_balance_usd", _risk_config_float(config, "max_tradable_balance", 0.0)),
+        max_event_exposure_pct=_risk_config_float(config, "max_event_exposure_pct", 0.10),
+        max_event_positions=int(_risk_config_float(config, "max_event_positions", 3)),
+        retrade_edge_premium=_risk_config_float(config, "retrade_edge_premium", 0.01),
+        retrade_confidence_premium=_risk_config_float(config, "retrade_confidence_premium", 0.0),
+        retrade_size_decay=_risk_config_float(config, "retrade_size_decay", 0.65),
+        strict_event_overlap=bool(_risk_config_value(config, "strict_event_overlap", True)),
+        min_retrade_net_edge=_risk_config_float(config, "min_retrade_net_edge", 0.005),
+        min_retrade_expected_profit_usd=_risk_config_float(config, "min_retrade_expected_profit_usd", 0.0),
+        require_price_improvement_for_same_market_family=bool(
+            _risk_config_value(config, "require_price_improvement_for_same_market_family", False)
+        ),
+        price_improvement_ticks=_risk_config_float(config, "price_improvement_ticks", 0.03),
     )
 
 
@@ -518,6 +633,20 @@ def _coerce_trace(value: Any) -> StrategyTrace:
 def _threshold(config: dict[str, Any], key: str, default: float) -> float:
     strategy = config.get("strategy", {}) or {}
     return float(strategy.get(key, config.get(key, default)) or default)
+
+
+def _risk_config_value(config: dict[str, Any], key: str, default: Any) -> Any:
+    risk_cfg = config.get("risk", {}) or {}
+    if key in risk_cfg:
+        return risk_cfg.get(key)
+    return config.get(key, default)
+
+
+def _risk_config_float(config: dict[str, Any], key: str, default: float) -> float:
+    try:
+        return float(_risk_config_value(config, key, default))
+    except (TypeError, ValueError):
+        return float(default)
 
 
 def _logic_version(config: dict[str, Any]) -> str:

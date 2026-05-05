@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -14,6 +15,8 @@ from bot.decision_pipeline import (
     FixedOpportunityAccountStateProvider,
     OPPORTUNITY_MODE,
     PAPER_LAB_MODE,
+    build_order_book_snapshot,
+    build_fixed_opportunity_risk_policy,
 )
 from bot.file_ops import append_jsonl, atomic_write_json, load_jsonl, locked_file, rewrite_jsonl
 from bot.strategies.enhanced import EnhancedStrategyEngine, KellySizer
@@ -24,6 +27,7 @@ from bot.shared_core.weather_risk import (
     build_weather_source_confidence_evidence,
     classify_weather_market,
 )
+from bot.weather.date_matcher import derive_market_date, derive_weather_date, validate_weather_date_match
 from bot.weather import WeatherMarketCityMapper
 from bot.weather.replay import ReplayFeeModel, score_replay_answer
 
@@ -91,7 +95,12 @@ class PredictionLab:
             min_expected_net_profit_usd=economics_cfg.get("min_expected_net_profit_usd", 0.0),
         )
         self.decision_evaluator = (
-            DecisionPipelineEvaluator(self.config, strategy=self.strategy, kelly_sizer=self.kelly)
+            DecisionPipelineEvaluator(
+                self.config,
+                strategy=self.strategy,
+                kelly_sizer=self.kelly,
+                risk_policy=build_fixed_opportunity_risk_policy(self.config, bankroll_usd=self.opportunity_bankroll_usd),
+            )
             if self.use_shared_pipeline
             else None
         )
@@ -273,19 +282,7 @@ class PredictionLab:
                         fee_model=fee_model,
                     )
                     row["status"] = "resolved"
-                row["resolution"] = {
-                    "outcome": outcome,
-                    "resolved_at": datetime.now(timezone.utc).isoformat(),
-                    "is_correct": scored.get("is_correct"),
-                    "net_pnl": scored.get("net_pnl"),
-                    "gross_pnl": scored.get("gross_pnl"),
-                    "position_size": scored.get("position_size"),
-                    "contracts": scored.get("contracts"),
-                    "fees_paid": scored.get("fees_paid"),
-                    "entry_price": scored.get("entry_price"),
-                    "quoted_entry_price": scored.get("quoted_entry_price"),
-                }
-                append_jsonl(self.resolutions_path, row)
+                append_jsonl(self.resolutions_path, self._build_resolution_row(row, outcome=outcome, scored=scored))
                 resolved_keys.add(identity)
                 resolved_count += 1
                 if scored.get("is_correct") is True:
@@ -318,7 +315,9 @@ class PredictionLab:
     def summarize(self) -> dict[str, Any]:
         with self._prediction_ledger_lock():
             rows = load_jsonl(self.predictions_path)
-        resolved = [row for row in rows if row.get("status") == "resolved" and isinstance(row.get("resolution"), dict)]
+            resolution_rows = load_jsonl(self.resolutions_path)
+        resolved_by_identity = {self._prediction_identity(row): row for row in resolution_rows if isinstance(row.get("resolution"), dict)}
+        resolved = [row for row in rows if self._prediction_identity(row) in resolved_by_identity]
         open_rows = [row for row in rows if row.get("status") == "open"]
         group_counts = Counter(row.get("group", "unknown") for row in rows)
         confidence_buckets = Counter()
@@ -330,12 +329,13 @@ class PredictionLab:
             conf = float(row.get("confidence", 0.0) or 0.0)
             bucket = f"{int(conf * 100 // 5 * 5):02d}-{int(conf * 100 // 5 * 5 + 4):02d}%"
             confidence_buckets[bucket] += 1
-            is_correct = (row.get("resolution") or {}).get("is_correct")
+            resolution = (resolved_by_identity.get(self._prediction_identity(row)) or {}).get("resolution") or {}
+            is_correct = resolution.get("is_correct")
             if is_correct is True:
                 correct += 1
             elif is_correct is False:
                 incorrect += 1
-            pnl_total += float((row.get("resolution") or {}).get("net_pnl") or 0.0)
+            pnl_total += float(resolution.get("net_pnl") or 0.0)
 
         return {
             "mode": self.mode,
@@ -455,7 +455,9 @@ class PredictionLab:
             raise RuntimeError("Shared decision pipeline is not enabled")
         metadata = dict(getattr(market, "metadata", {}) or {})
         account_state = self.opportunity_account_provider.get_account_state()
+        decision_started = time.perf_counter()
         order_book = self._fetch_order_book(exchange, market)
+        pre_logic_snapshot = self._order_book_snapshot_envelope(order_book, market=market, stage="pre_logic")
         artifact = self.decision_evaluator.evaluate(
             market,
             account_state=account_state,
@@ -467,10 +469,686 @@ class PredictionLab:
             mode=PAPER_LAB_MODE,
             config_snapshot=self.config,
         )
+        decision_finished = time.perf_counter()
         artifact_dict = artifact.to_dict()
+        decision_latency_ms = round((decision_finished - decision_started) * 1000.0, 3)
+        artifact_dict["decision_latency_ms"] = decision_latency_ms
+        artifact_dict["pre_logic_order_book_snapshot"] = pre_logic_snapshot
+        self._attach_execution_feasibility_snapshot(
+            artifact_dict,
+            market,
+            exchange=exchange,
+            pre_logic_order_book=order_book,
+            decision_started=decision_started,
+            decision_latency_ms=decision_latency_ms,
+        )
+        self._attach_weather_source_snapshot(artifact_dict, market)
         artifact_dict["paper_lab"] = self._paper_lab_row_metadata(artifact_dict)
         artifact_dict["opportunity_mode"] = self._opportunity_row_metadata(artifact_dict)
         return artifact_dict
+
+    def _attach_execution_feasibility_snapshot(
+        self,
+        artifact: dict[str, Any],
+        market: Any,
+        *,
+        exchange: Any | None,
+        pre_logic_order_book: dict[str, Any] | None,
+        decision_started: float,
+        decision_latency_ms: float,
+    ) -> None:
+        action = str(artifact.get("final_action") or "SKIP").upper()
+        if action not in {"BUY_YES", "BUY_NO"}:
+            return
+
+        post_logic_order_book = self._fetch_order_book(exchange, market)
+        elapsed_ms = round((time.perf_counter() - decision_started) * 1000.0, 3)
+        artifact["post_logic_order_book_snapshot"] = self._order_book_snapshot_envelope(
+            post_logic_order_book,
+            market=market,
+            stage="post_logic",
+        )
+        artifact["execution_feasibility"] = self._build_execution_feasibility(
+            market,
+            action=action,
+            pre_logic_order_book=pre_logic_order_book,
+            post_logic_order_book=post_logic_order_book,
+            decision_artifact=artifact,
+            decision_latency_ms=decision_latency_ms,
+            elapsed_ms=elapsed_ms,
+        )
+
+    def _build_execution_feasibility(
+        self,
+        market: Any,
+        *,
+        action: str,
+        pre_logic_order_book: dict[str, Any] | None,
+        post_logic_order_book: dict[str, Any] | None,
+        decision_artifact: dict[str, Any],
+        decision_latency_ms: float,
+        elapsed_ms: float,
+    ) -> dict[str, Any]:
+        side = "yes" if action == "BUY_YES" else "no"
+        pre_ask = self._side_ask(pre_logic_order_book, side)
+        post_ask = self._side_ask(post_logic_order_book, side)
+        max_slippage = self._execution_feasibility_max_slippage()
+        max_elapsed_ms = self._execution_feasibility_max_elapsed_ms()
+        same_market = self._same_market_snapshot(market, post_logic_order_book)
+        market_open = self._market_open_for_feasibility(market, post_logic_order_book)
+        same_market_open = bool(same_market and market_open)
+        same_side_ask_present = self._usable_unit_price(post_ask)
+        ask_delta = round(float(post_ask) - float(pre_ask), 6) if self._usable_unit_price(pre_ask) and self._usable_unit_price(post_ask) else None
+        ask_unchanged = ask_delta == 0 if ask_delta is not None else False
+        ask_within_slippage = bool(
+            self._usable_unit_price(pre_ask)
+            and self._usable_unit_price(post_ask)
+            and float(post_ask) <= float(pre_ask) + max_slippage
+        )
+        elapsed_within_threshold = elapsed_ms <= max_elapsed_ms
+        quantity_available = self._side_ask_quantity(post_logic_order_book, side)
+        requested_position_size = self._artifact_position_size(decision_artifact)
+        required_quantity = (
+            round(requested_position_size / float(post_ask), 6)
+            if requested_position_size is not None and requested_position_size > 0 and self._usable_unit_price(post_ask)
+            else None
+        )
+        sufficient_quantity = (
+            None
+            if quantity_available is None or required_quantity is None
+            else bool(quantity_available >= required_quantity)
+        )
+        quantity_condition = True if sufficient_quantity is None else sufficient_quantity
+        feasible = bool(
+            same_market_open
+            and same_side_ask_present
+            and ask_within_slippage
+            and quantity_condition
+            and elapsed_within_threshold
+        )
+        failed_checks = [
+            check
+            for check, ok in (
+                ("same_market_open", same_market_open),
+                ("same_side_ask_present", same_side_ask_present),
+                ("ask_within_slippage", ask_within_slippage),
+                ("sufficient_quantity", quantity_condition),
+                ("elapsed_within_threshold", elapsed_within_threshold),
+            )
+            if not ok
+        ]
+        return {
+            "artifact_version": 1,
+            "mode": "passive_snapshot_comparison",
+            "feasible": feasible,
+            "status": "feasible" if feasible else "infeasible",
+            "action": action,
+            "side": side,
+            "market_id": str(getattr(market, "id", "") or ""),
+            "pre_logic_ask": pre_ask,
+            "post_logic_ask": post_ask,
+            "ask_delta": ask_delta,
+            "max_slippage": max_slippage,
+            "max_elapsed_ms": max_elapsed_ms,
+            "decision_latency_ms": decision_latency_ms,
+            "elapsed_ms": elapsed_ms,
+            "same_market": same_market,
+            "market_open": market_open,
+            "same_market_open": same_market_open,
+            "same_side_ask_present": same_side_ask_present,
+            "ask_unchanged": ask_unchanged,
+            "ask_within_slippage": ask_within_slippage,
+            "quantity_check_available": quantity_available is not None,
+            "quantity_available": quantity_available,
+            "required_quantity": required_quantity,
+            "sufficient_quantity": sufficient_quantity,
+            "elapsed_within_threshold": elapsed_within_threshold,
+            "failed_checks": failed_checks,
+            "mutates_paper_state": False,
+        }
+
+    @staticmethod
+    def _order_book_snapshot_envelope(order_book: dict[str, Any] | None, *, market: Any, stage: str) -> dict[str, Any]:
+        snapshot = build_order_book_snapshot(order_book)
+        snapshot.update(
+            {
+                "stage": stage,
+                "market_id": str(getattr(market, "id", "") or ""),
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        return snapshot
+
+    def _execution_feasibility_max_slippage(self) -> float:
+        value = self.lab_cfg.get("execution_feasibility_max_slippage", self.config.get("execution_feasibility_max_slippage", 0.01))
+        bps = self.lab_cfg.get("execution_feasibility_max_slippage_bps", self.config.get("execution_feasibility_max_slippage_bps"))
+        try:
+            if bps is not None:
+                return max(0.0, float(bps) / 10_000.0)
+            return max(0.0, float(value))
+        except (TypeError, ValueError):
+            return 0.01
+
+    def _execution_feasibility_max_elapsed_ms(self) -> float:
+        value = self.lab_cfg.get("execution_feasibility_max_elapsed_ms", self.config.get("execution_feasibility_max_elapsed_ms", 2_000))
+        try:
+            return max(0.0, float(value))
+        except (TypeError, ValueError):
+            return 2_000.0
+
+    @staticmethod
+    def _side_ask(order_book: dict[str, Any] | None, side: str) -> float | None:
+        if not isinstance(order_book, dict):
+            return None
+        return PredictionLab._coerce_unit_float(order_book.get(f"best_{side}_ask"))
+
+    @staticmethod
+    def _side_ask_quantity(order_book: dict[str, Any] | None, side: str) -> float | None:
+        if not isinstance(order_book, dict):
+            return None
+        for key in (
+            f"best_{side}_ask_quantity",
+            f"best_{side}_ask_qty",
+            f"best_{side}_ask_size",
+            f"{side}_ask_quantity",
+            f"{side}_ask_qty",
+            f"{side}_ask_size",
+        ):
+            value = order_book.get(key)
+            try:
+                if value is not None:
+                    quantity = float(value)
+                    return quantity if isfinite(quantity) and quantity >= 0 else None
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    @staticmethod
+    def _artifact_position_size(decision_artifact: dict[str, Any]) -> float | None:
+        decision = decision_artifact.get("shared_core_decision") if isinstance(decision_artifact.get("shared_core_decision"), dict) else {}
+        for key in ("position_size", "requested_position_size"):
+            try:
+                value = decision.get(key)
+                if value is not None:
+                    numeric = float(value)
+                    return numeric if isfinite(numeric) and numeric > 0 else None
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    @staticmethod
+    def _same_market_snapshot(market: Any, order_book: dict[str, Any] | None) -> bool:
+        if not isinstance(order_book, dict):
+            return False
+        market_id = str(getattr(market, "id", "") or "")
+        snapshot_market_id = str(order_book.get("market_id") or order_book.get("ticker") or "")
+        return not snapshot_market_id or snapshot_market_id == market_id
+
+    @staticmethod
+    def _market_open_for_feasibility(market: Any, order_book: dict[str, Any] | None) -> bool:
+        status = str((order_book or {}).get("status") or getattr(market, "status", "") or "").lower()
+        if status in {"closed", "settled", "resolved", "expired", "halted", "paused"}:
+            return False
+        closes_at = getattr(market, "closes_at", None)
+        if hasattr(closes_at, "timestamp"):
+            now = datetime.now(timezone.utc)
+            if getattr(closes_at, "tzinfo", None) is None:
+                now = now.replace(tzinfo=None)
+            return closes_at > now
+        return True
+
+    @staticmethod
+    def _usable_unit_price(value: Any) -> bool:
+        return PredictionLab._coerce_unit_float(value) is not None and 0 < float(value) < 1
+
+    def _attach_weather_source_snapshot(self, artifact: dict[str, Any], market: Any) -> None:
+        snapshot = self._build_weather_source_snapshot(artifact, market)
+        if not snapshot:
+            return
+        source_context = artifact.get("source_context")
+        if not isinstance(source_context, dict):
+            source_context = {"source": "provided", "mode": artifact.get("mode"), "data": {}}
+            artifact["source_context"] = source_context
+        data = source_context.get("data")
+        if not isinstance(data, dict):
+            data = {}
+            source_context["data"] = data
+        data["weather_source_snapshot"] = snapshot
+        source_context["source"] = "provided"
+        source_context["source_mode"] = "recorded_as_of"
+        if snapshot.get("as_of") and not source_context.get("as_of"):
+            source_context["as_of"] = snapshot.get("as_of")
+
+        source_snapshots = artifact.get("source_snapshots")
+        if not isinstance(source_snapshots, list):
+            source_snapshots = []
+            artifact["source_snapshots"] = source_snapshots
+        source_snapshots.append(
+            {
+                key: value
+                for key, value in {
+                    "mode": "recorded_as_of",
+                    "source": "weather",
+                    "method": "_live_data_signal",
+                    "signal_name": snapshot.get("signal_name"),
+                    "signal_role": snapshot.get("signal_role"),
+                    "as_of": snapshot.get("as_of"),
+                    "fetched_at": snapshot.get("fetched_at"),
+                    "snapshot_ref": "source_context.data.weather_source_snapshot",
+                    "market_date": snapshot.get("market_date"),
+                    "market_date_source": snapshot.get("market_date_source"),
+                    "weather_date": snapshot.get("weather_date"),
+                    "target_forecast_date": snapshot.get("target_forecast_date"),
+                    "forecast_date": snapshot.get("forecast_date"),
+                    "date_validation": snapshot.get("date_validation"),
+                }.items()
+                if value is not None
+            }
+        )
+
+    def _build_weather_source_snapshot(self, artifact: dict[str, Any], market: Any) -> dict[str, Any] | None:
+        located = self._find_weather_signal_for_snapshot(artifact)
+        if located is None:
+            return None
+        signal_name, weather_signal, signal_role = located
+        weather_data = weather_signal.get("data") if isinstance(weather_signal.get("data"), dict) else {}
+        if not self._has_weather_snapshot_evidence(weather_signal, weather_data):
+            return None
+
+        strategy_signal = artifact.get("strategy_signal") if isinstance(artifact.get("strategy_signal"), dict) else {}
+        market_id = str(getattr(market, "id", "") or strategy_signal.get("market_id") or artifact.get("market_id") or "")
+        question = str(getattr(market, "question", "") or strategy_signal.get("question") or "")
+        metadata = dict(getattr(market, "metadata", {}) or {})
+        evidence_payload = {
+            **strategy_signal,
+            **weather_signal,
+            "market_id": market_id,
+            "question": question,
+            "data": weather_data,
+            "weather": weather_signal,
+            "metadata": metadata,
+        }
+        evidence = build_weather_source_confidence_evidence(evidence_payload)
+        station_resolution = evidence.get("weather_station_resolution") if isinstance(evidence.get("weather_station_resolution"), dict) else {}
+        market_context = {
+            "market_id": market_id,
+            "ticker": market_id,
+            "question": question,
+            "metadata": metadata,
+        }
+        market_date = derive_market_date(market_context)
+        market_date_iso = self._date_derivation_isoformat(market_date)
+        raw_date_validation = weather_data.get("date_validation") if isinstance(weather_data.get("date_validation"), dict) else {}
+        validation_weather_data = dict(weather_data)
+        self._copy_weather_date_fields_from_source_details(validation_weather_data, weather_data)
+        computed_date_validation = validate_weather_date_match(market_context, validation_weather_data).as_dict()
+        date_validation = self._choose_weather_date_validation(raw_date_validation, computed_date_validation)
+        validated_weather_date = date_validation.get("weather_date") if (date_validation or {}).get("ok") else None
+        as_of = (
+            weather_signal.get("source_timestamp")
+            or weather_data.get("fetched_at")
+            or weather_data.get("as_of")
+            or artifact.get("as_of")
+            or artifact.get("observed_at")
+        )
+        settlement_source = weather_data.get("settlement_source") or "nws"
+        source_agreement = weather_data.get("agreement", weather_signal.get("source_agreement_score"))
+        weather_confidence = weather_signal.get("confidence")
+        trace = artifact.get("strategy_trace") if isinstance(artifact.get("strategy_trace"), dict) else {}
+
+        source_signal = {
+            "signal_type": "weather",
+            "predicted_prob": weather_signal.get("predicted_prob"),
+            "confidence": weather_confidence,
+            "source_timestamp": weather_signal.get("source_timestamp"),
+            "ttl_seconds": weather_signal.get("ttl_seconds"),
+            "question_side": weather_signal.get("question_side"),
+            "edge": weather_signal.get("edge"),
+            "data": dict(weather_data),
+        }
+        snapshot = {
+            "artifact_version": 1,
+            "mode": "recorded_as_of",
+            "source_name": "weather",
+            "signal_name": signal_name,
+            "signal_role": signal_role,
+            "signal_type": "weather",
+            "method": "_live_data_signal",
+            "market_id": market_id,
+            "question": question,
+            "market_date": market_date_iso,
+            "market_date_source": getattr(market_date, "source", None),
+            "date_validation": date_validation,
+            "fetched_at": as_of,
+            "as_of": as_of,
+            "source_timestamp": weather_signal.get("source_timestamp"),
+            "ttl_seconds": weather_signal.get("ttl_seconds"),
+            "source_fetched_at": weather_data.get("fetched_at"),
+            "source_as_of": weather_data.get("as_of"),
+            "predicted_prob": weather_signal.get("predicted_prob"),
+            "confidence": weather_confidence,
+            "weather_confidence_score": evidence.get("weather_confidence_score"),
+            "source_agreement_score": source_agreement,
+            "settlement_source": settlement_source,
+            "station_id": station_resolution.get("station_id") or weather_data.get("station_id") or weather_signal.get("station_id"),
+            "station_cli": station_resolution.get("station_cli") or weather_data.get("station_cli") or weather_signal.get("station_cli"),
+            "station_mapping": evidence.get("weather_station_mapping"),
+            "station_resolution": station_resolution,
+            "forecast": {
+                "high": weather_data.get("forecast_high"),
+                "low": weather_data.get("forecast_low"),
+                "current": weather_data.get("current_temp"),
+                "actual_temp_used": weather_data.get("actual_temp_used"),
+                "predicted_temp": weather_data.get("predicted_temp"),
+                "threshold": weather_data.get("threshold"),
+                "question_side": weather_signal.get("question_side"),
+            },
+            "sources": self._weather_snapshot_sources(
+                weather_data,
+                settlement_source=settlement_source,
+                market_date=market_date_iso,
+                as_of=as_of,
+                station_resolution=station_resolution,
+                source_agreement=source_agreement,
+            ),
+            "gaps": {
+                "nws_open_meteo_gap": weather_data.get("nws_open_meteo_gap"),
+            },
+            "validation": {
+                "source_signal_status": signal_role,
+                "result": (trace.get("validation_results") or {}).get(signal_name)
+                if isinstance(trace.get("validation_results"), dict)
+                else None,
+                "date_validation": date_validation or None,
+            },
+            "veto": {
+                "final_action": artifact.get("final_action"),
+                "final_reason_code": artifact.get("final_reason_code"),
+                "strategy_skip_reason_code": trace.get("skip_reason_code"),
+            },
+            "skip_reasons": [
+                reason
+                for reason in (artifact.get("final_reason_code"), trace.get("skip_reason_code"))
+                if reason
+            ],
+            "warnings": list(weather_signal.get("warnings") or []) + list(trace.get("warnings") or []) + list(artifact.get("warnings") or []),
+            "source_signal": source_signal,
+        }
+        self._copy_optional_weather_date_fields(snapshot, validation_weather_data, validated_weather_date=validated_weather_date)
+        self._copy_optional_forecast_metadata(snapshot, validation_weather_data)
+        return snapshot
+
+    @staticmethod
+    def _find_weather_signal_for_snapshot(artifact: dict[str, Any]) -> tuple[str, dict[str, Any], str] | None:
+        strategy_signal = artifact.get("strategy_signal") if isinstance(artifact.get("strategy_signal"), dict) else {}
+        signal_details = strategy_signal.get("signal_details") if isinstance(strategy_signal.get("signal_details"), dict) else {}
+        for name, value in signal_details.items():
+            if isinstance(value, dict) and PredictionLab._looks_like_weather_signal(value):
+                return str(name), dict(value), "accepted"
+
+        trace = artifact.get("strategy_trace") if isinstance(artifact.get("strategy_trace"), dict) else {}
+        for container_name, role in (
+            ("accepted_signals", "accepted"),
+            ("rejected_signals", "rejected"),
+            ("raw_signals", "raw"),
+        ):
+            container = trace.get(container_name)
+            if not isinstance(container, dict):
+                continue
+            for name, value in container.items():
+                if isinstance(value, dict) and PredictionLab._looks_like_weather_signal(value):
+                    return str(name), dict(value), role
+        return None
+
+    @staticmethod
+    def _looks_like_weather_signal(value: dict[str, Any]) -> bool:
+        if str(value.get("signal_type") or "").lower() == "weather":
+            return True
+        data = value.get("data") if isinstance(value.get("data"), dict) else {}
+        return any(field in data for field in ("forecast_high", "forecast_low", "current_temp", "actual_temp_used"))
+
+    @staticmethod
+    def _has_weather_snapshot_evidence(weather_signal: dict[str, Any], weather_data: dict[str, Any]) -> bool:
+        if weather_signal.get("predicted_prob") is not None or weather_signal.get("confidence") is not None:
+            return True
+        return any(
+            weather_data.get(field) is not None
+            for field in ("forecast_high", "forecast_low", "current_temp", "sources", "source_details", "weather_date")
+        )
+
+    @staticmethod
+    def _weather_snapshot_sources(
+        weather_data: dict[str, Any],
+        *,
+        settlement_source: Any,
+        market_date: Any,
+        as_of: Any,
+        station_resolution: dict[str, Any],
+        source_agreement: Any,
+    ) -> list[dict[str, Any]]:
+        raw_details = weather_data.get("source_details")
+        if isinstance(raw_details, list) and raw_details:
+            source_names = [
+                str(item.get("source_name") or item.get("source") or item.get("name") or "").strip()
+                for item in raw_details
+                if isinstance(item, dict) and str(item.get("source_name") or item.get("source") or item.get("name") or "").strip()
+            ]
+        else:
+            raw_sources = weather_data.get("sources") or []
+            if not isinstance(raw_sources, list):
+                raw_sources = [raw_sources]
+            source_names = [str(source).strip() for source in raw_sources if str(source).strip()]
+            raw_details = []
+        if not source_names:
+            source_names = [str(weather_data.get("source_quality") or weather_data.get("source") or "weather").strip()]
+
+        detail_by_name = {
+            str(item.get("source_name") or item.get("source") or item.get("name") or "").strip().lower(): item
+            for item in raw_details
+            if isinstance(item, dict)
+        }
+        individual_highs = weather_data.get("individual_highs") if isinstance(weather_data.get("individual_highs"), dict) else {}
+        individual_lows = weather_data.get("individual_lows") if isinstance(weather_data.get("individual_lows"), dict) else {}
+        individual_currents = weather_data.get("individual_currents") if isinstance(weather_data.get("individual_currents"), dict) else {}
+        settlement_name = str(settlement_source or "").lower()
+        source_keys = [source_name.lower() for source_name in source_names]
+        settlement_source_drives_forecast = bool(settlement_name and settlement_name in source_keys)
+        equal_source_weight = round(1.0 / len(source_names), 6) if source_names else None
+        sources: list[dict[str, Any]] = []
+        for source_name in source_names:
+            key = source_name.lower()
+            detail = detail_by_name.get(key, {})
+            role = detail.get("role") or ("settlement_primary" if key == settlement_name else "cross_validation")
+            weight = detail.get("weight") if "weight" in detail else None
+            contribution = detail.get("contribution") if "contribution" in detail else None
+            weight_note = detail.get("weight_note")
+            if weight is None and contribution is None:
+                if settlement_source_drives_forecast:
+                    if key == settlement_name:
+                        weight = 1.0
+                        contribution = 1.0
+                        weight_note = weight_note or "settlement_source_drives_forecast"
+                    else:
+                        weight = 0.0
+                        contribution = 0.0
+                        weight_note = weight_note or "validator_only_settlement_source_drives_forecast"
+                elif equal_source_weight is not None:
+                    weight = equal_source_weight
+                    contribution = equal_source_weight
+                    weight_note = weight_note or "equal_weight_average_no_settlement_source"
+                else:
+                    weight_note = weight_note or "not_recorded_by_weather_engine"
+            elif not weight_note:
+                weight_note = "recorded_by_weather_engine"
+            source = {
+                "source_name": source_name,
+                "role": role,
+                "weight": weight,
+                "contribution": contribution,
+                "weight_note": weight_note,
+                "forecast_high": detail.get("forecast_high", individual_highs.get(source_name)),
+                "forecast_low": detail.get("forecast_low", individual_lows.get(source_name)),
+                "current_forecast": detail.get("current_forecast", individual_currents.get(source_name)),
+                "market_date": market_date,
+                "fetched_at": detail.get("fetched_at") or as_of,
+                "as_of": detail.get("as_of") or detail.get("fetched_at") or as_of,
+                "source_fetched_at": detail.get("fetched_at"),
+                "source_as_of": detail.get("as_of"),
+                "station_id": detail.get("station_id") or station_resolution.get("station_id"),
+                "station_cli": detail.get("station_cli") or station_resolution.get("station_cli"),
+                "station_mapping": detail.get("station_mapping") or station_resolution.get("mapping"),
+                "settlement_source": settlement_source,
+                "source_agreement_score": source_agreement,
+                "confidence": detail.get("confidence"),
+                "validation_reason": detail.get("validation_reason"),
+                "veto_reason": detail.get("veto_reason"),
+                "skip_reason": detail.get("skip_reason"),
+                "date_validation": detail.get("date_validation") if isinstance(detail.get("date_validation"), dict) else None,
+            }
+            PredictionLab._copy_optional_weather_date_fields(source, detail)
+            PredictionLab._copy_optional_forecast_metadata(source, detail)
+            sources.append({key: value for key, value in source.items() if value is not None})
+        return sources
+
+    @staticmethod
+    def _date_derivation_isoformat(value: Any) -> str | None:
+        if value is None:
+            return None
+        if hasattr(value, "value"):
+            inner = getattr(value, "value")
+            return inner.isoformat() if hasattr(inner, "isoformat") and inner is not None else None
+        isoformat = getattr(value, "isoformat", None)
+        if callable(isoformat):
+            return isoformat()
+        if isinstance(isoformat, str):
+            return isoformat
+        return None
+
+    @staticmethod
+    def _copy_optional_weather_date_fields(
+        target: dict[str, Any],
+        source: dict[str, Any],
+        *,
+        validated_weather_date: Any = None,
+    ) -> None:
+        weather_date = source.get("weather_date") or validated_weather_date
+        if weather_date not in (None, ""):
+            target["weather_date"] = weather_date
+            target.setdefault("target_forecast_date", weather_date)
+        forecast_date = source.get("forecast_date") or PredictionLab._derive_forecast_metadata_date(source)
+        if forecast_date not in (None, ""):
+            target["forecast_date"] = forecast_date
+            target.setdefault("target_forecast_date", forecast_date)
+        target_date = source.get("target_date")
+        if target_date not in (None, ""):
+            target["target_date"] = target_date
+            target.setdefault("target_forecast_date", target_date)
+
+    @staticmethod
+    def _copy_weather_date_fields_from_source_details(target: dict[str, Any], weather_data: dict[str, Any]) -> None:
+        if target.get("weather_date") in (None, "") and target.get("forecast_date") in (None, ""):
+            for detail in PredictionLab._iter_weather_source_details(weather_data):
+                weather_date = detail.get("weather_date")
+                forecast_date = detail.get("forecast_date") or PredictionLab._derive_forecast_metadata_date(detail)
+                date_validation = detail.get("date_validation") if isinstance(detail.get("date_validation"), dict) else {}
+                validation_weather_date = date_validation.get("weather_date")
+                if weather_date not in (None, ""):
+                    target["weather_date"] = weather_date
+                elif validation_weather_date not in (None, ""):
+                    target["weather_date"] = validation_weather_date
+                if forecast_date not in (None, ""):
+                    target["forecast_date"] = forecast_date
+                if target.get("weather_date") not in (None, "") or target.get("forecast_date") not in (None, ""):
+                    break
+        if not isinstance(target.get("date_validation"), dict):
+            for detail in PredictionLab._iter_weather_source_details(weather_data):
+                date_validation = detail.get("date_validation")
+                if isinstance(date_validation, dict):
+                    target["date_validation"] = dict(date_validation)
+                    break
+
+    @staticmethod
+    def _iter_weather_source_details(weather_data: dict[str, Any]):
+        details = weather_data.get("source_details")
+        if isinstance(details, list):
+            for detail in details:
+                if isinstance(detail, dict):
+                    yield detail
+
+    @staticmethod
+    def _derive_forecast_metadata_date(source: dict[str, Any]) -> str | None:
+        forecast_metadata = {
+            key: source.get(key)
+            for key in ("forecast_date", "forecast_start", "forecast_period_start", "period_start")
+            if source.get(key) not in (None, "")
+        }
+        derived = derive_weather_date(forecast_metadata)
+        return derived.isoformat
+
+    @staticmethod
+    def _choose_weather_date_validation(raw: dict[str, Any], computed: dict[str, Any]) -> dict[str, Any]:
+        if not raw:
+            return dict(computed)
+        if PredictionLab._date_validation_has_complete_dates(raw):
+            return dict(raw)
+        return dict(computed)
+
+    @staticmethod
+    def _date_validation_has_complete_dates(value: dict[str, Any]) -> bool:
+        if not isinstance(value, dict) or not isinstance(value.get("ok"), bool):
+            return False
+        market_date = PredictionLab._normalize_iso_date(value.get("market_date"))
+        weather_date = PredictionLab._normalize_iso_date(value.get("weather_date"))
+        if not market_date or not weather_date:
+            return False
+        if value.get("ok") is True and market_date != weather_date:
+            return False
+        return True
+
+    @staticmethod
+    def _normalize_iso_date(value: Any) -> str | None:
+        if value in (None, ""):
+            return None
+        isoformat = getattr(value, "isoformat", None)
+        if callable(isoformat):
+            value = isoformat()
+        text = str(value).strip()
+        if not text:
+            return None
+        if len(text) >= 10:
+            candidate = text[:10]
+            try:
+                datetime.fromisoformat(candidate)
+                return candidate
+            except ValueError:
+                pass
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00")).date().isoformat()
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _copy_optional_forecast_metadata(target: dict[str, Any], source: dict[str, Any]) -> None:
+        for key in (
+            "forecast_start",
+            "forecast_end",
+            "forecast_times",
+            "forecast_period_name",
+            "forecast_period_start",
+            "forecast_period_end",
+            "period_name",
+            "period_start",
+            "period_end",
+            "period_number",
+            "is_daytime",
+            "periods_used",
+            "high_period",
+            "low_period",
+            "source_metadata",
+        ):
+            value = source.get(key)
+            if value not in (None, "", []):
+                target[key] = value
 
     @staticmethod
     def _fetch_order_book(exchange: Any | None, market: Any) -> dict[str, Any] | None:
@@ -903,6 +1581,38 @@ class PredictionLab:
         if not isinstance(raw, dict):
             return None
         return detect_market_outcome(raw)
+
+    def _build_resolution_row(self, row: dict[str, Any], *, outcome: str, scored: dict[str, Any]) -> dict[str, Any]:
+        resolved_at = datetime.now(timezone.utc).isoformat()
+        return {
+            "resolution_id": f"{row.get('prediction_id') or row.get('market_id')}_{resolved_at}",
+            "prediction_id": row.get("prediction_id"),
+            "market_id": row.get("market_id"),
+            "experiment_id": row.get("experiment_id") or self.experiment_id,
+            "strategy_version": row.get("strategy_version") or self.strategy_version,
+            "run_id": row.get("run_id"),
+            "group": row.get("group"),
+            "series": row.get("series"),
+            "event_ticker": row.get("event_ticker"),
+            "direction": row.get("direction"),
+            "decision_type": row.get("decision_type"),
+            "yes_market_price": row.get("yes_market_price"),
+            "no_market_price": row.get("no_market_price"),
+            "hypothetical": row.get("hypothetical") if isinstance(row.get("hypothetical"), dict) else None,
+            "resolved_at": resolved_at,
+            "resolution": {
+                "outcome": outcome,
+                "resolved_at": resolved_at,
+                "is_correct": scored.get("is_correct"),
+                "net_pnl": scored.get("net_pnl"),
+                "gross_pnl": scored.get("gross_pnl"),
+                "position_size": scored.get("position_size"),
+                "contracts": scored.get("contracts"),
+                "fees_paid": scored.get("fees_paid"),
+                "entry_price": scored.get("entry_price"),
+                "quoted_entry_price": scored.get("quoted_entry_price"),
+            },
+        }
 
     def _group_allowed(self, group: str) -> bool:
         normalized = str(group or "unknown").lower()

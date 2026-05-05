@@ -72,6 +72,26 @@ class WeatherDateMatcherTests(unittest.TestCase):
         self.assertEqual(result.weather_date, "2026-04-14")
         self.assertEqual(result.source, "question:question")
 
+    def test_validation_derives_weather_date_from_forecast_start_metadata(self):
+        result = validate_weather_date_match(
+            {"market_ticker": "KXHIGHNY-26APR29-T80"},
+            {"forecast_start": "2026-04-29T07:00:00-04:00"},
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.reason, "dates_match")
+        self.assertEqual(result.weather_date, "2026-04-29")
+
+    def test_validation_derives_weather_date_from_period_start_metadata(self):
+        result = validate_weather_date_match(
+            {"market_ticker": "KXHIGHNY-26APR29-T80"},
+            {"forecast_period_start": "2026-04-29T06:00:00-04:00", "forecast_period_name": "Today"},
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.reason, "dates_match")
+        self.assertEqual(result.weather_date, "2026-04-29")
+
 
 if __name__ == "__main__":
     unittest.main()

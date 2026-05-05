@@ -10,7 +10,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Iterable
 
-from bot.decision_pipeline import DecisionPipelineEvaluator, build_fixed_opportunity_account_state
+from bot.decision_pipeline import (
+    DecisionPipelineEvaluator,
+    build_fixed_opportunity_account_state,
+    build_fixed_opportunity_risk_policy,
+)
 from bot.file_ops import load_jsonl
 
 logger = logging.getLogger(__name__)
@@ -26,6 +30,17 @@ ORDER_BOOK_RECORDED = "recorded_book"
 ORDER_BOOK_SIGNAL_PRICE_FALLBACK = "signal_price_fallback"
 ORDER_BOOK_SYNTHETIC = "synthetic"
 ORDER_BOOK_MISSING = "missing"
+
+QUALITY_REPLAY_GRADE_ORIGINAL = "replay_grade_original"
+QUALITY_REPLAY_GRADE_BACKFILLED = "replay_grade_backfilled"
+QUALITY_COVERAGE_ONLY = "coverage_only"
+QUALITY_MISSING_WEATHER_SNAPSHOT = "missing_weather_snapshot"
+QUALITY_MISSING_ORDER_BOOK = "missing_order_book"
+QUALITY_DATE_UNVERIFIED = "date_unverified"
+QUALITY_LIVE_SOURCE_FORBIDDEN = "live_source_forbidden"
+QUALITY_SYNTHETIC_SOURCE = "synthetic_source"
+QUALITY_HISTORICAL_POST_FACTO = "historical_post_facto"
+QUALITY_MISSING_SOURCE = "missing_source"
 
 LIVE_CURRENT_SOURCE_METHODS = (
     "_live_data_signal",
@@ -81,8 +96,24 @@ class ReplayArtifactInput:
 
 
 @dataclass(slots=True)
+class ReplayRowQuality:
+    category: str
+    reasons: list[str] = field(default_factory=list)
+    is_replay_grade_strict: bool = False
+    include_in_strict: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
 class ReplayComparisonRow:
     market_id: str
+    series: str | None
+    event_ticker: str | None
+    prediction_id: str | None
+    experiment_id: str | None
+    strategy_version: str | None
     original_action: str
     replayed_action: str
     original_reason_code: str | None
@@ -92,6 +123,11 @@ class ReplayComparisonRow:
     source_mode: str
     order_book_mode: str
     execution_snapshot_mode: str
+    quality: dict[str, Any]
+    category: str
+    reasons: list[str]
+    is_replay_grade_strict: bool
+    include_in_strict: bool
     warnings: list[str] = field(default_factory=list)
     source_path: str | None = None
     line_number: int | None = None
@@ -107,14 +143,51 @@ class ReplayComparisonRow:
 
 
 @dataclass(slots=True)
-class PredictionLabReplayResult:
-    rows: list[ReplayComparisonRow]
-    summary: dict[str, Any]
+class PredictionLabValidationIssue:
+    severity: str
+    code: str
+    message: str
+    source_path: str | None = None
+    line_number: int | None = None
+    market_id: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class PredictionLabValidationResult:
+    total_rows: int
+    checked_paths: list[str]
+    issues: list[PredictionLabValidationIssue]
+
+    @property
+    def ok(self) -> bool:
+        return not any(issue.severity == "error" for issue in self.issues)
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "ok": self.ok,
+            "total_rows": self.total_rows,
+            "checked_paths": list(self.checked_paths),
+            "issue_counts": _counts(issue.code for issue in self.issues),
+            "severity_counts": _counts(issue.severity for issue in self.issues),
+            "issues": [issue.to_dict() for issue in self.issues],
+        }
+
+
+@dataclass(slots=True)
+class PredictionLabReplayResult:
+    rows: list[ReplayComparisonRow]
+    summary: dict[str, Any]
+    all_rows: list[ReplayComparisonRow] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        coverage_rows = self.all_rows or self.rows
+        return {
             "summary": dict(self.summary),
             "rows": [row.to_dict() for row in self.rows],
+            "all_rows": [row.to_dict() for row in coverage_rows],
         }
 
 
@@ -125,13 +198,14 @@ def load_replay_artifacts(paths: Iterable[str | Path], *, limit: int | None = No
     for path_value in paths:
         path = Path(path_value)
         for index, row in enumerate(load_jsonl(path), start=1):
+            replay_row = _strip_inline_outcomes(row)
             artifact = row.get("decision_artifact")
             if not isinstance(artifact, dict):
-                artifact = _legacy_artifact_from_row(row)
+                artifact = _legacy_artifact_from_row(replay_row)
             records.append(
                 ReplayArtifactInput(
-                    row=dict(row),
-                    artifact=dict(artifact),
+                    row=replay_row,
+                    artifact=_strip_artifact_outcomes(artifact),
                     source_path=str(path),
                     line_number=index,
                 )
@@ -149,6 +223,9 @@ def replay_recorded_artifacts(
     bankroll_usd: float = 100.0,
     live_source_policy: str = "fail",
     require_recorded_source: bool = False,
+    row_quality_policy: str = "annotate",
+    resolution_records: Iterable[dict[str, Any]] | None = None,
+    resolution_paths: Iterable[str | Path] | None = None,
 ) -> PredictionLabReplayResult:
     """Replay recorded artifacts and compare original vs replayed decisions.
 
@@ -160,12 +237,19 @@ def replay_recorded_artifacts(
     - ``allow`` leaves the evaluator untouched and labels the run as unsafe.
     """
 
-    replay_config = dict(config or {})
-    replay_evaluator = evaluator or DecisionPipelineEvaluator(replay_config)
+    replay_config = _replay_safe_config(config or {})
+    replay_evaluator = evaluator or DecisionPipelineEvaluator(
+        replay_config,
+        risk_policy=build_fixed_opportunity_risk_policy(replay_config, bankroll_usd=bankroll_usd),
+    )
     rows: list[ReplayComparisonRow] = []
+    all_rows: list[ReplayComparisonRow] = []
     policy = str(live_source_policy or "fail").lower()
     if policy not in {"fail", "warn_skip", "allow"}:
         raise ValueError("live_source_policy must be one of: fail, warn_skip, allow")
+    quality_policy = str(row_quality_policy or "annotate").lower()
+    if quality_policy not in {"annotate", "include_all", "strict", "drop_incomplete", "strict_only"}:
+        raise ValueError("row_quality_policy must be one of: annotate, include_all, strict, drop_incomplete, strict_only")
 
     for raw_record in records:
         record = _coerce_record(raw_record)
@@ -177,6 +261,14 @@ def replay_recorded_artifacts(
         order_book_mode = classify_order_book_mode(original_artifact)
         execution_mode = classify_execution_snapshot_mode(original_artifact)
         row_warnings = _source_mode_warnings(source_mode, order_book_mode)
+        quality = classify_replay_row_quality(
+            original_artifact,
+            record.row,
+            source_mode=source_mode,
+            order_book_mode=order_book_mode,
+            execution_snapshot_mode=execution_mode,
+            warnings=row_warnings,
+        )
 
         if source_mode == SOURCE_LIVE_CURRENT_FORBIDDEN and policy == "fail":
             raise LiveCurrentSourceForbiddenError(
@@ -217,9 +309,13 @@ def replay_recorded_artifacts(
 
         replayed_action = _normalize_action(replayed.get("final_action"))
         replayed_reason = _coerce_reason(replayed.get("final_reason_code"))
-        outcome = _row_outcome(record.row)
         row = ReplayComparisonRow(
             market_id=str(getattr(market, "id", "") or ""),
+            series=_record_series(record, market),
+            event_ticker=_record_event_ticker(record, market),
+            prediction_id=_record_prediction_id(record),
+            experiment_id=_record_experiment_id(record),
+            strategy_version=_record_strategy_version(record),
             original_action=original_action,
             replayed_action=replayed_action,
             original_reason_code=original_reason,
@@ -229,19 +325,25 @@ def replay_recorded_artifacts(
             source_mode=source_mode,
             order_book_mode=order_book_mode,
             execution_snapshot_mode=execution_mode,
+            quality=quality.to_dict(),
+            category=quality.category,
+            reasons=list(quality.reasons),
+            is_replay_grade_strict=quality.is_replay_grade_strict,
+            include_in_strict=quality.include_in_strict,
             warnings=row_warnings,
             source_path=record.source_path,
             line_number=record.line_number,
             original_artifact=original_artifact,
             replayed_artifact=replayed,
-            outcome=outcome,
-            missed_win=_is_skip(original_action) and _is_correct_buy(replayed_action, outcome),
-            bad_buy_removed=_is_incorrect_buy(original_action, outcome) and _is_skip(replayed_action),
-            bad_buy_added=_is_skip(original_action) and _is_incorrect_buy(replayed_action, outcome),
+            outcome=None,
         )
+        all_rows.append(row)
+        if quality_policy in {"strict", "drop_incomplete", "strict_only"} and not row.include_in_strict:
+            continue
         rows.append(row)
 
-    return PredictionLabReplayResult(rows=rows, summary=_summarize(rows))
+    _apply_resolution_scoring(all_rows, resolution_records=resolution_records, resolution_paths=resolution_paths)
+    return PredictionLabReplayResult(rows=rows, summary=_summarize(rows, all_rows=all_rows), all_rows=all_rows)
 
 
 def replay_from_paths(
@@ -253,6 +355,8 @@ def replay_from_paths(
     bankroll_usd: float = 100.0,
     live_source_policy: str = "fail",
     require_recorded_source: bool = False,
+    row_quality_policy: str = "annotate",
+    resolution_paths: Iterable[str | Path] | None = None,
 ) -> PredictionLabReplayResult:
     records = load_replay_artifacts(paths, limit=limit)
     return replay_recorded_artifacts(
@@ -262,7 +366,25 @@ def replay_from_paths(
         bankroll_usd=bankroll_usd,
         live_source_policy=live_source_policy,
         require_recorded_source=require_recorded_source,
+        row_quality_policy=row_quality_policy,
+        resolution_paths=resolution_paths,
     )
+
+
+def _replay_safe_config(config: dict[str, Any]) -> dict[str, Any]:
+    replay_config = dict(config or {})
+    prediction_lab_cfg = replay_config.get("prediction_lab") if isinstance(replay_config.get("prediction_lab"), dict) else {}
+    strategy_cfg = dict(replay_config.get("strategy") or {})
+    for lab_key, strategy_key in (
+        ("disable_news", "enable_news"),
+        ("disable_social", "enable_social"),
+        ("disable_ai", "enable_ai"),
+    ):
+        if bool(prediction_lab_cfg.get(lab_key, False)):
+            strategy_cfg[strategy_key] = False
+    if strategy_cfg or "strategy" in replay_config:
+        replay_config["strategy"] = strategy_cfg
+    return replay_config
 
 
 def classify_source_mode(artifact: dict[str, Any], row: dict[str, Any] | None = None) -> str:
@@ -321,19 +443,25 @@ def classify_source_mode(artifact: dict[str, Any], row: dict[str, Any] | None = 
 
 def classify_order_book_mode(artifact: dict[str, Any]) -> str:
     snapshot = artifact.get("order_book_snapshot") if isinstance(artifact.get("order_book_snapshot"), dict) else {}
+    if not isinstance(snapshot, dict) or not snapshot:
+        snapshot = artifact.get("pre_logic_order_book_snapshot") if isinstance(artifact.get("pre_logic_order_book_snapshot"), dict) else {}
     source = str(snapshot.get("source") or "").lower()
     data = snapshot.get("data")
-    if source in {"book", "recorded_book"} and isinstance(data, dict) and data:
+    has_recorded_book_asks = _has_executable_ask_fields(data)
+    has_execution_asks = _has_usable_execution_prices(artifact)
+    if source in {"book", "recorded_book"} and has_recorded_book_asks:
         return ORDER_BOOK_RECORDED
-    if source in {"fallback", "signal_price_fallback"}:
+    if source in {"fallback", "signal_price_fallback"} and has_execution_asks:
         return ORDER_BOOK_SIGNAL_PRICE_FALLBACK
-    if source == "synthetic":
+    if source == "synthetic" and has_recorded_book_asks:
         return ORDER_BOOK_SYNTHETIC
 
     execution_source = str(artifact.get("execution_snapshot_source") or "").lower()
-    if execution_source in {"fallback", "signal_price_fallback"}:
+    if execution_source in {"book", "recorded_book"} and has_execution_asks:
+        return ORDER_BOOK_RECORDED
+    if execution_source in {"fallback", "signal_price_fallback"} and has_execution_asks:
         return ORDER_BOOK_SIGNAL_PRICE_FALLBACK
-    if execution_source == "synthetic":
+    if execution_source == "synthetic" and has_execution_asks:
         return ORDER_BOOK_SYNTHETIC
     return ORDER_BOOK_MISSING
 
@@ -341,23 +469,395 @@ def classify_order_book_mode(artifact: dict[str, Any]) -> str:
 def classify_execution_snapshot_mode(artifact: dict[str, Any]) -> str:
     snapshot = artifact.get("execution_snapshot") if isinstance(artifact.get("execution_snapshot"), dict) else {}
     source = str(snapshot.get("source") or artifact.get("execution_snapshot_source") or "").lower()
-    if source == "book":
+    has_prices = _has_executable_ask_fields(snapshot) or _has_executable_ask_fields(
+        (artifact.get("order_book_snapshot") or {}).get("data") if isinstance(artifact.get("order_book_snapshot"), dict) else None
+    )
+    if source == "book" and has_prices:
         return ORDER_BOOK_RECORDED
-    if source == "fallback":
+    if source == "fallback" and has_prices:
         return ORDER_BOOK_SIGNAL_PRICE_FALLBACK
-    if source == "synthetic":
+    if source == "synthetic" and has_prices:
         return ORDER_BOOK_SYNTHETIC
     return ORDER_BOOK_MISSING
 
 
+def classify_replay_row_quality(
+    artifact: dict[str, Any],
+    row: dict[str, Any] | None = None,
+    *,
+    source_mode: str | None = None,
+    order_book_mode: str | None = None,
+    execution_snapshot_mode: str | None = None,
+    warnings: Iterable[str] | None = None,
+) -> ReplayRowQuality:
+    """Classify whether a recorded row is strict replay-grade without fetching live data."""
+
+    row = row or {}
+    source_mode = source_mode or classify_source_mode(artifact, row)
+    order_book_mode = order_book_mode or classify_order_book_mode(artifact)
+    execution_snapshot_mode = execution_snapshot_mode or classify_execution_snapshot_mode(artifact)
+    warning_values = _artifact_warning_values(artifact, row, warnings)
+    weather_snapshot = _weather_source_snapshot(artifact)
+    weather_like = _is_weather_replay_row(artifact, row)
+    date_validation = _date_validation_for_quality(artifact, weather_snapshot)
+    original_action = _normalize_action(artifact.get("final_action") or _stored_action(row))
+    reasons: list[str] = []
+
+    if source_mode == SOURCE_MISSING:
+        reasons.append("missing_source")
+    elif source_mode == SOURCE_LIVE_CURRENT_FORBIDDEN:
+        reasons.append("live_source_forbidden")
+    elif source_mode == SOURCE_SYNTHETIC:
+        reasons.append("synthetic_source")
+    elif source_mode == SOURCE_HISTORICAL_POST_FACTO:
+        reasons.append("historical_post_facto")
+
+    if _warnings_match(warning_values, ("live_current_source_forbidden", "live source", "forbidden")):
+        _append_unique(reasons, "live_source_forbidden")
+    if _warnings_match(warning_values, ("synthetic",)):
+        _append_unique(reasons, "synthetic_source")
+    if _warnings_match(warning_values, ("historical_post_facto", "post_facto")):
+        _append_unique(reasons, "historical_post_facto")
+    if _warnings_match(warning_values, ("missing_source", "source_mode_missing")):
+        _append_unique(reasons, "missing_source")
+
+    if weather_like and not weather_snapshot:
+        _append_unique(reasons, "missing_weather_snapshot")
+
+    if order_book_mode != ORDER_BOOK_RECORDED or execution_snapshot_mode not in {ORDER_BOOK_RECORDED, ORDER_BOOK_SIGNAL_PRICE_FALLBACK}:
+        _append_unique(reasons, f"order_book_not_recorded:{order_book_mode}/{execution_snapshot_mode}")
+    if order_book_mode == ORDER_BOOK_MISSING:
+        _append_unique(reasons, "missing_order_book")
+    elif order_book_mode == ORDER_BOOK_SYNTHETIC or execution_snapshot_mode == ORDER_BOOK_SYNTHETIC:
+        _append_unique(reasons, "synthetic_source")
+
+    if original_action in {"BUY_YES", "BUY_NO"}:
+        feasibility = _execution_feasibility_block(artifact)
+        if feasibility is None:
+            _append_unique(reasons, "missing_execution_feasibility")
+        elif not _execution_feasibility_is_strict(feasibility):
+            status = str(feasibility.get("status") or "infeasible").lower()
+            failed = feasibility.get("failed_checks")
+            if isinstance(failed, list) and failed:
+                status = f"{status}:{','.join(str(item) for item in failed)}"
+            _append_unique(reasons, f"execution_feasibility_failed:{status}")
+
+    if weather_like and weather_snapshot and not _date_validation_is_strict(date_validation):
+        reason = str((date_validation or {}).get("reason") or "missing_date_validation")
+        _append_unique(reasons, f"date_unverified:{reason}")
+    if _warnings_match(warning_values, ("date_unverified", "missing_weather_date", "unit_mismatch", "date_validation")):
+        _append_unique(reasons, "date_unverified")
+
+    category = _quality_category_from_reasons(reasons)
+    if category is None:
+        category = QUALITY_REPLAY_GRADE_BACKFILLED if _has_backfill_provenance(artifact, row) else QUALITY_REPLAY_GRADE_ORIGINAL
+        strict = True
+    else:
+        strict = False
+    return ReplayRowQuality(
+        category=category,
+        reasons=reasons,
+        is_replay_grade_strict=strict,
+        include_in_strict=strict,
+    )
+
+
+def build_replay_series_grid(rows_or_result: Iterable[ReplayComparisonRow] | PredictionLabReplayResult) -> list[dict[str, Any]]:
+    """Group replay rows by series/event_ticker for strict-vs-coverage analysis."""
+
+    rows = (rows_or_result.all_rows or rows_or_result.rows) if isinstance(rows_or_result, PredictionLabReplayResult) else list(rows_or_result)
+    groups: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        series = str(row.series or _artifact_metadata(row.original_artifact or {}).get("series") or "unknown")
+        event_ticker = str(row.event_ticker or _artifact_metadata(row.original_artifact or {}).get("event_ticker") or "")
+        key = (series, event_ticker)
+        group = groups.setdefault(
+            key,
+            {
+                "series": series,
+                "event_ticker": event_ticker or None,
+                "total_rows": 0,
+                "strict_rows": 0,
+                "excluded_rows": 0,
+                "excluded_counts": {},
+                "quality_counts": {},
+                "warning_counts": {},
+                "action_changed": 0,
+                "reason_changed": 0,
+                "strict_action_changed": 0,
+                "strict_reason_changed": 0,
+                "action_change_counts": {},
+                "reason_change_counts": {},
+            },
+        )
+        group["total_rows"] += 1
+        if row.include_in_strict:
+            group["strict_rows"] += 1
+            if row.action_changed:
+                group["strict_action_changed"] += 1
+            if row.reason_changed:
+                group["strict_reason_changed"] += 1
+        else:
+            group["excluded_rows"] += 1
+            for reason in row.reasons or [row.category]:
+                _increment(group["excluded_counts"], reason)
+        _increment(group["quality_counts"], row.category)
+        for warning in row.warnings:
+            _increment(group["warning_counts"], warning)
+        if row.action_changed:
+            group["action_changed"] += 1
+            _increment(group["action_change_counts"], f"{row.original_action}->{row.replayed_action}")
+        if row.reason_changed:
+            group["reason_changed"] += 1
+            _increment(group["reason_change_counts"], f"{row.original_reason_code}->{row.replayed_reason_code}")
+    return [groups[key] for key in sorted(groups)]
+
+
+def validate_prediction_lab_tables(
+    input_paths: Iterable[str | Path],
+    *,
+    resolution_paths: Iterable[str | Path] | None = None,
+) -> PredictionLabValidationResult:
+    """Validate Prediction Lab replay-input rows and optional resolution ledgers."""
+
+    issues: list[PredictionLabValidationIssue] = []
+    checked_paths: list[str] = []
+    total_rows = 0
+    seen_inputs: dict[tuple[str, ...], tuple[str, int]] = {}
+    seen_resolutions: dict[tuple[str, ...], tuple[str, int]] = {}
+    resolution_path_set = {_validation_path_key(path_value) for path_value in resolution_paths or []}
+
+    for path_value in input_paths:
+        path = Path(path_value)
+        if _validation_path_key(path) in resolution_path_set:
+            continue
+        checked_paths.append(str(path))
+        for line_number, row in enumerate(load_jsonl(path), start=1):
+            total_rows += 1
+            _validate_replay_input_row(row, path=str(path), line_number=line_number, seen=seen_inputs, issues=issues)
+
+    for path_value in resolution_paths or []:
+        path = Path(path_value)
+        checked_paths.append(str(path))
+        for line_number, row in enumerate(load_jsonl(path), start=1):
+            total_rows += 1
+            _validate_resolution_row(row, path=str(path), line_number=line_number, seen=seen_resolutions, issues=issues)
+
+    return PredictionLabValidationResult(total_rows=total_rows, checked_paths=checked_paths, issues=issues)
+
+
+def _validation_path_key(path_value: str | Path) -> str:
+    return str(Path(path_value).expanduser().resolve(strict=False))
+
+
 def _coerce_record(value: ReplayArtifactInput | dict[str, Any]) -> ReplayArtifactInput:
     if isinstance(value, ReplayArtifactInput):
-        return value
-    row = dict(value)
+        row = _strip_inline_outcomes(value.row)
+        return ReplayArtifactInput(row=row, artifact=_strip_artifact_outcomes(value.artifact), source_path=value.source_path, line_number=value.line_number)
+    row = _strip_inline_outcomes(value)
     artifact = row.get("decision_artifact")
     if not isinstance(artifact, dict):
         artifact = _legacy_artifact_from_row(row)
-    return ReplayArtifactInput(row=row, artifact=dict(artifact))
+    return ReplayArtifactInput(row=row, artifact=_strip_artifact_outcomes(artifact))
+
+
+def _validate_replay_input_row(
+    row: dict[str, Any],
+    *,
+    path: str,
+    line_number: int,
+    seen: dict[tuple[str, ...], tuple[str, int]],
+    issues: list[PredictionLabValidationIssue],
+) -> None:
+    market_id = str(row.get("market_id") or "")
+    for key in ("market_id", "decision_type"):
+        if row.get(key) in (None, ""):
+            _add_validation_issue(issues, "error", "schema_missing_field", f"missing required field {key}", path, line_number, market_id)
+    if row.get("timestamp") in (None, "") and row.get("observed_at") in (None, ""):
+        _add_validation_issue(issues, "error", "schema_missing_timestamp", "missing timestamp/observed_at", path, line_number, market_id)
+    for key in ("timestamp", "observed_at"):
+        if row.get(key) not in (None, "") and _parse_dt(row.get(key)) is None:
+            _add_validation_issue(issues, "error", "timestamp_invalid", f"invalid {key}", path, line_number, market_id)
+
+    identity = _validation_identity(row)
+    if identity in seen:
+        first_path, first_line = seen[identity]
+        _add_validation_issue(
+            issues,
+            "error",
+            "duplicate_identity",
+            f"duplicate identity first seen at {first_path}:{first_line}",
+            path,
+            line_number,
+            market_id,
+        )
+    else:
+        seen[identity] = (path, line_number)
+
+    if _has_outcome_leakage(row):
+        _add_validation_issue(issues, "error", "outcome_leakage", "replay input row contains resolved outcome data", path, line_number, market_id)
+
+    artifact = row.get("decision_artifact")
+    if not isinstance(artifact, dict):
+        _add_validation_issue(issues, "warning", "schema_missing_decision_artifact", "missing decision_artifact; replay will use legacy fallback", path, line_number, market_id)
+        artifact = _legacy_artifact_from_row(row)
+
+    source_mode = classify_source_mode(artifact, row)
+    order_book_mode = classify_order_book_mode(artifact)
+    execution_mode = classify_execution_snapshot_mode(artifact)
+    quality = classify_replay_row_quality(
+        artifact,
+        row,
+        source_mode=source_mode,
+        order_book_mode=order_book_mode,
+        execution_snapshot_mode=execution_mode,
+    )
+    if source_mode != SOURCE_RECORDED_AS_OF:
+        _add_validation_issue(issues, "warning", "source_snapshot_incomplete", f"source_mode={source_mode}", path, line_number, market_id)
+    if _is_weather_replay_row(artifact, row) and not _weather_source_snapshot(artifact):
+        _add_validation_issue(issues, "warning", "weather_snapshot_incomplete", "weather row is missing weather_source_snapshot", path, line_number, market_id)
+    if order_book_mode != ORDER_BOOK_RECORDED or execution_mode not in {ORDER_BOOK_RECORDED, ORDER_BOOK_SIGNAL_PRICE_FALLBACK}:
+        _add_validation_issue(
+            issues,
+            "warning",
+            "order_book_execution_not_strict",
+            f"order_book_mode={order_book_mode} execution_snapshot_mode={execution_mode}",
+            path,
+            line_number,
+            market_id,
+        )
+    original_action = _normalize_action(artifact.get("final_action") or _stored_action(row))
+    if original_action in {"BUY_YES", "BUY_NO"} and not _execution_feasibility_is_strict(_execution_feasibility_block(artifact)):
+        _add_validation_issue(
+            issues,
+            "warning",
+            "execution_feasibility_not_strict",
+            "buy row is missing passing execution_feasibility evidence",
+            path,
+            line_number,
+            market_id,
+        )
+    if not quality.include_in_strict:
+        _add_validation_issue(issues, "warning", f"row_quality_{quality.category}", ", ".join(quality.reasons), path, line_number, market_id)
+
+
+def _validate_resolution_row(
+    row: dict[str, Any],
+    *,
+    path: str,
+    line_number: int,
+    seen: dict[tuple[str, ...], tuple[str, int]],
+    issues: list[PredictionLabValidationIssue],
+) -> None:
+    market_id = str(row.get("market_id") or "")
+    if not market_id:
+        _add_validation_issue(issues, "error", "resolution_schema_missing_market_id", "resolution row missing market_id", path, line_number, market_id)
+    resolution = row.get("resolution") if isinstance(row.get("resolution"), dict) else {}
+    outcome = str(resolution.get("outcome") or row.get("outcome") or "").upper()
+    if outcome not in {"YES", "NO", "VOID"}:
+        _add_validation_issue(issues, "error", "resolution_schema_missing_outcome", "resolution row missing YES/NO/VOID outcome", path, line_number, market_id)
+    resolved_at = resolution.get("resolved_at") or row.get("resolved_at")
+    if _parse_dt(resolved_at) is None:
+        _add_validation_issue(issues, "error", "resolution_timestamp_invalid", "resolution row missing/invalid resolved_at", path, line_number, market_id)
+    identity = _validation_identity(row)
+    if identity in seen:
+        first_path, first_line = seen[identity]
+        _add_validation_issue(
+            issues,
+            "error",
+            "duplicate_resolution_identity",
+            f"duplicate resolution identity first seen at {first_path}:{first_line}",
+            path,
+            line_number,
+            market_id,
+        )
+    else:
+        seen[identity] = (path, line_number)
+
+
+def _add_validation_issue(
+    issues: list[PredictionLabValidationIssue],
+    severity: str,
+    code: str,
+    message: str,
+    source_path: str,
+    line_number: int,
+    market_id: str | None,
+) -> None:
+    issues.append(
+        PredictionLabValidationIssue(
+            severity=severity,
+            code=code,
+            message=message,
+            source_path=source_path,
+            line_number=line_number,
+            market_id=market_id or None,
+        )
+    )
+
+
+def _validation_identity(row: dict[str, Any]) -> tuple[str, ...]:
+    if row.get("prediction_id") not in (None, ""):
+        return ("prediction", str(row.get("prediction_id")))
+    return (
+        "row",
+        str(row.get("market_id") or ""),
+        str(row.get("experiment_id") or ""),
+        str(row.get("strategy_version") or ""),
+        str(row.get("run_id") or ""),
+        str(row.get("observed_at") or row.get("timestamp") or ""),
+        str(row.get("snapshot_key") or ""),
+    )
+
+
+def _has_outcome_leakage(value: Any) -> bool:
+    leakage_keys = {"resolution", "outcome", "actual_outcome", "settled_outcome", "market_result"}
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if str(key).lower() in leakage_keys and _outcome_leakage_value_present(item):
+                return True
+            if _has_outcome_leakage(item):
+                return True
+    elif isinstance(value, list):
+        return any(_has_outcome_leakage(item) for item in value)
+    return False
+
+
+def _outcome_leakage_value_present(value: Any) -> bool:
+    if value in (None, "", [], {}):
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, dict):
+        return any(_outcome_leakage_value_present(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_outcome_leakage_value_present(item) for item in value)
+    return True
+
+
+def _strip_inline_outcomes(row: dict[str, Any]) -> dict[str, Any]:
+    replay_row = dict(row)
+    for key in ("resolution", "outcome", "actual_outcome", "settled_outcome", "market_result", "result"):
+        replay_row.pop(key, None)
+    return replay_row
+
+
+def _strip_artifact_outcomes(value: Any) -> dict[str, Any]:
+    stripped = _strip_artifact_outcomes_inner(value)
+    return stripped if isinstance(stripped, dict) else {}
+
+
+def _strip_artifact_outcomes_inner(value: Any) -> Any:
+    leakage_keys = {"resolution", "outcome", "actual_outcome", "settled_outcome", "market_result"}
+    if isinstance(value, dict):
+        return {
+            key: _strip_artifact_outcomes_inner(item)
+            for key, item in value.items()
+            if str(key).lower() not in leakage_keys
+        }
+    if isinstance(value, list):
+        return [_strip_artifact_outcomes_inner(item) for item in value]
+    return value
 
 
 def _legacy_artifact_from_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -399,14 +899,52 @@ def _market_from_record(record: ReplayArtifactInput) -> Any:
     )
 
 
+def _record_series(record: ReplayArtifactInput, market: Any) -> str | None:
+    metadata = getattr(market, "metadata", {}) if isinstance(getattr(market, "metadata", {}), dict) else {}
+    value = metadata.get("series") or record.row.get("series") or metadata.get("market_group") or record.row.get("group")
+    return str(value) if value not in (None, "") else None
+
+
+def _record_event_ticker(record: ReplayArtifactInput, market: Any) -> str | None:
+    metadata = getattr(market, "metadata", {}) if isinstance(getattr(market, "metadata", {}), dict) else {}
+    value = metadata.get("event_ticker") or record.row.get("event_ticker")
+    return str(value) if value not in (None, "") else None
+
+
+def _record_prediction_id(record: ReplayArtifactInput) -> str | None:
+    value = record.row.get("prediction_id")
+    return str(value) if value not in (None, "") else None
+
+
+def _record_experiment_id(record: ReplayArtifactInput) -> str | None:
+    value = record.row.get("experiment_id")
+    return str(value) if value not in (None, "") else None
+
+
+def _record_strategy_version(record: ReplayArtifactInput) -> str | None:
+    value = record.row.get("strategy_version")
+    return str(value) if value not in (None, "") else None
+
+
 def _recorded_order_book(artifact: dict[str, Any]) -> dict[str, Any] | None:
+    pre_logic_snapshot = artifact.get("pre_logic_order_book_snapshot") if isinstance(artifact.get("pre_logic_order_book_snapshot"), dict) else {}
+    pre_logic_data = pre_logic_snapshot.get("data")
+    if _has_executable_ask_fields(pre_logic_data):
+        return dict(pre_logic_data)
     snapshot = artifact.get("order_book_snapshot") if isinstance(artifact.get("order_book_snapshot"), dict) else {}
     data = snapshot.get("data")
-    if isinstance(data, dict) and data:
+    if _has_executable_ask_fields(data):
         return dict(data)
     order_book = artifact.get("order_book")
-    if isinstance(order_book, dict) and order_book:
+    if _has_executable_ask_fields(order_book):
         return dict(order_book)
+    execution_snapshot = artifact.get("execution_snapshot")
+    if _has_executable_ask_fields(execution_snapshot):
+        return {
+            key: execution_snapshot.get(key)
+            for key in ("best_yes_ask", "best_no_ask", "best_yes_bid", "best_no_bid")
+            if execution_snapshot.get(key) is not None
+        }
     return None
 
 
@@ -420,6 +958,267 @@ def _recorded_source_context(artifact: dict[str, Any]) -> dict[str, Any]:
     return context
 
 
+def _artifact_metadata(artifact: dict[str, Any]) -> dict[str, Any]:
+    source_context = artifact.get("source_context") if isinstance(artifact.get("source_context"), dict) else {}
+    data = source_context.get("data") if isinstance(source_context.get("data"), dict) else {}
+    metadata = data.get("market_metadata") if isinstance(data.get("market_metadata"), dict) else {}
+    return dict(metadata)
+
+
+def _weather_source_snapshot(artifact: dict[str, Any]) -> dict[str, Any] | None:
+    source_context = artifact.get("source_context") if isinstance(artifact.get("source_context"), dict) else {}
+    data = source_context.get("data") if isinstance(source_context.get("data"), dict) else {}
+    snapshot = data.get("weather_source_snapshot")
+    if isinstance(snapshot, dict) and snapshot:
+        return snapshot
+    snapshots = artifact.get("source_snapshots")
+    if isinstance(snapshots, list):
+        for source_snapshot in snapshots:
+            if not isinstance(source_snapshot, dict):
+                continue
+            resolved = _resolve_snapshot_ref(artifact, source_snapshot)
+            candidate = resolved if isinstance(resolved, dict) else source_snapshot
+            source_name = str(
+                candidate.get("source_name")
+                or candidate.get("source")
+                or candidate.get("signal_type")
+                or source_snapshot.get("source_name")
+                or source_snapshot.get("source")
+                or ""
+            ).lower()
+            is_rich_weather_snapshot = any(
+                key in candidate
+                for key in (
+                    "forecast",
+                    "date_validation",
+                    "sources",
+                    "source_signal",
+                    "market_date",
+                    "target_forecast_date",
+                    "station_id",
+                )
+            )
+            if source_name == "weather" and candidate and (resolved is not None or is_rich_weather_snapshot):
+                return candidate
+    return None
+
+
+def _is_weather_replay_row(artifact: dict[str, Any], row: dict[str, Any]) -> bool:
+    metadata = _artifact_metadata(artifact)
+    values = [
+        row.get("group"),
+        row.get("series"),
+        row.get("event_ticker"),
+        row.get("market_id"),
+        row.get("question"),
+        metadata.get("market_group"),
+        metadata.get("series"),
+        metadata.get("event_ticker"),
+        artifact.get("market_id"),
+    ]
+    joined = " ".join(str(value or "").lower() for value in values)
+    return any(token in joined for token in ("weather", "temperature", "daily_temperature", "kxhigh", "kxlow", "weather_source_snapshot"))
+
+
+def _date_validation_for_quality(artifact: dict[str, Any], weather_snapshot: dict[str, Any] | None) -> dict[str, Any] | None:
+    candidates: list[Any] = []
+    if isinstance(weather_snapshot, dict):
+        candidates.append(weather_snapshot.get("date_validation"))
+    source_context = artifact.get("source_context") if isinstance(artifact.get("source_context"), dict) else {}
+    data = source_context.get("data") if isinstance(source_context.get("data"), dict) else {}
+    candidates.append(data.get("date_validation"))
+    candidates.append(artifact.get("date_validation"))
+    snapshots = artifact.get("source_snapshots")
+    if isinstance(snapshots, list):
+        for snapshot in snapshots:
+            if not isinstance(snapshot, dict):
+                continue
+            resolved = _resolve_snapshot_ref(artifact, snapshot)
+            if isinstance(resolved, dict):
+                candidates.append(resolved.get("date_validation"))
+            candidates.append(snapshot.get("date_validation"))
+    for candidate in candidates:
+        if isinstance(candidate, dict):
+            return candidate
+    return None
+
+
+def _date_validation_is_strict(date_validation: dict[str, Any] | None) -> bool:
+    if not isinstance(date_validation, dict):
+        return False
+    if date_validation.get("ok") is not True:
+        return False
+    market_date = _normalize_iso_date(date_validation.get("market_date"))
+    weather_date = _normalize_iso_date(date_validation.get("weather_date"))
+    return bool(market_date and weather_date and market_date == weather_date)
+
+
+def _normalize_iso_date(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    isoformat = getattr(value, "isoformat", None)
+    if callable(isoformat):
+        value = isoformat()
+    text = str(value).strip()
+    if not text:
+        return None
+    if len(text) >= 10:
+        candidate = text[:10]
+        try:
+            datetime.fromisoformat(candidate)
+            return candidate
+        except ValueError:
+            pass
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).date().isoformat()
+    except ValueError:
+        return None
+
+
+def _has_usable_execution_prices(artifact: dict[str, Any]) -> bool:
+    snapshot = artifact.get("execution_snapshot")
+    return _has_executable_ask_fields(snapshot)
+
+
+def _execution_feasibility_block(artifact: dict[str, Any]) -> dict[str, Any] | None:
+    value = artifact.get("execution_feasibility")
+    return value if isinstance(value, dict) and value else None
+
+
+def _execution_feasibility_is_strict(value: dict[str, Any] | None) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if value.get("feasible") is not True:
+        return False
+    checks = (
+        "same_market_open",
+        "same_side_ask_present",
+        "ask_within_slippage",
+        "elapsed_within_threshold",
+    )
+    if not all(value.get(check) is True for check in checks):
+        return False
+    sufficient_quantity = value.get("sufficient_quantity")
+    return sufficient_quantity is not False
+
+
+def _has_executable_ask_fields(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    for field_name in ("best_yes_ask", "best_no_ask"):
+        if _usable_price(value.get(field_name)):
+            return True
+    return False
+
+
+def _usable_price(value: Any) -> bool:
+    if value in (None, ""):
+        return False
+    try:
+        price = float(value)
+    except (TypeError, ValueError):
+        return False
+    return 0.0 < price < 1.0
+
+
+def _artifact_warning_values(artifact: dict[str, Any], row: dict[str, Any], warnings: Iterable[str] | None) -> list[str]:
+    values: list[str] = []
+    for source in (warnings, artifact.get("warnings"), row.get("warnings")):
+        if isinstance(source, str):
+            values.append(source)
+        elif isinstance(source, (list, tuple, set)):
+            values.extend(str(value) for value in source if value not in (None, ""))
+    return values
+
+
+def _warnings_match(warnings: Iterable[str], tokens: Iterable[str]) -> bool:
+    lowered = [str(warning or "").lower() for warning in warnings]
+    return any(token in warning for warning in lowered for token in tokens)
+
+
+def _append_unique(values: list[str], value: str) -> None:
+    if value not in values:
+        values.append(value)
+
+
+def _quality_category_from_reasons(reasons: list[str]) -> str | None:
+    joined = " ".join(reasons)
+    if "live_source_forbidden" in reasons:
+        return QUALITY_LIVE_SOURCE_FORBIDDEN
+    if "synthetic_source" in reasons:
+        return QUALITY_SYNTHETIC_SOURCE
+    if "historical_post_facto" in reasons:
+        return QUALITY_HISTORICAL_POST_FACTO
+    if "missing_weather_snapshot" in reasons:
+        return QUALITY_MISSING_WEATHER_SNAPSHOT
+    if "missing_source" in reasons:
+        return QUALITY_MISSING_SOURCE
+    if any(reason.startswith("date_unverified") for reason in reasons):
+        return QUALITY_DATE_UNVERIFIED
+    if "missing_order_book" in reasons or "order_book_not_recorded" in joined:
+        return QUALITY_MISSING_ORDER_BOOK
+    if "missing_execution_feasibility" in reasons or any(reason.startswith("execution_feasibility_failed") for reason in reasons):
+        return QUALITY_COVERAGE_ONLY
+    return None
+
+
+def _has_backfill_provenance(artifact: dict[str, Any], row: dict[str, Any]) -> bool:
+    tokens = ("historical_replay", "backfilled", "backfill")
+    values: list[Any] = [
+        artifact.get("provenance"),
+        artifact.get("source_provenance"),
+        artifact.get("collection_source"),
+        artifact.get("replay_source"),
+        artifact.get("mode"),
+        row.get("provenance"),
+        row.get("source_provenance"),
+        row.get("collection_source"),
+    ]
+    shared_pipeline = row.get("shared_pipeline") if isinstance(row.get("shared_pipeline"), dict) else {}
+    values.extend((shared_pipeline.get("provenance"), shared_pipeline.get("source_provenance")))
+    source_context = artifact.get("source_context") if isinstance(artifact.get("source_context"), dict) else {}
+    values.extend((source_context.get("provenance"), source_context.get("source_provenance"), source_context.get("source_mode")))
+    data = source_context.get("data") if isinstance(source_context.get("data"), dict) else {}
+    weather_snapshot = data.get("weather_source_snapshot") if isinstance(data.get("weather_source_snapshot"), dict) else {}
+    values.extend(
+        (
+            weather_snapshot.get("provenance"),
+            weather_snapshot.get("source_provenance"),
+            weather_snapshot.get("mode"),
+            weather_snapshot.get("source_quality"),
+        )
+    )
+    snapshots = artifact.get("source_snapshots")
+    if isinstance(snapshots, list):
+        for snapshot in snapshots:
+            if isinstance(snapshot, dict):
+                resolved = _resolve_snapshot_ref(artifact, snapshot)
+                values.extend((snapshot.get("provenance"), snapshot.get("source_provenance"), snapshot.get("mode"), snapshot.get("source_quality")))
+                if isinstance(resolved, dict) and _nested_backfill_signal(resolved):
+                    return True
+    if any(any(token in str(value or "").lower() for token in tokens) for value in values):
+        return True
+    return _nested_backfill_signal(weather_snapshot)
+
+
+def _nested_backfill_signal(value: Any) -> bool:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_text = str(key or "").lower()
+            item_text = str(item or "").lower()
+            if key_text == "historical_replay" and bool(item):
+                return True
+            if key_text == "source_quality" and ("settlement" in item_text or "historical" in item_text):
+                return True
+            if any(token in item_text for token in ("historical_replay", "backfilled", "backfill")):
+                return True
+            if _nested_backfill_signal(item):
+                return True
+    elif isinstance(value, (list, tuple, set)):
+        return any(_nested_backfill_signal(item) for item in value)
+    return False
+
+
 def _recorded_execution_snapshot(artifact: dict[str, Any]) -> dict[str, Any] | None:
     snapshot = artifact.get("execution_snapshot")
     if not isinstance(snapshot, dict) or not snapshot:
@@ -431,12 +1230,17 @@ def _recorded_execution_snapshot(artifact: dict[str, Any]) -> dict[str, Any] | N
 
 
 def _record_as_of(artifact: dict[str, Any], row: dict[str, Any]) -> datetime | None:
-    for value in (
-        artifact.get("as_of"),
-        artifact.get("observed_at"),
-        row.get("observed_at"),
-        row.get("timestamp"),
-    ):
+    values = [artifact.get("as_of")]
+    source_context = artifact.get("source_context") if isinstance(artifact.get("source_context"), dict) else {}
+    values.append(source_context.get("as_of"))
+    source_data = source_context.get("data") if isinstance(source_context.get("data"), dict) else {}
+    weather_snapshot = source_data.get("weather_source_snapshot") if isinstance(source_data.get("weather_source_snapshot"), dict) else {}
+    values.append(weather_snapshot.get("as_of"))
+    snapshots = artifact.get("source_snapshots")
+    if isinstance(snapshots, list):
+        values.extend(snapshot.get("as_of") for snapshot in snapshots if isinstance(snapshot, dict))
+    values.extend((artifact.get("observed_at"), row.get("observed_at"), row.get("timestamp")))
+    for value in values:
         parsed = _parse_dt(value)
         if parsed is not None:
             return parsed
@@ -525,15 +1329,21 @@ def _guard_live_current_source(
 
 def _recorded_source_signals(artifact: dict[str, Any]) -> dict[str, dict[str, Any]]:
     signals: dict[str, dict[str, Any]] = {}
+    ref_backed_methods: set[str] = set()
     snapshots = artifact.get("source_snapshots")
     if isinstance(snapshots, list):
         for snapshot in snapshots:
             if not isinstance(snapshot, dict):
                 continue
             method_name = _source_method_for_snapshot(snapshot)
-            signal = _signal_from_source_snapshot(snapshot)
+            snapshot_payload = _resolve_snapshot_ref(artifact, snapshot) or snapshot
+            if isinstance(snapshot_payload, dict):
+                method_name = method_name or _source_method_for_snapshot(snapshot_payload)
+            signal = _signal_from_replay_snapshot_payload(snapshot_payload, snapshot)
             if method_name and signal:
                 signals[method_name] = signal
+                if snapshot_payload is not snapshot:
+                    ref_backed_methods.add(method_name)
 
     source_context = artifact.get("source_context") if isinstance(artifact.get("source_context"), dict) else {}
     data = source_context.get("data")
@@ -543,12 +1353,57 @@ def _recorded_source_signals(artifact: dict[str, Any]) -> dict[str, dict[str, An
                 continue
             if not isinstance(value, dict):
                 continue
-            method_name = SOURCE_SIGNAL_METHODS.get(str(source_name).lower())
-            signal = _normalize_recorded_source_signal(value, source_name=str(source_name))
+            if str(source_name).lower() == "weather_source_snapshot":
+                method_name = SOURCE_SIGNAL_METHODS["weather"]
+                signal = _signal_from_weather_source_snapshot(value)
+            else:
+                method_name = SOURCE_SIGNAL_METHODS.get(str(source_name).lower())
+                signal = _normalize_recorded_source_signal(value, source_name=str(source_name))
             if method_name and signal:
-                signals.setdefault(method_name, signal)
+                if method_name not in signals or method_name in ref_backed_methods:
+                    signals[method_name] = signal
 
     return signals
+
+
+def _resolve_snapshot_ref(artifact: dict[str, Any], snapshot: dict[str, Any]) -> dict[str, Any] | None:
+    ref = str(snapshot.get("snapshot_ref") or "").strip()
+    if not ref:
+        return None
+    if ref == "source_context.data.weather_source_snapshot":
+        source_context = artifact.get("source_context") if isinstance(artifact.get("source_context"), dict) else {}
+        data = source_context.get("data") if isinstance(source_context.get("data"), dict) else {}
+        value = data.get("weather_source_snapshot")
+        return value if isinstance(value, dict) else None
+    current: Any = artifact
+    for part in ref.split("."):
+        if isinstance(current, dict):
+            current = current.get(part)
+            continue
+        return None
+    return current if isinstance(current, dict) else None
+
+
+def _signal_from_replay_snapshot_payload(payload: Any, snapshot: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    source_name = str(
+        payload.get("source_name")
+        or payload.get("source")
+        or snapshot.get("source_name")
+        or snapshot.get("source")
+        or snapshot.get("name")
+        or ""
+    ).lower()
+    if any(key in payload for key in ("signal", "raw_signal", "accepted_signal", "data")):
+        signal = _signal_from_source_snapshot(payload)
+        if signal:
+            return signal
+    if source_name == "weather" or payload.get("forecast") or str(payload.get("signal_type") or "").lower() == "weather":
+        signal = _signal_from_weather_source_snapshot(payload)
+        if signal:
+            return signal
+    return _signal_from_source_snapshot(payload)
 
 
 def _source_method_for_snapshot(snapshot: dict[str, Any]) -> str | None:
@@ -592,6 +1447,69 @@ def _normalize_recorded_source_signal(value: Any, *, source_name: str = "") -> d
     if "signal_type" not in signal and source_name:
         signal["signal_type"] = str(source_name).lower()
     return signal
+
+
+def _signal_from_weather_source_snapshot(snapshot: dict[str, Any]) -> dict[str, Any] | None:
+    source_signal = snapshot.get("source_signal")
+    normalized = _normalize_recorded_source_signal(source_signal, source_name="weather")
+    if normalized:
+        return normalized
+    forecast = snapshot.get("forecast") if isinstance(snapshot.get("forecast"), dict) else {}
+    sources = snapshot.get("sources") if isinstance(snapshot.get("sources"), list) else []
+    source_names = [
+        source.get("source_name")
+        for source in sources
+        if isinstance(source, dict) and source.get("source_name") not in (None, "")
+    ]
+    source_details = [dict(source) for source in sources if isinstance(source, dict)]
+    date_validation = snapshot.get("date_validation") if isinstance(snapshot.get("date_validation"), dict) else None
+    weather_date = _weather_date_from_snapshot(snapshot, date_validation)
+    source_timestamp = snapshot.get("source_timestamp") or snapshot.get("as_of") or snapshot.get("fetched_at")
+    data = {
+        "forecast_high": forecast.get("forecast_high", forecast.get("high")),
+        "forecast_low": forecast.get("forecast_low", forecast.get("low")),
+        "current_temp": forecast.get("current_temp", forecast.get("current")),
+        "actual_temp_used": forecast.get("actual_temp_used"),
+        "predicted_temp": forecast.get("predicted_temp"),
+        "threshold": forecast.get("threshold"),
+        "sources": source_names,
+        "source_details": source_details,
+        "agreement": snapshot.get("source_agreement_score"),
+        "settlement_source": snapshot.get("settlement_source"),
+        "station_id": snapshot.get("station_id"),
+        "station_cli": snapshot.get("station_cli"),
+        "station_mapping": snapshot.get("station_mapping"),
+        "station_resolution": snapshot.get("station_resolution"),
+        "date_validation": date_validation,
+        "weather_date": weather_date,
+        "forecast_date": snapshot.get("forecast_date"),
+        "target_forecast_date": snapshot.get("target_forecast_date"),
+        "fetched_at": snapshot.get("source_fetched_at") or snapshot.get("fetched_at"),
+        "as_of": snapshot.get("source_as_of") or snapshot.get("as_of"),
+    }
+    gaps = snapshot.get("gaps") if isinstance(snapshot.get("gaps"), dict) else {}
+    if gaps.get("nws_open_meteo_gap") is not None:
+        data["nws_open_meteo_gap"] = gaps.get("nws_open_meteo_gap")
+    candidate = {
+        "signal_type": "weather",
+        "predicted_prob": snapshot.get("predicted_prob"),
+        "confidence": snapshot.get("confidence"),
+        "source_timestamp": source_timestamp,
+        "ttl_seconds": snapshot.get("ttl_seconds"),
+        "question_side": forecast.get("question_side"),
+        "data": {key: value for key, value in data.items() if value not in (None, "", [])},
+    }
+    return _normalize_recorded_source_signal(candidate, source_name="weather")
+
+
+def _weather_date_from_snapshot(snapshot: dict[str, Any], date_validation: dict[str, Any] | None) -> Any:
+    if snapshot.get("weather_date") not in (None, ""):
+        return snapshot.get("weather_date")
+    if snapshot.get("forecast_date") not in (None, ""):
+        return snapshot.get("forecast_date")
+    if date_validation and date_validation.get("ok") and date_validation.get("weather_date") not in (None, ""):
+        return date_validation.get("weather_date")
+    return None
 
 
 def _dict_has_signal_fields(value: dict[str, Any]) -> bool:
@@ -649,9 +1567,13 @@ def _source_mode_warnings(source_mode: str, order_book_mode: str) -> list[str]:
     return warnings
 
 
-def _summarize(rows: list[ReplayComparisonRow]) -> dict[str, Any]:
+def _summarize(rows: list[ReplayComparisonRow], *, all_rows: list[ReplayComparisonRow] | None = None) -> dict[str, Any]:
+    all_rows = all_rows or rows
+    strict_rows = [row for row in all_rows if row.include_in_strict]
+    excluded_rows = [row for row in all_rows if not row.include_in_strict]
     return {
         "total": len(rows),
+        "input_total": len(all_rows),
         "action_changed": sum(1 for row in rows if row.action_changed),
         "reason_changed": sum(1 for row in rows if row.reason_changed),
         "missed_wins": sum(1 for row in rows if row.missed_win),
@@ -661,7 +1583,76 @@ def _summarize(rows: list[ReplayComparisonRow]) -> dict[str, Any]:
         "outcomes": _counts(row.outcome or "unknown" for row in rows),
         "source_modes": _counts(row.source_mode for row in rows),
         "order_book_modes": _counts(row.order_book_mode for row in rows),
+        "quality_counts": _counts(row.category for row in all_rows),
+        "strict_row_count": len(strict_rows),
+        "excluded_row_count": len(excluded_rows),
+        "excluded_reason_counts": _counts(reason for row in excluded_rows for reason in (row.reasons or [row.category])),
+        "strict_metrics": _summary_metrics(strict_rows),
         "warning_count": sum(len(row.warnings) for row in rows),
+    }
+
+
+def _apply_resolution_scoring(
+    rows: list[ReplayComparisonRow],
+    *,
+    resolution_records: Iterable[dict[str, Any]] | None = None,
+    resolution_paths: Iterable[str | Path] | None = None,
+) -> None:
+    resolutions = list(resolution_records or [])
+    for path_value in resolution_paths or []:
+        resolutions.extend(load_jsonl(Path(path_value)))
+    if not resolutions:
+        return
+
+    exact: dict[tuple[str, str, str], str] = {}
+    by_market: dict[str, str] = {}
+    for resolution_row in resolutions:
+        outcome = _row_outcome(resolution_row)
+        if outcome is None:
+            continue
+        market_id = str(resolution_row.get("market_id") or "")
+        if not market_id:
+            continue
+        identity = _resolution_identity(resolution_row)
+        exact[identity] = outcome
+        by_market.setdefault(market_id, outcome)
+
+    for row in rows:
+        outcome = exact.get(_comparison_identity(row)) or by_market.get(row.market_id)
+        if outcome is None:
+            continue
+        row.outcome = outcome
+        row.missed_win = _is_skip(row.original_action) and _is_correct_buy(row.replayed_action, outcome)
+        row.bad_buy_removed = _is_incorrect_buy(row.original_action, outcome) and _is_skip(row.replayed_action)
+        row.bad_buy_added = _is_skip(row.original_action) and _is_incorrect_buy(row.replayed_action, outcome)
+
+
+def _resolution_identity(row: dict[str, Any]) -> tuple[str, str, str]:
+    return (
+        str(row.get("market_id") or ""),
+        str(row.get("experiment_id") or ""),
+        str(row.get("strategy_version") or ""),
+    )
+
+
+def _comparison_identity(row: ReplayComparisonRow) -> tuple[str, str, str]:
+    return (
+        row.market_id,
+        str(row.experiment_id or ""),
+        str(row.strategy_version or ""),
+    )
+
+
+def _summary_metrics(rows: list[ReplayComparisonRow]) -> dict[str, Any]:
+    return {
+        "total": len(rows),
+        "action_changed": sum(1 for row in rows if row.action_changed),
+        "reason_changed": sum(1 for row in rows if row.reason_changed),
+        "missed_wins": sum(1 for row in rows if row.missed_win),
+        "over_filtered_wins": sum(1 for row in rows if row.missed_win),
+        "bad_buys_removed": sum(1 for row in rows if row.bad_buy_removed),
+        "bad_buys_added": sum(1 for row in rows if row.bad_buy_added),
+        "outcomes": _counts(row.outcome or "unknown" for row in rows),
     }
 
 
@@ -670,6 +1661,11 @@ def _counts(values: Iterable[str]) -> dict[str, int]:
     for value in values:
         counts[value] = counts.get(value, 0) + 1
     return counts
+
+
+def _increment(counts: dict[str, int], value: Any) -> None:
+    key = str(value)
+    counts[key] = counts.get(key, 0) + 1
 
 
 def _stored_action(row: dict[str, Any]) -> str:
@@ -727,7 +1723,7 @@ def _parse_dt(value: Any) -> datetime | None:
 def _row_outcome(row: dict[str, Any]) -> str | None:
     resolution = row.get("resolution") if isinstance(row.get("resolution"), dict) else {}
     outcome = str(resolution.get("outcome") or row.get("outcome") or "").upper()
-    if outcome in {"YES", "NO"}:
+    if outcome in {"YES", "NO", "VOID"}:
         return outcome
     return None
 

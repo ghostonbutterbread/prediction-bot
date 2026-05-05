@@ -124,6 +124,8 @@ Important constraints from review:
    - storage caps
    - observer semantics
 
+   For replay-grade production collection, `score_only: true` means the replay target is the append-only market snapshot ledger. `collector_record_predictions` only has effect when `score_only: false`, which should be an intentional choice to open Prediction Lab prediction rows.
+
    Early integration must be additive and backward-compatible with these constraints.
 
 6. Replay source injection is not a solved boundary yet.
@@ -162,6 +164,21 @@ MarketProvider
 8. Call shared-core `build_trade_decision(...)`.
 9. Produce a `DecisionArtifact`.
 10. Let the mode adapter decide whether to record, simulate, execute, or skip.
+
+### Passive Execution Feasibility Snapshots
+
+Collector artifacts must distinguish "the book used by decision logic" from "the trade still looked executable after decision logic finished."
+
+For shared-pipeline Prediction Lab collection:
+
+- `pre_logic_order_book_snapshot` records the passive book read used before strategy and shared-core logic.
+- `decision_latency_ms` records elapsed decision time before the optional post-logic read.
+- BUY candidates get a second passive `post_logic_order_book_snapshot`.
+- BUY candidates also get `execution_feasibility`, which compares same-market/open status, same-side ask presence, ask unchanged or within configured slippage, quantity sufficiency when size is available, and total elapsed time against the configured threshold.
+
+This is still observer-only metadata. It must not call an execution adapter, reserve cash, place orders, or mutate paper portfolio state.
+
+Replay and validation should treat passing `execution_feasibility` as stronger execution evidence for newly collected BUY rows. Legacy rows with only one recorded book can still be used for coverage and logic inspection, but should not be promoted to strict execution-feasible replay rows.
 
 ---
 
@@ -605,6 +622,15 @@ Implementation checkpoint 2026-04-30:
 - Phase 3 replay criteria are covered by `bot/prediction_lab_replay.py`, `scripts/prediction_lab_replay.py`, and `tests/test_prediction_lab_replay.py`.
 - Phase 4 is implemented through `FixedOpportunityAccountStateProvider`, explicit `paper_lab` / `opportunity` metadata, configurable `prediction_lab.opportunity_bankroll_usd`, and Prediction Lab row/artifact fields showing isolated bankroll, Kelly sizing, and `mutates_portfolio_account: false`.
 - Verification gate: `PYTHONPATH=. pytest -q tests/test_prediction_lab_collect.py tests/test_prediction_lab_replay.py tests/test_decision_pipeline.py`.
+
+Implementation checkpoint 2026-05-04:
+
+- Replay CLI exists and supports `--live-source-policy`, `--require-recorded-source`, `--row-quality-policy`, `--summary-output`, and `--grid-output`.
+- Replay result summaries include strict-vs-coverage separation, excluded reasons, source modes, order-book modes, changed decisions, missed wins, bad buys removed/added, and grid output.
+- Current data proves why this separation matters: early/legacy rows are incomplete and can produce misleading P&L/replay conclusions if mixed with strict rows.
+- A sampled replay of `500` current prediction rows with `row_quality_policy=annotate` produced `0` strict rows because source/order-book/weather snapshots were missing for that sample. That is a data-quality signal, not a strategy conclusion.
+- Newer collector snapshots do contain shared-pipeline decision artifacts, but the next required checkpoint is to verify populated `weather_source_snapshot`/recorded source and order-book/execution snapshot fields on live collector rows.
+- Until strict rows are available, Prediction Lab replay should be used for coverage diagnostics and reason-code plumbing, not final P&L claims.
 
 ### Phase 5 — Paper portfolio/live alignment
 

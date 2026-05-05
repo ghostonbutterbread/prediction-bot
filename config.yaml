@@ -176,6 +176,7 @@ prediction_lab:
   enabled: true
   paused: false
   mode: collector
+  observer_mode: true
   groups:
     - weather
   max_markets_per_run: 1000
@@ -190,7 +191,10 @@ prediction_lab:
   collection_storage_cap_gb: 25
   collection_warning_threshold_pct: 90
   auto_pause_collection_on_storage_cap: true
+  # Production replay readiness targets market_snapshots.jsonl while score_only remains true.
+  # Set score_only: false only when intentionally opening Prediction Lab prediction rows.
   score_only: true
+  use_shared_pipeline: true
   experiment_id: weather-collector-v1
   strategy_version: v1
   hypothetical_notional_mode: flat
