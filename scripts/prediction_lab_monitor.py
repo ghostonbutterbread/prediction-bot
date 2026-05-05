@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
@@ -30,6 +31,11 @@ EXPECTED_COLLECTOR_ARGV = [
     "--config",
     "config.prediction_lab_weather_overnight.yaml",
 ]
+DEFAULT_OPENCLAW_CANDIDATES = (
+    "/home/linuxbrew/.linuxbrew/bin/openclaw",
+    "/usr/local/bin/openclaw",
+    "/usr/bin/openclaw",
+)
 
 
 @dataclass(slots=True)
@@ -239,6 +245,10 @@ def evaluate_health(
         if cap_gb > 0 and storage_gb >= cap_gb:
             issues.append(MonitorIssue("storage_cap_reached", f"storage {storage_gb:.3f} GB >= cap {cap_gb:.3f} GB"))
 
+        heartbeat_at = parse_iso(state.get("last_storage_check_at"))
+        if heartbeat_at is not None:
+            details["state_heartbeat_age_seconds"] = (now - heartbeat_at).total_seconds()
+
     log_dir = lab_dir / "logs"
     latest_log = max(log_dir.glob("collector_*.log"), key=lambda p: p.stat().st_mtime, default=None) if log_dir.exists() else None
     details["latest_log"] = str(latest_log) if latest_log else None
@@ -247,7 +257,9 @@ def evaluate_health(
     else:
         age = file_age_seconds(latest_log, now=now)
         details["latest_log_age_seconds"] = age
-        if age is not None and age > stale_log_seconds:
+        heartbeat_age = details.get("state_heartbeat_age_seconds")
+        heartbeat_fresh = isinstance(heartbeat_age, (int, float)) and heartbeat_age <= stale_log_seconds
+        if age is not None and age > stale_log_seconds and not heartbeat_fresh:
             issues.append(MonitorIssue("stale_log", f"latest collector log is {int(age)}s old; threshold {stale_log_seconds}s"))
 
     return MonitorResult(healthy=not any(issue.severity == "critical" for issue in issues), issues=issues, details=details)
@@ -290,12 +302,32 @@ def format_alert(result: MonitorResult) -> str:
     return "\n".join(lines)
 
 
+def resolve_openclaw_bin() -> str | None:
+    configured = os.environ.get("OPENCLAW_BIN")
+    if configured:
+        configured_path = Path(configured).expanduser()
+        if configured_path.exists() and os.access(configured_path, os.X_OK):
+            return str(configured_path)
+    found = shutil.which("openclaw")
+    if found:
+        return found
+    for candidate in DEFAULT_OPENCLAW_CANDIDATES:
+        candidate_path = Path(candidate)
+        if candidate_path.exists() and os.access(candidate_path, os.X_OK):
+            return str(candidate_path)
+    return None
+
+
 def run_command(cmd: list[str], *, timeout: int = 30) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True, timeout=timeout)
 
 
 def send_telegram_alert(message: str, *, target: str, thread_id: str | None = None, silent: bool = False) -> bool:
-    cmd = ["openclaw", "message", "send", "--channel", "telegram", "--target", target, "--message", message]
+    openclaw = resolve_openclaw_bin()
+    if not openclaw:
+        print("openclaw executable not found; set OPENCLAW_BIN or install it on PATH", file=sys.stderr)
+        return False
+    cmd = [openclaw, "message", "send", "--channel", "telegram", "--target", target, "--message", message]
     if thread_id:
         cmd.extend(["--thread-id", str(thread_id)])
     if silent:
@@ -308,7 +340,11 @@ def send_telegram_alert(message: str, *, target: str, thread_id: str | None = No
 
 
 def trigger_repair_cron(job_id: str) -> bool:
-    result = run_command(["openclaw", "cron", "run", job_id])
+    openclaw = resolve_openclaw_bin()
+    if not openclaw:
+        print("openclaw executable not found; set OPENCLAW_BIN or install it on PATH", file=sys.stderr)
+        return False
+    result = run_command([openclaw, "cron", "run", job_id])
     if result.returncode != 0:
         print(result.stderr or result.stdout, file=sys.stderr)
         return False

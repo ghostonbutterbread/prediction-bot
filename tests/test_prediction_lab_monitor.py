@@ -160,6 +160,41 @@ class PredictionLabMonitorTests(unittest.TestCase):
             self.assertFalse(result.healthy)
             self.assertIn("collector_not_running", [issue.code for issue in result.issues])
 
+    def test_evaluate_health_accepts_recent_state_heartbeat_when_file_log_is_stale(self):
+        now = datetime(2026, 4, 28, 18, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = self._write_config(root)
+            lab_dir = root / "data" / "paper" / "prediction_lab"
+            self._write_state(lab_dir, now=now)
+            state_path = lab_dir / "state.json"
+            state = json.loads(state_path.read_text())
+            state["last_storage_check_at"] = (now - timedelta(seconds=30)).isoformat()
+            state_path.write_text(json.dumps(state))
+            old_log_time = (now - timedelta(hours=2)).timestamp()
+            for log in (lab_dir / "logs").glob("collector_*.log"):
+                os.utime(log, (old_log_time, old_log_time))
+
+            result = monitor.evaluate_health(
+                config_path,
+                now=now,
+                cmdlines=[
+                    (
+                        123,
+                        [
+                            "python3",
+                            "scripts/prediction_lab_collect.py",
+                            "--config",
+                            str(config_path),
+                        ],
+                    )
+                ],
+                stale_log_seconds=1800,
+            )
+
+            self.assertTrue(result.healthy, result.summary())
+            self.assertNotIn("stale_log", [issue.code for issue in result.issues])
+
     def test_evaluate_health_uses_nested_prediction_lab_config(self):
         now = datetime(2026, 4, 28, 18, 0, tzinfo=timezone.utc)
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -193,6 +228,33 @@ class PredictionLabMonitorTests(unittest.TestCase):
         self.assertTrue(monitor.should_notify(broken, {}))
         self.assertFalse(monitor.should_notify(broken, {"last_state_key": monitor.state_key(broken)}))
         self.assertTrue(monitor.should_notify(healthy, {"last_state_key": monitor.state_key(broken)}))
+
+    def test_openclaw_resolver_uses_env_path_when_cron_path_is_minimal(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            openclaw = Path(tmpdir) / "openclaw"
+            openclaw.write_text("#!/bin/sh\nexit 0\n")
+            openclaw.chmod(0o755)
+
+            with patch.dict(os.environ, {"OPENCLAW_BIN": str(openclaw), "PATH": "/usr/bin"}, clear=False):
+                with patch("shutil.which", return_value=None):
+                    self.assertEqual(monitor.resolve_openclaw_bin(), str(openclaw))
+
+    def test_alert_and_repair_use_resolved_openclaw_path(self):
+        calls = []
+
+        class Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        with patch.object(monitor, "resolve_openclaw_bin", return_value="/opt/openclaw"):
+            with patch.object(monitor, "run_command", side_effect=lambda cmd, **kwargs: calls.append(cmd) or Result()):
+                self.assertTrue(monitor.send_telegram_alert("msg", target="chat", thread_id="8"))
+                self.assertTrue(monitor.trigger_repair_cron("job-1"))
+
+        self.assertEqual(calls[0][0], "/opt/openclaw")
+        self.assertEqual(calls[0][1:4], ["message", "send", "--channel"])
+        self.assertEqual(calls[1], ["/opt/openclaw", "cron", "run", "job-1"])
 
     def test_main_can_trigger_repair_job_on_unhealthy_state_change(self):
         now = datetime(2026, 4, 28, 18, 0, tzinfo=timezone.utc)

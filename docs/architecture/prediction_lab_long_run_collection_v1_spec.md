@@ -113,6 +113,8 @@ prediction_lab:
   collection_storage_cap_gb: 25
   collection_warning_threshold_pct: 90
   auto_pause_collection_on_storage_cap: true
+  # Production replay readiness should target market_snapshots.jsonl with score_only=true.
+  # Enable prediction rows only when intentionally tracking open Prediction Lab predictions.
   score_only: true
 ```
 
@@ -121,6 +123,7 @@ prediction_lab:
 - if more than one group is configured, collector exits with a clear error
 - `paused: true` means do not run collection passes
 - while paused, resolution passes may still run if open predictions exist
+- `score_only: true` suppresses `predictions.jsonl` rows even if `collector_record_predictions: true`; production replay should use `market_snapshots.jsonl` unless predictions are explicitly enabled with `score_only: false`
 
 ## One-owner lock
 There must be one active collector owner lock per Prediction Lab data directory.
@@ -347,6 +350,23 @@ However, the stored data should already support future questions like:
 - how often did we observe a market before it resolved?
 
 That deeper analysis can be a second-phase reporting enhancement.
+
+### 2026-05-04 operational review
+
+The v1 collector/storage design is broadly correct, but the current live collector needs operational repair before the next research conclusion:
+
+- state file says collector mode is enabled and unpaused
+- storage is healthy at about `1.15 GB` of the `25 GB` cap
+- monitor currently reports `collector_not_running`, stale collection, and stale collector logs
+- monitor alerting tried to call `openclaw` from cron and failed with `FileNotFoundError`, so alert/repair plumbing also needs hardening
+
+The next v1 success gate is not more strategy tuning. It is:
+
+1. restore the collector process
+2. make monitor alerting/repair work in the cron environment
+3. confirm fresh rows are being written
+4. confirm fresh shared-pipeline rows contain replay-grade source/weather and order-book/execution snapshot fields
+5. only then use long-run P&L/reporting as evidence
 
 ## Initial recommended run
 For the first real test:

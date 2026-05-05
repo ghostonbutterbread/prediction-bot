@@ -6,14 +6,44 @@ Called by paper_loop.py when events need human attention.
 Usage:
     python send_alert.py --message "Alert text"
 """
+import os
+import shutil
 import subprocess
 import sys
+from pathlib import Path
+
+
+DEFAULT_OPENCLAW_CANDIDATES = (
+    "/home/linuxbrew/.linuxbrew/bin/openclaw",
+    "/usr/local/bin/openclaw",
+    "/usr/bin/openclaw",
+)
+
+
+def resolve_openclaw_bin() -> str | None:
+    configured = os.environ.get("OPENCLAW_BIN")
+    if configured:
+        configured_path = Path(configured).expanduser()
+        if configured_path.exists() and os.access(configured_path, os.X_OK):
+            return str(configured_path)
+    found = shutil.which("openclaw")
+    if found:
+        return found
+    for candidate in DEFAULT_OPENCLAW_CANDIDATES:
+        candidate_path = Path(candidate)
+        if candidate_path.exists() and os.access(candidate_path, os.X_OK):
+            return str(candidate_path)
+    return None
 
 
 def send_alert(message: str) -> bool:
     """Send alert to Ryushe via Telegram using openclaw CLI."""
+    openclaw = resolve_openclaw_bin()
+    if not openclaw:
+        print("openclaw executable not found; set OPENCLAW_BIN or install it on PATH", file=sys.stderr)
+        return False
     cmd = [
-        "openclaw", "message", "send",
+        openclaw, "message", "send",
         "--channel", "telegram",
         "--target", "7104548956",  # Ryushe's Telegram chat ID
         "--message", message,
