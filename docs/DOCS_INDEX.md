@@ -112,7 +112,20 @@ This is the quickest handoff note for future agents working on weather strategy,
 
 ---
 
-### 8. `docs/PREDICTION_LAB_TUNING_DIRECTION_SPEC.md`
+### 8. `docs/architecture/market_router_strategy_lane_spec.md`
+Read this before implementing weather strategy lanes or market-gating fixes.
+
+Use it to understand:
+- why market routing must fail closed before paper/live trade entry
+- why current weather trading should require strict daily-temperature route evidence
+- how to prevent non-weather markets like 2030 energy/WIND from leaking into weather runs
+- how future category handlers can share root EV/risk/execution logic without data leaks
+
+This is the immediate pre-lane bugfix/spec for market routing and category handlers.
+
+---
+
+### 9. `docs/PREDICTION_LAB_TUNING_DIRECTION_SPEC.md`
 Read this for the current immediate strategy direction.
 
 Use it to understand:
@@ -124,7 +137,7 @@ This is the strategy-iteration bridge between current readiness and future deplo
 
 ---
 
-### 9. `docs/LIVE_DEPLOYMENT_READINESS_PLAN.md`
+### 10. `docs/LIVE_DEPLOYMENT_READINESS_PLAN.md`
 Read this when the question becomes "what must be true before unattended or true deployment is responsible?"
 
 Use it to understand:
