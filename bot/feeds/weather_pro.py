@@ -36,6 +36,16 @@ class WeatherSnapshot:
     humidity: float = 0
     wind_mph: float = 0
     conditions: str = ""
+    as_of: datetime | None = None
+    weather_date: str | None = None
+    forecast_date: str | None = None
+    forecast_start: str | None = None
+    forecast_end: str | None = None
+    forecast_times: list[str] = field(default_factory=list)
+    forecast_period_name: str | None = None
+    forecast_period_start: str | None = None
+    forecast_period_end: str | None = None
+    source_details: dict = field(default_factory=dict)
 
 
 @dataclass 
@@ -158,16 +168,23 @@ class OpenMeteoFeed:
             # Find today's high/low from next 24 hours
             now = datetime.now()
             today_temps = []
+            today_times = []
             for i, t in enumerate(times):
                 try:
                     dt = datetime.fromisoformat(t)
                     if 0 <= (dt - now).total_seconds() / 3600 <= 24:
                         today_temps.append(temps[i])
+                        today_times.append(t)
                 except:
                     continue
 
             if not today_temps:
                 today_temps = temps[:24]
+                today_times = times[: len(today_temps)]
+
+            fetched_at = datetime.now(timezone.utc)
+            forecast_start = today_times[0] if today_times else None
+            forecast_end = today_times[-1] if today_times else None
 
             return WeatherSnapshot(
                 city=city.lower(),
@@ -175,11 +192,21 @@ class OpenMeteoFeed:
                 low_temp_f=min(today_temps) if today_temps else 0,
                 current_temp_f=current.get("temperature_2m", 0),
                 source="open-meteo",
-                fetched_at=datetime.now(timezone.utc),
+                fetched_at=fetched_at,
                 forecast_hours_ahead=1,
                 confidence=0.85,
                 humidity=current.get("relative_humidity_2m", 0),
                 wind_mph=current.get("wind_speed_10m", 0) * 0.621371,  # km/h to mph
+                as_of=fetched_at,
+                forecast_start=forecast_start,
+                forecast_end=forecast_end,
+                forecast_times=list(today_times),
+                source_details={
+                    "timezone": data.get("timezone"),
+                    "utc_offset_seconds": data.get("utc_offset_seconds"),
+                    "current_time": current.get("time"),
+                    "forecast_times_used": list(today_times),
+                },
             )
         except Exception as e:
             logger.debug(f"Open-Meteo error for {city}: {e}")
@@ -297,13 +324,25 @@ class NWSFeed:
 
             if is_daytime and len(periods) > 1:
                 high = temp
-                low = periods[1].get("temperature", temp)
+                high_period = today
+                low_period = periods[1]
+                low = low_period.get("temperature", temp)
             elif len(periods) > 1:
                 low = temp
-                high = periods[1].get("temperature", temp)
+                low_period = today
+                high_period = periods[1]
+                high = high_period.get("temperature", temp)
             else:
                 high = temp
                 low = temp
+                high_period = today
+                low_period = today
+
+            fetched_at = datetime.now(timezone.utc)
+            period_name = today.get("name")
+            period_start = today.get("startTime")
+            period_end = today.get("endTime")
+            periods_used = [self._period_ref(period) for period in (high_period, low_period)]
 
             return WeatherSnapshot(
                 city=city.lower(),
@@ -311,14 +350,48 @@ class NWSFeed:
                 low_temp_f=float(low),
                 current_temp_f=float(temp),
                 source="nws",
-                fetched_at=datetime.now(timezone.utc),
+                fetched_at=fetched_at,
                 forecast_hours_ahead=2,
                 confidence=0.85,
                 conditions=today.get("shortForecast", ""),
+                as_of=fetched_at,
+                forecast_start=period_start,
+                forecast_end=period_end,
+                forecast_period_name=period_name,
+                forecast_period_start=period_start,
+                forecast_period_end=period_end,
+                source_details={
+                    "office": office,
+                    "grid_x": grid_x,
+                    "grid_y": grid_y,
+                    "station_id": station,
+                    "period_name": period_name,
+                    "period_start": period_start,
+                    "period_end": period_end,
+                    "period_number": today.get("number"),
+                    "is_daytime": is_daytime,
+                    "periods_used": periods_used,
+                    "high_period": self._period_ref(high_period),
+                    "low_period": self._period_ref(low_period),
+                },
             )
         except Exception as e:
             logger.debug(f"NWS error for {city}: {e}")
             return None
+
+    @staticmethod
+    def _period_ref(period: dict) -> dict:
+        return _drop_none(
+            {
+                "number": period.get("number"),
+                "name": period.get("name"),
+                "startTime": period.get("startTime"),
+                "endTime": period.get("endTime"),
+                "isDaytime": period.get("isDaytime"),
+                "temperature": period.get("temperature"),
+                "temperatureUnit": period.get("temperatureUnit"),
+            }
+        )
 
     def close(self):
         self.http.close()
@@ -363,8 +436,11 @@ class OpenWeatherMapFeed:
                 return None
 
             # Get temps from next 24 hours (3-hour intervals = 8 items)
-            temps = [item["main"]["temp"] for item in list_items[:8]]
-            current_temp = list_items[0]["main"]["temp"]
+            window_items = list_items[:8]
+            temps = [item["main"]["temp"] for item in window_items]
+            current_temp = window_items[0]["main"]["temp"]
+            times_used = [item.get("dt_txt") or item.get("dt") for item in window_items if item.get("dt_txt") or item.get("dt")]
+            fetched_at = datetime.now(timezone.utc)
 
             return WeatherSnapshot(
                 city=city.lower(),
@@ -372,12 +448,19 @@ class OpenWeatherMapFeed:
                 low_temp_f=min(temps),
                 current_temp_f=current_temp,
                 source="openweathermap",
-                fetched_at=datetime.now(timezone.utc),
+                fetched_at=fetched_at,
                 forecast_hours_ahead=0.5,  # Updated every 30 min
                 confidence=0.90,
-                humidity=list_items[0]["main"].get("humidity", 0),
-                wind_mph=list_items[0]["wind"].get("speed", 0),
-                conditions=list_items[0]["weather"][0]["description"] if list_items[0].get("weather") else "",
+                humidity=window_items[0]["main"].get("humidity", 0),
+                wind_mph=window_items[0]["wind"].get("speed", 0),
+                conditions=window_items[0]["weather"][0]["description"] if window_items[0].get("weather") else "",
+                as_of=fetched_at,
+                forecast_start=str(times_used[0]) if times_used else None,
+                forecast_end=str(times_used[-1]) if times_used else None,
+                forecast_times=[str(value) for value in times_used],
+                source_details={
+                    "forecast_times_used": [str(value) for value in times_used],
+                },
             )
         except Exception as e:
             logger.debug(f"OpenWeatherMap error for {city}: {e}")
@@ -510,7 +593,21 @@ class ProWeatherEngine:
             details={
                 "individual_highs": {s.source: s.high_temp_f for s in snapshots},
                 "individual_lows": {s.source: s.low_temp_f for s in snapshots},
+                "individual_currents": {s.source: s.current_temp_f for s in snapshots},
+                "source_confidences": {s.source: s.confidence for s in snapshots},
+                "source_fetched_at": {s.source: s.fetched_at.isoformat() for s in snapshots},
+                "source_as_of": {s.source: s.as_of.isoformat() if isinstance(s.as_of, datetime) else s.as_of for s in snapshots if s.as_of},
+                "source_weather_dates": {s.source: s.weather_date for s in snapshots if s.weather_date},
+                "source_forecast_dates": {s.source: s.forecast_date for s in snapshots if s.forecast_date},
+                "source_forecast_starts": {s.source: s.forecast_start for s in snapshots if s.forecast_start},
+                "source_forecast_ends": {s.source: s.forecast_end for s in snapshots if s.forecast_end},
+                "source_forecast_times": {s.source: list(s.forecast_times) for s in snapshots if s.forecast_times},
+                "source_forecast_period_names": {s.source: s.forecast_period_name for s in snapshots if s.forecast_period_name},
+                "source_forecast_period_starts": {s.source: s.forecast_period_start for s in snapshots if s.forecast_period_start},
+                "source_forecast_period_ends": {s.source: s.forecast_period_end for s in snapshots if s.forecast_period_end},
+                "source_metadata": {s.source: dict(s.source_details) for s in snapshots if s.source_details},
                 "settlement_source": "nws",  # Kalshi uses NWS to settle
+                "forecast_driver": "nws" if has_nws else "equal_source_average",
                 "nws_high": nws_snapshot.high_temp_f if nws_snapshot else None,
                 "nws_low": nws_snapshot.low_temp_f if nws_snapshot else None,
                 "nws_open_meteo_gap": nws_open_meteo_gap,
@@ -620,11 +717,62 @@ class ProWeatherEngine:
                 "city": city,
                 "sources": forecast.sources_used,
                 "agreement": forecast.source_agreement,
+                "source_details": self._source_contribution_details(forecast),
+                "settlement_source": forecast.details.get("settlement_source"),
+                "nws_high": forecast.details.get("nws_high"),
+                "nws_low": forecast.details.get("nws_low"),
                 "nws_open_meteo_gap": forecast.details.get("nws_open_meteo_gap"),
             }
         }
+
+    @staticmethod
+    def _source_contribution_details(forecast: MultiSourceForecast) -> list[dict]:
+        settlement_source = forecast.details.get("settlement_source")
+        sources = list(forecast.sources_used or [])
+        has_settlement_source = settlement_source in sources
+        equal_weight = round(1.0 / len(sources), 6) if sources else None
+        details = []
+        for source in sources:
+            if has_settlement_source:
+                drives_forecast = source == settlement_source
+                weight = 1.0 if drives_forecast else 0.0
+                note = "settlement_source_drives_forecast" if drives_forecast else "validator_only_settlement_source_drives_forecast"
+            else:
+                weight = equal_weight
+                note = "equal_weight_average_no_settlement_source"
+            details.append(
+                _drop_none(
+                {
+                    "source_name": source,
+                    "role": "settlement_primary" if source == settlement_source else "forecast_contributor" if not has_settlement_source else "cross_validation",
+                    "weight": weight,
+                    "contribution": weight,
+                    "weight_note": note,
+                    "forecast_high": forecast.details.get("individual_highs", {}).get(source),
+                    "forecast_low": forecast.details.get("individual_lows", {}).get(source),
+                    "current_forecast": forecast.details.get("individual_currents", {}).get(source),
+                    "confidence": forecast.details.get("source_confidences", {}).get(source),
+                    "fetched_at": forecast.details.get("source_fetched_at", {}).get(source),
+                    "as_of": forecast.details.get("source_as_of", {}).get(source),
+                    "weather_date": forecast.details.get("source_weather_dates", {}).get(source),
+                    "forecast_date": forecast.details.get("source_forecast_dates", {}).get(source),
+                    "forecast_start": forecast.details.get("source_forecast_starts", {}).get(source),
+                    "forecast_end": forecast.details.get("source_forecast_ends", {}).get(source),
+                    "forecast_times": forecast.details.get("source_forecast_times", {}).get(source),
+                    "forecast_period_name": forecast.details.get("source_forecast_period_names", {}).get(source),
+                    "forecast_period_start": forecast.details.get("source_forecast_period_starts", {}).get(source),
+                    "forecast_period_end": forecast.details.get("source_forecast_period_ends", {}).get(source),
+                    "source_metadata": forecast.details.get("source_metadata", {}).get(source),
+                }
+                )
+            )
+        return details
 
     def close(self):
         self.open_meteo.close()
         self.nws.close()
         self.owm.close()
+
+
+def _drop_none(value: dict) -> dict:
+    return {key: item for key, item in value.items() if item is not None}

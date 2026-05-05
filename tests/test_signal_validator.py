@@ -2,6 +2,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 from bot.exchanges.base import Market
+from bot.feeds.weather_pro import MultiSourceForecast, NWSFeed, ProWeatherEngine, WeatherSnapshot
 from bot.strategies.signal_validator import SignalValidator
 
 
@@ -143,6 +144,107 @@ class SignalValidatorTests(unittest.TestCase):
         self.assertEqual(results["news"].adjusted_confidence, 0.50)
         self.assertTrue(any("Weather and news disagree" in warning for warning in results["live"].warnings))
         self.assertTrue(any("Weather and news disagree" in warning for warning in results["news"].warnings))
+
+    def test_weather_source_details_include_feed_timestamp_metadata_without_inventing_dates(self):
+        fetched_at = datetime(2026, 4, 27, 12, 0, tzinfo=timezone.utc)
+        forecast = MultiSourceForecast(
+            city="austin",
+            high_temp_f=84.0,
+            low_temp_f=63.0,
+            current_temp_f=72.0,
+            sources_used=["open-meteo", "nws"],
+            confidence=0.9,
+            fetched_at=fetched_at,
+            source_agreement=0.95,
+            details={
+                "individual_highs": {"open-meteo": 83.0, "nws": 84.0},
+                "individual_lows": {"open-meteo": 62.0, "nws": 63.0},
+                "individual_currents": {"open-meteo": 71.0, "nws": 72.0},
+                "source_confidences": {"open-meteo": 0.85, "nws": 0.85},
+                "source_fetched_at": {"open-meteo": "2026-04-27T12:00:00+00:00", "nws": "2026-04-27T12:01:00+00:00"},
+                "source_forecast_starts": {"open-meteo": "2026-04-27T07:00", "nws": "2026-04-27T06:00:00-05:00"},
+                "source_forecast_ends": {"open-meteo": "2026-04-28T06:00", "nws": "2026-04-27T18:00:00-05:00"},
+                "source_forecast_times": {"open-meteo": ["2026-04-27T07:00", "2026-04-27T08:00"]},
+                "source_forecast_period_names": {"nws": "Today"},
+                "source_forecast_period_starts": {"nws": "2026-04-27T06:00:00-05:00"},
+                "source_forecast_period_ends": {"nws": "2026-04-27T18:00:00-05:00"},
+                "settlement_source": "nws",
+            },
+        )
+
+        details = ProWeatherEngine._source_contribution_details(forecast)
+        by_source = {detail["source_name"]: detail for detail in details}
+
+        self.assertEqual(by_source["open-meteo"]["forecast_start"], "2026-04-27T07:00")
+        self.assertEqual(by_source["open-meteo"]["forecast_times"], ["2026-04-27T07:00", "2026-04-27T08:00"])
+        self.assertEqual(by_source["nws"]["forecast_period_name"], "Today")
+        self.assertNotIn("weather_date", by_source["open-meteo"])
+        self.assertNotIn("forecast_date", by_source["nws"])
+
+        snapshot = WeatherSnapshot(
+            city="austin",
+            high_temp_f=84.0,
+            low_temp_f=63.0,
+            current_temp_f=72.0,
+            source="nws",
+            fetched_at=fetched_at,
+            forecast_hours_ahead=2,
+            confidence=0.85,
+            forecast_period_name="Today",
+        )
+        self.assertEqual(snapshot.forecast_period_name, "Today")
+
+    def test_nws_forecast_metadata_records_distinct_high_and_low_periods(self):
+        class FakeResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "properties": {
+                        "periods": [
+                            {
+                                "number": 1,
+                                "name": "Today",
+                                "startTime": "2026-04-27T06:00:00-05:00",
+                                "endTime": "2026-04-27T18:00:00-05:00",
+                                "isDaytime": True,
+                                "temperature": 84,
+                                "temperatureUnit": "F",
+                                "shortForecast": "Sunny",
+                            },
+                            {
+                                "number": 2,
+                                "name": "Tonight",
+                                "startTime": "2026-04-27T18:00:00-05:00",
+                                "endTime": "2026-04-28T06:00:00-05:00",
+                                "isDaytime": False,
+                                "temperature": 63,
+                                "temperatureUnit": "F",
+                                "shortForecast": "Clear",
+                            },
+                        ]
+                    }
+                }
+
+        class FakeHttp:
+            def get(self, *args, **kwargs):
+                return FakeResponse()
+
+        feed = NWSFeed()
+        feed.http = FakeHttp()
+        feed._points_cache["austin"] = (datetime.now(timezone.utc), ("EWX", 152, 91))
+
+        snapshot = feed.get_forecast("austin")
+
+        self.assertIsNotNone(snapshot)
+        details = snapshot.source_details
+        self.assertEqual(details["periods_used"][0]["name"], "Today")
+        self.assertEqual(details["periods_used"][1]["name"], "Tonight")
+        self.assertEqual(details["high_period"]["number"], 1)
+        self.assertEqual(details["high_period"]["temperature"], 84)
+        self.assertEqual(details["low_period"]["number"], 2)
+        self.assertEqual(details["low_period"]["temperature"], 63)
 
 
 if __name__ == "__main__":

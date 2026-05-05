@@ -1,18 +1,24 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from bot.decision_pipeline import DecisionPipelineEvaluator
 from bot.file_ops import append_jsonl
 from bot.prediction_lab_replay import (
     LiveCurrentSourceForbiddenError,
+    build_replay_series_grid,
     classify_order_book_mode,
+    classify_replay_row_quality,
     classify_source_mode,
     load_replay_artifacts,
+    replay_from_paths,
     replay_recorded_artifacts,
+    validate_prediction_lab_tables,
 )
 from bot.risk import RiskDecision
 from bot.strategies.enhanced import StrategyTrace
+from bot.strategies.signal_validator import SignalValidator
 
 
 class FixedKelly:
@@ -122,6 +128,54 @@ class RecordedLiveSourceStrategy:
         return signal, trace
 
 
+class ReplayValidatingRecordedSourceStrategy:
+    def __init__(self):
+        self.validator = SignalValidator()
+
+    def _live_data_signal(self, market):
+        raise AssertionError("live source should not be called during recorded replay")
+
+    def analyze_market_with_trace(self, market, order_book=None):
+        source_signal = self._live_data_signal(market)
+        validation = self.validator.validate_all({"live": source_signal}, market)["live"]
+        trace = StrategyTrace(
+            raw_signals={"live": dict(source_signal)},
+            validation_results={
+                "live": {
+                    "accepted": validation.accepted,
+                    "adjusted_confidence": validation.adjusted_confidence,
+                    "adjusted_prob": validation.adjusted_prob,
+                    "warnings": list(validation.warnings),
+                    "rejection_reason": validation.rejection_reason,
+                }
+            },
+        )
+        if not validation.accepted:
+            trace.rejected_signals["live"] = dict(source_signal)
+            trace.skip_reason_code = "no_validated_signals"
+            return None, trace
+
+        predicted = float(validation.adjusted_prob)
+        yes_price = float(getattr(market, "yes_price", 0.0))
+        signal = {
+            "market_id": getattr(market, "id", ""),
+            "exchange": getattr(market, "exchange", "kalshi"),
+            "question": getattr(market, "question", ""),
+            "direction": "BUY_YES",
+            "model_probability": round(predicted, 4),
+            "market_price": yes_price,
+            "yes_market_price": yes_price,
+            "no_market_price": getattr(market, "no_price", None),
+            "edge": round(predicted - yes_price, 4),
+            "confidence": validation.adjusted_confidence,
+            "signals": {"live": predicted},
+            "signal_details": {"live": dict(source_signal)},
+        }
+        trace.accepted_signals["live"] = dict(source_signal)
+        trace.ensemble_signal = dict(signal)
+        return signal, trace
+
+
 class CommonLiveMethodStrategy(FixedSignalStrategy):
     def __init__(self, method_name: str):
         super().__init__(_signal())
@@ -182,6 +236,53 @@ def _row(*, artifact_patch: dict | None = None, row_patch: dict | None = None) -
                 "best_no_bid": 0.58,
             },
         },
+        "pre_logic_order_book_snapshot": {
+            "source": "book",
+            "stage": "pre_logic",
+            "data": {
+                "best_yes_ask": 0.43,
+                "best_yes_bid": 0.42,
+                "best_no_ask": 0.59,
+                "best_no_bid": 0.58,
+            },
+        },
+        "post_logic_order_book_snapshot": {
+            "source": "book",
+            "stage": "post_logic",
+            "data": {
+                "best_yes_ask": 0.43,
+                "best_yes_bid": 0.42,
+                "best_no_ask": 0.59,
+                "best_no_bid": 0.58,
+            },
+        },
+        "decision_latency_ms": 12.5,
+        "execution_feasibility": {
+            "artifact_version": 1,
+            "mode": "passive_snapshot_comparison",
+            "feasible": True,
+            "status": "feasible",
+            "action": "BUY_YES",
+            "side": "yes",
+            "pre_logic_ask": 0.43,
+            "post_logic_ask": 0.43,
+            "ask_delta": 0.0,
+            "max_slippage": 0.01,
+            "max_elapsed_ms": 2000,
+            "decision_latency_ms": 12.5,
+            "elapsed_ms": 13.0,
+            "same_market": True,
+            "market_open": True,
+            "same_market_open": True,
+            "same_side_ask_present": True,
+            "ask_unchanged": True,
+            "ask_within_slippage": True,
+            "quantity_check_available": False,
+            "sufficient_quantity": None,
+            "elapsed_within_threshold": True,
+            "failed_checks": [],
+            "mutates_paper_state": False,
+        },
         "execution_snapshot_source": "book",
         "final_action": "BUY_YES",
         "final_reason_code": "approved",
@@ -201,6 +302,56 @@ def _row(*, artifact_patch: dict | None = None, row_patch: dict | None = None) -
         "decision_type": "buy_yes",
         "decision_artifact": artifact,
     }
+    if row_patch:
+        row.update(row_patch)
+    return row
+
+
+def _weather_row(*, artifact_patch: dict | None = None, row_patch: dict | None = None) -> dict:
+    weather_snapshot = {
+        "mode": "recorded_as_of",
+        "source_name": "weather",
+        "signal_type": "weather",
+        "as_of": "2026-04-29T12:00:00+00:00",
+        "predicted_prob": 0.72,
+        "confidence": 0.9,
+        "forecast": {"high": 84.0, "threshold": 80.0, "question_side": "above"},
+        "date_validation": {"ok": True, "reason": "matched", "market_date": "2026-04-29", "weather_date": "2026-04-29"},
+    }
+    row = _row(
+        artifact_patch={
+            "source_context": {
+                "source": "provided",
+                "source_mode": "recorded_as_of",
+                "as_of": "2026-04-29T12:00:00+00:00",
+                "data": {
+                    "market_metadata": {
+                        "market_group": "weather",
+                        "series": "daily_temperature",
+                        "event_ticker": "KXHIGHNY-26APR29",
+                    },
+                    "weather_source_snapshot": weather_snapshot,
+                },
+            },
+            "source_snapshots": [
+                {
+                    "mode": "recorded_as_of",
+                    "source": "weather",
+                    "method": "_live_data_signal",
+                    "snapshot_ref": "source_context.data.weather_source_snapshot",
+                }
+            ],
+        },
+        row_patch={
+            "market_id": "KXHIGHNY-26APR29-T80",
+            "group": "weather",
+            "series": "daily_temperature",
+            "event_ticker": "KXHIGHNY-26APR29",
+            "question": "Will NYC high temperature be above 80?",
+        },
+    )
+    if artifact_patch:
+        row["decision_artifact"].update(artifact_patch)
     if row_patch:
         row.update(row_patch)
     return row
@@ -256,6 +407,266 @@ class PredictionLabReplayTests(unittest.TestCase):
         self.assertEqual(result.rows[0].source_mode, "recorded_as_of")
         self.assertEqual(result.rows[0].order_book_mode, "recorded_book")
         self.assertEqual(result.rows[0].execution_snapshot_mode, "recorded_book")
+        self.assertEqual(result.rows[0].category, "replay_grade_original")
+        self.assertTrue(result.rows[0].include_in_strict)
+        self.assertEqual(result.summary["quality_counts"]["replay_grade_original"], 1)
+        self.assertEqual(result.summary["strict_row_count"], 1)
+
+    def test_row_quality_classifies_fully_replay_grade_row(self):
+        row = _row()
+
+        quality = classify_replay_row_quality(row["decision_artifact"], row)
+
+        self.assertEqual(quality.category, "replay_grade_original")
+        self.assertEqual(quality.reasons, [])
+        self.assertTrue(quality.is_replay_grade_strict)
+        self.assertTrue(quality.include_in_strict)
+
+    def test_buy_row_without_execution_feasibility_is_coverage_only(self):
+        row = _row()
+        row["decision_artifact"].pop("execution_feasibility", None)
+        row["decision_artifact"].pop("post_logic_order_book_snapshot", None)
+
+        quality = classify_replay_row_quality(row["decision_artifact"], row)
+
+        self.assertEqual(quality.category, "coverage_only")
+        self.assertIn("missing_execution_feasibility", quality.reasons)
+        self.assertFalse(quality.include_in_strict)
+
+    def test_backfilled_buy_row_without_execution_feasibility_stays_coverage_only(self):
+        row = _row(artifact_patch={"source_provenance": "historical_replay_backfill"})
+        row["decision_artifact"].pop("execution_feasibility", None)
+        row["decision_artifact"].pop("post_logic_order_book_snapshot", None)
+
+        quality = classify_replay_row_quality(row["decision_artifact"], row)
+
+        self.assertEqual(quality.category, "coverage_only")
+        self.assertIn("missing_execution_feasibility", quality.reasons)
+        self.assertFalse(quality.is_replay_grade_strict)
+        self.assertFalse(quality.include_in_strict)
+
+    def test_row_quality_classifies_missing_weather_snapshot(self):
+        row = _weather_row(
+            artifact_patch={
+                "source_context": {
+                    "source": "provided",
+                    "source_mode": "recorded_as_of",
+                    "data": {"market_metadata": {"market_group": "weather", "series": "daily_temperature"}},
+                },
+                "source_snapshots": [],
+            }
+        )
+
+        result = replay_recorded_artifacts([row], evaluator=self._evaluator(FixedSignalStrategy(_signal())))
+
+        self.assertEqual(result.rows[0].category, "missing_weather_snapshot")
+        self.assertIn("missing_weather_snapshot", result.rows[0].reasons)
+        self.assertFalse(result.rows[0].include_in_strict)
+        self.assertEqual(result.summary["excluded_row_count"], 1)
+
+    def test_row_quality_classifies_missing_order_book(self):
+        row = _row(
+            artifact_patch={
+                "order_book_snapshot": {"source": "missing", "data": None},
+                "execution_snapshot_source": "missing",
+            }
+        )
+
+        result = replay_recorded_artifacts([row], evaluator=self._evaluator(FixedSignalStrategy(_signal())))
+
+        self.assertEqual(result.rows[0].category, "missing_order_book")
+        self.assertIn("missing_order_book", result.rows[0].reasons)
+        self.assertFalse(result.rows[0].include_in_strict)
+
+    def test_row_quality_classifies_malformed_book_without_prices_as_missing_order_book(self):
+        row = _row(
+            artifact_patch={
+                "order_book_snapshot": {"source": "book", "data": {"unrelated": "value"}},
+                "execution_snapshot_source": "book",
+            }
+        )
+
+        result = replay_recorded_artifacts([row], evaluator=self._evaluator(FixedSignalStrategy(_signal())))
+
+        self.assertEqual(classify_order_book_mode(row["decision_artifact"]), "missing")
+        self.assertEqual(result.rows[0].category, "missing_order_book")
+        self.assertIn("missing_order_book", result.rows[0].reasons)
+
+    def test_row_quality_classifies_zero_asks_as_missing_order_book(self):
+        row = _row(
+            artifact_patch={
+                "order_book_snapshot": {
+                    "source": "book",
+                    "data": {"best_yes_ask": 0, "best_no_ask": None, "best_yes_bid": 0.40, "best_no_bid": 0.59},
+                },
+                "execution_snapshot": {"source": "book", "best_yes_ask": 0, "best_no_ask": None},
+                "execution_snapshot_source": "book",
+            }
+        )
+
+        result = replay_recorded_artifacts([row], evaluator=self._evaluator(FixedSignalStrategy(_signal())))
+
+        self.assertEqual(classify_order_book_mode(row["decision_artifact"]), "missing")
+        self.assertEqual(result.rows[0].category, "missing_order_book")
+        self.assertIn("missing_order_book", result.rows[0].reasons)
+
+    def test_row_quality_classifies_bid_only_book_as_missing_order_book(self):
+        row = _row(
+            artifact_patch={
+                "order_book_snapshot": {"source": "book", "data": {"best_yes_bid": 0.40, "best_no_bid": 0.59}},
+                "execution_snapshot": {"source": "book", "best_yes_bid": 0.40, "best_no_bid": 0.59},
+                "execution_snapshot_source": "book",
+            }
+        )
+
+        result = replay_recorded_artifacts([row], evaluator=self._evaluator(FixedSignalStrategy(_signal())))
+
+        self.assertEqual(classify_order_book_mode(row["decision_artifact"]), "missing")
+        self.assertEqual(result.rows[0].category, "missing_order_book")
+        self.assertIn("missing_order_book", result.rows[0].reasons)
+
+    def test_row_quality_classifies_date_unverified(self):
+        row = _weather_row()
+        row["decision_artifact"]["source_context"]["data"]["weather_source_snapshot"]["date_validation"] = {
+            "ok": False,
+            "reason": "missing_weather_date",
+            "market_date": "2026-04-29",
+            "weather_date": None,
+        }
+
+        result = replay_recorded_artifacts([row], evaluator=self._evaluator(FixedSignalStrategy(_signal())))
+
+        self.assertEqual(result.rows[0].category, "date_unverified")
+        self.assertTrue(any(reason.startswith("date_unverified") for reason in result.rows[0].reasons))
+        self.assertFalse(result.rows[0].include_in_strict)
+
+    def test_row_quality_classifies_ok_only_date_validation_as_date_unverified(self):
+        row = _weather_row()
+        row["decision_artifact"]["source_context"]["data"]["weather_source_snapshot"]["date_validation"] = {"ok": True}
+
+        result = replay_recorded_artifacts([row], evaluator=self._evaluator(FixedSignalStrategy(_signal())))
+
+        self.assertEqual(result.rows[0].category, "date_unverified")
+        self.assertIn("date_unverified:missing_date_validation", result.rows[0].reasons)
+        self.assertFalse(result.rows[0].include_in_strict)
+
+    def test_row_quality_classifies_backfilled_historical_replay_row_as_strict(self):
+        row = _row(
+            artifact_patch={
+                "source_provenance": "historical_replay_backfill",
+                "source_context": {
+                    "source": "provided",
+                    "source_mode": "historical_replay",
+                    "data": {
+                        "market_metadata": {"market_group": "sports", "series": "unit"},
+                        "unit_source": {"value": 1},
+                    },
+                },
+            }
+        )
+
+        result = replay_recorded_artifacts([row], evaluator=self._evaluator(FixedSignalStrategy(_signal())))
+
+        self.assertEqual(result.rows[0].category, "replay_grade_backfilled")
+        self.assertTrue(result.rows[0].include_in_strict)
+
+    def test_row_quality_classifies_nested_historical_replay_weather_signal_as_backfilled(self):
+        row = _weather_row()
+        weather_snapshot = row["decision_artifact"]["source_context"]["data"]["weather_source_snapshot"]
+        weather_snapshot["source_signal"] = {
+            "signal_type": "weather",
+            "predicted_prob": 0.72,
+            "confidence": 0.9,
+            "data": {
+                "historical_replay": True,
+                "source_quality": "settlement_station_official_daily",
+            },
+        }
+
+        result = replay_recorded_artifacts([row], evaluator=self._evaluator(FixedSignalStrategy(_signal())))
+
+        self.assertEqual(result.rows[0].category, "replay_grade_backfilled")
+        self.assertTrue(result.rows[0].include_in_strict)
+
+    def test_row_quality_policy_strict_drops_incomplete_rows_from_result_rows(self):
+        good = _row()
+        missing_book = _row(
+            artifact_patch={
+                "market_id": "KXUNIT-26APR30-YES",
+                "order_book_snapshot": {"source": "missing", "data": None},
+                "execution_snapshot_source": "missing",
+            },
+            row_patch={"market_id": "KXUNIT-26APR30-YES"},
+        )
+
+        result = replay_recorded_artifacts(
+            [good, missing_book],
+            evaluator=self._evaluator(FixedSignalStrategy(_signal())),
+            row_quality_policy="strict",
+        )
+
+        self.assertEqual(len(result.rows), 1)
+        self.assertEqual(result.rows[0].category, "replay_grade_original")
+        self.assertEqual(result.summary["input_total"], 2)
+        self.assertEqual(result.summary["total"], 1)
+        self.assertEqual(result.summary["strict_row_count"], 1)
+        self.assertEqual(result.summary["excluded_row_count"], 1)
+        self.assertEqual(result.summary["excluded_reason_counts"]["missing_order_book"], 1)
+
+    def test_series_grid_uses_coverage_rows_when_strict_policy_filters_result_rows(self):
+        good = _weather_row()
+        missing_book = _weather_row(
+            artifact_patch={
+                "market_id": "KXHIGHNY-26APR29-T81",
+                "order_book_snapshot": {"source": "missing", "data": None},
+                "execution_snapshot_source": "missing",
+            },
+            row_patch={"market_id": "KXHIGHNY-26APR29-T81"},
+        )
+
+        result = replay_recorded_artifacts(
+            [good, missing_book],
+            evaluator=self._evaluator(FixedSignalStrategy(_signal()), risk_policy=DenyRisk()),
+            row_quality_policy="strict",
+        )
+        grid = build_replay_series_grid(result)
+
+        self.assertEqual(len(result.rows), 1)
+        self.assertEqual(len(result.all_rows), 2)
+        self.assertEqual(result.summary["input_total"], 2)
+        self.assertEqual(grid[0]["total_rows"], 2)
+        self.assertEqual(grid[0]["strict_rows"], 1)
+        self.assertEqual(grid[0]["excluded_rows"], 1)
+        self.assertEqual(grid[0]["quality_counts"]["missing_order_book"], 1)
+
+    def test_series_grid_counts_quality_and_exclusions(self):
+        good = _weather_row()
+        missing_book = _weather_row(
+            artifact_patch={
+                "market_id": "KXHIGHNY-26APR29-T81",
+                "order_book_snapshot": {"source": "missing", "data": None},
+                "execution_snapshot_source": "missing",
+            },
+            row_patch={"market_id": "KXHIGHNY-26APR29-T81"},
+        )
+
+        result = replay_recorded_artifacts(
+            [good, missing_book],
+            evaluator=self._evaluator(FixedSignalStrategy(_signal()), risk_policy=DenyRisk()),
+        )
+        grid = build_replay_series_grid(result)
+
+        self.assertEqual(len(grid), 1)
+        self.assertEqual(grid[0]["series"], "daily_temperature")
+        self.assertEqual(grid[0]["event_ticker"], "KXHIGHNY-26APR29")
+        self.assertEqual(grid[0]["total_rows"], 2)
+        self.assertEqual(grid[0]["strict_rows"], 1)
+        self.assertEqual(grid[0]["excluded_rows"], 1)
+        self.assertEqual(grid[0]["quality_counts"]["replay_grade_original"], 1)
+        self.assertEqual(grid[0]["quality_counts"]["missing_order_book"], 1)
+        self.assertEqual(grid[0]["excluded_counts"]["missing_order_book"], 1)
+        self.assertEqual(grid[0]["action_changed"], 2)
+        self.assertEqual(grid[0]["reason_changed"], 2)
 
     def test_metadata_only_source_context_is_not_recorded_as_of(self):
         row = _row(
@@ -294,19 +705,441 @@ class PredictionLabReplayTests(unittest.TestCase):
             [
                 _row(
                     artifact_patch={"final_action": "SKIP", "source_snapshots": [high_source]},
-                    row_patch={"decision_type": "skip", "direction": "SKIP", "resolution": {"outcome": "YES"}},
+                    row_patch={"decision_type": "skip", "direction": "SKIP"},
                 ),
                 _row(artifact_patch={"final_action": "SKIP", "source_snapshots": [low_source]}, row_patch={"decision_type": "skip", "direction": "SKIP"}),
             ],
             evaluator=self._evaluator(strategy),
             require_recorded_source=True,
+            resolution_records=[
+                {
+                    "market_id": "KXUNIT-26APR29-YES",
+                    "resolution": {"outcome": "YES", "resolved_at": "2026-04-30T00:00:00+00:00"},
+                }
+            ],
         )
 
         self.assertEqual(strategy.live_calls, 0)
         self.assertEqual([row.replayed_action for row in result.rows], ["BUY_YES", "SKIP"])
         self.assertEqual(result.summary["missed_wins"], 1)
         self.assertEqual(result.summary["over_filtered_wins"], 1)
+        self.assertEqual(result.summary["outcomes"]["YES"], 2)
+
+    def test_replay_ignores_inline_resolution_until_resolution_ledger_is_joined(self):
+        strategy = RecordedLiveSourceStrategy()
+        source = {
+            "mode": "recorded_as_of",
+            "source": "weather",
+            "as_of": "2026-04-29T12:00:00+00:00",
+            "signal": {"signal_type": "weather", "predicted_prob": 0.82, "confidence": 0.92},
+        }
+        row = _row(
+            artifact_patch={"final_action": "SKIP", "source_snapshots": [source]},
+            row_patch={"decision_type": "skip", "direction": "SKIP", "resolution": {"outcome": "YES"}},
+        )
+
+        blind = replay_recorded_artifacts([row], evaluator=self._evaluator(strategy), require_recorded_source=True)
+        scored = replay_recorded_artifacts(
+            [row],
+            evaluator=self._evaluator(strategy),
+            require_recorded_source=True,
+            resolution_records=[
+                {
+                    "market_id": "KXUNIT-26APR29-YES",
+                    "resolution": {"outcome": "YES", "resolved_at": "2026-04-30T00:00:00+00:00"},
+                }
+            ],
+        )
+
+        self.assertIsNone(blind.rows[0].outcome)
+        self.assertEqual(blind.summary["outcomes"], {"unknown": 1})
+        self.assertEqual(scored.rows[0].outcome, "YES")
+        self.assertEqual(scored.summary["missed_wins"], 1)
+
+    def test_score_only_market_snapshots_can_be_replayed_and_scored_from_resolution_ledger(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            snapshot_path = Path(tmpdir) / "market_snapshots.jsonl"
+            resolution_path = Path(tmpdir) / "resolutions.jsonl"
+            append_jsonl(
+                snapshot_path,
+                _row(
+                    artifact_patch={"source_snapshots": [{"mode": "recorded_as_of", "source": "weather", "signal": {"signal_type": "weather", "predicted_prob": 0.82, "confidence": 0.92}}]},
+                    row_patch={
+                        "timestamp": "2026-04-29T12:00:00+00:00",
+                        "observed_at": "2026-04-29T12:00:00+00:00",
+                        "snapshot_key": "KXUNIT-26APR29-YES",
+                        "recorded_prediction": False,
+                    },
+                ),
+            )
+            append_jsonl(
+                resolution_path,
+                {
+                    "market_id": "KXUNIT-26APR29-YES",
+                    "resolution": {"outcome": "YES", "resolved_at": "2026-04-30T00:00:00+00:00"},
+                },
+            )
+
+            records = load_replay_artifacts([snapshot_path])
+            result = replay_recorded_artifacts(
+                records,
+                evaluator=self._evaluator(RecordedLiveSourceStrategy()),
+                resolution_paths=[resolution_path],
+            )
+
+        self.assertEqual(result.rows[0].outcome, "YES")
         self.assertEqual(result.summary["outcomes"]["YES"], 1)
+
+    def test_replay_from_paths_honors_prediction_lab_source_disables_for_score_only_snapshots(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            snapshot_path = Path(tmpdir) / "market_snapshots.jsonl"
+            append_jsonl(
+                snapshot_path,
+                _row(
+                    artifact_patch={
+                        "source_snapshots": [
+                            {
+                                "mode": "recorded_as_of",
+                                "source": "weather",
+                                "method": "_live_data_signal",
+                                "signal": {"signal_type": "weather", "predicted_prob": 0.82, "confidence": 0.92},
+                            }
+                        ]
+                    },
+                    row_patch={"recorded_prediction": False},
+                ),
+            )
+            config = {
+                "prediction_lab": {"score_only": True, "disable_news": True, "disable_social": True, "disable_ai": True},
+                "strategy": {"min_edge": 0.01, "min_confidence": 0.5},
+                "max_entry_price": 0.7,
+            }
+
+            with (
+                patch("bot.strategies.enhanced.EnhancedStrategyEngine._news_signal", side_effect=AssertionError("news disabled")),
+                patch("bot.strategies.enhanced.EnhancedStrategyEngine._social_signal", side_effect=AssertionError("social disabled")),
+                patch("bot.strategies.enhanced.EnhancedStrategyEngine._ai_signal", side_effect=AssertionError("ai disabled")),
+            ):
+                result = replay_from_paths([snapshot_path], config=config)
+
+        self.assertEqual(result.summary["input_total"], 1)
+        self.assertEqual(result.all_rows[0].source_mode, "recorded_as_of")
+
+    def test_prediction_lab_validator_flags_duplicates_and_outcome_leakage(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "market_snapshots.jsonl"
+            row = _row(row_patch={"resolution": {"outcome": "YES"}})
+            append_jsonl(path, row)
+            append_jsonl(path, row)
+
+            validation = validate_prediction_lab_tables([path])
+            payload = validation.to_dict()
+
+        self.assertFalse(validation.ok)
+        self.assertEqual(payload["issue_counts"]["outcome_leakage"], 2)
+        self.assertEqual(payload["issue_counts"]["duplicate_identity"], 1)
+
+    def test_prediction_lab_validator_allows_resolution_ledger_outcomes_but_not_input_outcomes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            snapshot_path = Path(tmpdir) / "market_snapshots.jsonl"
+            leaked_input_path = Path(tmpdir) / "leaked_market_snapshots.jsonl"
+            resolution_path = Path(tmpdir) / "resolutions.jsonl"
+            snapshot_row = _row(row_patch={"recorded_prediction": False})
+            snapshot_row["decision_artifact"]["source_context"]["data"]["market_metadata"].update({"outcome": None, "result": ""})
+            append_jsonl(snapshot_path, snapshot_row)
+            append_jsonl(leaked_input_path, _row(row_patch={"market_id": "KXUNIT-26APR30-YES", "resolution": {"outcome": "YES"}}))
+            append_jsonl(
+                resolution_path,
+                {
+                    "market_id": "KXUNIT-26APR29-YES",
+                    "resolution": {"outcome": "YES", "resolved_at": "2026-04-30T00:00:00+00:00"},
+                },
+            )
+
+            ledger_validation = validate_prediction_lab_tables(
+                [snapshot_path, resolution_path],
+                resolution_paths=[resolution_path],
+            ).to_dict()
+            leaked_validation = validate_prediction_lab_tables([leaked_input_path], resolution_paths=[resolution_path]).to_dict()
+
+        self.assertNotIn("outcome_leakage", ledger_validation["issue_counts"])
+        self.assertEqual(ledger_validation["total_rows"], 2)
+        self.assertEqual(leaked_validation["issue_counts"]["outcome_leakage"], 1)
+
+    def test_prediction_lab_validator_recognizes_execution_feasibility_evidence(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            good_path = Path(tmpdir) / "good_market_snapshots.jsonl"
+            old_path = Path(tmpdir) / "old_market_snapshots.jsonl"
+            old_row = _row()
+            old_row["decision_artifact"].pop("execution_feasibility", None)
+            old_row["decision_artifact"].pop("post_logic_order_book_snapshot", None)
+            append_jsonl(good_path, _row())
+            append_jsonl(old_path, old_row)
+
+            good = validate_prediction_lab_tables([good_path]).to_dict()
+            old = validate_prediction_lab_tables([old_path]).to_dict()
+
+        self.assertNotIn("execution_feasibility_not_strict", good["issue_counts"])
+        self.assertNotIn("row_quality_coverage_only", good["issue_counts"])
+        self.assertEqual(old["issue_counts"]["execution_feasibility_not_strict"], 1)
+        self.assertEqual(old["issue_counts"]["row_quality_coverage_only"], 1)
+
+    def test_nested_weather_source_context_snapshot_is_recorded_as_of_and_replayable(self):
+        strategy = RecordedLiveSourceStrategy()
+        weather_snapshot = {
+            "mode": "recorded_as_of",
+            "source_name": "weather",
+            "signal_name": "live",
+            "signal_type": "weather",
+            "market_date": "2026-04-29",
+            "target_forecast_date": "2026-04-29",
+            "as_of": "2026-04-29T12:00:00+00:00",
+            "predicted_prob": 0.82,
+            "confidence": 0.92,
+            "station_id": "KNYC",
+            "station_cli": "NYC",
+            "station_mapping": "exact",
+            "settlement_source": "nws",
+            "source_agreement_score": 0.94,
+            "forecast": {"high": 84.0, "low": 65.0, "current": 73.0, "threshold": 80.0, "question_side": "above"},
+            "sources": [
+                {
+                    "source_name": "nws",
+                    "role": "settlement_primary",
+                    "weight": 1.0,
+                    "contribution": 1.0,
+                    "forecast_high": 84.0,
+                    "forecast_low": 65.0,
+                    "current_forecast": 73.0,
+                    "target_forecast_date": "2026-04-29",
+                    "market_date": "2026-04-29",
+                    "fetched_at": "2026-04-29T12:00:00+00:00",
+                    "station_id": "KNYC",
+                    "station_cli": "NYC",
+                    "station_mapping": "exact",
+                    "settlement_source": "nws",
+                },
+                {
+                    "source_name": "open-meteo",
+                    "role": "cross_validation",
+                    "weight": None,
+                    "contribution": None,
+                    "weight_note": "not_recorded_by_weather_engine",
+                    "forecast_high": 82.0,
+                    "forecast_low": 64.0,
+                    "target_forecast_date": "2026-04-29",
+                    "market_date": "2026-04-29",
+                    "fetched_at": "2026-04-29T12:00:00+00:00",
+                },
+            ],
+            "gaps": {"nws_open_meteo_gap": 2.0},
+            "source_signal": {
+                "signal_type": "weather",
+                "predicted_prob": 0.82,
+                "confidence": 0.92,
+                "source_timestamp": "2026-04-29T12:00:00+00:00",
+                "data": {"forecast_high": 84.0, "forecast_low": 65.0, "current_temp": 73.0, "sources": ["nws", "open-meteo"]},
+            },
+        }
+        row = _row(
+            artifact_patch={
+                "final_action": "SKIP",
+                "source_context": {
+                    "source": "provided",
+                    "source_mode": "recorded_as_of",
+                    "mode": "prediction_lab",
+                    "as_of": "2026-04-29T12:00:00+00:00",
+                    "data": {
+                        "market_metadata": {"market_group": "weather", "series": "daily_temperature"},
+                        "weather_source_snapshot": weather_snapshot,
+                    },
+                },
+                "source_snapshots": [],
+            },
+            row_patch={"group": "weather", "series": "daily_temperature", "decision_type": "skip", "direction": "SKIP", "volume": 1000},
+        )
+
+        result = replay_recorded_artifacts([row], evaluator=self._evaluator(strategy), require_recorded_source=True)
+
+        self.assertEqual(strategy.live_calls, 0)
+        self.assertEqual(classify_source_mode(row["decision_artifact"], row), "recorded_as_of")
+        self.assertEqual(result.rows[0].source_mode, "recorded_as_of")
+        self.assertEqual(result.rows[0].replayed_action, "BUY_YES")
+        nested = result.rows[0].original_artifact["source_context"]["data"]["weather_source_snapshot"]
+        self.assertEqual(nested["sources"][0]["weight"], 1.0)
+        self.assertIsNone(nested["sources"][1]["weight"])
+        self.assertEqual(nested["target_forecast_date"], "2026-04-29")
+
+    def test_source_snapshot_ref_prefers_nested_weather_snapshot_over_legacy_signal(self):
+        strategy = RecordedLiveSourceStrategy()
+        weather_snapshot = {
+            "mode": "recorded_as_of",
+            "source_name": "weather",
+            "signal_type": "weather",
+            "as_of": "2026-04-29T12:00:00+00:00",
+            "predicted_prob": 0.82,
+            "confidence": 0.92,
+            "forecast": {"high": 84.0, "low": 65.0, "actual_temp_used": 84.0, "predicted_temp": 84.0, "threshold": 80.0, "question_side": "above"},
+            "source_signal": {
+                "signal_type": "weather",
+                "predicted_prob": 0.82,
+                "confidence": 0.92,
+                "data": {"actual_temp_used": 84.0},
+            },
+        }
+        row = _row(
+            artifact_patch={
+                "final_action": "SKIP",
+                "source_context": {
+                    "source": "provided",
+                    "source_mode": "recorded_as_of",
+                    "data": {
+                        "market_metadata": {"market_group": "weather", "series": "daily_temperature"},
+                        "weather_source_snapshot": weather_snapshot,
+                    },
+                },
+                "source_snapshots": [
+                    {
+                        "mode": "recorded_as_of",
+                        "source": "weather",
+                        "method": "_live_data_signal",
+                        "snapshot_ref": "source_context.data.weather_source_snapshot",
+                        "signal": {"signal_type": "weather", "predicted_prob": 0.12, "confidence": 0.92},
+                    }
+                ],
+            },
+            row_patch={"group": "weather", "series": "daily_temperature", "decision_type": "skip", "direction": "SKIP", "volume": 1000},
+        )
+
+        result = replay_recorded_artifacts([row], evaluator=self._evaluator(strategy), require_recorded_source=True)
+
+        self.assertEqual(strategy.live_calls, 0)
+        self.assertEqual(result.rows[0].replayed_action, "BUY_YES")
+        replayed_signal = result.rows[0].replayed_artifact["strategy_signal"]["signal_details"]["live"]
+        self.assertEqual(replayed_signal["predicted_prob"], 0.82)
+
+    def test_nested_weather_snapshot_without_source_signal_reconstructs_live_data_shape(self):
+        weather_snapshot = {
+            "mode": "recorded_as_of",
+            "source_name": "weather",
+            "signal_type": "weather",
+            "as_of": "2026-04-29T12:00:00+00:00",
+            "source_timestamp": "2026-04-29T11:59:00+00:00",
+            "ttl_seconds": 600,
+            "predicted_prob": 0.82,
+            "confidence": 0.92,
+            "station_id": "KNYC",
+            "station_cli": "NYC",
+            "station_mapping": "exact",
+            "settlement_source": "nws",
+            "source_agreement_score": 0.94,
+            "target_forecast_date": "2026-04-30",
+            "forecast_date": "2026-04-29",
+            "date_validation": {"ok": False, "reason": "unit_mismatch", "market_date": "2026-04-30", "weather_date": None},
+            "forecast": {
+                "high": 84.0,
+                "low": 65.0,
+                "current": 73.0,
+                "actual_temp_used": 84.0,
+                "predicted_temp": 84.0,
+                "threshold": 80.0,
+                "question_side": "above",
+            },
+            "sources": [
+                {
+                    "source_name": "nws",
+                    "role": "settlement_primary",
+                    "weight": 1.0,
+                    "forecast_high": 84.0,
+                    "forecast_low": 65.0,
+                    "current_forecast": 73.0,
+                    "station_id": "KNYC",
+                    "station_cli": "NYC",
+                }
+            ],
+        }
+        row = _row(
+            artifact_patch={
+                "final_action": "SKIP",
+                "source_context": {
+                    "source": "provided",
+                    "source_mode": "recorded_as_of",
+                    "data": {
+                        "market_metadata": {"market_group": "weather", "series": "daily_temperature"},
+                        "weather_source_snapshot": weather_snapshot,
+                    },
+                },
+                "source_snapshots": [
+                    {
+                        "mode": "recorded_as_of",
+                        "source": "weather",
+                        "method": "_live_data_signal",
+                        "snapshot_ref": "source_context.data.weather_source_snapshot",
+                    }
+                ],
+            },
+            row_patch={"group": "weather", "series": "daily_temperature", "decision_type": "skip", "direction": "SKIP", "volume": 1000},
+        )
+
+        result = replay_recorded_artifacts(
+            [row],
+            evaluator=self._evaluator(ReplayValidatingRecordedSourceStrategy()),
+            require_recorded_source=True,
+        )
+
+        self.assertEqual(result.rows[0].replayed_action, "BUY_YES")
+        replayed_signal = result.rows[0].replayed_artifact["strategy_signal"]["signal_details"]["live"]
+        data = replayed_signal["data"]
+        self.assertEqual(replayed_signal["source_timestamp"], "2026-04-29T11:59:00+00:00")
+        self.assertEqual(replayed_signal["ttl_seconds"], 600)
+        self.assertEqual(data["forecast_high"], 84.0)
+        self.assertEqual(data["forecast_low"], 65.0)
+        self.assertEqual(data["current_temp"], 73.0)
+        self.assertEqual(data["actual_temp_used"], 84.0)
+        self.assertEqual(data["predicted_temp"], 84.0)
+        self.assertEqual(data["threshold"], 80.0)
+        self.assertEqual(data["sources"], ["nws"])
+        self.assertEqual(data["source_details"][0]["source_name"], "nws")
+        self.assertEqual(data["station_id"], "KNYC")
+        self.assertEqual(data["date_validation"]["reason"], "unit_mismatch")
+        self.assertEqual(data["target_forecast_date"], "2026-04-30")
+        self.assertEqual(data["weather_date"], "2026-04-29")
+
+    def test_recorded_source_staleness_is_checked_against_artifact_as_of(self):
+        row = _row(
+            artifact_patch={
+                "as_of": None,
+                "final_action": "SKIP",
+                "source_snapshots": [
+                    {
+                        "mode": "recorded_as_of",
+                        "source": "weather",
+                        "as_of": "2026-04-29T12:00:00+00:00",
+                        "signal": {
+                            "signal_type": "weather",
+                            "predicted_prob": 0.82,
+                            "confidence": 0.92,
+                            "source_timestamp": "2026-04-29T11:59:00+00:00",
+                            "ttl_seconds": 600,
+                            "question_side": "above",
+                            "data": {"actual_temp_used": 84.0},
+                        },
+                    }
+                ],
+            },
+            row_patch={"decision_type": "skip", "direction": "SKIP", "volume": 1000},
+        )
+
+        result = replay_recorded_artifacts(
+            [row],
+            evaluator=self._evaluator(ReplayValidatingRecordedSourceStrategy()),
+            require_recorded_source=True,
+        )
+
+        self.assertEqual(result.rows[0].replayed_action, "BUY_YES")
+        live_validation = result.rows[0].replayed_artifact["strategy_trace"]["validation_results"]["live"]
+        self.assertTrue(live_validation["accepted"])
+        self.assertFalse(any("stale" in warning.lower() for warning in live_validation["warnings"]))
 
     def test_historical_replay_does_not_silently_use_live_current_source_data(self):
         evaluator = self._evaluator(LiveTouchingStrategy(_signal()))

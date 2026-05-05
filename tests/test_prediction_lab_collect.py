@@ -15,6 +15,7 @@ from bot.config import load_config
 from bot.decision_pipeline import DecisionPipelineEvaluator
 from bot.prediction_lab import PredictionLab, PredictionLabRunResult
 from bot.prediction_lab_collect import PredictionLabCollectorDaemon
+from bot.prediction_lab_replay import classify_replay_row_quality
 from bot.risk import RiskDecision
 from bot.strategies.enhanced import StrategyTrace
 from scripts import prediction_lab_collect as prediction_lab_collect_script
@@ -31,6 +32,23 @@ class _DirectExchange:
     def get_markets_direct(self, limit=0, page_size=0, max_pages=0):
         self.calls.append(("get_markets_direct", limit, page_size, max_pages))
         return []
+
+
+class _SequentialBookExchange:
+    def __init__(self, market, books: list[dict | None]):
+        self.market = market
+        self.books = list(books)
+        self.book_calls = 0
+
+    def get_markets_direct(self, **kwargs):
+        return [self.market]
+
+    def get_order_book(self, market_id):
+        self.book_calls += 1
+        if self.books:
+            value = self.books.pop(0)
+            return dict(value) if isinstance(value, dict) else value
+        return None
 
 
 class _FakeClock:
@@ -113,6 +131,65 @@ class PredictionLabCollectorTests(unittest.TestCase):
     @staticmethod
     def _runtime_prediction_lab_dir(data_dir: Path) -> Path:
         return data_dir / "paper" / "prediction_lab"
+
+    def _collect_sports_buy_artifact(self, tmpdir: str, books: list[dict | None], *, lab_patch: dict | None = None) -> dict:
+        prediction_lab_cfg = {
+            "enabled": True,
+            "mode": "collector",
+            "groups": ["sports"],
+            "score_only": False,
+            "record_all_scored": True,
+            "collector_record_predictions": True,
+            "use_shared_pipeline": True,
+            "execution_feasibility_max_slippage": 0.01,
+            "execution_feasibility_max_elapsed_ms": 10_000,
+        }
+        if lab_patch:
+            prediction_lab_cfg.update(lab_patch)
+        config = {
+            "data_dir": tmpdir,
+            "prediction_lab": prediction_lab_cfg,
+            "strategy": {"min_edge": 0.01, "min_confidence": 0.5, "enable_news": False, "enable_social": False, "enable_ai": False},
+            "max_entry_price": 0.7,
+        }
+        lab = PredictionLab(config)
+        signal = {
+            "market_id": "KXNBATEST-26APR29-HOME",
+            "exchange": "kalshi",
+            "question": "Will the NBA test team win?",
+            "direction": "BUY_YES",
+            "model_probability": 0.7,
+            "market_price": 0.4,
+            "yes_market_price": 0.4,
+            "no_market_price": 0.6,
+            "edge": 0.3,
+            "confidence": 0.9,
+            "signals": {"unit": 0.7},
+        }
+        lab.decision_evaluator = DecisionPipelineEvaluator(
+            lab.config,
+            strategy=_TracedSignalStrategy(signal),
+            kelly_sizer=_FixedKelly(10.0),
+            risk_policy=_AllowRisk(),
+        )
+        market = SimpleNamespace(
+            id="KXNBATEST-26APR29-HOME",
+            exchange="kalshi",
+            question="Will the NBA test team win?",
+            category="sports",
+            yes_price=0.4,
+            no_price=0.6,
+            volume=1000,
+            closes_at=datetime.now(timezone.utc) + timedelta(hours=6),
+            metadata={"market_group": "sports", "series": "nba"},
+        )
+        exchange = _SequentialBookExchange(market, books)
+
+        lab.run(exchange)
+
+        row = load_jsonl(lab.predictions_path)[0]
+        row["exchange_book_calls"] = exchange.book_calls
+        return row["decision_artifact"]
 
     def _write_config(self, path: Path, *, data_dir: Path, paused: bool = False, enabled: bool = True, cap_gb: float = 5.0, groups: str = "[weather]", score_only: bool = True):
         path.write_text(
@@ -426,6 +503,482 @@ class PredictionLabCollectorTests(unittest.TestCase):
             self.assertEqual(prediction_rows[0]["decision_artifact"]["order_book_snapshot"]["source"], "missing")
             self.assertEqual(snapshot_rows[0]["decision_artifact"]["final_reason_code"], "unit_no_signal")
 
+    def test_prediction_lab_shared_pipeline_records_weather_source_snapshot_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "data_dir": tmpdir,
+                "prediction_lab": {
+                    "enabled": True,
+                    "mode": "collector",
+                    "observer_mode": True,
+                    "groups": ["weather"],
+                    "score_only": False,
+                    "record_all_scored": True,
+                    "collector_record_predictions": True,
+                    "collector_record_market_snapshots": True,
+                    "use_shared_pipeline": True,
+                },
+                "strategy": {"min_edge": 0.01, "min_confidence": 0.5, "enable_news": False, "enable_social": False, "enable_ai": False},
+                "max_entry_price": 0.7,
+            }
+            lab = PredictionLab(config)
+            weather_signal = {
+                "signal_type": "weather",
+                "predicted_prob": 0.86,
+                "confidence": 0.91,
+                "source_timestamp": "2026-04-27T12:05:00+00:00",
+                "ttl_seconds": 600,
+                "question_side": "above",
+                "edge": 0.46,
+                "data": {
+                    "forecast_high": 84.0,
+                    "forecast_low": 63.0,
+                    "current_temp": 72.0,
+                    "actual_temp_used": 84.0,
+                    "predicted_temp": 84.0,
+                    "threshold": 80.0,
+                    "city": "oklahoma city",
+                    "sources": ["nws", "open-meteo"],
+                    "source_details": [
+                        {
+                            "source_name": "nws",
+                            "role": "settlement_primary",
+                            "weight": 1.0,
+                            "contribution": 1.0,
+                            "forecast_high": 84.0,
+                            "forecast_low": 63.0,
+                            "current_forecast": 72.0,
+                            "weather_date": "2026-04-27",
+                            "fetched_at": "2026-04-27T12:05:00+00:00",
+                            "as_of": "2026-04-27T12:05:01+00:00",
+                            "forecast_period_name": "Today",
+                            "forecast_period_start": "2026-04-27T06:00:00-05:00",
+                            "forecast_period_end": "2026-04-27T18:00:00-05:00",
+                        },
+                        {
+                            "source_name": "open-meteo",
+                            "role": "cross_validation",
+                            "weight": None,
+                            "contribution": None,
+                            "forecast_high": 82.5,
+                            "forecast_low": 62.0,
+                            "current_forecast": 71.5,
+                            "weather_date": "2026-04-27",
+                            "fetched_at": "2026-04-27T12:04:00+00:00",
+                            "forecast_start": "2026-04-27T07:00",
+                            "forecast_end": "2026-04-28T06:00",
+                            "forecast_times": ["2026-04-27T07:00", "2026-04-27T08:00"],
+                        },
+                    ],
+                    "agreement": 0.93,
+                    "settlement_source": "nws",
+                    "nws_open_meteo_gap": 1.5,
+                    "weather_date": "2026-04-27",
+                    "date_validation": {
+                        "ok": True,
+                        "reason": "dates_match",
+                        "market_date": "2026-04-27",
+                        "weather_date": "2026-04-27",
+                        "source": "unit:explicit",
+                    },
+                    "fetched_at": "2026-04-27T12:06:00+00:00",
+                    "as_of": "2026-04-27T12:06:01+00:00",
+                    "station_id": "KOKC",
+                    "station_cli": "OKC",
+                },
+            }
+            signal = {
+                "market_id": "KXHIGHTOKC-26APR27-T80",
+                "exchange": "kalshi",
+                "question": "Will the high temperature in Oklahoma City be above 80 degrees on Apr 27?",
+                "direction": "BUY_YES",
+                "model_probability": 0.86,
+                "market_price": 0.4,
+                "yes_market_price": 0.4,
+                "no_market_price": 0.6,
+                "edge": 0.46,
+                "confidence": 0.91,
+                "signals": {"live": 0.86},
+                "signal_details": {"live": weather_signal},
+            }
+            lab.decision_evaluator = DecisionPipelineEvaluator(
+                lab.config,
+                strategy=_TracedSignalStrategy(signal),
+                kelly_sizer=_FixedKelly(10.0),
+                risk_policy=_AllowRisk(),
+            )
+            market = SimpleNamespace(
+                id="KXHIGHTOKC-26APR27-T80",
+                exchange="kalshi",
+                question="Will the high temperature in Oklahoma City be above 80 degrees on Apr 27?",
+                category="weather",
+                yes_price=0.4,
+                no_price=0.6,
+                volume=4500,
+                closes_at=datetime.now(timezone.utc) + timedelta(hours=6),
+                metadata={"market_group": "weather", "series": "daily_temperature"},
+            )
+            exchange = SimpleNamespace(get_markets_direct=lambda **kwargs: [market])
+
+            lab.run(exchange)
+            prediction_row = load_jsonl(lab.predictions_path)[0]
+            snapshot_row = load_jsonl(lab.market_snapshots_path)[0]
+            prediction_snapshot = prediction_row["decision_artifact"]["source_context"]["data"]["weather_source_snapshot"]
+            market_snapshot = snapshot_row["decision_artifact"]["source_context"]["data"]["weather_source_snapshot"]
+
+            self.assertEqual(prediction_row["decision_artifact"]["source_context"]["source_mode"], "recorded_as_of")
+            self.assertEqual(prediction_snapshot["market_date"], "2026-04-27")
+            self.assertEqual(prediction_snapshot["target_forecast_date"], "2026-04-27")
+            self.assertEqual(prediction_snapshot["weather_date"], "2026-04-27")
+            self.assertEqual(prediction_snapshot["date_validation"]["source"], "unit:explicit")
+            self.assertEqual(prediction_snapshot["source_fetched_at"], "2026-04-27T12:06:00+00:00")
+            self.assertEqual(prediction_snapshot["source_as_of"], "2026-04-27T12:06:01+00:00")
+            self.assertEqual(prediction_snapshot["station_id"], "KOKC")
+            self.assertEqual(prediction_snapshot["settlement_source"], "nws")
+            self.assertEqual(prediction_snapshot["source_agreement_score"], 0.93)
+            self.assertEqual(prediction_snapshot["gaps"]["nws_open_meteo_gap"], 1.5)
+            self.assertEqual(prediction_snapshot["sources"][0]["source_name"], "nws")
+            self.assertEqual(prediction_snapshot["sources"][0]["weight"], 1.0)
+            self.assertEqual(prediction_snapshot["sources"][0]["weather_date"], "2026-04-27")
+            self.assertEqual(prediction_snapshot["sources"][0]["forecast_period_name"], "Today")
+            self.assertEqual(prediction_snapshot["sources"][0]["forecast_period_start"], "2026-04-27T06:00:00-05:00")
+            self.assertEqual(prediction_snapshot["sources"][0]["source_as_of"], "2026-04-27T12:05:01+00:00")
+            self.assertEqual(prediction_snapshot["sources"][1]["source_name"], "open-meteo")
+            self.assertEqual(prediction_snapshot["sources"][1]["weight"], 0.0)
+            self.assertEqual(prediction_snapshot["sources"][1]["weight_note"], "validator_only_settlement_source_drives_forecast")
+            self.assertEqual(prediction_snapshot["sources"][1]["forecast_start"], "2026-04-27T07:00")
+            self.assertEqual(prediction_snapshot["sources"][1]["forecast_times"], ["2026-04-27T07:00", "2026-04-27T08:00"])
+            self.assertEqual(market_snapshot["sources"][0]["weather_date"], "2026-04-27")
+            self.assertNotIn("data", prediction_row["decision_artifact"]["source_snapshots"][0])
+            self.assertNotIn("signal", prediction_row["decision_artifact"]["source_snapshots"][0])
+            self.assertEqual(
+                prediction_row["decision_artifact"]["source_snapshots"][0]["snapshot_ref"],
+                "source_context.data.weather_source_snapshot",
+            )
+
+    def test_prediction_lab_weather_snapshot_records_rejected_signal_role_before_raw(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "data_dir": tmpdir,
+                "prediction_lab": {
+                    "enabled": True,
+                    "mode": "collector",
+                    "observer_mode": True,
+                    "groups": ["weather"],
+                    "score_only": False,
+                    "record_all_scored": True,
+                    "collector_record_predictions": True,
+                    "use_shared_pipeline": True,
+                },
+                "strategy": {"min_edge": 0.01, "min_confidence": 0.5, "enable_news": False, "enable_social": False, "enable_ai": False},
+                "max_entry_price": 0.7,
+            }
+            lab = PredictionLab(config)
+            weather_signal = {
+                "signal_type": "weather",
+                "predicted_prob": 0.86,
+                "confidence": 0.2,
+                "source_timestamp": "2026-04-27T12:05:00+00:00",
+                "ttl_seconds": 600,
+                "question_side": "above",
+                "data": {
+                    "forecast_high": 150.0,
+                    "forecast_low": 63.0,
+                    "actual_temp_used": 150.0,
+                    "predicted_temp": 150.0,
+                    "threshold": 80.0,
+                    "sources": ["nws"],
+                    "weather_date": "2026-04-27",
+                },
+            }
+
+            class RejectedWeatherStrategy:
+                def analyze_market_with_trace(self, market, order_book=None):
+                    trace = StrategyTrace(
+                        raw_signals={"live": dict(weather_signal)},
+                        rejected_signals={"live": {**weather_signal, "rejection_reason": "outside plausible bounds"}},
+                        skip_reason_code="no_validated_signals",
+                    )
+                    return None, trace
+
+            lab.decision_evaluator = DecisionPipelineEvaluator(
+                lab.config,
+                strategy=RejectedWeatherStrategy(),
+                kelly_sizer=_FixedKelly(10.0),
+                risk_policy=_AllowRisk(),
+            )
+            market = SimpleNamespace(
+                id="KXHIGHTOKC-26APR27-T80",
+                exchange="kalshi",
+                question="Will the high temperature in Oklahoma City be above 80 degrees on Apr 27?",
+                category="weather",
+                yes_price=0.4,
+                no_price=0.6,
+                volume=4500,
+                closes_at=datetime.now(timezone.utc) + timedelta(hours=6),
+                metadata={"market_group": "weather", "series": "daily_temperature"},
+            )
+            exchange = SimpleNamespace(get_markets_direct=lambda **kwargs: [market])
+
+            lab.run(exchange)
+            snapshot = load_jsonl(lab.predictions_path)[0]["decision_artifact"]["source_context"]["data"]["weather_source_snapshot"]
+            source_ref = load_jsonl(lab.predictions_path)[0]["decision_artifact"]["source_snapshots"][0]
+
+            self.assertEqual(snapshot["signal_role"], "rejected")
+            self.assertEqual(snapshot["validation"]["source_signal_status"], "rejected")
+            self.assertEqual(source_ref["signal_role"], "rejected")
+            self.assertEqual(snapshot["source_signal"]["data"]["actual_temp_used"], 150.0)
+
+    def test_prediction_lab_weather_snapshot_missing_weather_date_does_not_use_market_date_as_forecast_date(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "data_dir": tmpdir,
+                "prediction_lab": {
+                    "enabled": True,
+                    "mode": "collector",
+                    "observer_mode": True,
+                    "groups": ["weather"],
+                    "score_only": False,
+                    "record_all_scored": True,
+                    "collector_record_predictions": True,
+                    "collector_record_market_snapshots": True,
+                    "use_shared_pipeline": True,
+                },
+                "strategy": {"min_edge": 0.01, "min_confidence": 0.5, "enable_news": False, "enable_social": False, "enable_ai": False},
+                "max_entry_price": 0.7,
+            }
+            lab = PredictionLab(config)
+            weather_signal = {
+                "signal_type": "weather",
+                "predicted_prob": 0.86,
+                "confidence": 0.91,
+                "source_timestamp": "2026-04-27T12:05:00+00:00",
+                "ttl_seconds": 600,
+                "question_side": "above",
+                "data": {
+                    "forecast_high": 84.0,
+                    "forecast_low": 63.0,
+                    "actual_temp_used": 84.0,
+                    "predicted_temp": 84.0,
+                    "threshold": 80.0,
+                    "city": "oklahoma city",
+                    "sources": ["nws", "open-meteo"],
+                    "agreement": 0.93,
+                    "settlement_source": "nws",
+                },
+            }
+            signal = {
+                "market_id": "KXHIGHTOKC-26APR27-T80",
+                "exchange": "kalshi",
+                "question": "Will the high temperature in Oklahoma City be above 80 degrees on Apr 27?",
+                "direction": "BUY_YES",
+                "model_probability": 0.86,
+                "market_price": 0.4,
+                "yes_market_price": 0.4,
+                "no_market_price": 0.6,
+                "edge": 0.46,
+                "confidence": 0.91,
+                "signals": {"live": 0.86},
+                "signal_details": {"live": weather_signal},
+            }
+            lab.decision_evaluator = DecisionPipelineEvaluator(
+                lab.config,
+                strategy=_TracedSignalStrategy(signal),
+                kelly_sizer=_FixedKelly(10.0),
+                risk_policy=_AllowRisk(),
+            )
+            market = SimpleNamespace(
+                id="KXHIGHTTOKC-26APR27-T80",
+                exchange="kalshi",
+                question="Will the high temperature in Oklahoma City be above 80 degrees on Apr 27?",
+                category="weather",
+                yes_price=0.4,
+                no_price=0.6,
+                volume=4500,
+                closes_at=datetime.now(timezone.utc) + timedelta(hours=6),
+                metadata={"market_group": "weather", "series": "daily_temperature"},
+            )
+            exchange = SimpleNamespace(get_markets_direct=lambda **kwargs: [market])
+
+            lab.run(exchange)
+            prediction_snapshot = load_jsonl(lab.predictions_path)[0]["decision_artifact"]["source_context"]["data"]["weather_source_snapshot"]
+
+            self.assertEqual(prediction_snapshot["market_date"], "2026-04-27")
+            self.assertNotIn("target_forecast_date", prediction_snapshot)
+            self.assertNotIn("forecast_date", prediction_snapshot)
+            self.assertNotIn("weather_date", prediction_snapshot)
+            self.assertEqual(prediction_snapshot["date_validation"]["reason"], "missing_weather_date")
+            self.assertIsNone(prediction_snapshot["date_validation"]["weather_date"])
+            self.assertNotIn("target_forecast_date", prediction_snapshot["sources"][0])
+            self.assertNotIn("forecast_date", prediction_snapshot["sources"][0])
+            self.assertNotIn("weather_date", prediction_snapshot["sources"][0])
+
+    def test_prediction_lab_weather_snapshot_derives_date_from_forecast_period_start(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lab = PredictionLab(
+                {
+                    "data_dir": tmpdir,
+                    "prediction_lab": {"enabled": True, "mode": "collector", "groups": ["weather"], "use_shared_pipeline": True},
+                    "strategy": {"min_edge": 0.01, "min_confidence": 0.5, "enable_news": False, "enable_social": False, "enable_ai": False},
+                }
+            )
+            weather_signal = {
+                "signal_type": "weather",
+                "predicted_prob": 0.86,
+                "confidence": 0.91,
+                "source_timestamp": "2026-04-27T12:05:00+00:00",
+                "question_side": "above",
+                "data": {
+                    "forecast_high": 84.0,
+                    "forecast_low": 63.0,
+                    "actual_temp_used": 84.0,
+                    "predicted_temp": 84.0,
+                    "threshold": 80.0,
+                    "sources": ["nws"],
+                    "source_details": [
+                        {
+                            "source_name": "nws",
+                            "forecast_high": 84.0,
+                            "forecast_low": 63.0,
+                            "forecast_period_name": "Today",
+                            "forecast_period_start": "2026-04-27T06:00:00-05:00",
+                            "forecast_period_end": "2026-04-27T18:00:00-05:00",
+                        }
+                    ],
+                    "settlement_source": "nws",
+                },
+            }
+            artifact = {
+                "strategy_signal": {
+                    "market_id": "KXHIGHTOKC-26APR27-T80",
+                    "question": "Will the high temperature in Oklahoma City be above 80 degrees on Apr 27?",
+                    "signal_details": {"live": weather_signal},
+                },
+                "strategy_trace": {},
+                "as_of": "2026-04-27T12:06:00+00:00",
+            }
+            market = SimpleNamespace(
+                id="KXHIGHTOKC-26APR27-T80",
+                question="Will the high temperature in Oklahoma City be above 80 degrees on Apr 27?",
+                category="weather",
+                metadata={"market_group": "weather", "series": "daily_temperature"},
+            )
+
+            snapshot = lab._build_weather_source_snapshot(artifact, market)
+
+            self.assertEqual(snapshot["forecast_date"], "2026-04-27")
+            self.assertEqual(snapshot["weather_date"], "2026-04-27")
+            self.assertEqual(snapshot["date_validation"]["reason"], "dates_match")
+            self.assertEqual(snapshot["date_validation"]["weather_date"], "2026-04-27")
+            self.assertEqual(snapshot["sources"][0]["forecast_date"], "2026-04-27")
+            self.assertEqual(snapshot["sources"][0]["target_forecast_date"], "2026-04-27")
+
+    def test_prediction_lab_weather_snapshot_uses_source_detail_weather_date_for_strict_replay_grade(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "data_dir": tmpdir,
+                "prediction_lab": {
+                    "enabled": True,
+                    "mode": "collector",
+                    "observer_mode": True,
+                    "groups": ["weather"],
+                    "score_only": False,
+                    "record_all_scored": True,
+                    "collector_record_predictions": True,
+                    "collector_record_market_snapshots": True,
+                    "use_shared_pipeline": True,
+                },
+                "strategy": {"min_edge": 0.01, "min_confidence": 0.5, "enable_news": False, "enable_social": False, "enable_ai": False},
+                "max_entry_price": 0.7,
+            }
+            lab = PredictionLab(config)
+            weather_signal = {
+                "signal_type": "weather",
+                "predicted_prob": 0.86,
+                "confidence": 0.91,
+                "source_timestamp": "2026-04-27T12:05:00+00:00",
+                "ttl_seconds": 600,
+                "question_side": "above",
+                "data": {
+                    "forecast_high": 84.0,
+                    "forecast_low": 63.0,
+                    "actual_temp_used": 84.0,
+                    "predicted_temp": 84.0,
+                    "threshold": 80.0,
+                    "city": "oklahoma city",
+                    "sources": ["nws"],
+                    "source_details": [
+                        {
+                            "source_name": "nws",
+                            "forecast_high": 84.0,
+                            "forecast_low": 63.0,
+                            "weather_date": "2026-04-27",
+                            "forecast_date": "2026-04-27",
+                            "date_validation": {"ok": True},
+                            "fetched_at": "2026-04-27T12:05:00+00:00",
+                        }
+                    ],
+                    "agreement": 0.93,
+                    "settlement_source": "nws",
+                    "date_validation": {"ok": True},
+                },
+            }
+            signal = {
+                "market_id": "KXHIGHTOKC-26APR27-T80",
+                "exchange": "kalshi",
+                "question": "Will the high temperature in Oklahoma City be above 80 degrees on Apr 27?",
+                "direction": "BUY_YES",
+                "model_probability": 0.86,
+                "market_price": 0.4,
+                "yes_market_price": 0.4,
+                "no_market_price": 0.6,
+                "edge": 0.46,
+                "confidence": 0.91,
+                "signals": {"live": 0.86},
+                "signal_details": {"live": weather_signal},
+            }
+            lab.decision_evaluator = DecisionPipelineEvaluator(
+                lab.config,
+                strategy=_TracedSignalStrategy(signal),
+                kelly_sizer=_FixedKelly(10.0),
+                risk_policy=_AllowRisk(),
+            )
+            market = SimpleNamespace(
+                id="KXHIGHTOKC-26APR27-T80",
+                exchange="kalshi",
+                question="Will the high temperature in Oklahoma City be above 80 degrees on Apr 27?",
+                category="weather",
+                yes_price=0.4,
+                no_price=0.6,
+                volume=4500,
+                closes_at=datetime.now(timezone.utc) + timedelta(hours=6),
+                metadata={"market_group": "weather", "series": "daily_temperature"},
+            )
+            exchange = SimpleNamespace(
+                get_markets_direct=lambda **kwargs: [market],
+                get_order_book=lambda market_id: {
+                    "best_yes_ask": 0.41,
+                    "best_yes_bid": 0.40,
+                    "best_no_ask": 0.60,
+                    "best_no_bid": 0.59,
+                },
+            )
+
+            lab.run(exchange)
+            prediction_row = load_jsonl(lab.predictions_path)[0]
+            prediction_snapshot = prediction_row["decision_artifact"]["source_context"]["data"]["weather_source_snapshot"]
+            quality = classify_replay_row_quality(prediction_row["decision_artifact"], prediction_row)
+
+            self.assertEqual(prediction_snapshot["weather_date"], "2026-04-27")
+            self.assertEqual(prediction_snapshot["forecast_date"], "2026-04-27")
+            self.assertEqual(prediction_snapshot["date_validation"]["reason"], "dates_match")
+            self.assertEqual(prediction_snapshot["date_validation"]["market_date"], "2026-04-27")
+            self.assertEqual(prediction_snapshot["date_validation"]["weather_date"], "2026-04-27")
+            self.assertEqual(prediction_snapshot["sources"][0]["weather_date"], "2026-04-27")
+            self.assertEqual(prediction_snapshot["sources"][0]["date_validation"], {"ok": True})
+            self.assertEqual(quality.category, "replay_grade_original")
+            self.assertTrue(quality.include_in_strict)
+
     def test_prediction_lab_shared_pipeline_records_buy_artifact_and_preserves_prediction_schema(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = {
@@ -521,6 +1074,68 @@ class PredictionLabCollectorTests(unittest.TestCase):
             self.assertEqual(row["decision_artifact"]["execution_snapshot_source"], "book")
             self.assertEqual(row["decision_artifact"]["source_context"]["source"], "provided")
 
+    def test_prediction_lab_execution_feasibility_exact_match(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            artifact = self._collect_sports_buy_artifact(
+                tmpdir,
+                [
+                    {"best_yes_ask": 0.41, "best_yes_bid": 0.40, "best_no_ask": 0.60, "best_no_bid": 0.59, "best_yes_ask_quantity": 100},
+                    {"best_yes_ask": 0.41, "best_yes_bid": 0.40, "best_no_ask": 0.60, "best_no_bid": 0.59, "best_yes_ask_quantity": 100},
+                ],
+            )
+
+        feasibility = artifact["execution_feasibility"]
+        self.assertEqual(artifact["pre_logic_order_book_snapshot"]["stage"], "pre_logic")
+        self.assertEqual(artifact["post_logic_order_book_snapshot"]["stage"], "post_logic")
+        self.assertGreaterEqual(artifact["decision_latency_ms"], 0)
+        self.assertTrue(feasibility["feasible"])
+        self.assertTrue(feasibility["ask_unchanged"])
+        self.assertTrue(feasibility["sufficient_quantity"])
+        self.assertFalse(feasibility["mutates_paper_state"])
+
+    def test_prediction_lab_execution_feasibility_allows_configured_slippage(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            artifact = self._collect_sports_buy_artifact(
+                tmpdir,
+                [
+                    {"best_yes_ask": 0.41, "best_yes_bid": 0.40, "best_no_ask": 0.60, "best_no_bid": 0.59},
+                    {"best_yes_ask": 0.415, "best_yes_bid": 0.405, "best_no_ask": 0.585, "best_no_bid": 0.575},
+                ],
+                lab_patch={"execution_feasibility_max_slippage": 0.01},
+            )
+
+        feasibility = artifact["execution_feasibility"]
+        self.assertTrue(feasibility["feasible"])
+        self.assertFalse(feasibility["ask_unchanged"])
+        self.assertTrue(feasibility["ask_within_slippage"])
+        self.assertAlmostEqual(feasibility["ask_delta"], 0.005)
+
+    def test_prediction_lab_execution_feasibility_rejects_moved_or_unavailable_ask(self):
+        cases = {
+            "moved": (
+                {"best_yes_ask": 0.41, "best_yes_bid": 0.40, "best_no_ask": 0.60, "best_no_bid": 0.59},
+                {"best_yes_ask": 0.43, "best_yes_bid": 0.42, "best_no_ask": 0.58, "best_no_bid": 0.57},
+                "ask_within_slippage",
+            ),
+            "unavailable": (
+                {"best_yes_ask": 0.41, "best_yes_bid": 0.40, "best_no_ask": 0.60, "best_no_bid": 0.59},
+                {"best_yes_ask": None, "best_yes_bid": 0.40, "best_no_ask": 0.60, "best_no_bid": 0.59},
+                "same_side_ask_present",
+            ),
+        }
+        for name, (pre_book, post_book, failed_check) in cases.items():
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    artifact = self._collect_sports_buy_artifact(
+                        tmpdir,
+                        [pre_book, post_book],
+                        lab_patch={"execution_feasibility_max_slippage": 0.01},
+                    )
+
+                feasibility = artifact["execution_feasibility"]
+                self.assertFalse(feasibility["feasible"])
+                self.assertIn(failed_check, feasibility["failed_checks"])
+
     def test_prediction_lab_shared_pipeline_uses_isolated_opportunity_bankroll(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = {
@@ -612,6 +1227,70 @@ class PredictionLabCollectorTests(unittest.TestCase):
             self.assertFalse(prediction_row["opportunity_mode"]["mutates_portfolio_account"])
             self.assertEqual(snapshot_row["opportunity_mode"]["bankroll_usd"], 250.0)
 
+    def test_prediction_lab_shared_pipeline_uses_fixed_opportunity_risk_not_paper_risk_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            Path(tmpdir, "risk_state.json").write_text(json.dumps({"max_drawdown_halt": True}), encoding="utf-8")
+            config = {
+                "data_dir": tmpdir,
+                "prediction_lab": {
+                    "enabled": True,
+                    "mode": "collector",
+                    "groups": ["sports"],
+                    "score_only": False,
+                    "record_all_scored": True,
+                    "collector_record_predictions": True,
+                    "use_shared_pipeline": True,
+                },
+                "strategy": {"min_edge": 0.01, "min_confidence": 0.5, "enable_news": False, "enable_social": False, "enable_ai": False},
+                "max_entry_price": 0.7,
+            }
+            lab = PredictionLab(config)
+            signal = {
+                "market_id": "unit-risk-isolation",
+                "exchange": "kalshi",
+                "question": "Will the NBA test team win?",
+                "direction": "BUY_YES",
+                "model_probability": 0.7,
+                "market_price": 0.4,
+                "yes_market_price": 0.4,
+                "no_market_price": 0.6,
+                "edge": 0.3,
+                "confidence": 0.9,
+                "signals": {"unit": 0.7},
+            }
+            lab.decision_evaluator.strategy = _TracedSignalStrategy(signal)
+            lab.decision_evaluator.kelly_sizer = _FixedKelly(10.0)
+            market = SimpleNamespace(
+                id="unit-risk-isolation",
+                exchange="kalshi",
+                question="Will the NBA test team win?",
+                category="sports",
+                yes_price=0.4,
+                no_price=0.6,
+                volume=4500,
+                closes_at=datetime.now(timezone.utc) + timedelta(hours=6),
+                metadata={"market_group": "sports", "series": "unit"},
+            )
+            exchange = SimpleNamespace(
+                get_markets_direct=lambda **kwargs: [market],
+                get_order_book=lambda market_id: {
+                    "best_yes_ask": 0.41,
+                    "best_yes_bid": 0.40,
+                    "best_no_ask": 0.60,
+                    "best_no_bid": 0.59,
+                },
+            )
+
+            lab.run(exchange)
+            row = load_jsonl(lab.predictions_path)[0]
+
+            self.assertEqual(row["decision_artifact"]["final_action"], "BUY_YES")
+            self.assertEqual(row["decision_artifact"]["shared_core_decision"]["reason_code"], "approved")
+            self.assertEqual(
+                row["decision_artifact"]["shared_core_decision"]["reasoning"]["risk"]["metadata"]["risk_policy"],
+                "fixed_opportunity",
+            )
+
     def test_prediction_lab_shared_pipeline_vetoed_signal_is_stored_skip_safe(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = {
@@ -683,6 +1362,7 @@ class PredictionLabCollectorTests(unittest.TestCase):
             snapshot_row = load_jsonl(lab.market_snapshots_path)[0]
             resolve_result = lab.resolve_open_predictions(exchange)
             resolved_row = load_jsonl(lab.predictions_path)[0]
+            resolution_row = load_jsonl(lab.resolutions_path)[0]
 
             self.assertEqual(prediction_row["direction"], "SKIP")
             self.assertEqual(snapshot_row["direction"], "SKIP")
@@ -695,8 +1375,9 @@ class PredictionLabCollectorTests(unittest.TestCase):
             self.assertEqual(prediction_row["decision_artifact"]["final_reason_code"], "kelly_zero_size")
             self.assertEqual(prediction_row["shared_pipeline"]["final_reason_code"], "kelly_zero_size")
             self.assertEqual(resolve_result["skipped"], 1)
-            self.assertEqual(resolved_row["resolution"]["is_correct"], None)
-            self.assertEqual(resolved_row["resolution"]["position_size"], 0.0)
+            self.assertNotIn("resolution", resolved_row)
+            self.assertEqual(resolution_row["resolution"]["is_correct"], None)
+            self.assertEqual(resolution_row["resolution"]["position_size"], 0.0)
 
     def test_prediction_lab_shared_pipeline_risk_denial_with_positive_kelly_is_stored_skip_safe(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1100,9 +1781,9 @@ class PredictionLabCollectorTests(unittest.TestCase):
         self.assertTrue(_DaemonStub.kwargs["config_patch"]["prediction_lab"]["collector_record_market_snapshots"])
         self.assertTrue(_DaemonStub.kwargs["config_patch"]["prediction_lab"]["collector_record_predictions"])
         self.assertTrue(_DaemonStub.kwargs["config_patch"]["prediction_lab"]["record_all_scored"])
-        self.assertFalse(_DaemonStub.kwargs["config_patch"]["prediction_lab"]["score_only"])
+        self.assertNotIn("score_only", _DaemonStub.kwargs["config_patch"]["prediction_lab"])
         self.assertEqual(_DaemonStub.kwargs["config_patch"]["prediction_lab"]["min_confidence_to_record"], 0.0)
-        self.assertEqual(_DaemonStub.kwargs["config_patch"]["prediction_lab"]["min_edge_to_record"], -1.0)
+        self.assertNotIn("min_edge_to_record", _DaemonStub.kwargs["config_patch"]["prediction_lab"])
         self.assertFalse(_DaemonStub.kwargs["config_patch"]["trading"]["enabled"])
         self.assertFalse(_DaemonStub.kwargs["config_patch"]["trading_enabled"])
 
@@ -1296,8 +1977,9 @@ class PredictionLabCollectorTests(unittest.TestCase):
             self.assertEqual(result["resolved"], 1)
             self.assertAlmostEqual(result["net_pnl"], 18.6)
             self.assertEqual(rows[0]["status"], "resolved")
-            self.assertAlmostEqual(rows[0]["resolution"]["position_size"], 20.0)
+            self.assertNotIn("resolution", rows[0])
             self.assertAlmostEqual(resolutions[0]["resolution"]["net_pnl"], 18.6)
+            self.assertAlmostEqual(resolutions[0]["resolution"]["position_size"], 20.0)
 
     def test_prediction_lab_rows_include_weather_risk_metadata_when_derivable(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -41,9 +41,11 @@ def main() -> int:
                 'collector_record_market_snapshots': True,
                 'collector_record_predictions': True,
                 'record_all_scored': True,
-                'score_only': False,
+                # Preserve the configured score_only setting. In score-only
+                # replay-readiness mode, market_snapshots.jsonl is the replay
+                # target and predictions.jsonl should not be opened just because
+                # the collector is running with --observer.
                 'min_confidence_to_record': 0.0,
-                'min_edge_to_record': -1.0,
             },
             'trading': {
                 'enabled': False,

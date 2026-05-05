@@ -217,6 +217,15 @@ class DecisionPipelineTests(unittest.TestCase):
 
         self.assertFalse(config["prediction_lab"]["use_shared_pipeline"])
 
+    def test_repo_config_enables_shared_pipeline_without_disabling_observer_or_score_only(self):
+        config = load_config(Path(__file__).resolve().parents[1] / "config.yaml")
+
+        prediction_lab = config["prediction_lab"]
+        self.assertTrue(prediction_lab["use_shared_pipeline"])
+        self.assertEqual(prediction_lab["mode"], "collector")
+        self.assertTrue(prediction_lab["observer_mode"])
+        self.assertTrue(prediction_lab["score_only"])
+
 
 if __name__ == "__main__":
     unittest.main()

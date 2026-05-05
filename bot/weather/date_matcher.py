@@ -57,6 +57,9 @@ WEATHER_DATE_FIELDS = (
     "observation_date",
     "observed_date",
     "forecast_date",
+    "forecast_start",
+    "forecast_period_start",
+    "period_start",
     "date",
     "target_date",
 )
