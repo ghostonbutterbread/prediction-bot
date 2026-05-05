@@ -99,7 +99,20 @@ This is the main spec for the remaining live-hardening workstream.
 
 ---
 
-### 7. `docs/PREDICTION_LAB_TUNING_DIRECTION_SPEC.md`
+### 7. `docs/PAPER_WEATHER_FINDINGS_2026-05-04.md`
+Read this for the freshest paper-weather findings.
+
+Use it to understand:
+- what the current 15 open paper trades are showing
+- why some trades look golden-ish while others are cheap lottery/hidden-gem trades
+- why forecast-direction side selection matters, especially buying NO when evidence rejects YES
+- why an explicit market allowlist gate is now recommended
+
+This is the quickest handoff note for future agents working on weather strategy, paper-trade quality, or market gating.
+
+---
+
+### 8. `docs/PREDICTION_LAB_TUNING_DIRECTION_SPEC.md`
 Read this for the current immediate strategy direction.
 
 Use it to understand:
@@ -111,7 +124,7 @@ This is the strategy-iteration bridge between current readiness and future deplo
 
 ---
 
-### 8. `docs/LIVE_DEPLOYMENT_READINESS_PLAN.md`
+### 9. `docs/LIVE_DEPLOYMENT_READINESS_PLAN.md`
 Read this when the question becomes "what must be true before unattended or true deployment is responsible?"
 
 Use it to understand:
@@ -124,7 +137,7 @@ This is the main bridge from current hardening work to real deployment readiness
 
 ---
 
-### 9. `docs/LIVE_IMPLEMENTATION_BUILD_ORDER_CHECKLIST.md`
+### 10. `docs/LIVE_IMPLEMENTATION_BUILD_ORDER_CHECKLIST.md`
 Read this when you want the concrete implementation order.
 
 Use it to understand:
@@ -137,7 +150,7 @@ This is the execution checklist that turns the broader specs into a practical bu
 
 ---
 
-### 10. `docs/LIVE_CANARY_READINESS.md`
+### 11. `docs/LIVE_CANARY_READINESS.md`
 Read this only when preparing a tiny supervised live test.
 
 Use it to understand:
@@ -154,6 +167,7 @@ This is a launch-readiness note, not a build spec.
 ### Strategic layer
 These tell us where the project is going:
 - `docs/OVERALL_DIRECTION_SPEC.md`
+- `docs/PAPER_WEATHER_FINDINGS_2026-05-04.md`
 - `docs/PREDICTION_LAB_TUNING_DIRECTION_SPEC.md`
 - `LIVE_PARITY_CHECKLIST.md`
 - `docs/LIVE_DEPLOYMENT_READINESS_PLAN.md`
@@ -178,6 +192,8 @@ These are narrower supporting specs for adjacent workstreams:
 - `docs/architecture/paper_live_rollout_log.md` — rollout logging concept
 - `docs/architecture/paper_live_rollout_log_and_standby_spec.md` — rollout + standby design
 - `docs/architecture/prediction_lab_shared_pipeline_spec.md` — shared collector/replay/paper/live decision-pipeline architecture for Prediction Lab as a wrapper, not duplicated logic
+- `docs/architecture/prediction_lab_blind_replay_validator_spec.md` — blind replay, separate resolution ledger, replay-output table, and active dataset validator requirements
+- `docs/architecture/prediction_lab_backfill_upgrader_spec.md` — old-row inventory, artifact/log/historical recovery, evidence tiers, and provenance-labeled upgraded datasets
 - `docs/architecture/prediction_lab_long_run_collection_spec.md` — Prediction Lab long-run collection direction
 - `docs/architecture/prediction_lab_long_run_collection_v1_spec.md` — earlier/v1 collection version
 

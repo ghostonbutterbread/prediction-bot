@@ -1,6 +1,6 @@
 # Prediction Bot — Overall Direction Spec
 
-_Last updated: 2026-04-29_
+_Last updated: 2026-05-04_
 
 ## Purpose
 
@@ -82,6 +82,38 @@ But it is far enough along that the project should not stall here waiting for pe
 ---
 
 ## Current Judgment
+
+### 2026-05-04 review checkpoint
+
+Current repo/data review shows the direction is still right, but the immediate blocker has shifted from "does Prediction Lab collect?" to "is the current collection/replay dataset replay-grade enough to trust conclusions?"
+
+Observed state from `data/paper/prediction_lab/` on 2026-05-04:
+
+- collector state says `mode=collector`, `observer_mode=true`, `trading_enabled=false`, and `order_execution_enabled=false`
+- stored data includes `2,669` prediction rows, `129,971` market snapshots, and `2,080` resolution rows
+- collector is currently not running; monitor reports `collector_not_running`, stale collection, and stale logs
+- storage use is about `1.15 GB` against the `25 GB` cap, so storage is not the pause reason
+- legacy resolved rows show very poor hypothetical P&L, but those rows predate the shared-pipeline artifact path and should not be treated as proof of current logic quality
+- newer shared-pipeline snapshots contain decision artifacts, but current replay-grade coverage is still incomplete until recorded weather/source snapshots and order-book/execution snapshots are populated consistently
+
+Current conclusion:
+
+> Prediction Lab is the correct place to answer "what would our P&L have been?" and "are we making good observations?", but the next pass must prioritize replay-grade data quality and analysis/reporting before using the collected P&L as strategy truth.
+
+For live direction, this means:
+
+- do **not** scale live based on the current lab P&L alone
+- fix/restart collector monitoring first
+- make replay distinguish legacy/incomplete rows from strict replay-grade rows
+- use strict rows for conclusions and coverage rows only for debugging what data is missing
+- keep live limited to supervised canary only after the lab and parity artifacts agree
+
+For bucket direction, this means:
+
+- keep the current narrow-bucket safety layer in place
+- do not increase bucket exposure from the old replay alone
+- define a future bucket expansion rule around distribution probability, station/source agreement, volume/liquidity, and forward Prediction Lab evidence
+- if bucket allocation is added later, it should be a capped bucket budget across multiple independent high-quality buckets, not unlimited per-bucket sizing
 
 ### Prediction Lab status
 **Strong enough to become the primary logic-tuning surface now.**
