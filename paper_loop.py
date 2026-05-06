@@ -124,8 +124,11 @@ def get_config():
             "news_weight": float(os.getenv("NEWS_WEIGHT", "0.15")),
             "ai_weight": float(os.getenv("AI_WEIGHT", "0.20")),
             # News uses fallback sources (Yahoo Finance RSS, Bing News RSS).
-            # If all fail, the strategy degrades gracefully to price+volume signals.
+            # If all fail, paper mode fails closed instead of silently trading on
+            # redistributed lower-quality signals.
             "enable_news": os.getenv("ENABLE_NEWS_FALLBACK", "true").lower() != "false",
+            "fail_closed_on_news_source_failure": _env_bool("FAIL_CLOSED_ON_NEWS_SOURCE_FAILURE", True),
+            "enable_weather_hidden_gem_safety_guard": _env_bool("ENABLE_WEATHER_HIDDEN_GEM_SAFETY_GUARD", True),
             "enable_ai": False,   # Still off — AI calls depend on external LLM quota
             "enable_social": False,  # Still off — Twitter/X API not configured
         },

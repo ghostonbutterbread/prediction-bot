@@ -37,6 +37,29 @@ class EnhancedStrategyEngine:
         self.social_weight = config.get("social_weight", 0.15)
         self.enable_news = config.get("enable_news", True)
         self.enable_social = config.get("enable_social", True)
+        self.fail_closed_on_news_source_failure = bool(
+            config.get("fail_closed_on_news_source_failure", False)
+        )
+        self._last_news_lookup_sources_failed = False
+        self.enable_weather_hidden_gem_safety_guard = bool(
+            config.get("enable_weather_hidden_gem_safety_guard", False)
+        )
+        self.weather_hidden_gem_max_entry_price = self._config_float(
+            config.get("weather_hidden_gem_max_entry_price"),
+            0.05,
+        )
+        self.weather_hidden_gem_probability_threshold = self._config_float(
+            config.get("weather_hidden_gem_probability_threshold"),
+            0.20,
+        )
+        self.weather_hidden_gem_min_live_confidence = self._config_float(
+            config.get("weather_hidden_gem_min_live_confidence"),
+            0.60,
+        )
+        self.weather_hidden_gem_min_source_agreement = self._config_float(
+            config.get("weather_hidden_gem_min_source_agreement"),
+            0.75,
+        )
 
         if self.enable_news:
             self.news = NewsFeed()
@@ -128,23 +151,8 @@ class EnhancedStrategyEngine:
         if not signals:
             return None
 
-        # If the news feed has exhausted all fallback sources, remove its weight
-        # and redistribute proportionally among remaining active signals so that
-        # total confidence isn't artificially deflated by a zeroed news weight.
-        if "news" in signals and self.enable_news:
-            news_feed_obj = getattr(self, "news", None)
-            if news_feed_obj is not None and getattr(news_feed_obj, "all_sources_failed", False):
-                redistributed = weights.pop("news", 0)
-                signals.pop("news", None)
-                if weights and redistributed > 0:
-                    remaining_total = sum(weights.values())
-                    if remaining_total > 0:
-                        for k in list(weights.keys()):
-                            weights[k] += redistributed * (weights[k] / remaining_total)
-                logger.debug(
-                    f"News unavailable — redistributed {redistributed:.0%} weight "
-                    f"to remaining signals: {list(weights.keys())}"
-                )
+        if self._handle_news_source_failure(signals, weights):
+            return None
 
         if not signals:
             return None
@@ -208,6 +216,15 @@ class EnhancedStrategyEngine:
         if edge < self.min_edge:
             return None
         if weighted_confidence < self.min_confidence:
+            return None
+
+        live_signal_for_gate = validated_signals.get("live")
+        if self._weather_hidden_gem_safety_rejects(live_signal_for_gate, direction, entry_price):
+            logger.debug(
+                "Weather hidden-gem safety guard rejected %s for %s",
+                direction,
+                getattr(market, "id", ""),
+            )
             return None
 
         return {
@@ -321,6 +338,83 @@ class EnhancedStrategyEngine:
             return value
         return round(float(value), digits)
 
+    def _handle_news_source_failure(self, signals: dict[str, dict], weights: dict[str, float]) -> bool:
+        if not self.enable_news or not self._last_news_lookup_sources_failed:
+            return False
+        if self.fail_closed_on_news_source_failure:
+            logger.debug("News unavailable — fail-closed strategy policy skipped trade")
+            return True
+
+        if "news" not in signals:
+            return False
+
+        redistributed = weights.pop("news", 0)
+        signals.pop("news", None)
+        if weights and redistributed > 0:
+            remaining_total = sum(weights.values())
+            if remaining_total > 0:
+                for k in list(weights.keys()):
+                    weights[k] += redistributed * (weights[k] / remaining_total)
+        logger.debug(
+            f"News unavailable — redistributed {redistributed:.0%} weight "
+            f"to remaining signals: {list(weights.keys())}"
+        )
+        return False
+
+    def _weather_hidden_gem_safety_rejects(
+        self,
+        live_signal: dict | None,
+        direction: str,
+        entry_price: float | None,
+    ) -> bool:
+        if not self.enable_weather_hidden_gem_safety_guard:
+            return False
+        try:
+            entry = float(entry_price)
+        except (TypeError, ValueError):
+            return False
+        if entry > self.weather_hidden_gem_max_entry_price:
+            return False
+        if not isinstance(live_signal, dict) or live_signal.get("signal_type") != "weather":
+            return False
+
+        data = live_signal.get("data") if isinstance(live_signal.get("data"), dict) else {}
+        question_side = str(live_signal.get("question_side") or data.get("question_side") or "").lower()
+
+        # Exact weather buckets at 1–5¢ need distribution support. A point forecast
+        # near the bucket is not enough to call a 10x–25x hidden gem.
+        if question_side == "range" and data.get("distribution_probability") is None:
+            return True
+
+        # Tail hidden gems are skipped only when validated live weather strongly
+        # disagrees with the candidate side. This is direction-based, not YES-biased.
+        if question_side not in {"above", "below"}:
+            return False
+        try:
+            probability = float(live_signal.get("predicted_prob"))
+            confidence = float(live_signal.get("confidence") or 0.0)
+            agreement = float(data.get("agreement") or 0.0)
+        except (TypeError, ValueError):
+            return False
+        if confidence < self.weather_hidden_gem_min_live_confidence:
+            return False
+        if agreement < self.weather_hidden_gem_min_source_agreement:
+            return False
+
+        normalized_direction = str(direction or "").upper()
+        threshold = max(0.0, min(0.5, self.weather_hidden_gem_probability_threshold))
+        candidate_probability = probability if normalized_direction == "BUY_YES" else 1.0 - probability
+        return candidate_probability <= threshold
+
+    @staticmethod
+    def _config_float(value: Any, default: float) -> float:
+        try:
+            if value is None:
+                return float(default)
+            return float(value)
+        except (TypeError, ValueError):
+            return float(default)
+
     def _price_signal(self, market, order_book: dict = None) -> Optional[dict]:
         """Detect mispricing using market microstructure + known biases."""
         yes_price = market.yes_price
@@ -378,11 +472,15 @@ class EnhancedStrategyEngine:
 
     def _news_signal(self, market) -> Optional[dict]:
         """Analyze news sentiment for the market."""
+        self._last_news_lookup_sources_failed = False
         try:
             news_items = self.news.get_news_for_market(market.question)
 
             if not news_items:
+                self._last_news_lookup_sources_failed = bool(getattr(self.news, "all_sources_failed", False))
                 return None
+
+            self._last_news_lookup_sources_failed = False
 
             # Average sentiment weighted by relevance
             total_weight = sum(n.relevance * getattr(n, "recency_weight", 1.0) for n in news_items)
@@ -416,6 +514,7 @@ class EnhancedStrategyEngine:
                 "warnings": quality["warnings"],
             }
         except Exception as e:
+            self._last_news_lookup_sources_failed = True
             logger.debug(f"News signal error: {e}")
             return None
 
