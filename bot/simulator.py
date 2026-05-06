@@ -30,6 +30,8 @@ from bot.shared_core import (
     normalize_trade_context,
     reason_to_key,
 )
+from bot.shared_core.decision import HIDDEN_GEM_ENTRY_PRICE_CAP
+from bot.strategy_lanes import select_strategy_lane
 from bot.strategies.enhanced import EnhancedStrategyEngine, KellySizer
 from bot.parity_audit import normalize_parity_trade_row, summarize_normalized_rows
 from bot.trade_audit import (
@@ -647,9 +649,21 @@ class Simulator:
             return "invalid_signal"
 
         market_price = normalized["entry_price"]
-        if edge < self.min_edge:
+        strategy_lane = select_strategy_lane(
+            entry_price=market_price,
+            win_probability=float(normalized["win_probability"]),
+            edge=edge,
+            confidence=confidence,
+            min_edge=float(self.min_edge),
+            min_confidence=float(self.min_confidence),
+            hidden_gem_entry_price_cap=HIDDEN_GEM_ENTRY_PRICE_CAP,
+            config=dict(self.config.get("strategy_lanes", {}) or {}),
+        )
+        if not strategy_lane.allowed:
+            return strategy_lane.reason_code
+        if edge < strategy_lane.effective_min_edge:
             return "edge_below_threshold"
-        if confidence < self.min_confidence:
+        if confidence < strategy_lane.effective_min_confidence:
             return "confidence_below_threshold"
         if market_price > self.max_entry_price:
             return "entry_price_above_cap"

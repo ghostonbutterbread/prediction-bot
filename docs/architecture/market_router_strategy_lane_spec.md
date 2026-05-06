@@ -318,3 +318,43 @@ This pass is complete when:
 - Paper/live/shared-core all fail closed on missing or disallowed route.
 - Targeted tests pass for classification, Prediction Lab, paper, live, and shared-core routing.
 - No new strategy-lane behavior is introduced before route safety is verified.
+
+## Phase 2 strategy-lane split
+
+After route safety, the shared core may select a strategy lane for decision
+metadata and optional explicitly configured threshold behavior. The route
+handler/category decision remains separate: `market_route` still decides whether
+the market may enter shared core at all, and `strategy_lane` only interprets the
+already-normalized trade economics.
+
+Supported lane IDs:
+
+- `edge` — default non-cheap-contract path using the existing configured
+  `min_edge`, `min_confidence`, max-entry, EV/risk, sizing, and execution gates.
+- `hidden_gem` — cheap-contract path selected when entry price is at or below
+  the existing hidden-gem entry cap; the existing hidden-gem edge and probability
+  multiple gates still live in shared core.
+- `confidence_slow_profit` — optional high-confidence, lower-edge lane. It is
+  inert unless `strategy_lanes.enabled: true`,
+  `strategy_lanes.confidence_slow_profit.enabled: true`, and explicit lane
+  thresholds are configured. Config normalization treats that explicit sub-lane
+  enablement as allowlist inclusion for `confidence_slow_profit`; defaults still
+  omit it from `enabled_lanes`.
+
+Default config keeps lanes as metadata only:
+
+```yaml
+strategy_lanes:
+  enabled: false
+  enabled_lanes:
+    - edge
+    - hidden_gem
+  confidence_slow_profit:
+    enabled: false
+    min_edge:
+    min_confidence:
+```
+
+When defaults are used, approvals and rejections remain equivalent to the
+pre-lane edge/confidence/hidden-gem behavior. New lane behavior requires an
+explicit config change and is recorded in `decision.reasoning["strategy_lane"]`.
