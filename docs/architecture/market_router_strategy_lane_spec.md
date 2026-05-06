@@ -1,6 +1,6 @@
 # Market Router + Strategy Lane Spec
 
-_Last updated: 2026-05-05_
+_Last updated: 2026-05-06_
 
 ## Purpose
 
@@ -23,10 +23,10 @@ Core rule:
 
 ## Non-goals
 
-- Do not implement the full confidence/edge/hidden-gem lane split in this pass.
 - Do not add new sports or energy trading logic in this pass.
 - Do not allow broad keyword matching to approve trades.
 - Do not use route labels as proof of profitability; routes only decide whether the bot is allowed to reason about the market.
+- Do not treat the 2026-05-06 hotfix as final lane strategy. It is a safety bridge that blocks weak penny weather buckets until the evidence-card work exists.
 
 ## Current implementation review
 
@@ -319,6 +319,19 @@ This pass is complete when:
 - Targeted tests pass for classification, Prediction Lab, paper, live, and shared-core routing.
 - No new strategy-lane behavior is introduced before route safety is verified.
 
+## Current branch state — 2026-05-06
+
+The active `feature/weather-strategy-lanes` branch already has an initial lane-selection implementation in progress:
+
+- `bot/strategy_lanes.py` selects `edge`, `hidden_gem`, and optional `confidence_slow_profit` lanes.
+- `bot/shared_core/decision.py` records `decision.reasoning["strategy_lane"]` and can reject disabled lanes before Kelly/risk sizing.
+- Default lane config is metadata-preserving: `edge` and `hidden_gem` stay enabled, while `confidence_slow_profit` is inert unless explicitly enabled.
+- The 2026-05-06 hotfix on `main` / runtime added a paper safety bridge in `bot/strategies/enhanced.py` and `paper_loop.py`: cheap weather bucket hidden-gems require `distribution_probability`; cheap tail hidden-gems can be vetoed when validated live weather strongly rejects the candidate side; paper can fail closed on unusable news/feed state.
+
+Important branch rule:
+
+> Continue lanes from the current branch state, but fold the hotfix intent into the lane/evidence-card design instead of preserving it as an unrelated strategy-layer special case forever.
+
 ## Phase 2 strategy-lane split
 
 After route safety, the shared core may select a strategy lane for decision
@@ -358,3 +371,119 @@ strategy_lanes:
 When defaults are used, approvals and rejections remain equivalent to the
 pre-lane edge/confidence/hidden-gem behavior. New lane behavior requires an
 explicit config change and is recorded in `decision.reasoning["strategy_lane"]`.
+
+## Phase 3 evidence-card lane expansion
+
+Phase 3 should convert the hotfix into durable lane/evidence-card logic.
+
+The immediate target is the `hidden_gem` lane for `weather.daily_temperature` markets. The goal is not to remove hidden gems; it is to keep 24x-style opportunities possible only when the evidence explains why the market is wrong.
+
+### Phase 3A prerequisite: beta-gated rollout wiring
+
+The 2026-05-06 `feature/policy-beta-config` scaffold is now merged into `main` and available to this branch through `config["strategy_policy_normalized"]`.
+
+Before adding more lane behavior, Phase 3 must first wire lane/weather-risk behavior through `strategy_policy` so stable behavior can remain comparable and reversible:
+
+- `strategy_policy.version: stable` or `beta.mode: off` must preserve old/stable decision behavior except for explicitly accepted safety scaffolding such as route identity metadata.
+- `strategy_policy.version: beta` with `beta.mode: shadow` should compute and record beta lane/evidence-card decisions next to the stable decision, but must not change final paper/live/live-like action.
+- `strategy_policy.version: beta` with `beta.mode: enforce` may allow beta lane/evidence-card logic to affect paper decisions after shadow data is reviewed.
+- live should remain stable until explicit promotion.
+- `strategy_lanes.enabled` and lane-specific config are not enough by themselves for behavior-changing rollout; behavior-changing lane/weather-risk gates must also check the normalized strategy policy mode and relevant feature flag.
+
+Initial feature-flag mapping:
+
+```yaml
+strategy_policy:
+  version: beta
+  beta:
+    mode: shadow   # off | shadow | enforce
+    features:
+      weather_hidden_gem_evidence_card: true
+      bucket_distribution_scoring: true
+      hidden_gem_lane_gates: true
+```
+
+Recommended implementation order:
+
+1. Add policy helpers/adapters near the decision pipeline so callers can ask whether beta lane logic is `off`, `shadow`, or `enforce`.
+2. Preserve a stable decision artifact and add a beta/shadow decision artifact for comparison.
+3. Gate hidden-gem evidence-card rejection, bucket distribution rejection, tail bridge rejection, exceptional hidden-gem rejection, weather sizing caps/multipliers, and `confidence_slow_profit` admission behind beta policy checks before they become behavior-changing defaults.
+4. Make Prediction Lab emit stable-vs-beta deltas before paper uses `enforce`.
+5. Add tests proving stable/off preserves old behavior, shadow records beta differences without changing final action, and enforce can change paper decisions only when the relevant feature flag is enabled.
+
+### Hidden-gem lane evidence card
+
+For each hidden-gem candidate, record at least:
+
+- `market_route` and weather shape (`tail_high`, `tail_low`, `bucket`)
+- entry price and probability multiple
+- model probability / candidate-side probability
+- source mode: recorded, live, historical, synthetic, or missing
+- official station mapping quality (`exact`, `inferred`, `missing`)
+- source agreement and source freshness
+- market volume/liquidity and whether it is known
+- for buckets: `distribution_probability`, forecast mean, forecast spread/uncertainty, bucket center, bucket width, and distance to center
+- for tails: threshold probability mass and distance to threshold
+- reason code for approve / reject / resize
+
+### Bucket hidden-gem direction
+
+The 2026-05-06 paper/archive check showed cheap bucket rows were the clearest danger:
+
+- current paper cheap open buckets were mostly negative, and the hotfix would have rejected 7 open trades while improving marked P&L by about `$1.45`
+- resolved Prediction Lab cheap bucket rows checked during the hotfix review had no observed wins in the sampled resolved set, despite many old model probabilities implying 20x–40x opportunities
+
+Therefore bucket hidden-gems should not pass from point forecasts alone.
+
+Proposed first durable bucket approval rule:
+
+```text
+entry_price <= 0.05
+AND distribution_probability is present
+AND distribution_probability >= entry_price + 0.05
+AND distribution_probability >= 3 * entry_price
+AND source/station evidence passes minimum quality gates
+```
+
+This still allows true 24x-style opportunities. Example:
+
+```text
+entry_price = 0.01
+distribution_probability = 0.24
+multiple = 24x
+edge = +0.23
+=> eligible for hidden_gem evidence-card approval, subject to source/station/size caps
+```
+
+It rejects the old failure mode:
+
+```text
+entry_price = 0.03
+point forecast near bucket
+no distribution_probability
+=> reject: bucket_missing_distribution_probability
+```
+
+Initial bucket sizing should remain capped even when approved. Treat bucket approval as a carefully budgeted lottery lane, not normal sizing.
+
+### Tail hidden-gem direction
+
+Tail markets can remain more permissive than buckets, but Phase 3 should stop relying only on point-forecast confidence.
+
+Tail hidden-gem approval should use candidate-side probability mass when available. If distribution scoring is not yet available, tails may use the current hotfix-style veto as a bridge:
+
+- reject cheap tails when strong live weather evidence says the candidate side is very unlikely
+- do not reject solely from weak/stale/inferred evidence
+- record whether the decision used full distribution scoring or bridge logic
+
+### Phase 3 acceptance criteria
+
+- Stable/off config preserves pre-beta final decisions, except for explicitly accepted route-safety scaffolding.
+- Shadow config records beta lane/evidence-card decisions and stable-vs-beta deltas without changing the final paper/live-like action.
+- Enforce config can change paper decisions only when `strategy_policy.version: beta`, `beta.mode: enforce`, and the relevant feature flag are enabled.
+- `hidden_gem` decisions emit an evidence card in shared-core reasoning and Prediction Lab artifacts.
+- Bucket hidden-gems without `distribution_probability` fail closed with a stable reason code in beta/enforce, and appear as beta rejections in shadow.
+- Bucket hidden-gems with strong distribution probability can still pass and are clearly capped/sized.
+- Prediction Lab can report approvals/rejections by `shape x hidden_gem_tier x reason_code`.
+- Replay can compare stable/pre-hotfix, hotfix bridge, and evidence-card logic on the same recorded artifacts.
+- Paper/live behavior remains route-gated and defaults stay conservative until enough clean-label rows accumulate.

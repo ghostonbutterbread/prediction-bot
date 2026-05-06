@@ -107,7 +107,11 @@ strategy:
   enable_news: true
   enable_social: true
   enable_ai: true
+  # Paper loop may override these safety knobs; keep shared config conservative
+  # because `main.py live` can load config.yaml unless a live config is supplied.
+  fail_closed_on_news_source_failure: false
   enable_weather_observation_log: false
+  enable_weather_directional_mismatch_guard: false
   weather_observation_log_path: data/weather_observations.jsonl
   weather_observation_cooldown_seconds: 21600
 kalshi_fee_rate: 0.07

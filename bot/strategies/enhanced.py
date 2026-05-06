@@ -11,6 +11,7 @@ from bot.feeds.twitter import SocialFeed
 from bot.feeds.ai_signal import AISignalFeed
 from bot.feeds.live_data import LiveFeedAggregator
 from bot.strategies.signal_validator import SignalAuditLog, SignalValidator
+from bot.strategy_policy import coerce_strategy_policy, strategy_policy_status
 from bot.weather import ObservationLog, WeatherMarketCityMapper
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,7 @@ class StrategyTrace:
     ensemble_signal: dict | None = None
     skip_reason_code: str | None = None
     warnings: list[str] = field(default_factory=list)
+    gate_metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -37,7 +39,20 @@ class StrategyTrace:
             "ensemble_signal": dict(self.ensemble_signal) if isinstance(self.ensemble_signal, dict) else None,
             "skip_reason_code": self.skip_reason_code,
             "warnings": list(self.warnings),
+            "gate_metadata": dict(self.gate_metadata),
         }
+
+
+def strategy_config_with_policy(config: dict[str, Any] | None) -> dict[str, Any]:
+    """Build EnhancedStrategyEngine config from root config plus policy metadata."""
+    root_config = config or {}
+    strategy_cfg = dict((root_config.get("strategy", {}) or {}) if isinstance(root_config, dict) else {})
+    if isinstance(root_config, dict):
+        if "strategy_policy_normalized" in root_config:
+            strategy_cfg["strategy_policy_normalized"] = root_config.get("strategy_policy_normalized")
+        if "strategy_policy" in root_config:
+            strategy_cfg["strategy_policy"] = root_config.get("strategy_policy")
+    return strategy_cfg
 
 
 class EnhancedStrategyEngine:
@@ -55,6 +70,10 @@ class EnhancedStrategyEngine:
 
     def __init__(self, config: dict = None):
         config = config or {}
+        self.strategy_policy = coerce_strategy_policy(
+            config.get("strategy_policy_normalized") or config.get("strategy_policy")
+        )
+        self.strategy_policy_status = strategy_policy_status(self.strategy_policy)
         self.min_edge = config.get("min_edge", 0.05)
         self.min_confidence = config.get("min_confidence", 0.50)
         self.max_position_pct = config.get("max_position_pct", 0.10)
@@ -84,6 +103,24 @@ class EnhancedStrategyEngine:
         self.weather_hidden_gem_min_source_agreement = self._config_float(
             config.get("weather_hidden_gem_min_source_agreement"),
             0.75,
+        )
+        self.enable_weather_directional_mismatch_guard = bool(
+            config.get("enable_weather_directional_mismatch_guard", False)
+        )
+        self.weather_directional_mismatch_guard_explicit_override = bool(
+            config.get("weather_directional_mismatch_guard_explicit_override", False)
+        )
+        self.weather_directional_mismatch_max_entry_price = self._config_float(
+            config.get("weather_directional_mismatch_max_entry_price"),
+            0.05,
+        )
+        self.weather_directional_mismatch_probability_threshold = self._config_float(
+            config.get("weather_directional_mismatch_probability_threshold"),
+            0.20,
+        )
+        self.weather_directional_mismatch_min_confidence = self._config_float(
+            config.get("weather_directional_mismatch_min_confidence"),
+            0.70,
         )
 
         if self.enable_news:
@@ -251,6 +288,17 @@ class EnhancedStrategyEngine:
                 getattr(market, "id", ""),
             )
             return None
+        mismatch_gate = self._weather_directional_mismatch_gate(live_signal_for_gate, direction, entry_price)
+        if mismatch_gate:
+            result_gate_metadata = {
+                "strategy_policy_status": self.strategy_policy_status,
+                "weather_directional_mismatch_guard": mismatch_gate,
+            }
+        else:
+            result_gate_metadata = {"strategy_policy_status": self.strategy_policy_status}
+        if mismatch_gate.get("enforced"):
+            logger.debug("Weather directional mismatch guard rejected hidden-gem tail trade for %s", getattr(market, "id", ""))
+            return None
         if self._weather_live_signal_vetoes_direction(live_signal_for_gate, direction):
             logger.debug("Weather live signal vetoed opposite-side tail trade for %s", getattr(market, "id", ""))
             return None
@@ -268,6 +316,8 @@ class EnhancedStrategyEngine:
             "confidence": round(weighted_confidence, 4),
             "signals": {k: s["predicted_prob"] for k, s in validated_signals.items()},
             "signal_details": signal_details,
+            "strategy_policy_status": self.strategy_policy_status,
+            "gate_metadata": result_gate_metadata,
             "question": market.question,
         }
         live_details = signal_details.get("live", {})
@@ -288,6 +338,7 @@ class EnhancedStrategyEngine:
         keeping the existing live/paper call path unchanged.
         """
         trace = StrategyTrace()
+        trace.gate_metadata["strategy_policy_status"] = self.strategy_policy_status
         signals = {}
         weights = {}
 
@@ -334,21 +385,8 @@ class EnhancedStrategyEngine:
             trace.skip_reason_code = "no_raw_signals"
             return None, trace
 
-        if "news" in signals and self.enable_news:
-            news_feed_obj = getattr(self, "news", None)
-            if news_feed_obj is not None and getattr(news_feed_obj, "all_sources_failed", False):
-                redistributed = weights.pop("news", 0)
-                signals.pop("news", None)
-                if weights and redistributed > 0:
-                    remaining_total = sum(weights.values())
-                    if remaining_total > 0:
-                        for k in list(weights.keys()):
-                            weights[k] += redistributed * (weights[k] / remaining_total)
-                trace.warnings.append("news_sources_failed_weight_redistributed")
-                logger.debug(
-                    f"News unavailable — redistributed {redistributed:.0%} weight "
-                    f"to remaining signals: {list(weights.keys())}"
-                )
+        if self._handle_news_source_failure(signals, weights, trace=trace):
+            return None, trace
 
         if not signals:
             trace.skip_reason_code = "no_signals_after_news_redistribution"
@@ -442,6 +480,28 @@ class EnhancedStrategyEngine:
             return None, trace
 
         live_signal_for_gate = validated_signals.get("live")
+        if self._weather_hidden_gem_safety_rejects(live_signal_for_gate, direction, entry_price):
+            trace.skip_reason_code = "weather_hidden_gem_safety_guard"
+            trace.gate_metadata["weather_hidden_gem_safety_guard"] = {
+                "stable_bridge": True,
+                "enforced": True,
+                "reason_code": "weather_hidden_gem_safety_guard",
+            }
+            logger.debug(
+                "Weather hidden-gem safety guard rejected %s for %s",
+                direction,
+                getattr(market, "id", ""),
+            )
+            return None, trace
+        mismatch_gate = self._weather_directional_mismatch_gate(live_signal_for_gate, direction, entry_price)
+        if mismatch_gate:
+            trace.gate_metadata["weather_directional_mismatch_guard"] = mismatch_gate
+            if mismatch_gate.get("shadow"):
+                trace.warnings.append("weather_directional_mismatch_guard_shadow")
+        if mismatch_gate.get("enforced"):
+            trace.skip_reason_code = "weather_directional_mismatch_guard"
+            logger.debug("Weather directional mismatch guard rejected hidden-gem tail trade for %s", getattr(market, "id", ""))
+            return None, trace
         if self._weather_live_signal_vetoes_direction(live_signal_for_gate, direction):
             trace.skip_reason_code = "weather_live_signal_veto"
             logger.debug("Weather live signal vetoed opposite-side tail trade for %s", getattr(market, "id", ""))
@@ -468,6 +528,125 @@ class EnhancedStrategyEngine:
             "warnings": list(validation.warnings or []),
             "rejection_reason": validation.rejection_reason,
         }
+
+    def _handle_news_source_failure(
+        self,
+        signals: dict[str, dict],
+        weights: dict[str, float],
+        *,
+        trace: StrategyTrace | None = None,
+    ) -> bool:
+        if not self.enable_news or not self._last_news_lookup_sources_failed:
+            return False
+        if self.fail_closed_on_news_source_failure:
+            if trace is not None:
+                trace.skip_reason_code = "news_sources_failed_fail_closed"
+                trace.warnings.append("news_sources_failed_fail_closed")
+            logger.debug("News unavailable — fail-closed strategy policy skipped trade")
+            return True
+        if "news" not in signals:
+            return False
+
+        redistributed = weights.pop("news", 0)
+        signals.pop("news", None)
+        if weights and redistributed > 0:
+            remaining_total = sum(weights.values())
+            if remaining_total > 0:
+                for k in list(weights.keys()):
+                    weights[k] += redistributed * (weights[k] / remaining_total)
+        if trace is not None:
+            trace.warnings.append("news_sources_failed_weight_redistributed")
+        logger.debug(
+            f"News unavailable — redistributed {redistributed:.0%} weight "
+            f"to remaining signals: {list(weights.keys())}"
+        )
+        return False
+
+    def _weather_live_signal_directional_mismatch(
+        self,
+        live_signal: dict | None,
+        direction: str,
+        entry_price: float | None,
+    ) -> bool:
+        return bool(self._weather_directional_mismatch_gate(live_signal, direction, entry_price).get("enforced"))
+
+    def _weather_directional_mismatch_gate(
+        self,
+        live_signal: dict | None,
+        direction: str,
+        entry_price: float | None,
+    ) -> dict[str, Any]:
+        if not self.enable_weather_directional_mismatch_guard:
+            return {}
+        try:
+            entry = float(entry_price)
+        except (TypeError, ValueError):
+            return {}
+        if entry > self.weather_directional_mismatch_max_entry_price:
+            return {}
+        would_reject = self._weather_live_signal_rejects_direction(
+            live_signal,
+            direction,
+            probability_threshold=self.weather_directional_mismatch_probability_threshold,
+            min_confidence=self.weather_directional_mismatch_min_confidence,
+        )
+        if not would_reject:
+            return {}
+
+        feature = "hidden_gem_lane_gates"
+        feature_active = self.strategy_policy.feature_enabled(feature)
+        feature_enforced = self.strategy_policy.feature_enforced(feature)
+        override_enforced = bool(self.weather_directional_mismatch_guard_explicit_override)
+        enforced = bool(feature_enforced or override_enforced)
+        shadow = bool(feature_active and self.strategy_policy.is_shadow and not enforced)
+        return {
+            "gate": "weather_directional_mismatch_guard",
+            "feature": feature,
+            "policy": self.strategy_policy_status,
+            "enabled": True,
+            "would_reject": True,
+            "active": bool(feature_active or override_enforced),
+            "shadow": shadow,
+            "enforced": enforced,
+            "explicit_override": override_enforced,
+            "reason_code": "weather_directional_mismatch_guard",
+            "preserved_stable_action": bool(not enforced),
+            "differs_from_final": bool(shadow),
+        }
+
+    @staticmethod
+    def _weather_live_signal_rejects_direction(
+        live_signal: dict | None,
+        direction: str,
+        *,
+        probability_threshold: float = 0.20,
+        min_confidence: float = 0.70,
+    ) -> bool:
+        if not isinstance(live_signal, dict):
+            return False
+        if live_signal.get("signal_type") != "weather":
+            return False
+        question_side = str(
+            live_signal.get("question_side")
+            or (live_signal.get("data") if isinstance(live_signal.get("data"), dict) else {}).get("question_side")
+            or ""
+        ).strip().lower()
+        if question_side not in {"above", "below"}:
+            return False
+        try:
+            probability = float(live_signal.get("predicted_prob"))
+            confidence = float(live_signal.get("confidence") or 0.0)
+        except (TypeError, ValueError):
+            return False
+        if confidence < min_confidence:
+            return False
+        normalized_direction = str(direction or "").upper()
+        threshold = max(0.0, min(0.5, float(probability_threshold)))
+        if normalized_direction == "BUY_YES":
+            return probability <= threshold
+        if normalized_direction == "BUY_NO":
+            return probability >= 1 - threshold
+        return False
 
     @staticmethod
     def _weather_live_signal_vetoes_direction(live_signal: dict | None, direction: str) -> bool:
@@ -498,6 +677,15 @@ class EnhancedStrategyEngine:
         if probability <= 0.20 and normalized_direction == "BUY_YES":
             return True
         return False
+
+    @staticmethod
+    def _config_float(value: Any, default: float) -> float:
+        try:
+            if value is None:
+                return float(default)
+            return float(value)
+        except (TypeError, ValueError):
+            return float(default)
 
     def _record_weather_observation(self, market, signal_name: str, signal: dict) -> None:
         if not self.enable_weather_observation_log or self.weather_observation_log is None:
@@ -596,29 +784,6 @@ class EnhancedStrategyEngine:
             return value
         return round(float(value), digits)
 
-    def _handle_news_source_failure(self, signals: dict[str, dict], weights: dict[str, float]) -> bool:
-        if not self.enable_news or not self._last_news_lookup_sources_failed:
-            return False
-        if self.fail_closed_on_news_source_failure:
-            logger.debug("News unavailable — fail-closed strategy policy skipped trade")
-            return True
-
-        if "news" not in signals:
-            return False
-
-        redistributed = weights.pop("news", 0)
-        signals.pop("news", None)
-        if weights and redistributed > 0:
-            remaining_total = sum(weights.values())
-            if remaining_total > 0:
-                for k in list(weights.keys()):
-                    weights[k] += redistributed * (weights[k] / remaining_total)
-        logger.debug(
-            f"News unavailable — redistributed {redistributed:.0%} weight "
-            f"to remaining signals: {list(weights.keys())}"
-        )
-        return False
-
     def _weather_hidden_gem_safety_rejects(
         self,
         live_signal: dict | None,
@@ -663,15 +828,6 @@ class EnhancedStrategyEngine:
         threshold = max(0.0, min(0.5, self.weather_hidden_gem_probability_threshold))
         candidate_probability = probability if normalized_direction == "BUY_YES" else 1.0 - probability
         return candidate_probability <= threshold
-
-    @staticmethod
-    def _config_float(value: Any, default: float) -> float:
-        try:
-            if value is None:
-                return float(default)
-            return float(value)
-        except (TypeError, ValueError):
-            return float(default)
 
     def _price_signal(self, market, order_book: dict = None) -> Optional[dict]:
         """Detect mispricing using market microstructure + known biases."""
@@ -733,6 +889,7 @@ class EnhancedStrategyEngine:
         self._last_news_lookup_sources_failed = False
         try:
             news_items = self.news.get_news_for_market(market.question)
+            self._last_news_lookup_sources_failed = bool(getattr(self.news, "all_sources_failed", False))
 
             if not news_items:
                 self._last_news_lookup_sources_failed = bool(getattr(self.news, "all_sources_failed", False))

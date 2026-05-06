@@ -50,6 +50,12 @@ class StrategyPolicy(dict):
         features = self.get("features", {}) or {}
         return bool(self.is_active and features.get(name, False))
 
+    def feature_enforced(self, name: str) -> bool:
+        return bool(self.is_enforce and self.feature_enabled(name))
+
+    def status(self) -> dict[str, Any]:
+        return strategy_policy_status(self)
+
 
 def _as_string(value: Any) -> str:
     return str(value or "").strip().lower()
@@ -137,4 +143,75 @@ def normalize_strategy_policy(raw_policy: Any) -> StrategyPolicy:
     )
 
 
-__all__ = ["DEFAULT_FEATURES", "StrategyPolicy", "normalize_strategy_policy"]
+def coerce_strategy_policy(raw_policy: Any) -> StrategyPolicy:
+    """Return a normalized policy from raw or already-normalized policy data."""
+    if isinstance(raw_policy, StrategyPolicy):
+        return raw_policy
+    if not isinstance(raw_policy, Mapping):
+        return _stable_policy()
+
+    if "beta" in raw_policy:
+        return normalize_strategy_policy(raw_policy)
+
+    version = _as_string(raw_policy.get("version", "stable")) or "stable"
+    mode = _as_string(raw_policy.get("beta_mode", raw_policy.get("mode", "off"))) or "off"
+    if version not in VALID_VERSIONS or mode not in VALID_BETA_MODES:
+        return _stable_policy(raw_policy.get("configured_features") if isinstance(raw_policy, Mapping) else None)
+    if version != "beta":
+        mode = "off"
+
+    configured_features = _normalize_feature_flags(
+        raw_policy.get("configured_features")
+        if isinstance(raw_policy.get("configured_features"), Mapping)
+        else raw_policy.get("features")
+    )
+    feature_source = raw_policy.get("features") if isinstance(raw_policy.get("features"), Mapping) else configured_features
+    is_configured_beta = version == "beta"
+    is_active = is_configured_beta and mode in ACTIVE_BETA_MODES
+    is_shadow = is_active and mode == "shadow"
+    is_enforce = is_active and mode == "enforce"
+    active_features = _normalize_feature_flags(feature_source) if is_active else dict(DEFAULT_FEATURES)
+
+    return StrategyPolicy(
+        {
+            "version": version,
+            "beta_mode": mode,
+            "configured_features": configured_features,
+            "features": active_features,
+            "is_beta": is_configured_beta,
+            "is_configured_beta": is_configured_beta,
+            "is_active": is_active,
+            "is_shadow": is_shadow,
+            "is_enforce": is_enforce,
+        }
+    )
+
+
+def strategy_policy_status(raw_policy: Any = None) -> dict[str, Any]:
+    policy = coerce_strategy_policy(raw_policy)
+    enabled_features = {
+        name: bool(policy.feature_enabled(name))
+        for name in DEFAULT_FEATURES
+    }
+    return {
+        "version": policy["version"],
+        "mode": policy["beta_mode"],
+        "active": policy.is_active,
+        "shadow": policy.is_shadow,
+        "enforce": policy.is_enforce,
+        "enabled_features": enabled_features,
+    }
+
+
+def strategy_policy_feature_enforced(raw_policy: Any, feature_name: str) -> bool:
+    return coerce_strategy_policy(raw_policy).feature_enforced(feature_name)
+
+
+__all__ = [
+    "DEFAULT_FEATURES",
+    "StrategyPolicy",
+    "coerce_strategy_policy",
+    "normalize_strategy_policy",
+    "strategy_policy_feature_enforced",
+    "strategy_policy_status",
+]

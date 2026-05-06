@@ -1,7 +1,7 @@
 # Weather Narrow Bucket / Tail Risk Spec
 
-Status: Finalized implementation spec for `v2` / `v3` / `v4`  
-Date: 2026-04-27  
+Status: Finalized implementation spec for `v2` / `v3` / `v4`; updated with 2026-05-06 hidden-gem hotfix learnings
+Date: 2026-04-27; updated 2026-05-06
 Scope: documentation only; no code changes implied by this file
 
 ## Purpose
@@ -381,18 +381,39 @@ Minimum `v3` requirements:
 
 Buckets should only become selectively tradable in `v3` if all are true:
 
-- exact station mapping
+- exact station mapping, or an explicit experimental label if the mapping is not exact
 - valid distribution probability
 - minimum bucket probability passes
 - source agreement is acceptable
 - size remains capped
 - station-history penalties do not invalidate the setup
 
+2026-05-06 update from paper/hotfix review:
+
+The current paper and Prediction Lab samples showed the old bucket model could create apparent 20x–40x hidden gems from point forecasts that still resolved badly. The durable rule should preserve true hidden-gem upside without letting point forecasts masquerade as bucket probability.
+
+Initial coarse `v3` bucket approval gate:
+
+```text
+entry_price <= 0.05
+AND distribution_probability is present
+AND distribution_probability >= entry_price + 0.05
+AND distribution_probability >= 3 * entry_price
+AND source/station evidence passes minimum quality gates
+```
+
+Interpretation:
+
+- a `$0.01` bucket with `distribution_probability = 0.24` remains eligible as a 24x-style hidden gem, subject to source/station and sizing caps
+- a `$0.03` bucket with only a nearby point forecast and no distribution probability is rejected
+- a `$0.05` bucket with `distribution_probability = 0.08` is not enough; the probability is above market but not high enough to justify hidden-gem treatment
+
 Important:
 
-- do not set bucket thresholds by maximizing the `61`-trade replay
+- do not set bucket thresholds by maximizing the `61`-trade replay or the 2026-05-06 paper sample
 - start with coarse floors
 - re-evaluate only after clean-label Prediction Lab samples accumulate
+- keep bucket sizing capped even when the bucket passes; approved buckets are still a lottery lane, not normal exposure
 
 ### `v3` tail rules
 
@@ -493,6 +514,8 @@ For every weather candidate, whether traded or skipped, Prediction Lab should re
 - market volume / liquidity and whether it was known
 - time to close
 - source freshness
+- source mode (`recorded`, `live`, `historical`, `synthetic`, `missing`)
+- strategy lane / evidence-card lane id
 - requested size
 - final size
 - skip / resize / tier reason code

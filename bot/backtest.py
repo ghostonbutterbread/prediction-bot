@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Optional
 
 from bot.exchanges.base import Market
-from bot.strategies.enhanced import EnhancedStrategyEngine, KellySizer
+from bot.strategies.enhanced import EnhancedStrategyEngine, KellySizer, strategy_config_with_policy
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +68,7 @@ class Backtester:
 
     def __init__(self, config: dict = None):
         config = config or {}
-        self.strategy = EnhancedStrategyEngine(config.get("strategy", {}))
+        self.strategy = EnhancedStrategyEngine(strategy_config_with_policy(config))
         self.kelly = KellySizer()
         self.starting_balance = config.get("starting_balance", 1000)
         self.min_edge = config.get("strategy", {}).get("min_edge", 0.02)

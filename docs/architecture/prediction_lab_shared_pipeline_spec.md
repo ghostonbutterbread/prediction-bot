@@ -600,10 +600,31 @@ Exit criteria:
 
 Phase 3 should not be treated as complete until source injection exists. Before that, replay can use historical adapters, but must label any non-recorded source as post-facto or synthetic.
 
+For the current hidden-gem lane work, Phase 3 must specifically support comparing:
+
+1. pre-hotfix / current branch behavior
+2. 2026-05-06 hotfix bridge behavior
+3. proposed evidence-card behavior
+
+on the same recorded candidate set.
+
+Replay reports should include, at minimum:
+
+- bad bucket buys removed
+- winners skipped by the hotfix bridge
+- hidden-gem approvals/rejections by `shape x tier x reason_code`
+- bucket rows with and without `distribution_probability`
+- threshold slices such as:
+  - `distribution_probability >= entry_price + 0.05`
+  - `distribution_probability >= 3x entry_price`
+  - combined gate pass/fail
+- strict-vs-coverage separation so legacy/incomplete rows do not masquerade as strategy truth
+
 Exit criteria:
 
 - Replay can run old vs new logic on the same artifact set.
 - Report shows missed wins, bad buys, changed reason codes, and source-data mode.
+- For weather hidden-gems, report also shows whether 24x-style bucket opportunities remain possible under evidence-card gates, rather than being blanket-disabled.
 
 ### Phase 4 — Paper Lab opportunity mode
 
@@ -631,6 +652,22 @@ Implementation checkpoint 2026-05-04:
 - A sampled replay of `500` current prediction rows with `row_quality_policy=annotate` produced `0` strict rows because source/order-book/weather snapshots were missing for that sample. That is a data-quality signal, not a strategy conclusion.
 - Newer collector snapshots do contain shared-pipeline decision artifacts, but the next required checkpoint is to verify populated `weather_source_snapshot`/recorded source and order-book/execution snapshot fields on live collector rows.
 - Until strict rows are available, Prediction Lab replay should be used for coverage diagnostics and reason-code plumbing, not final P&L claims.
+
+Implementation checkpoint 2026-05-06 — hidden-gem/bucket evidence direction:
+
+- A hotfix was shipped to `main` / active runtime to stop the worst cheap weather bucket failures while the lane work continues. It should be treated as bridge behavior, not final Prediction Lab strategy.
+- The hotfix/paper audit found that old cheap bucket rows could look like 20x–40x opportunities while still resolving poorly. This reinforces that Phase 1 artifacts must capture the evidence behind a probability, not only the final model probability.
+- Phase 1 trace/artifact work should now explicitly include hidden-gem evidence-card fields when available:
+  - weather shape
+  - hidden-gem tier / probability multiple
+  - `distribution_probability`
+  - forecast mean and spread/uncertainty
+  - distance to bucket center or tail threshold
+  - station mapping quality
+  - source agreement/freshness
+  - source mode (`recorded`, `live`, `historical`, `synthetic`, `missing`)
+  - reason code for approve/reject/resize
+- Phase 1 is not complete for weather hidden-gem analysis until collector rows can explain *why* a bucket or tail hidden gem passed/failed. Strategy trace alone is insufficient if it lacks source/evidence quality fields.
 
 ### Phase 5 — Paper portfolio/live alignment
 

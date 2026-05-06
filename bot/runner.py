@@ -31,7 +31,7 @@ from bot.trade_audit import (
     coerce_bool,
     enrich_trade_audit_fields,
 )
-from bot.strategies.enhanced import EnhancedStrategyEngine, KellySizer
+from bot.strategies.enhanced import EnhancedStrategyEngine, KellySizer, strategy_config_with_policy
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +60,7 @@ class PredictionBot:
         self._config_last_mtime: float | None = None
 
         self.exchanges: dict[str, BaseExchange] = {}
-        self.strategy = EnhancedStrategyEngine(config.get("strategy", {}))
+        self.strategy = EnhancedStrategyEngine(strategy_config_with_policy(config))
         self.live_state = RunnerLiveStateAdapter(self)
         self.live_reconciliation = RunnerLiveReconciliationAdapter(self)
         self.live_sync = RunnerLiveSync(self)
@@ -1349,7 +1349,7 @@ class PredictionBot:
         return {"blocked_reason": "execution_failed", "decision": decision}
 
     def _market_route_enforcement_enabled(self) -> bool:
-        scan_cfg = self.config.get("scan") if isinstance(self.config, dict) else None
+        """Market routing is stable route safety; policy flags do not disable it."""
         return True
 
 

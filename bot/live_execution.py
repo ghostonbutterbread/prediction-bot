@@ -202,8 +202,11 @@ class RunnerLiveExecutionAdapter:
             metadata={
                 "runner": "live",
                 "market_route": market_route,
+                "market_route_enforcement": "stable_required",
                 "market_route_required": self._market_route_enforcement_enabled(config),
                 "strategy_lanes": dict(config.get("strategy_lanes", {}) or {}),
+                "strategy_policy_normalized": dict(config.get("strategy_policy_normalized", {}) or {}),
+                "strategy_policy": dict(config.get("strategy_policy", {}) or {}),
                 "event_key": event_key,
                 "market_family_key": candidate_family_key,
                 "event_snapshot": {
@@ -266,7 +269,7 @@ class RunnerLiveExecutionAdapter:
 
     @staticmethod
     def _market_route_enforcement_enabled(config: dict[str, Any]) -> bool:
-        scan_cfg = config.get("scan") if isinstance(config, dict) else None
+        """Market routing is stable route safety; policy flags do not disable it."""
         return True
 
     def _intent_fingerprint(self, exchange_name: str, market_id: str, direction: str) -> str:

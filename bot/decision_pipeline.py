@@ -12,7 +12,7 @@ from typing import Any
 from bot.risk import RiskDecision, RiskManager
 from bot.market_router import DEFAULT_ALLOWED_MARKET_ROUTES, route_market
 from bot.shared_core import AccountState, TradeContext, build_execution_snapshot, build_trade_decision
-from bot.strategies.enhanced import EnhancedStrategyEngine, KellySizer, StrategyTrace
+from bot.strategies.enhanced import EnhancedStrategyEngine, KellySizer, StrategyTrace, strategy_config_with_policy
 from bot.trade_audit import trade_event_key
 
 PAPER_LAB_MODE = "paper_lab"
@@ -76,7 +76,7 @@ class DecisionPipelineEvaluator:
         self.config = config or {}
         scan_cfg = self.config.setdefault("scan", {})
         scan_cfg.setdefault("allowed_market_routes", list(DEFAULT_ALLOWED_MARKET_ROUTES))
-        self.strategy = strategy or EnhancedStrategyEngine(self.config.get("strategy", {}) or {})
+        self.strategy = strategy or EnhancedStrategyEngine(strategy_config_with_policy(self.config))
         economics_cfg = self.config.get("trade_economics", {}) or {}
         self.kelly_sizer = kelly_sizer or KellySizer(
             fee_rate=self.config.get("kalshi_fee_rate"),
@@ -263,8 +263,11 @@ class DecisionPipelineEvaluator:
                 "mode": pipeline_input.mode,
                 "category": metadata.get("category", getattr(market, "category", "")),
                 "market_route": market_route,
+                "market_route_enforcement": "stable_required",
                 "market_route_required": _market_route_enforcement_enabled(pipeline_input.config_snapshot),
                 "strategy_lanes": dict(pipeline_input.config_snapshot.get("strategy_lanes", {}) or {}),
+                "strategy_policy_normalized": dict(pipeline_input.config_snapshot.get("strategy_policy_normalized", {}) or {}),
+                "strategy_policy": dict(pipeline_input.config_snapshot.get("strategy_policy", {}) or {}),
                 "event_key": event_key,
                 "market_family_key": _market_family_key(str(signal.get("market_id") or getattr(market, "id", ""))),
                 "event_snapshot": _empty_event_snapshot(event_key, signal, execution_snapshot),
@@ -690,7 +693,7 @@ def _market_family_key(market_id: str) -> str:
 
 
 def _market_route_enforcement_enabled(config: dict[str, Any]) -> bool:
-    scan_cfg = config.get("scan") if isinstance(config, dict) else None
+    """Market routing is stable route safety; policy flags do not disable it."""
     return True
 
 
