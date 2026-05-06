@@ -12,7 +12,15 @@ class FakeExchange:
         self.orders = []
 
     def get_markets(self, limit=30):
-        return [SimpleNamespace(id="m1", question="Will rain happen?", yes_price=0.4, no_price=0.6)]
+        return [
+            SimpleNamespace(
+                id="KXHIGHNY-26APR29-T80",
+                question="Will NYC high temperature be above 80 degrees?",
+                yes_price=0.4,
+                no_price=0.6,
+                metadata={"series_ticker": "KXHIGHNY", "event_ticker": "KXHIGHNY-26APR29"},
+            )
+        ]
 
     def get_order_book(self, market_id):
         return {"best_yes_ask": 0.40, "best_no_ask": 0.60}
@@ -70,8 +78,10 @@ class RunnerSingleTradeModeTests(unittest.TestCase):
             bot = self._make_bot(tmpdir)
             signal = {
                 "exchange": "kalshi",
-                "market_id": "m1",
-                "question": "Will rain happen?",
+                "market_id": "KXHIGHNY-26APR29-T80",
+                "question": "Will NYC high temperature be above 80 degrees?",
+                "series_ticker": "KXHIGHNY",
+                "event_ticker": "KXHIGHNY-26APR29",
                 "direction": "BUY_YES",
                 "market_price": 0.40,
                 "yes_price": 0.40,

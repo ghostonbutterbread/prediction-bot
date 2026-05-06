@@ -63,7 +63,7 @@ class RecoveryParityEdgeTests(unittest.TestCase):
                     Position(
                         market_id="KXHIGHNY-26APR16-T70",
                         exchange="kalshi",
-                        question="Will NYC high be below 70?",
+                        question="Will NYC high temperature be below 70 degrees?",
                         side="YES",
                         entry_price=0.40,
                         size=2.0,
@@ -77,7 +77,7 @@ class RecoveryParityEdgeTests(unittest.TestCase):
                         order_id="ord-partial-1",
                         market_id="KXHIGHNY-26APR16-T70",
                         exchange="kalshi",
-                        question="Will NYC high be below 70?",
+                        question="Will NYC high temperature be below 70 degrees?",
                         side="YES",
                         requested_size=5.0,
                         filled_size=2.0,
@@ -100,7 +100,7 @@ class RecoveryParityEdgeTests(unittest.TestCase):
             signal = {
                 "exchange": "kalshi",
                 "market_id": "KXHIGHNY-26APR16-T72",
-                "question": "Will NYC high be below 72?",
+                "question": "Will NYC high temperature be below 72 degrees?",
                 "direction": "BUY_YES",
                 "market_price": 0.40,
                 "yes_price": 0.40,
@@ -131,7 +131,7 @@ class RecoveryParityEdgeTests(unittest.TestCase):
                         order_id="ord-canceled-1",
                         market_id="KXHIGHNY-26APR16-T70",
                         exchange="kalshi",
-                        question="Will NYC high be below 70?",
+                        question="Will NYC high temperature be below 70 degrees?",
                         side="YES",
                         requested_size=5.0,
                         filled_size=0.0,
@@ -166,7 +166,7 @@ class RecoveryParityEdgeTests(unittest.TestCase):
                     Position(
                         market_id="KXHIGHNY-26APR16-T70",
                         exchange="kalshi",
-                        question="Will NYC high be below 70?",
+                        question="Will NYC high temperature be below 70 degrees?",
                         side="YES",
                         entry_price=0.40,
                         size=4.0,
@@ -209,7 +209,7 @@ class RecoveryParityEdgeTests(unittest.TestCase):
             signal = {
                 "exchange": "kalshi",
                 "market_id": "KXHIGHNY-26APR16-T72",
-                "question": "Will NYC high be below 72?",
+                "question": "Will NYC high temperature be below 72 degrees?",
                 "direction": "BUY_YES",
                 "market_price": 0.40,
                 "yes_price": 0.40,

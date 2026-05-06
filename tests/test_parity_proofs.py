@@ -31,7 +31,7 @@ class ParityProofTests(unittest.TestCase):
         return {
             "exchange": "kalshi",
             "market_id": "KXHIGHNY-26APR16-T72",
-            "question": "Will NYC high be below 72?",
+            "question": "Will NYC high temperature be below 72 degrees?",
             "direction": "BUY_YES",
             "market_price": 0.40,
             "yes_price": 0.40,
@@ -80,7 +80,7 @@ class ParityProofTests(unittest.TestCase):
                     timestamp="2026-04-23T00:00:00+00:00",
                     exchange="kalshi",
                     market_id="KXHIGHNY-26APR16-T70",
-                    question="Will NYC high be below 70?",
+                    question="Will NYC high temperature be below 70 degrees?",
                     direction="BUY_YES",
                     model_probability=0.70,
                     market_price=0.42,
@@ -124,7 +124,7 @@ class ParityProofTests(unittest.TestCase):
             bot.open_positions = [
                 LivePosition(
                     market_id="KXHIGHNY-26APR16-T70",
-                    question="Will NYC high be below 70?",
+                    question="Will NYC high temperature be below 70 degrees?",
                     direction="BUY_YES",
                     price=0.42,
                     size=5.0,

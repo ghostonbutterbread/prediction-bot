@@ -64,8 +64,10 @@ class SharedCorePaperAdapterTests(unittest.TestCase):
             self.assertEqual(session.data_path, str(sim.data_dir))
 
             signal = {
-                "market_id": "test-market",
-                "question": "Will test settle YES?",
+                "market_id": "KXHIGHNY-26APR29-T80",
+                "question": "Will NYC high temperature be above 80 degrees?",
+                "series_ticker": "KXHIGHNY",
+                "event_ticker": "KXHIGHNY-26APR29",
                 "exchange": "kalshi",
                 "direction": "BUY_YES",
                 "model_probability": 0.7,
@@ -105,8 +107,10 @@ class SharedCorePaperAdapterTests(unittest.TestCase):
             sim.risk.state.reserved_capital = 75.0
 
             signal = {
-                "market_id": "test-market",
-                "question": "Will test settle YES?",
+                "market_id": "KXHIGHNY-26APR29-T80",
+                "question": "Will NYC high temperature be above 80 degrees?",
+                "series_ticker": "KXHIGHNY",
+                "event_ticker": "KXHIGHNY-26APR29",
                 "exchange": "kalshi",
                 "direction": "BUY_YES",
                 "model_probability": 0.7,
@@ -153,8 +157,10 @@ class SharedCorePaperAdapterTests(unittest.TestCase):
             )
 
             signal = {
-                "market_id": "test-market",
-                "question": "Will test settle YES?",
+                "market_id": "KXHIGHNY-26APR29-T80",
+                "question": "Will NYC high temperature be above 80 degrees?",
+                "series_ticker": "KXHIGHNY",
+                "event_ticker": "KXHIGHNY-26APR29",
                 "exchange": "kalshi",
                 "direction": "BUY_YES",
                 "model_probability": 0.7,
@@ -174,13 +180,13 @@ class SharedCorePaperAdapterTests(unittest.TestCase):
             with patch.object(sim.session_store, "save_session", wraps=sim.session_store.save_session) as save_mock:
                 with patch.object(sim.session_store, "load_session", wraps=sim.session_store.load_session) as load_mock:
                     events = sim.resolve_open_positions(
-                        FakeSettlementExchange({"test-market": FakeResolvedMarket(result="YES")})
+                        FakeSettlementExchange({"KXHIGHNY-26APR29-T80": FakeResolvedMarket(result="YES")})
                     )
 
             self.assertEqual(len(events), 1)
             self.assertIsInstance(events[0], ResolutionEvent)
             self.assertEqual(events[0].position_id, trade.id)
-            self.assertEqual(events[0].market_id, "test-market")
+            self.assertEqual(events[0].market_id, "KXHIGHNY-26APR29-T80")
             self.assertEqual(events[0].status, "settled")
             self.assertEqual(events[0].outcome, "YES")
             self.assertAlmostEqual(events[0].pnl, 13.95)

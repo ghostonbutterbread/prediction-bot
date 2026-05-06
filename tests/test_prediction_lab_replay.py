@@ -197,9 +197,11 @@ class CommonLiveMethodStrategy(FixedSignalStrategy):
 
 def _signal() -> dict:
     return {
-        "market_id": "KXUNIT-26APR29-YES",
+        "market_id": "KXHIGHNY-26APR29-T80",
         "exchange": "kalshi",
-        "question": "Will the unit test pass?",
+        "question": "Will NYC high temperature be above 80 degrees?",
+        "series_ticker": "KXHIGHNY",
+        "event_ticker": "KXHIGHNY-26APR29",
         "direction": "BUY_YES",
         "model_probability": 0.72,
         "market_price": 0.42,
@@ -213,7 +215,7 @@ def _signal() -> dict:
 
 def _row(*, artifact_patch: dict | None = None, row_patch: dict | None = None) -> dict:
     artifact = {
-        "market_id": "KXUNIT-26APR29-YES",
+        "market_id": "KXHIGHNY-26APR29-T80",
         "mode": "prediction_lab",
         "observed_at": "2026-04-29T12:00:00+00:00",
         "as_of": "2026-04-29T12:00:00+00:00",
@@ -223,8 +225,21 @@ def _row(*, artifact_patch: dict | None = None, row_patch: dict | None = None) -
             "mode": "prediction_lab",
             "as_of": "2026-04-29T12:00:00+00:00",
             "data": {
-                "market_metadata": {"market_group": "sports", "series": "unit"},
+                "market_metadata": {
+                    "market_group": "weather",
+                    "series": "daily_temperature",
+                    "series_ticker": "KXHIGHNY",
+                    "event_ticker": "KXHIGHNY-26APR29",
+                },
                 "unit_source": {"value": 1},
+                "weather_source_snapshot": {
+                    "mode": "recorded_as_of",
+                    "source_name": "weather",
+                    "signal_type": "weather",
+                    "as_of": "2026-04-29T12:00:00+00:00",
+                    "forecast": {"high": 84.0, "threshold": 80.0, "question_side": "above"},
+                    "date_validation": {"ok": True, "reason": "matched", "market_date": "2026-04-29", "weather_date": "2026-04-29"},
+                },
             },
         },
         "order_book_snapshot": {
@@ -292,10 +307,10 @@ def _row(*, artifact_patch: dict | None = None, row_patch: dict | None = None) -
     row = {
         "timestamp": "2026-04-29T12:00:00+00:00",
         "observed_at": "2026-04-29T12:00:00+00:00",
-        "market_id": "KXUNIT-26APR29-YES",
-        "group": "sports",
-        "series": "unit",
-        "question": "Will the unit test pass?",
+        "market_id": "KXHIGHNY-26APR29-T80",
+        "group": "weather",
+        "series": "daily_temperature",
+        "question": "Will NYC high temperature be above 80 degrees?",
         "yes_market_price": 0.42,
         "no_market_price": 0.58,
         "direction": "BUY_YES",
@@ -451,7 +466,13 @@ class PredictionLabReplayTests(unittest.TestCase):
                 "source_context": {
                     "source": "provided",
                     "source_mode": "recorded_as_of",
-                    "data": {"market_metadata": {"market_group": "weather", "series": "daily_temperature"}},
+                    "data": {
+                        "market_metadata": {
+                            "market_group": "weather",
+                            "series": "daily_temperature",
+                            "event_ticker": "KXHIGHNY-26APR29",
+                        }
+                    },
                 },
                 "source_snapshots": [],
             }
@@ -558,8 +579,16 @@ class PredictionLabReplayTests(unittest.TestCase):
                     "source": "provided",
                     "source_mode": "historical_replay",
                     "data": {
-                        "market_metadata": {"market_group": "sports", "series": "unit"},
+                        "market_metadata": {"market_group": "weather", "series": "daily_temperature", "series_ticker": "KXHIGHNY", "event_ticker": "KXHIGHNY-26APR29"},
                         "unit_source": {"value": 1},
+                        "weather_source_snapshot": {
+                            "mode": "recorded_as_of",
+                            "source_name": "weather",
+                            "signal_type": "weather",
+                            "as_of": "2026-04-29T12:00:00+00:00",
+                            "forecast": {"high": 84.0, "threshold": 80.0, "question_side": "above"},
+                            "date_validation": {"ok": True, "reason": "matched", "market_date": "2026-04-29", "weather_date": "2026-04-29"},
+                        },
                     },
                 },
             }
@@ -592,11 +621,11 @@ class PredictionLabReplayTests(unittest.TestCase):
         good = _row()
         missing_book = _row(
             artifact_patch={
-                "market_id": "KXUNIT-26APR30-YES",
+                "market_id": "KXHIGHNY-26APR30-T80",
                 "order_book_snapshot": {"source": "missing", "data": None},
                 "execution_snapshot_source": "missing",
             },
-            row_patch={"market_id": "KXUNIT-26APR30-YES"},
+            row_patch={"market_id": "KXHIGHNY-26APR30-T80"},
         )
 
         result = replay_recorded_artifacts(
@@ -675,7 +704,7 @@ class PredictionLabReplayTests(unittest.TestCase):
                     "source": "provided",
                     "mode": "prediction_lab",
                     "as_of": "2026-04-29T12:00:00+00:00",
-                    "data": {"market_metadata": {"market_group": "sports", "series": "unit"}},
+                    "data": {"market_metadata": {"market_group": "sports", "series": "unit", "series_ticker": "KXHIGHNY"}},
                 }
             }
         )
@@ -713,7 +742,7 @@ class PredictionLabReplayTests(unittest.TestCase):
             require_recorded_source=True,
             resolution_records=[
                 {
-                    "market_id": "KXUNIT-26APR29-YES",
+                    "market_id": "KXHIGHNY-26APR29-T80",
                     "resolution": {"outcome": "YES", "resolved_at": "2026-04-30T00:00:00+00:00"},
                 }
             ],
@@ -745,7 +774,7 @@ class PredictionLabReplayTests(unittest.TestCase):
             require_recorded_source=True,
             resolution_records=[
                 {
-                    "market_id": "KXUNIT-26APR29-YES",
+                    "market_id": "KXHIGHNY-26APR29-T80",
                     "resolution": {"outcome": "YES", "resolved_at": "2026-04-30T00:00:00+00:00"},
                 }
             ],
@@ -767,7 +796,7 @@ class PredictionLabReplayTests(unittest.TestCase):
                     row_patch={
                         "timestamp": "2026-04-29T12:00:00+00:00",
                         "observed_at": "2026-04-29T12:00:00+00:00",
-                        "snapshot_key": "KXUNIT-26APR29-YES",
+                        "snapshot_key": "KXHIGHNY-26APR29-T80",
                         "recorded_prediction": False,
                     },
                 ),
@@ -775,7 +804,7 @@ class PredictionLabReplayTests(unittest.TestCase):
             append_jsonl(
                 resolution_path,
                 {
-                    "market_id": "KXUNIT-26APR29-YES",
+                    "market_id": "KXHIGHNY-26APR29-T80",
                     "resolution": {"outcome": "YES", "resolved_at": "2026-04-30T00:00:00+00:00"},
                 },
             )
@@ -847,11 +876,11 @@ class PredictionLabReplayTests(unittest.TestCase):
             snapshot_row = _row(row_patch={"recorded_prediction": False})
             snapshot_row["decision_artifact"]["source_context"]["data"]["market_metadata"].update({"outcome": None, "result": ""})
             append_jsonl(snapshot_path, snapshot_row)
-            append_jsonl(leaked_input_path, _row(row_patch={"market_id": "KXUNIT-26APR30-YES", "resolution": {"outcome": "YES"}}))
+            append_jsonl(leaked_input_path, _row(row_patch={"market_id": "KXHIGHNY-26APR30-T80", "resolution": {"outcome": "YES"}}))
             append_jsonl(
                 resolution_path,
                 {
-                    "market_id": "KXUNIT-26APR29-YES",
+                    "market_id": "KXHIGHNY-26APR29-T80",
                     "resolution": {"outcome": "YES", "resolved_at": "2026-04-30T00:00:00+00:00"},
                 },
             )
@@ -950,7 +979,11 @@ class PredictionLabReplayTests(unittest.TestCase):
                     "mode": "prediction_lab",
                     "as_of": "2026-04-29T12:00:00+00:00",
                     "data": {
-                        "market_metadata": {"market_group": "weather", "series": "daily_temperature"},
+                        "market_metadata": {
+                            "market_group": "weather",
+                            "series": "daily_temperature",
+                            "event_ticker": "KXHIGHNY-26APR29",
+                        },
                         "weather_source_snapshot": weather_snapshot,
                     },
                 },
@@ -994,7 +1027,11 @@ class PredictionLabReplayTests(unittest.TestCase):
                     "source": "provided",
                     "source_mode": "recorded_as_of",
                     "data": {
-                        "market_metadata": {"market_group": "weather", "series": "daily_temperature"},
+                        "market_metadata": {
+                            "market_group": "weather",
+                            "series": "daily_temperature",
+                            "event_ticker": "KXHIGHNY-26APR29",
+                        },
                         "weather_source_snapshot": weather_snapshot,
                     },
                 },
@@ -1065,7 +1102,11 @@ class PredictionLabReplayTests(unittest.TestCase):
                     "source": "provided",
                     "source_mode": "recorded_as_of",
                     "data": {
-                        "market_metadata": {"market_group": "weather", "series": "daily_temperature"},
+                        "market_metadata": {
+                            "market_group": "weather",
+                            "series": "daily_temperature",
+                            "event_ticker": "KXHIGHNY-26APR29",
+                        },
                         "weather_source_snapshot": weather_snapshot,
                     },
                 },
@@ -1143,9 +1184,10 @@ class PredictionLabReplayTests(unittest.TestCase):
 
     def test_historical_replay_does_not_silently_use_live_current_source_data(self):
         evaluator = self._evaluator(LiveTouchingStrategy(_signal()))
+        live_row = _row(artifact_patch={"source_context": {"source": "live_current", "data": {}}})
 
         with self.assertRaises(LiveCurrentSourceForbiddenError):
-            replay_recorded_artifacts([_row()], evaluator=evaluator)
+            replay_recorded_artifacts([live_row], evaluator=evaluator)
 
     def test_broader_live_current_source_methods_are_guarded(self):
         for method_name in ("_news_signal", "_social_signal", "_ai_signal"):
@@ -1156,11 +1198,12 @@ class PredictionLabReplayTests(unittest.TestCase):
 
     def test_live_current_policy_can_warn_and_skip_source_call(self):
         evaluator = self._evaluator(LiveTouchingStrategy(_signal()))
+        live_row = _row(artifact_patch={"source_context": {"source": "live_current", "data": {}}})
 
-        result = replay_recorded_artifacts([_row()], evaluator=evaluator, live_source_policy="warn_skip")
+        result = replay_recorded_artifacts([live_row], evaluator=evaluator, live_source_policy="warn_skip")
 
         self.assertEqual(result.rows[0].replayed_action, "BUY_YES")
-        self.assertIn("live_current_source_forbidden_for_historical_replay:KXUNIT-26APR29-YES", result.rows[0].warnings)
+        self.assertIn("live_current_source_forbidden_for_historical_replay:KXHIGHNY-26APR29-T80", result.rows[0].warnings)
 
     def test_require_recorded_source_rejects_metadata_only_context(self):
         row = _row(
@@ -1168,7 +1211,7 @@ class PredictionLabReplayTests(unittest.TestCase):
                 "source_context": {
                     "source": "provided",
                     "mode": "prediction_lab",
-                    "data": {"market_metadata": {"market_group": "sports", "series": "unit"}},
+                    "data": {"market_metadata": {"market_group": "sports", "series": "unit", "series_ticker": "KXHIGHNY"}},
                 }
             }
         )
