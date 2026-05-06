@@ -14,6 +14,8 @@ from copy import deepcopy
 from typing import Any
 from pathlib import Path
 
+from bot.strategy_policy import normalize_strategy_policy
+
 logger = logging.getLogger(__name__)
 
 
@@ -170,6 +172,11 @@ def _normalize_storage_config(config: dict) -> dict:
     prediction_lab["send_telegram_updates"] = bool(prediction_lab.get("send_telegram_updates", True))
     prediction_lab["telegram_summary_on_pause"] = bool(prediction_lab.get("telegram_summary_on_pause", True))
     config["prediction_lab"] = prediction_lab
+    return config
+
+
+def _normalize_strategy_policy_config(config: dict) -> dict:
+    config["strategy_policy_normalized"] = normalize_strategy_policy(config.get("strategy_policy", {}) or {})
     return config
 
 try:
@@ -361,6 +368,7 @@ def load_config(config_path: str | Path | None = None) -> dict:
 
     # Apply .env overrides
     config = _apply_env_overrides(config)
+    config = _normalize_strategy_policy_config(config)
     config = _normalize_storage_config(config)
     config = _apply_runtime_paths(config)
 

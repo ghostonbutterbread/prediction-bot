@@ -1,0 +1,40 @@
+# Strategy Policy Beta Rollout
+
+## Purpose
+
+`strategy_policy` is a shared config surface for Prediction Lab, paper, and live strategy policy experiments. The initial scaffold only normalizes config and exposes helper booleans; it does not change scoring, lane gates, order sizing, order placement, or any other trading decision.
+
+## Config Shape
+
+```yaml
+strategy_policy:
+  version: stable # stable|beta, default stable
+  beta_mode: off  # off|shadow|enforce, optional shorthand
+  beta:
+    mode: off     # off|shadow|enforce
+    features:
+      weather_hidden_gem_evidence_card: false
+      bucket_distribution_scoring: false
+      hidden_gem_lane_gates: false
+```
+
+The loader exposes the parsed value at `config["strategy_policy_normalized"]`. Invalid `version` or beta mode values fail closed to `stable` and `off`.
+
+`beta.mode` takes precedence over the top-level `beta_mode` shorthand. Use top-level `beta_mode` only when the nested `beta.mode` key is omitted.
+
+Unknown feature names are ignored. Only keys listed in the default feature set are normalized, so `feature_enabled("typo")` is always false.
+
+## Helper Semantics
+
+- `is_configured_beta`: true when `version: beta` parsed successfully, even if `beta_mode` is `off`.
+- `is_active`: true only when `version: beta` and the effective mode is `shadow` or `enforce`.
+- `is_shadow`: true only for active beta shadow mode.
+- `is_enforce`: true only for active beta enforce mode.
+- `is_beta`: compatibility alias for `is_configured_beta`; prefer the explicit helper in new code.
+- `configured_features`: normalized feature flags requested in config.
+- `features`: active feature flags. These are all false unless `is_active` is true.
+- `feature_enabled(name)`: true only for a known feature whose active flag is true.
+
+## Rollout
+
+Stable main remains the default everywhere. Prediction Lab may opt into `version: beta` with `mode: shadow` to collect parallel evidence without changing decisions. Paper may move to `mode: enforce` after shadow data is reviewed. Live stays `stable` until the beta policy is explicitly promoted.
