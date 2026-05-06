@@ -16,6 +16,7 @@ from pathlib import Path
 
 from bot.strategy_policy import normalize_strategy_policy
 from bot.market_router import normalize_allowed_market_routes
+from bot.strategy_lanes import default_strategy_lane_config, normalize_strategy_lane_config
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +148,8 @@ def _normalize_storage_config(config: dict) -> dict:
     if parity_mode["require_book_prices"]:
         parity_mode["fallback_to_signal_prices"] = False
     config["parity_mode"] = parity_mode
+
+    config["strategy_lanes"] = normalize_strategy_lane_config(config.get("strategy_lanes", {}))
 
     raw_prediction_lab = config.get("prediction_lab", {}) or {}
     prediction_lab = _deep_merge(_default_prediction_lab_config(), raw_prediction_lab)
@@ -462,6 +465,7 @@ def _default_config() -> dict:
         },
         "storage": _default_storage_config(),
         "parity_mode": _default_parity_mode_config(),
+        "strategy_lanes": default_strategy_lane_config(),
         "risk": {
             "kelly_fraction": 0.75,
             "max_position_pct": 0.20,

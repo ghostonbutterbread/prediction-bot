@@ -6,6 +6,7 @@ from math import isfinite
 from typing import Any, Protocol
 
 from bot.trade_audit import trade_event_key
+from bot.strategy_lanes import select_strategy_lane
 
 from .interfaces import TradeContext, TradeDecision
 from .weather_risk import (
@@ -130,12 +131,23 @@ def build_trade_decision(
     if route_metadata is not None:
         reasoning["market_route"] = route_metadata
 
-    if edge < min_edge:
+    strategy_lane = select_strategy_lane(
+        entry_price=entry_price,
+        win_probability=win_probability,
+        edge=edge,
+        confidence=confidence,
+        min_edge=float(min_edge),
+        min_confidence=float(min_confidence),
+        hidden_gem_entry_price_cap=HIDDEN_GEM_ENTRY_PRICE_CAP,
+        config=_strategy_lane_config(context, source_signal),
+    )
+    reasoning["strategy_lane"] = strategy_lane.to_dict()
+    if not strategy_lane.allowed:
         return TradeDecision(
             action="SKIP",
             approved=False,
-            reason_code="edge_below_threshold",
-            reason=f"Edge {edge:.4f} below minimum {min_edge:.4f}",
+            reason_code=strategy_lane.reason_code,
+            reason=f"Strategy lane rejected: {strategy_lane.lane_id}",
             edge=edge,
             confidence=confidence,
             entry_price=entry_price,
@@ -143,12 +155,30 @@ def build_trade_decision(
             reasoning=reasoning,
         )
 
-    if confidence < min_confidence:
+    effective_min_edge = strategy_lane.effective_min_edge
+    effective_min_confidence = strategy_lane.effective_min_confidence
+    reasoning["thresholds"]["effective_min_edge"] = effective_min_edge
+    reasoning["thresholds"]["effective_min_confidence"] = effective_min_confidence
+
+    if edge < effective_min_edge:
+        return TradeDecision(
+            action="SKIP",
+            approved=False,
+            reason_code="edge_below_threshold",
+            reason=f"Edge {edge:.4f} below minimum {effective_min_edge:.4f}",
+            edge=edge,
+            confidence=confidence,
+            entry_price=entry_price,
+            win_probability=win_probability,
+            reasoning=reasoning,
+        )
+
+    if confidence < effective_min_confidence:
         return TradeDecision(
             action="SKIP",
             approved=False,
             reason_code="confidence_below_threshold",
-            reason=f"Confidence {confidence:.4f} below minimum {min_confidence:.4f}",
+            reason=f"Confidence {confidence:.4f} below minimum {effective_min_confidence:.4f}",
             edge=edge,
             confidence=confidence,
             entry_price=entry_price,
@@ -285,8 +315,8 @@ def build_trade_decision(
         )
 
     if event_snapshot["retrade"]:
-        required_retrade_edge = min_edge + retrade_policy["retrade_edge_premium"]
-        required_retrade_confidence = min_confidence + retrade_policy["retrade_confidence_premium"]
+        required_retrade_edge = effective_min_edge + retrade_policy["retrade_edge_premium"]
+        required_retrade_confidence = effective_min_confidence + retrade_policy["retrade_confidence_premium"]
         reasoning["retrade"].update(
             {
                 "retrade_edge_threshold": required_retrade_edge,
@@ -638,6 +668,18 @@ def _market_route_rejection(context: TradeContext, source_signal: dict[str, Any]
         return reason_code, f"Market route rejected: {reason_code}", route
     if not route.get("handler_id"):
         return "missing_market_route_handler", "Market route is missing a handler", route
+    return None
+
+
+def _strategy_lane_config(context: TradeContext, source_signal: dict[str, Any]) -> dict[str, Any] | None:
+    for value in (
+        (context.metadata or {}).get("strategy_lanes"),
+        source_signal.get("strategy_lanes"),
+        (context.metadata or {}).get("strategy_lane_config"),
+        source_signal.get("strategy_lane_config"),
+    ):
+        if isinstance(value, dict):
+            return dict(value)
     return None
 
 

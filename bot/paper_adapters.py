@@ -369,6 +369,7 @@ class SimulatorPaperStateAdapter:
                 "category": signal.get("category", ""),
                 "market_route": market_route,
                 "market_route_required": self._market_route_enforcement_enabled(host_config),
+                "strategy_lanes": dict(host_config.get("strategy_lanes", {}) or {}),
                 "event_key": event_key,
                 "market_family_key": candidate_family_key,
                 "event_snapshot": {

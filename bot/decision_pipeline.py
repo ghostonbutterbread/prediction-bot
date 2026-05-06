@@ -264,6 +264,7 @@ class DecisionPipelineEvaluator:
                 "category": metadata.get("category", getattr(market, "category", "")),
                 "market_route": market_route,
                 "market_route_required": _market_route_enforcement_enabled(pipeline_input.config_snapshot),
+                "strategy_lanes": dict(pipeline_input.config_snapshot.get("strategy_lanes", {}) or {}),
                 "event_key": event_key,
                 "market_family_key": _market_family_key(str(signal.get("market_id") or getattr(market, "id", ""))),
                 "event_snapshot": _empty_event_snapshot(event_key, signal, execution_snapshot),

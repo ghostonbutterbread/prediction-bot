@@ -203,6 +203,7 @@ class RunnerLiveExecutionAdapter:
                 "runner": "live",
                 "market_route": market_route,
                 "market_route_required": self._market_route_enforcement_enabled(config),
+                "strategy_lanes": dict(config.get("strategy_lanes", {}) or {}),
                 "event_key": event_key,
                 "market_family_key": candidate_family_key,
                 "event_snapshot": {

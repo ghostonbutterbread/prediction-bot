@@ -158,6 +158,20 @@ parity_mode:
   # production = live runtime keeps live risk preset
   # identical_risk = live runtime intentionally uses the paper risk preset for apples-to-apples comparison
   comparison_mode: production
+strategy_lanes:
+  # Disabled means lanes are recorded as decision metadata only; existing edge,
+  # confidence, hidden-gem, risk, and execution gates keep their current behavior.
+  enabled: false
+  enabled_lanes:
+    - edge
+    - hidden_gem
+  confidence_slow_profit:
+    # Explicitly enable this plus strategy_lanes.enabled to admit high-confidence,
+    # lower-edge slow-profit trades with the thresholds below. When enabled,
+    # normalization includes this lane in enabled_lanes.
+    enabled: false
+    min_edge:
+    min_confidence:
 runtime:
   base_dir: data
 
