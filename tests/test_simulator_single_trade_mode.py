@@ -8,7 +8,16 @@ from bot.simulator import Simulator
 
 class FakeExchange:
     def get_markets(self, limit=100):
-        return [SimpleNamespace(id="m1", question="Will rain happen?", yes_price=0.4, no_price=0.6, closes_at=None)]
+        return [
+            SimpleNamespace(
+                id="KXHIGHNY-26APR29-T80",
+                question="Will NYC high temperature be above 80 degrees?",
+                yes_price=0.4,
+                no_price=0.6,
+                closes_at=None,
+                metadata={"series_ticker": "KXHIGHNY", "event_ticker": "KXHIGHNY-26APR29"},
+            )
+        ]
 
 
 class SimulatorSingleTradeModeTests(unittest.TestCase):
@@ -28,8 +37,10 @@ class SimulatorSingleTradeModeTests(unittest.TestCase):
                 }
             )
             signal = {
-                "market_id": "m1",
-                "question": "Will rain happen?",
+                "market_id": "KXHIGHNY-26APR29-T80",
+                "question": "Will NYC high temperature be above 80 degrees?",
+                "series_ticker": "KXHIGHNY",
+                "event_ticker": "KXHIGHNY-26APR29",
                 "direction": "BUY_YES",
                 "market_price": 0.40,
                 "yes_price": 0.40,

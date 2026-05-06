@@ -69,11 +69,13 @@ class RestartReconnectChaosTests(unittest.TestCase):
         bot.risk.state.session_peak_balance = 25.0
         return bot
 
-    def _signal(self, market_id="m-new"):
+    def _signal(self, market_id="KXHIGHNY-26APR29-T80"):
         return {
             "exchange": "kalshi",
             "market_id": market_id,
-            "question": "Should restart state allow a new entry?",
+            "question": "Will NYC high temperature be above 80 degrees?",
+            "series_ticker": "KXHIGHNY",
+            "event_ticker": "KXHIGHNY-26APR29",
             "direction": "BUY_YES",
             "market_price": 0.40,
             "yes_price": 0.40,
@@ -105,7 +107,7 @@ class RestartReconnectChaosTests(unittest.TestCase):
             exchange = ChaosRestartExchange(
                 positions=[
                     Position(
-                        market_id="m-overreserved",
+                        market_id="KXHIGHNY-26APR29-T81",
                         exchange="kalshi",
                         question="Over reserved?",
                         side="YES",
@@ -121,7 +123,7 @@ class RestartReconnectChaosTests(unittest.TestCase):
             bot.exchanges["kalshi"] = exchange
 
             with patch.object(bot.kelly, "calculate", return_value=5.0):
-                result = bot._process_signal(self._signal("m-blocked"))
+                result = bot._process_signal(self._signal("KXHIGHNY-26APR29-T82"))
 
             self.assertEqual(result["blocked_reason"], "reconciliation_state_blocked")
             self.assertIn("negative_available_cash_after_reconcile", result["reconciliation_issues"])
@@ -140,7 +142,7 @@ class RestartReconnectChaosTests(unittest.TestCase):
                 {
                     "order_id": "stale-local-order",
                     "exchange": "kalshi",
-                    "market_id": "m-startup-clears-local",
+                    "market_id": "KXHIGHNY-26APR29-T83",
                     "direction": "BUY_YES",
                     "status": "open",
                     "remaining_size": 1.0,
@@ -150,7 +152,7 @@ class RestartReconnectChaosTests(unittest.TestCase):
                 {
                     "order_id": "stale-local-order-2",
                     "exchange": "kalshi",
-                    "market_id": "m-startup-clears-local",
+                    "market_id": "KXHIGHNY-26APR29-T83",
                     "direction": "BUY_YES",
                     "status": "open",
                     "remaining_size": 1.0,
@@ -169,7 +171,7 @@ class RestartReconnectChaosTests(unittest.TestCase):
             bot.exchanges["kalshi"] = exchange
 
             with patch.object(bot.kelly, "calculate", return_value=5.0):
-                result = bot._process_signal(self._signal("m-startup-clears-local"))
+                result = bot._process_signal(self._signal("KXHIGHNY-26APR29-T83"))
 
             self.assertIn("order", result)
             self.assertTrue(bot.startup_reconciliation_status["kalshi"]["completed"])
@@ -185,7 +187,7 @@ class RestartReconnectChaosTests(unittest.TestCase):
                     orders=[
                         RestingOrder(
                             order_id="ord-resting",
-                            market_id="m-resting",
+                            market_id="KXHIGHNY-26APR29-T84",
                             exchange="kalshi",
                             question="Existing resting order?",
                             side="YES",
@@ -207,7 +209,7 @@ class RestartReconnectChaosTests(unittest.TestCase):
                 ChaosRestartExchange(
                     positions=[
                         Position(
-                            market_id="m-blocked",
+                            market_id="KXHIGHNY-26APR29-T82",
                             exchange="kalshi",
                             question="Blocked startup?",
                             side="YES",
@@ -244,7 +246,7 @@ class RestartReconnectChaosTests(unittest.TestCase):
                 {
                     "order_id": "ord-canceled-partial",
                     "exchange": "kalshi",
-                    "market_id": "m-canceled-partial",
+                    "market_id": "KXHIGHNY-26APR29-T85",
                     "question": "Was the order partially canceled?",
                     "direction": "BUY_YES",
                     "status": "open",
@@ -262,7 +264,7 @@ class RestartReconnectChaosTests(unittest.TestCase):
                     "trade_id": "ord-canceled-partial",
                     "order_id": "ord-canceled-partial",
                     "exchange": "kalshi",
-                    "market_id": "m-canceled-partial",
+                    "market_id": "KXHIGHNY-26APR29-T85",
                     "question": "Was the order partially canceled?",
                     "direction": "BUY_YES",
                     "status": "placed",
@@ -284,7 +286,7 @@ class RestartReconnectChaosTests(unittest.TestCase):
                 orders=[
                     RestingOrder(
                         order_id="ord-canceled-partial",
-                        market_id="m-canceled-partial",
+                        market_id="KXHIGHNY-26APR29-T85",
                         exchange="kalshi",
                         question="Was the order partially canceled?",
                         side="YES",
@@ -323,7 +325,7 @@ class RestartReconnectChaosTests(unittest.TestCase):
             }
 
             with patch.object(bot.kelly, "calculate", return_value=5.0):
-                blocked = bot._process_signal(self._signal("m-gated"))
+                blocked = bot._process_signal(self._signal("KXHIGHNY-26APR29-T86"))
 
             self.assertEqual(blocked["blocked_reason"], "reconciliation_state_blocked")
             self.assertEqual(exchange.placed_orders, [])
@@ -331,7 +333,7 @@ class RestartReconnectChaosTests(unittest.TestCase):
             bot._reconcile_exchange_state("kalshi", exchange)
 
             with patch.object(bot.kelly, "calculate", return_value=5.0):
-                allowed = bot._process_signal(self._signal("m-cleared"))
+                allowed = bot._process_signal(self._signal("KXHIGHNY-26APR29-T87"))
 
             self.assertIn("order", allowed)
             self.assertEqual(len(exchange.placed_orders), 1)

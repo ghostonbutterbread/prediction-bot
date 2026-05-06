@@ -39,8 +39,10 @@ class RunnerRiskBlockEventTests(unittest.TestCase):
             bot = self._make_bot(tmpdir)
             signal = {
                 "exchange": "kalshi",
-                "market_id": "m1",
-                "question": "Will rain happen?",
+                "market_id": "KXHIGHNY-26APR29-T80",
+                "question": "Will NYC high temperature be above 80 degrees?",
+                "series_ticker": "KXHIGHNY",
+                "event_ticker": "KXHIGHNY-26APR29",
                 "direction": "BUY_YES",
                 "market_price": 0.40,
                 "yes_price": 0.40,
@@ -60,9 +62,9 @@ class RunnerRiskBlockEventTests(unittest.TestCase):
             self.assertEqual(entries[0]["schema_name"], "execution_audit_row")
             self.assertEqual(entries[0]["status"], "rejected")
             self.assertEqual(entries[0]["lifecycle_state"], "risk_check_rejected")
-            self.assertEqual(entries[0]["blocked_reason"], "risk_trading_paused_by_operator")
-            self.assertEqual(entries[0]["decision_reason_code"], "risk_trading_paused_by_operator")
-            self.assertTrue(entries[0]["trade_id"].startswith("risk-block:m1:risk_trading_paused_by_operator:"))
+            self.assertEqual(entries[0]["blocked_reason"], "trading_disabled")
+            self.assertEqual(entries[0]["decision_reason_code"], "trading_disabled")
+            self.assertTrue(entries[0]["trade_id"].startswith("risk-block:KXHIGHNY-26APR29-T80:trading_disabled:"))
 
     def test_scan_log_includes_canonical_candidate_summaries(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -70,8 +72,10 @@ class RunnerRiskBlockEventTests(unittest.TestCase):
             signals = [
                 {
                     "exchange": "kalshi",
-                    "market_id": "m1",
-                    "question": "Will rain happen?",
+                    "market_id": "KXHIGHNY-26APR29-T80",
+                    "question": "Will NYC high temperature be above 80 degrees?",
+                    "series_ticker": "KXHIGHNY",
+                    "event_ticker": "KXHIGHNY-26APR29",
                     "direction": "BUY_YES",
                     "market_price": 0.40,
                     "yes_price": 0.40,
@@ -84,8 +88,10 @@ class RunnerRiskBlockEventTests(unittest.TestCase):
                 },
                 {
                     "exchange": "kalshi",
-                    "market_id": "m2",
-                    "question": "Will snow happen?",
+                    "market_id": "KXLOWNY-26APR29-T60",
+                    "question": "Will NYC low temperature be below 60 degrees?",
+                    "series_ticker": "KXLOWNY",
+                    "event_ticker": "KXLOWNY-26APR29",
                     "direction": "BUY_NO",
                     "market_price": 0.62,
                     "yes_price": 0.38,

@@ -31,7 +31,7 @@ class RecoveryParityTests(unittest.TestCase):
                                 "timestamp": "2026-04-23T00:00:00+00:00",
                                 "exchange": "kalshi",
                                 "market_id": "KXHIGHNY-26APR16-T70",
-                                "question": "Will NYC high be below 70?",
+                                "question": "Will NYC high temperature be below 70 degrees?",
                                 "direction": "BUY_YES",
                                 "model_probability": 0.70,
                                 "market_price": 0.40,
@@ -81,7 +81,7 @@ class RecoveryParityTests(unittest.TestCase):
             signal = {
                 "exchange": "kalshi",
                 "market_id": "KXHIGHNY-26APR16-T72",
-                "question": "Will NYC high be below 72?",
+                "question": "Will NYC high temperature be below 72 degrees?",
                 "direction": "BUY_YES",
                 "market_price": 0.40,
                 "yes_price": 0.40,
@@ -164,7 +164,7 @@ class RecoveryParityTests(unittest.TestCase):
             bot.open_positions = [
                 LivePosition(
                     market_id="KXHIGHNY-26APR16-T70",
-                    question="Will NYC high be below 70?",
+                    question="Will NYC high temperature be below 70 degrees?",
                     direction="BUY_YES",
                     price=0.40,
                     size=8.0,
@@ -177,7 +177,7 @@ class RecoveryParityTests(unittest.TestCase):
                 {
                     "order_id": "ord-open-1",
                     "market_id": "KXHIGHNY-26APR16-T74",
-                    "question": "Will NYC high be below 74?",
+                    "question": "Will NYC high temperature be below 74 degrees?",
                     "direction": "BUY_YES",
                     "status": "open",
                     "requested_size": 5.0,
@@ -207,7 +207,7 @@ class RecoveryParityTests(unittest.TestCase):
             signal = {
                 "exchange": "kalshi",
                 "market_id": "KXHIGHNY-26APR16-T72",
-                "question": "Will NYC high be below 72?",
+                "question": "Will NYC high temperature be below 72 degrees?",
                 "direction": "BUY_YES",
                 "market_price": 0.40,
                 "yes_price": 0.40,

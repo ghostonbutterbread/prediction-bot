@@ -44,8 +44,10 @@ class ArtifactExchange:
 class Phase5DecisionArtifactTests(unittest.TestCase):
     def _signal(self):
         return {
-            "market_id": "phase5-market",
-            "question": "Will Phase 5 stay aligned?",
+            "market_id": "KXHIGHNY-26APR29-T80",
+            "question": "Will NYC high temperature be above 80 degrees?",
+            "series_ticker": "KXHIGHNY",
+            "event_ticker": "KXHIGHNY-26APR29",
             "exchange": "kalshi",
             "direction": "BUY_YES",
             "model_probability": 0.70,
