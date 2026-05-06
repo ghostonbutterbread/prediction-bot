@@ -36,3 +36,6 @@ prediction_lab:
 scan:
   allowed_market_groups:
     - weather
+
+strategy:
+  enable_weather_directional_mismatch_guard: true

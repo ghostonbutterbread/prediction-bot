@@ -36,7 +36,7 @@ _INFERRED_MAPPING_KEYS = (
     "weather_source_id",
     "source_id",
 )
-_NESTED_SIGNAL_KEYS = ("data", "weather_context", "weather_market_context", "weather", "metadata")
+_NESTED_SIGNAL_KEYS = ("data", "weather_context", "weather_market_context", "weather", "metadata", "signal_details", "live")
 
 
 def build_weather_source_confidence_evidence(signal: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -186,14 +186,7 @@ def _extract_volume(signal: Mapping[str, Any]) -> float | None:
 
 
 def _has_any_key(signal: Mapping[str, Any], keys: tuple[str, ...]) -> bool:
-    for key in keys:
-        value = signal.get(key)
-        if value not in (None, "", [], {}):
-            return True
-    for nested_key in _NESTED_SIGNAL_KEYS:
-        nested = signal.get(nested_key)
-        if not isinstance(nested, Mapping):
-            continue
+    for nested in _iter_search_mappings(signal):
         for key in keys:
             value = nested.get(key)
             if value not in (None, "", [], {}):
@@ -207,19 +200,34 @@ def _first_bounded_float(
     nested: tuple[str, ...] = (),
     default: float | None = None,
 ) -> float | None:
-    for key in keys:
-        value = _bounded_float(signal.get(key))
-        if value is not None:
-            return value
-    for nested_key in _NESTED_SIGNAL_KEYS:
-        nested_obj = signal.get(nested_key)
-        if not isinstance(nested_obj, Mapping):
-            continue
+    for nested_obj in _iter_search_mappings(signal):
         for key in (*keys, *nested):
             value = _bounded_float(nested_obj.get(key))
             if value is not None:
                 return value
     return default
+
+
+def _iter_search_mappings(signal: Mapping[str, Any]):
+    seen: set[int] = set()
+
+    def visit(mapping: Mapping[str, Any], depth: int):
+        marker = id(mapping)
+        if marker in seen:
+            return
+        seen.add(marker)
+        yield mapping
+        if depth <= 0:
+            return
+        for nested_key in _NESTED_SIGNAL_KEYS:
+            nested_obj = mapping.get(nested_key)
+            if isinstance(nested_obj, Mapping):
+                yield from visit(nested_obj, depth - 1)
+                for value in nested_obj.values():
+                    if isinstance(value, Mapping):
+                        yield from visit(value, depth - 1)
+
+    yield from visit(signal, 3)
 
 
 def _normalize_station_mapping(value: Any) -> str | None:

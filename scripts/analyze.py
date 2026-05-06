@@ -22,6 +22,7 @@ from bot.trade_audit import (
 )
 from bot.config import load_config
 from bot.status import prune_log_storage, summarize_log_storage
+from bot.strategy_policy import strategy_policy_status
 
 DATA_DIR = Path(__file__).parent.parent / "data"
 PACIFIC = timezone(timedelta(hours=-7))
@@ -92,6 +93,35 @@ def _build_position_performance(trades: list[dict]) -> dict:
     }
 
 
+def _strategy_policy_status_from_latest(latest: dict, fallback_config: dict) -> dict:
+    """Prefer session/report policy snapshots over today's config.yaml."""
+    candidate_sources = [
+        latest,
+        latest.get("summary", {}) if isinstance(latest.get("summary"), dict) else {},
+        latest.get("report", {}) if isinstance(latest.get("report"), dict) else {},
+        latest.get("config_snapshot", {}) if isinstance(latest.get("config_snapshot"), dict) else {},
+        latest.get("config", {}) if isinstance(latest.get("config"), dict) else {},
+    ]
+    for trade in reversed(latest.get("trades", []) or []):
+        if not isinstance(trade, dict):
+            continue
+        artifact = trade.get("decision_artifact") if isinstance(trade.get("decision_artifact"), dict) else {}
+        decision = artifact.get("shared_core_decision") if isinstance(artifact.get("shared_core_decision"), dict) else {}
+        reasoning = decision.get("reasoning") if isinstance(decision.get("reasoning"), dict) else {}
+        candidate_sources.extend([artifact, reasoning])
+
+    for source in candidate_sources:
+        status = source.get("strategy_policy_status") if isinstance(source, dict) else None
+        if isinstance(status, dict) and status.get("version") and status.get("mode"):
+            return dict(status)
+        if isinstance(source, dict) and source.get("strategy_policy_normalized"):
+            return strategy_policy_status(source.get("strategy_policy_normalized"))
+        if isinstance(source, dict) and source.get("strategy_policy"):
+            return strategy_policy_status(source.get("strategy_policy"))
+
+    return strategy_policy_status(fallback_config.get("strategy_policy_normalized"))
+
+
 def analyze(*, prune_logs: bool = True) -> dict:
     """Run full analysis and return structured insights.
 
@@ -157,6 +187,7 @@ def analyze(*, prune_logs: bool = True) -> dict:
     }
 
     config = load_config(PROJECT_ROOT / "config.yaml")
+    result["strategy_policy_status"] = _strategy_policy_status_from_latest(latest, config)
     prune_result = prune_log_storage(config, project_root=PROJECT_ROOT) if prune_logs else None
     storage_summary = summarize_log_storage(config, project_root=PROJECT_ROOT)
     if storage_summary:
@@ -432,6 +463,15 @@ def format_report(analysis: dict) -> str:
     ]
     if s.get("current_session_file"):
         lines.append(f"Source: {s['current_session_file']}")
+    policy_status = analysis.get("strategy_policy_status") or {}
+    if policy_status:
+        features = policy_status.get("enabled_features") or {}
+        enabled = ", ".join(sorted(name for name, enabled in features.items() if enabled)) or "none"
+        lines.append(
+            f"Strategy policy: {policy_status.get('version', 'stable')}/{policy_status.get('mode', 'off')} | "
+            f"active={bool(policy_status.get('active'))} shadow={bool(policy_status.get('shadow'))} "
+            f"enforce={bool(policy_status.get('enforce'))} | features={enabled}"
+        )
     if s.get("ignored_invalid_trades"):
         lines.append(f"Ignored invalid trade rows: {s['ignored_invalid_trades']}")
     if s.get("invalid_resolved_positions"):

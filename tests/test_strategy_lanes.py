@@ -140,7 +140,8 @@ class StrategyLaneTests(unittest.TestCase):
                         "min_edge": 0.02,
                         "min_confidence": 0.90,
                     },
-                }
+                },
+                "strategy_policy": self._beta_policy("enforce", hidden_gem_lane_gates=True),
             },
         )
         kelly_sizer, risk_policy = self._approving_dependencies(size=4.0)
@@ -162,6 +163,49 @@ class StrategyLaneTests(unittest.TestCase):
         self.assertEqual(decision.reasoning["thresholds"]["effective_min_edge"], 0.02)
         self.assertEqual(decision.reasoning["thresholds"]["effective_min_confidence"], 0.90)
 
+    def test_shadow_slow_profit_lane_records_beta_delta_without_admission(self):
+        context = self._context(
+            market_price=0.50,
+            model_probability=0.53,
+            edge=0.03,
+            confidence=0.95,
+            metadata={
+                "strategy_lanes": {
+                    "enabled": True,
+                    "enabled_lanes": ["edge", "hidden_gem", "confidence_slow_profit"],
+                    "confidence_slow_profit": {
+                        "enabled": True,
+                        "min_edge": 0.02,
+                        "min_confidence": 0.90,
+                    },
+                },
+                "strategy_policy": self._beta_policy("shadow", hidden_gem_lane_gates=True),
+            },
+        )
+        kelly_sizer = Mock()
+        risk_policy = Mock()
+
+        decision = build_trade_decision(
+            context,
+            kelly_sizer=kelly_sizer,
+            risk_policy=risk_policy,
+            min_edge=0.05,
+            min_confidence=0.50,
+            max_entry_price=0.70,
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertEqual(decision.reason_code, "edge_below_threshold")
+        lane = decision.reasoning["strategy_lane"]
+        self.assertEqual(lane["lane_id"], EDGE_LANE)
+        beta_gate = lane["evidence"]["beta_lane_gate"]
+        self.assertTrue(beta_gate["beta_behavior_enabled"])
+        self.assertFalse(beta_gate["beta_behavior_enforced"])
+        self.assertEqual(beta_gate["lane_id"], CONFIDENCE_SLOW_PROFIT_LANE)
+        self.assertTrue(beta_gate["differs_from_final"])
+        kelly_sizer.calculate.assert_not_called()
+        risk_policy.check_trade.assert_not_called()
+
     def test_enabled_lane_allowlist_can_fail_before_kelly_and_risk(self):
         context = self._context(
             market_price=0.03,
@@ -172,7 +216,8 @@ class StrategyLaneTests(unittest.TestCase):
                 "strategy_lanes": {
                     "enabled": True,
                     "enabled_lanes": ["edge"],
-                }
+                },
+                "strategy_policy": self._beta_policy("enforce", hidden_gem_lane_gates=True),
             },
         )
         kelly_sizer = Mock()
@@ -259,6 +304,7 @@ class StrategyLaneTests(unittest.TestCase):
                             "min_confidence": 0.90,
                         },
                     },
+                    "strategy_policy": self._beta_policy("enforce", hidden_gem_lane_gates=True),
                 }
             )
             signal = self._slow_profit_signal()
@@ -329,6 +375,8 @@ class StrategyLaneTests(unittest.TestCase):
             source_context={
                 "market_id": "KXHIGHNY-260506-T71",
                 "question": "Will the high temperature in New York exceed 71 degrees?",
+                "confidence": 0.90,
+                "signals": {"live": model_probability, "price": model_probability},
             },
             metadata=merged_metadata,
         )
@@ -361,6 +409,26 @@ class StrategyLaneTests(unittest.TestCase):
             "edge": 0.03,
             "confidence": 0.95,
             "signals": {},
+        }
+
+    def _beta_policy(
+        self,
+        mode: str,
+        *,
+        weather_hidden_gem_evidence_card: bool = False,
+        bucket_distribution_scoring: bool = False,
+        hidden_gem_lane_gates: bool = False,
+    ) -> dict:
+        return {
+            "version": "beta",
+            "beta": {
+                "mode": mode,
+                "features": {
+                    "weather_hidden_gem_evidence_card": weather_hidden_gem_evidence_card,
+                    "bucket_distribution_scoring": bucket_distribution_scoring,
+                    "hidden_gem_lane_gates": hidden_gem_lane_gates,
+                },
+            },
         }
 
 

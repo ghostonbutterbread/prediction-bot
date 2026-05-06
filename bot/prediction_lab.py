@@ -19,7 +19,7 @@ from bot.decision_pipeline import (
     build_fixed_opportunity_risk_policy,
 )
 from bot.file_ops import append_jsonl, atomic_write_json, load_jsonl, locked_file, rewrite_jsonl
-from bot.strategies.enhanced import EnhancedStrategyEngine, KellySizer
+from bot.strategies.enhanced import EnhancedStrategyEngine, KellySizer, strategy_config_with_policy
 from bot.market_classification import apply_classification_metadata, classify_market_object
 from bot.market_router import route_market
 from bot.shared_core.resolution import detect_market_outcome
@@ -52,7 +52,7 @@ class PredictionLab:
         self.mode = str(self.lab_cfg.get("mode", "seed_and_watch") or "seed_and_watch").lower()
         self.paused = bool(self.lab_cfg.get("paused", False))
         self.observer_mode = bool(self.lab_cfg.get("observer_mode", False))
-        strategy_cfg = dict((self.config.get("strategy", {}) or {}))
+        strategy_cfg = strategy_config_with_policy(self.config)
         if self.lab_cfg.get("disable_news", True):
             strategy_cfg["enable_news"] = False
         if self.lab_cfg.get("disable_social", True):
@@ -1677,7 +1677,7 @@ class PredictionLab:
         return normalized in self.groups
 
     def _market_route_enforcement_enabled(self) -> bool:
-        scan_cfg = self.config.get("scan") if isinstance(self.config, dict) else None
+        """Market routing is stable route safety; policy flags do not disable it."""
         return True
 
     def _prediction_ledger_lock(self):

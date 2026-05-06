@@ -129,9 +129,12 @@ class WeatherMarketRiskTests(unittest.TestCase):
     def test_suspicious_hidden_gem_is_allowed_with_penalty(self):
         assessment = assess_weather_market_risk(
             {
-                "market_id": "KXHIGHMIA-26APR26-B82.5",
-                "question": "Will the high temp in Miami be 82-83° on Apr 26?",
+                "market_id": "KXHIGHMIA-26APR26-T90",
+                "question": "Will the high temp in Miami be >90° on Apr 26?",
                 "market_volume": 900,
+                "weather_station_mapping": "exact",
+                "weather_confidence_score": 0.82,
+                "source_agreement_score": 0.72,
             },
             entry_price=0.03,
             win_probability=0.36,  # 12x price
@@ -141,6 +144,99 @@ class WeatherMarketRiskTests(unittest.TestCase):
         self.assertFalse(assessment.should_skip)
         self.assertIn("extreme_disagreement_suspicious", assessment.flags)
         self.assertLess(assessment.size_multiplier, 0.5)
+
+    def test_normal_weather_hidden_gem_skips_without_strong_weather_evidence(self):
+        assessment = assess_weather_market_risk(
+            {
+                "market_id": "KXHIGHMIA-26APR26-T90",
+                "question": "Will the high temp in Miami be >90° on Apr 26?",
+                "market_volume": 900,
+            },
+            entry_price=0.04,
+            win_probability=0.16,
+        )
+
+        self.assertTrue(assessment.should_skip)
+        self.assertEqual(assessment.hidden_gem_tier, "normal")
+        self.assertEqual(assessment.reason_code, "weather_hidden_gem_without_strong_evidence")
+
+    def test_bucket_hidden_gem_skips_without_distribution_probability(self):
+        assessment = assess_weather_market_risk(
+            {
+                "market_id": "KXHIGHMIA-26APR26-B82.5",
+                "question": "Will the high temp in Miami be 82-83° on Apr 26?",
+                "market_volume": 900,
+                "weather_station_mapping": "exact",
+                "weather_confidence_score": 0.94,
+                "source_agreement_score": 0.9,
+            },
+            entry_price=0.03,
+            win_probability=0.15,
+        )
+
+        self.assertTrue(assessment.should_skip)
+        self.assertEqual(assessment.hidden_gem_tier, "normal")
+        self.assertEqual(assessment.reason_code, "weather_bucket_hidden_gem_missing_distribution_probability")
+
+    def test_tail_hidden_gem_skips_when_live_probability_rejects_candidate_side(self):
+        assessment = assess_weather_market_risk(
+            {
+                "market_id": "KXHIGHTSEA-26APR26-T64",
+                "question": "Will the maximum temperature be <64° on Apr 26?",
+                "market_volume": 900,
+                "candidate_direction": "BUY_YES",
+                "source_agreement_score": 0.86,
+                "signal_details": {
+                    "live": {
+                        "signal_type": "weather",
+                        "predicted_prob": 0.12,
+                        "confidence": 0.62,
+                    }
+                },
+            },
+            entry_price=0.04,
+            win_probability=0.16,
+        )
+
+        self.assertTrue(assessment.should_skip)
+        self.assertEqual(assessment.reason_code, "weather_tail_hidden_gem_live_probability_mismatch")
+        self.assertIn("tail_directional_mismatch", assessment.flags)
+
+    def test_tail_hidden_gem_directional_mismatch_is_symmetric_for_buy_no(self):
+        assessment = assess_weather_market_risk(
+            {
+                "market_id": "KXHIGHATL-26APR26-T90",
+                "question": "Will Atlanta high temperature be above 90 degrees?",
+                "market_volume": 900,
+                "candidate_direction": "BUY_NO",
+                "source_agreement_score": 0.86,
+                "signal_details": {"live": {"signal_type": "weather", "predicted_prob": 0.91, "confidence": 0.62}},
+            },
+            entry_price=0.04,
+            win_probability=0.16,
+        )
+
+        self.assertTrue(assessment.should_skip)
+        self.assertEqual(assessment.reason_code, "weather_tail_hidden_gem_live_probability_mismatch")
+
+    def test_tail_hidden_gem_does_not_skip_on_low_confidence_live_probability(self):
+        assessment = assess_weather_market_risk(
+            {
+                "market_id": "KXHIGHATL-26APR26-T90",
+                "question": "Will Atlanta high temperature be above 90 degrees?",
+                "market_volume": 900,
+                "candidate_direction": "BUY_YES",
+                "source_agreement_score": 0.86,
+                "weather_station_mapping": "exact",
+                "weather_confidence_score": 0.82,
+                "signal_details": {"live": {"signal_type": "weather", "predicted_prob": 0.12, "confidence": 0.40}},
+            },
+            entry_price=0.04,
+            win_probability=0.16,
+        )
+
+        self.assertFalse(assessment.should_skip)
+        self.assertEqual(assessment.hidden_gem_tier, "normal")
 
     def test_exceptional_hidden_gem_skips_without_perfect_evidence(self):
         assessment = assess_weather_market_risk(

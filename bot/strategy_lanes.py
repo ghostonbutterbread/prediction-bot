@@ -5,10 +5,13 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping
 
+from bot.strategy_policy import coerce_strategy_policy, strategy_policy_status
+
 
 EDGE_LANE = "edge"
 CONFIDENCE_SLOW_PROFIT_LANE = "confidence_slow_profit"
 HIDDEN_GEM_LANE = "hidden_gem"
+HIDDEN_GEM_LANE_GATES_FEATURE = "hidden_gem_lane_gates"
 DEFAULT_ENABLED_LANES = (EDGE_LANE, HIDDEN_GEM_LANE)
 
 
@@ -76,11 +79,16 @@ def select_strategy_lane(
     min_confidence: float,
     hidden_gem_entry_price_cap: float,
     config: Mapping[str, Any] | None = None,
+    strategy_policy: Mapping[str, Any] | None = None,
 ) -> StrategyLaneDecision:
     lane_config = normalize_strategy_lane_config(config)
-    behavior_enabled = bool(lane_config.get("enabled", False))
+    policy = coerce_strategy_policy(strategy_policy)
+    configured_behavior_enabled = bool(lane_config.get("enabled", False))
+    beta_behavior_enabled = configured_behavior_enabled and policy.feature_enabled(HIDDEN_GEM_LANE_GATES_FEATURE)
+    behavior_enabled = configured_behavior_enabled and policy.feature_enforced(HIDDEN_GEM_LANE_GATES_FEATURE)
     slow_profit_config = dict(lane_config.get("confidence_slow_profit") or {})
     slow_profit_explicitly_enabled = behavior_enabled and bool(slow_profit_config.get("enabled", False))
+    beta_slow_profit_explicitly_enabled = beta_behavior_enabled and bool(slow_profit_config.get("enabled", False))
 
     lane_id = EDGE_LANE
     reason_code = "edge_lane_selected"
@@ -110,6 +118,18 @@ def select_strategy_lane(
     if behavior_enabled and lane_id not in enabled_lanes:
         allowed = False
         reason_code = "strategy_lane_disabled"
+    beta_lane_id, beta_reason_code, beta_allowed, beta_effective_min_edge, beta_effective_min_confidence = _select_beta_lane(
+        entry_price=entry_price,
+        edge=edge,
+        confidence=confidence,
+        min_edge=min_edge,
+        min_confidence=min_confidence,
+        hidden_gem_entry_price_cap=hidden_gem_entry_price_cap,
+        enabled_lanes=enabled_lanes,
+        behavior_enabled=beta_behavior_enabled,
+        slow_profit_config=slow_profit_config,
+        slow_profit_enabled=beta_slow_profit_explicitly_enabled,
+    )
 
     return StrategyLaneDecision(
         lane_id=lane_id,
@@ -130,8 +150,67 @@ def select_strategy_lane(
             "confidence_slow_profit_enabled": slow_profit_explicitly_enabled,
             "confidence_slow_profit_min_edge": slow_profit_config.get("min_edge"),
             "confidence_slow_profit_min_confidence": slow_profit_config.get("min_confidence"),
+            "strategy_policy": strategy_policy_status(policy),
+            "beta_lane_gate": {
+                "feature": HIDDEN_GEM_LANE_GATES_FEATURE,
+                "configured_behavior_enabled": configured_behavior_enabled,
+                "beta_behavior_enabled": beta_behavior_enabled,
+                "beta_behavior_enforced": behavior_enabled,
+                "confidence_slow_profit_enabled": beta_slow_profit_explicitly_enabled,
+                "lane_id": beta_lane_id,
+                "allowed": beta_allowed,
+                "reason_code": beta_reason_code,
+                "effective_min_edge": beta_effective_min_edge,
+                "effective_min_confidence": beta_effective_min_confidence,
+                "differs_from_final": (
+                    beta_lane_id != lane_id
+                    or beta_allowed != allowed
+                    or beta_effective_min_edge != effective_min_edge
+                    or beta_effective_min_confidence != effective_min_confidence
+                ),
+            },
         },
     )
+
+
+def _select_beta_lane(
+    *,
+    entry_price: float,
+    edge: float,
+    confidence: float,
+    min_edge: float,
+    min_confidence: float,
+    hidden_gem_entry_price_cap: float,
+    enabled_lanes: set[str],
+    behavior_enabled: bool,
+    slow_profit_config: Mapping[str, Any],
+    slow_profit_enabled: bool,
+) -> tuple[str, str, bool, float, float]:
+    lane_id = EDGE_LANE
+    reason_code = "edge_lane_selected"
+    effective_min_edge = float(min_edge)
+    effective_min_confidence = float(min_confidence)
+    if entry_price <= hidden_gem_entry_price_cap:
+        lane_id = HIDDEN_GEM_LANE
+        reason_code = "hidden_gem_lane_selected"
+    elif _slow_profit_matches(
+        edge=edge,
+        confidence=confidence,
+        min_edge=min_edge,
+        min_confidence=min_confidence,
+        config=slow_profit_config,
+        enabled=slow_profit_enabled,
+    ):
+        lane_id = CONFIDENCE_SLOW_PROFIT_LANE
+        reason_code = "confidence_slow_profit_lane_selected"
+        effective_min_edge = float(slow_profit_config["min_edge"])
+        effective_min_confidence = float(slow_profit_config["min_confidence"])
+
+    allowed = True
+    if behavior_enabled and lane_id not in enabled_lanes:
+        allowed = False
+        reason_code = "strategy_lane_disabled"
+    return lane_id, reason_code, allowed, effective_min_edge, effective_min_confidence
 
 
 def _slow_profit_matches(

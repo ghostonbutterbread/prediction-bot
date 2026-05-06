@@ -250,3 +250,26 @@ def _cheap_tail_market():
         category="KXHIGHTATL",
         closes_at=None,
     )
+
+
+def test_weather_hidden_gem_guard_blocks_trace_path_too():
+    engine = _engine_with_live_weather(
+        {
+            "signal_type": "weather",
+            "predicted_prob": 0.75,
+            "confidence": 0.80,
+            "question_side": "range",
+            "data": {
+                "question_side": "range",
+                "forecast_high": 84.0,
+                "actual_temp_used": 84.0,
+                "threshold": 85.0,
+                "agreement": 0.90,
+            },
+        }
+    )
+
+    signal, trace = engine.analyze_market_with_trace(_cheap_bucket_market())
+
+    assert signal is None
+    assert trace.skip_reason_code == "weather_hidden_gem_safety_guard"

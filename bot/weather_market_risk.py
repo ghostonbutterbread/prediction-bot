@@ -32,6 +32,19 @@ DEFAULT_WEATHER_RISK_POLICY: dict[str, Any] = {
         "normal_multiple_min": 3.0,
         "normal_multiple_max": 10.0,
         "suspicious_multiple_max": 15.0,
+        "bucket_requires_distribution_probability": True,
+        "tail_directional_mismatch": {
+            "enabled": True,
+            "probability_threshold": 0.20,
+            "min_source_agreement": 0.75,
+            "min_live_confidence": 0.60,
+        },
+        "strong_evidence": {
+            "enabled": True,
+            "min_station_mapping": "inferred",
+            "min_weather_confidence": 0.70,
+            "min_source_agreement": 0.65,
+        },
         "suspicious_size_multiplier": 0.35,
         "exceptional_size_multiplier": 0.10,
         "exceptional_allow_tiny_probe": False,
@@ -183,12 +196,32 @@ def assess_weather_market_risk(
             assessment.hidden_gem_tier = "normal"
         elif multiple < suspicious_max:
             assessment.hidden_gem_tier = "suspicious"
+        else:
+            assessment.hidden_gem_tier = "exceptional"
+        if shape == "bucket" and bool(hidden_cfg.get("bucket_requires_distribution_probability", True)):
+            if _coerce_float(signal.get("distribution_probability"), default=None) is None:
+                assessment.should_skip = True
+                assessment.reason_code = "weather_bucket_hidden_gem_missing_distribution_probability"
+                assessment.reason = "Cheap weather bucket hidden gem requires distribution probability support"
+                return assessment
+        tail_mismatch = _tail_directional_mismatch_reason(signal, hidden_cfg, shape)
+        if tail_mismatch is not None:
+            assessment.should_skip = True
+            assessment.reason_code = tail_mismatch[0]
+            assessment.reason = tail_mismatch[1]
+            assessment.flags.append("tail_directional_mismatch")
+            return assessment
+        if assessment.hidden_gem_tier != "exceptional" and not _strong_hidden_gem_evidence_passes(signal, hidden_cfg):
+            assessment.should_skip = True
+            assessment.reason_code = "weather_hidden_gem_without_strong_evidence"
+            assessment.reason = "Cheap weather hidden gem requires strong weather evidence"
+            return assessment
+        if assessment.hidden_gem_tier == "suspicious":
             assessment.flags.append("extreme_disagreement_suspicious")
             assessment.size_multiplier *= _coerce_float(
                 hidden_cfg.get("suspicious_size_multiplier"), 0.35
             ) or 0.35
-        else:
-            assessment.hidden_gem_tier = "exceptional"
+        elif assessment.hidden_gem_tier == "exceptional":
             assessment.flags.append("extreme_disagreement_exceptional")
             assessment.evidence_perfect = _exceptional_evidence_passes(signal, hidden_cfg, assessment.volume_known)
             if assessment.evidence_perfect:
@@ -207,6 +240,108 @@ def assess_weather_market_risk(
 
     assessment.size_multiplier = max(0.0, min(1.0, assessment.size_multiplier))
     return assessment
+
+
+def _strong_hidden_gem_evidence_passes(signal: dict[str, Any], hidden_cfg: dict[str, Any]) -> bool:
+    cfg = dict(hidden_cfg.get("strong_evidence") or {})
+    if not cfg.get("enabled", True):
+        return True
+
+    mapping_rank = {"unknown": 0, "inferred": 1, "exact": 2}
+    required_mapping = str(cfg.get("min_station_mapping", "inferred") or "inferred").lower()
+    mapping = str(
+        signal.get("weather_station_mapping")
+        or signal.get("station_mapping")
+        or signal.get("station_mapping_quality")
+        or "unknown"
+    ).lower()
+    if mapping_rank.get(mapping, 0) < mapping_rank.get(required_mapping, 1):
+        return False
+
+    weather_confidence = _coerce_float(signal.get("weather_confidence_score"), 0.0) or 0.0
+    source_agreement = _coerce_float(signal.get("source_agreement_score"), 0.0) or 0.0
+    min_weather_confidence = _coerce_float(cfg.get("min_weather_confidence"), 0.70) or 0.70
+    min_source_agreement = _coerce_float(cfg.get("min_source_agreement"), 0.65) or 0.65
+    return weather_confidence >= min_weather_confidence and source_agreement >= min_source_agreement
+
+
+def _tail_directional_mismatch_reason(
+    signal: dict[str, Any],
+    hidden_cfg: dict[str, Any],
+    shape: MarketShape,
+) -> tuple[str, str] | None:
+    if shape not in {"tail_low", "tail_high"}:
+        return None
+    cfg = dict(hidden_cfg.get("tail_directional_mismatch") or {})
+    if not cfg.get("enabled", True):
+        return None
+
+    direction = str(signal.get("candidate_direction") or signal.get("direction") or "").upper()
+    if direction not in {"BUY_YES", "BUY_NO"}:
+        return None
+
+    live_signal = _extract_live_weather_signal(signal)
+    if live_signal is None:
+        return None
+    probability = _bounded_probability(live_signal.get("predicted_prob"))
+    if probability is None:
+        return None
+
+    live_confidence = _coerce_float(live_signal.get("confidence"), 0.0) or 0.0
+    min_live_confidence = _coerce_float(cfg.get("min_live_confidence"), 0.60) or 0.60
+    if live_confidence < min_live_confidence:
+        return None
+
+    source_agreement = _coerce_float(signal.get("source_agreement_score"), 0.0) or 0.0
+    min_source_agreement = _coerce_float(cfg.get("min_source_agreement"), 0.75) or 0.75
+    if source_agreement < min_source_agreement:
+        return None
+
+    threshold = _coerce_float(cfg.get("probability_threshold"), 0.20) or 0.20
+    threshold = max(0.0, min(0.5, threshold))
+    candidate_probability = probability if direction == "BUY_YES" else 1.0 - probability
+    if candidate_probability <= threshold:
+        return (
+            "weather_tail_hidden_gem_live_probability_mismatch",
+            "Cheap weather tail hidden gem conflicts with live weather probability",
+        )
+    return None
+
+
+def _extract_live_weather_signal(signal: dict[str, Any]) -> dict[str, Any] | None:
+    direct_probability = None
+    for key in ("live_weather_probability", "weather_probability"):
+        direct_probability = _bounded_probability(signal.get(key))
+        if direct_probability is not None:
+            return {
+                "signal_type": "weather",
+                "predicted_prob": direct_probability,
+                "confidence": signal.get("weather_confidence_score") or signal.get("confidence"),
+            }
+
+    signal_details = signal.get("signal_details")
+    if isinstance(signal_details, dict):
+        live_signal = signal_details.get("live")
+        if isinstance(live_signal, dict) and _is_weather_live_signal(live_signal):
+            return live_signal
+
+    if _is_weather_live_signal(signal):
+        return signal
+    return None
+
+
+def _is_weather_live_signal(value: dict[str, Any]) -> bool:
+    if str(value.get("signal_type") or "").lower() == "weather":
+        return True
+    data = value.get("data") if isinstance(value.get("data"), dict) else {}
+    return any(key in data for key in ("forecast_high", "forecast_low", "actual_temp_used", "threshold"))
+
+
+def _bounded_probability(value: Any) -> float | None:
+    probability = _coerce_float(value, default=None)
+    if probability is None:
+        return None
+    return max(0.0, min(1.0, probability))
 
 
 def apply_weather_size_limits(requested_size: float, assessment: WeatherRiskAssessment, *, current_balance: float | None = None) -> float:

@@ -81,6 +81,7 @@ from bot.runner import PredictionBot
 from bot.simulator import Simulator
 from bot.dashboard import render_simple
 from bot.status import build_snapshot, format_status_message, send_status_update
+from bot.strategy_policy import coerce_strategy_policy
 
 INTERVAL = int(os.getenv("PAPER_SCAN_INTERVAL", "120"))  # 2 min default
 SIMULATE_ONLY = os.getenv("SIMULATE_ONLY", "true").lower() == "true"
@@ -142,8 +143,9 @@ def get_config(config_path: str | Path | None = None):
     strategy["min_confidence"] = float(os.getenv("MIN_CONFIDENCE", strategy["min_confidence"]))
     strategy["news_weight"] = float(os.getenv("NEWS_WEIGHT", strategy["news_weight"]))
     strategy["ai_weight"] = float(os.getenv("AI_WEIGHT", strategy["ai_weight"]))
-    # News uses fallback sources (Yahoo Finance RSS, Bing News RSS). If all fail,
-    # paper mode fails closed instead of silently trading on redistributed lower-quality signals.
+    # News uses fallback sources (Yahoo Finance RSS, Bing News RSS). Paper mode
+    # fails closed when those sources are exhausted so degraded feeds cannot
+    # silently redistribute weight into weaker signals.
     strategy["enable_news"] = os.getenv("ENABLE_NEWS_FALLBACK", str(strategy.get("enable_news", True))).lower() != "false"
     strategy["fail_closed_on_news_source_failure"] = _env_bool(
         "FAIL_CLOSED_ON_NEWS_SOURCE_FAILURE",
@@ -151,8 +153,25 @@ def get_config(config_path: str | Path | None = None):
     )
     strategy["enable_weather_hidden_gem_safety_guard"] = _env_bool(
         "ENABLE_WEATHER_HIDDEN_GEM_SAFETY_GUARD",
-        bool(strategy.get("enable_weather_hidden_gem_safety_guard", True)),
+        True,
     )
+    policy = coerce_strategy_policy(config.get("strategy_policy_normalized") or config.get("strategy_policy"))
+    directional_env = os.getenv("ENABLE_WEATHER_DIRECTIONAL_MISMATCH_GUARD")
+    directional_policy_default = bool(policy.feature_enforced("hidden_gem_lane_gates"))
+    if directional_env is None:
+        strategy["enable_weather_directional_mismatch_guard"] = directional_policy_default
+        strategy["weather_directional_mismatch_guard_explicit_override"] = False
+    else:
+        strategy["enable_weather_directional_mismatch_guard"] = _env_bool(
+            "ENABLE_WEATHER_DIRECTIONAL_MISMATCH_GUARD",
+            directional_policy_default,
+        )
+        strategy["weather_directional_mismatch_guard_explicit_override"] = bool(
+            strategy["enable_weather_directional_mismatch_guard"]
+        )
+    strategy["strategy_policy_normalized"] = policy
+    if "strategy_policy" in config:
+        strategy["strategy_policy"] = dict(config.get("strategy_policy", {}) or {})
     strategy.setdefault("enable_ai", False)
     strategy.setdefault("enable_social", False)
     config["strategy"] = strategy

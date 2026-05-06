@@ -7,6 +7,7 @@ from typing import Any, Protocol
 
 from bot.trade_audit import trade_event_key
 from bot.strategy_lanes import select_strategy_lane
+from bot.strategy_policy import coerce_strategy_policy, strategy_policy_status
 
 from .interfaces import TradeContext, TradeDecision
 from .weather_risk import (
@@ -45,6 +46,8 @@ HIDDEN_GEM_ENTRY_PRICE_CAP = 0.05
 HIDDEN_GEM_MIN_EDGE = 0.05
 HIDDEN_GEM_MIN_PROBABILITY_MULTIPLE = 3.0
 NON_HIDDEN_GEM_MIN_WIN_PROBABILITY = 0.50
+WEATHER_EVIDENCE_CARD_FEATURE = "weather_hidden_gem_evidence_card"
+WEATHER_BUCKET_SCORING_FEATURE = "bucket_distribution_scoring"
 
 
 def build_trade_decision(
@@ -105,6 +108,10 @@ def build_trade_decision(
     edge = _coerce_optional_float(context.edge) or 0.0
     confidence = _coerce_optional_float(context.confidence) or 0.0
     source_signal = dict(context.source_context or {})
+    strategy_policy = _strategy_policy_for_context(context, source_signal)
+    reasoning["strategy_policy_status"] = strategy_policy_status(strategy_policy)
+    reasoning["market_route_enforcement"] = "stable_required"
+    reasoning["market_route_required"] = True
 
     reasoning["normalized"] = {
         "direction": direction,
@@ -140,6 +147,7 @@ def build_trade_decision(
         min_confidence=float(min_confidence),
         hidden_gem_entry_price_cap=HIDDEN_GEM_ENTRY_PRICE_CAP,
         config=_strategy_lane_config(context, source_signal),
+        strategy_policy=strategy_policy,
     )
     reasoning["strategy_lane"] = strategy_lane.to_dict()
     if not strategy_lane.allowed:
@@ -268,6 +276,7 @@ def build_trade_decision(
         "market_id": context.market_id,
         "question": context.question,
         **source_signal,
+        "candidate_direction": direction,
     }
     is_weather_market = (
         classify_weather_market(str(weather_signal.get("question") or ""), str(weather_signal.get("market_id") or "")) != "unknown"
@@ -286,8 +295,9 @@ def build_trade_decision(
         reasoning["weather_risk"] = {
             **weather_assessment.to_dict(),
             "evidence": weather_evidence,
+            "beta_gate": _weather_rejection_beta_gate(strategy_policy, weather_assessment),
         }
-        if weather_assessment.should_skip:
+        if weather_assessment.should_skip and reasoning["weather_risk"]["beta_gate"]["enforced"]:
             return TradeDecision(
                 action="SKIP",
                 approved=False,
@@ -383,10 +393,17 @@ def build_trade_decision(
             weather_assessment,
             current_balance=context.account_state.current_balance,
         )
+        reasoning["weather_risk"]["beta_sizing_gate"] = _weather_sizing_beta_gate(
+            strategy_policy,
+            weather_assessment,
+            requested_size=requested_size,
+            adjusted_size=weather_adjusted_size,
+        )
         if weather_adjusted_size != requested_size:
             reasoning["weather_risk"]["requested_size_before_weather_limits"] = round(requested_size, 4)
             reasoning["weather_risk"]["requested_size_after_weather_limits"] = weather_adjusted_size
-            requested_size = weather_adjusted_size
+            if reasoning["weather_risk"]["beta_sizing_gate"]["enforced"]:
+                requested_size = weather_adjusted_size
 
     requested_size = apply_event_sizing(requested_size, event_snapshot, retrade_policy, reasoning)
     if requested_size <= 0:
@@ -681,6 +698,92 @@ def _strategy_lane_config(context: TradeContext, source_signal: dict[str, Any]) 
         if isinstance(value, dict):
             return dict(value)
     return None
+
+
+def _strategy_policy_for_context(context: TradeContext, source_signal: dict[str, Any]):
+    for value in (
+        (context.metadata or {}).get("strategy_policy_normalized"),
+        (context.metadata or {}).get("strategy_policy"),
+        source_signal.get("strategy_policy_normalized"),
+        source_signal.get("strategy_policy"),
+    ):
+        if isinstance(value, dict) and value:
+            return coerce_strategy_policy(value)
+    return coerce_strategy_policy(None)
+
+
+def _weather_rejection_beta_gate(strategy_policy: Any, weather_assessment) -> dict[str, Any]:
+    policy = coerce_strategy_policy(strategy_policy)
+    reason_code = weather_assessment.reason_code
+    feature = _weather_rejection_feature(reason_code)
+    active = bool(feature and policy.feature_enabled(feature))
+    enforced = bool(feature and policy.feature_enforced(feature))
+    return {
+        "policy": strategy_policy_status(policy),
+        "feature": feature,
+        "would_reject": bool(weather_assessment.should_skip),
+        "reason_code": reason_code,
+        "active": active,
+        "shadow": bool(active and policy.is_shadow),
+        "enforced": enforced,
+        "preserved_stable_action": bool(weather_assessment.should_skip and not enforced),
+        "differs_from_final": bool(weather_assessment.should_skip and active and not enforced),
+    }
+
+
+def _weather_sizing_beta_gate(
+    strategy_policy: Any,
+    weather_assessment,
+    *,
+    requested_size: float,
+    adjusted_size: float,
+) -> dict[str, Any]:
+    policy = coerce_strategy_policy(strategy_policy)
+    features = _weather_sizing_features(weather_assessment)
+    would_adjust = adjusted_size != requested_size
+    active = bool(would_adjust and features and all(policy.feature_enabled(feature) for feature in features))
+    enforced = bool(would_adjust and features and all(policy.feature_enforced(feature) for feature in features))
+    return {
+        "policy": strategy_policy_status(policy),
+        "features": features,
+        "would_adjust_size": would_adjust,
+        "requested_size": round(float(requested_size), 4),
+        "beta_adjusted_size": round(float(adjusted_size), 4),
+        "active": active,
+        "shadow": bool(active and policy.is_shadow),
+        "enforced": enforced,
+        "preserved_stable_size": bool(would_adjust and not enforced),
+        "differs_from_final": bool(would_adjust and active and not enforced),
+    }
+
+
+def _weather_rejection_feature(reason_code: Any) -> str | None:
+    code = str(reason_code or "")
+    if code == "weather_bucket_hidden_gem_missing_distribution_probability":
+        return WEATHER_BUCKET_SCORING_FEATURE
+    if code in {
+        "weather_tail_hidden_gem_live_probability_mismatch",
+        "weather_hidden_gem_without_strong_evidence",
+        "weather_extreme_disagreement_without_perfect_evidence",
+    }:
+        return WEATHER_EVIDENCE_CARD_FEATURE
+    return None
+
+
+def _weather_sizing_features(weather_assessment) -> list[str]:
+    flags = set(weather_assessment.flags or [])
+    features: set[str] = set()
+    if weather_assessment.shape == "bucket" and (
+        "narrow_bucket" in flags
+        or weather_assessment.max_position_pct is not None
+        or weather_assessment.max_position_usd is not None
+    ):
+        features.add(WEATHER_BUCKET_SCORING_FEATURE)
+    if weather_assessment.hidden_gem_tier in {"suspicious", "exceptional"} or any(
+        str(flag).startswith("extreme_disagreement") for flag in flags
+    ):
+        features.add(WEATHER_EVIDENCE_CARD_FEATURE)
+    return sorted(features)
 
 
 def normalize_trade_context(context: TradeContext) -> dict[str, float | str] | None:

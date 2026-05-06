@@ -368,8 +368,11 @@ class SimulatorPaperStateAdapter:
             metadata={
                 "category": signal.get("category", ""),
                 "market_route": market_route,
+                "market_route_enforcement": "stable_required",
                 "market_route_required": self._market_route_enforcement_enabled(host_config),
                 "strategy_lanes": dict(host_config.get("strategy_lanes", {}) or {}),
+                "strategy_policy_normalized": dict(host_config.get("strategy_policy_normalized", {}) or {}),
+                "strategy_policy": dict(host_config.get("strategy_policy", {}) or {}),
                 "event_key": event_key,
                 "market_family_key": candidate_family_key,
                 "event_snapshot": {
@@ -406,7 +409,7 @@ class SimulatorPaperStateAdapter:
 
     @staticmethod
     def _market_route_enforcement_enabled(config: dict[str, Any]) -> bool:
-        scan_cfg = config.get("scan") if isinstance(config, dict) else None
+        """Market routing is stable route safety; policy flags do not disable it."""
         return True
 
     def effective_trades(self) -> list[Any]:
