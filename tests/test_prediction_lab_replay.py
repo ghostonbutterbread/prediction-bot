@@ -475,6 +475,45 @@ class PredictionLabReplayTests(unittest.TestCase):
         self.assertEqual(result.summary["action_changed"], 1)
         self.assertEqual(result.summary["reason_changed"], 1)
 
+    def test_replay_summary_includes_original_strategy_lane_deltas(self):
+        row = _row(
+            artifact_patch={
+                "final_action": "SKIP",
+                "final_reason_code": "edge_below_threshold",
+                "shared_core_decision": {
+                    "approved": False,
+                    "reason_code": "edge_below_threshold",
+                    "reasoning": {
+                        "strategy_lane": {
+                            "lane_id": "edge",
+                            "allowed": True,
+                            "reason_code": "edge_lane_selected",
+                            "evidence": {
+                                "beta_lane_gate": {
+                                    "lane_id": "confidence_slow_profit",
+                                    "allowed": True,
+                                    "reason_code": "confidence_slow_profit_lane_selected",
+                                    "differs_from_final": True,
+                                }
+                            },
+                        }
+                    },
+                },
+            }
+        )
+
+        result = replay_recorded_artifacts(
+            [row],
+            evaluator=self._evaluator(FixedSignalStrategy(_signal())),
+        )
+
+        original = result.summary["strategy_lanes"]["original"]
+        self.assertEqual(original["lane_rows"], 1)
+        self.assertEqual(original["selected_lane_counts"], {"edge": 1})
+        self.assertEqual(original["would_select_lane_counts"], {"confidence_slow_profit": 1})
+        self.assertEqual(original["would_select_slow_profit_rows"], 1)
+        self.assertEqual(original["slow_profit_differs_from_final_rows"], 1)
+
     def test_recorded_source_and_order_book_modes_are_labeled(self):
         row = _row()
 

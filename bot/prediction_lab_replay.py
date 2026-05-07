@@ -20,6 +20,7 @@ from bot.hidden_gem_evidence import (
     extract_hidden_gem_evidence_card,
     summarize_hidden_gem_evidence_cards,
 )
+from bot.strategy_lane_reporting import summarize_strategy_lanes
 
 logger = logging.getLogger(__name__)
 
@@ -1597,9 +1598,22 @@ def _summarize(rows: list[ReplayComparisonRow], *, all_rows: list[ReplayComparis
         "excluded_row_count": len(excluded_rows),
         "excluded_reason_counts": _counts(reason for row in excluded_rows for reason in (row.reasons or [row.category])),
         "strict_metrics": _summary_metrics(strict_rows),
+        "strategy_lanes": {
+            "original": summarize_strategy_lanes(_strategy_lane_summary_rows(rows, artifact_attr="original_artifact")),
+            "replayed": summarize_strategy_lanes(_strategy_lane_summary_rows(rows, artifact_attr="replayed_artifact")),
+        },
         "weather_hidden_gem_comparison": _weather_hidden_gem_replay_comparison(all_rows),
         "warning_count": sum(len(row.warnings) for row in rows),
     }
+
+
+def _strategy_lane_summary_rows(rows: list[ReplayComparisonRow], *, artifact_attr: str) -> list[dict[str, Any]]:
+    summary_rows = []
+    for row in rows:
+        artifact = getattr(row, artifact_attr, None)
+        if isinstance(artifact, dict):
+            summary_rows.append({"decision_artifact": artifact})
+    return summary_rows
 
 
 def _weather_hidden_gem_replay_comparison(rows: list[ReplayComparisonRow]) -> dict[str, Any]:
