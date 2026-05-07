@@ -440,6 +440,13 @@ Phase 3C implementation note, 2026-05-06:
 - `scripts/analyze.py` and Prediction Lab summary paths share the same reporting helper
 - this slice is reporting-only and does not alter strategy selection, trade decisions, sizing, risk checks, or order behavior
 
+Phase 3D implementation note, 2026-05-06:
+
+- Prediction Lab replay summaries now include `weather_hidden_gem_comparison` with separate `strict` and `coverage` slices
+- the pre-hotfix/hotfix/evidence-card comparator is `artifact_derived_conservative`: recorded final action is used as the pre-hotfix proxy, hotfix bridge rejection is inferred only from stable bridge reason codes, and evidence-card behavior is read from `hidden_gem_evidence_card`
+- the report includes bad bucket buys removed, winners skipped by the hotfix bridge, approvals/rejections by `weather_shape x hidden_gem_tier x reason_code`, bucket rows with/without `distribution_probability`, and the `entry_price + 0.05` / `3x entry_price` threshold slices
+- this slice is reporting-only and does not alter strategy selection, trade decisions, sizing, risk checks, runtime config, or order behavior
+
 ### Bucket hidden-gem direction
 
 The 2026-05-06 paper/archive check showed cheap bucket rows were the clearest danger:

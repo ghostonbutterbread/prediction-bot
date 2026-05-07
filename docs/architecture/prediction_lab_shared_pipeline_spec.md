@@ -620,6 +620,13 @@ Replay reports should include, at minimum:
   - combined gate pass/fail
 - strict-vs-coverage separation so legacy/incomplete rows do not masquerade as strategy truth
 
+Phase 3D implementation note, 2026-05-06:
+
+- `bot/prediction_lab_replay.py` now adds `summary.weather_hidden_gem_comparison` to replay output
+- the comparison is intentionally `artifact_derived_conservative`; it does not claim exact old/pre-hotfix truth when artifacts cannot reconstruct that logic
+- `strict` and `coverage` slices are reported separately, with legacy/no-card/incomplete rows retained in coverage without crashing
+- bucket distribution presence, threshold pass/fail counts, bad bucket buys removed, winners skipped by inferred hotfix bridge reason codes, and evidence-card approval/rejection groupings are reported from the same replay artifact set
+
 Exit criteria:
 
 - Replay can run old vs new logic on the same artifact set.

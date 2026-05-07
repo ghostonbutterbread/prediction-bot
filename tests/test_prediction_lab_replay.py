@@ -372,6 +372,69 @@ def _weather_row(*, artifact_patch: dict | None = None, row_patch: dict | None =
     return row
 
 
+def _hidden_gem_card(
+    *,
+    market_id: str = "KXHIGHNY-26APR29-T80",
+    shape: str = "bucket",
+    tier: str = "normal",
+    entry_price: float | None = 0.03,
+    distribution_probability: float | None = None,
+    weather_reject: str | None = None,
+    beta_reject: str | None = None,
+) -> dict:
+    card = {
+        "artifact_version": 1,
+        "lane": "hidden_gem",
+        "market_id": market_id,
+        "weather_shape": shape,
+        "hidden_gem_tier": tier,
+        "entry_price": entry_price,
+        "reason_codes": {
+            "weather_reject": weather_reject,
+            "beta_reject": beta_reject,
+            "resize": None,
+        },
+    }
+    if shape == "bucket":
+        card["bucket"] = {"distribution_probability": distribution_probability}
+    return card
+
+
+def _row_with_hidden_gem_card(
+    *,
+    market_id: str,
+    card: dict,
+    missing_book: bool = False,
+) -> dict:
+    artifact_patch = {
+        "market_id": market_id,
+        "shared_core_decision": {
+            "approved": True,
+            "reason_code": "approved",
+            "reasoning": {"hidden_gem_evidence_card": card},
+        },
+    }
+    if missing_book:
+        artifact_patch.update(
+            {
+                "order_book_snapshot": {"source": "missing", "data": None},
+                "pre_logic_order_book_snapshot": {"source": "missing", "data": None},
+                "post_logic_order_book_snapshot": {"source": "missing", "data": None},
+                "execution_snapshot": {"source": "missing"},
+                "execution_snapshot_source": "missing",
+            }
+        )
+    return _weather_row(
+        artifact_patch=artifact_patch,
+        row_patch={
+            "market_id": market_id,
+            "snapshot_key": market_id,
+            "decision_type": "buy_yes",
+            "direction": "BUY_YES",
+        },
+    )
+
+
 class PredictionLabReplayTests(unittest.TestCase):
     def _evaluator(self, strategy, risk_policy=None):
         return DecisionPipelineEvaluator(
@@ -696,6 +759,163 @@ class PredictionLabReplayTests(unittest.TestCase):
         self.assertEqual(grid[0]["excluded_counts"]["missing_order_book"], 1)
         self.assertEqual(grid[0]["action_changed"], 2)
         self.assertEqual(grid[0]["reason_changed"], 2)
+
+    def test_weather_hidden_gem_replay_comparison_reports_bridge_and_bucket_thresholds(self):
+        bridge_reason = "weather_bucket_hidden_gem_missing_distribution_probability"
+        bad_bucket = _row_with_hidden_gem_card(
+            market_id="KXHIGHNY-26APR29-T80",
+            card=_hidden_gem_card(
+                market_id="KXHIGHNY-26APR29-T80",
+                entry_price=0.03,
+                distribution_probability=None,
+                beta_reject=bridge_reason,
+            ),
+        )
+        winner_skipped = _row_with_hidden_gem_card(
+            market_id="KXHIGHNY-26APR29-T81",
+            card=_hidden_gem_card(
+                market_id="KXHIGHNY-26APR29-T81",
+                entry_price=0.03,
+                distribution_probability=None,
+                beta_reject=bridge_reason,
+            ),
+        )
+        supported_bucket = _row_with_hidden_gem_card(
+            market_id="KXHIGHNY-26APR29-T82",
+            card=_hidden_gem_card(
+                market_id="KXHIGHNY-26APR29-T82",
+                entry_price=0.01,
+                distribution_probability=0.24,
+            ),
+        )
+
+        result = replay_recorded_artifacts(
+            [bad_bucket, winner_skipped, supported_bucket],
+            evaluator=self._evaluator(FixedSignalStrategy(_signal()), risk_policy=DenyRisk()),
+            resolution_records=[
+                {"market_id": "KXHIGHNY-26APR29-T80", "resolution": {"outcome": "NO", "resolved_at": "2026-04-30T00:00:00+00:00"}},
+                {"market_id": "KXHIGHNY-26APR29-T81", "resolution": {"outcome": "YES", "resolved_at": "2026-04-30T00:00:00+00:00"}},
+            ],
+        )
+
+        comparison = result.summary["weather_hidden_gem_comparison"]
+        strict = comparison["strict"]
+
+        self.assertEqual(comparison["basis"], "artifact_derived_conservative")
+        self.assertEqual(strict["rows"], 3)
+        self.assertEqual(strict["hidden_gem_evidence_cards"]["card_rows"], 3)
+        self.assertEqual(strict["bucket_distribution"]["bucket_rows"], 3)
+        self.assertEqual(strict["bucket_distribution"]["with_distribution_probability"], 1)
+        self.assertEqual(strict["bucket_distribution"]["without_distribution_probability"], 2)
+        self.assertEqual(
+            strict["bucket_distribution"]["threshold_slices"]["distribution_probability_gte_entry_plus_0_05"],
+            {"pass": 1, "fail": 0},
+        )
+        self.assertEqual(
+            strict["bucket_distribution"]["threshold_slices"]["distribution_probability_gte_3x_entry"],
+            {"pass": 1, "fail": 0},
+        )
+        self.assertEqual(strict["comparators"]["hotfix_bridge"]["inferred_rejections"], 2)
+        self.assertEqual(strict["comparators"]["hotfix_bridge"]["bad_bucket_buys_removed"], 1)
+        self.assertEqual(strict["comparators"]["hotfix_bridge"]["winners_skipped"], 1)
+        self.assertEqual(strict["comparators"]["evidence_card"]["rejections"], 2)
+
+    def test_weather_hidden_gem_replay_comparison_separates_strict_from_coverage_rows(self):
+        strict_row = _row_with_hidden_gem_card(
+            market_id="KXHIGHNY-26APR29-T80",
+            card=_hidden_gem_card(market_id="KXHIGHNY-26APR29-T80", entry_price=0.01, distribution_probability=0.24),
+        )
+        coverage_row = _row_with_hidden_gem_card(
+            market_id="KXHIGHNY-26APR29-T81",
+            card={"reason_codes": {}},
+            missing_book=True,
+        )
+        legacy_no_card = _weather_row(
+            artifact_patch={"market_id": "KXHIGHNY-26APR29-T82"},
+            row_patch={"market_id": "KXHIGHNY-26APR29-T82", "decision_type": "buy_yes", "direction": "BUY_YES"},
+        )
+
+        result = replay_recorded_artifacts(
+            [strict_row, coverage_row, legacy_no_card],
+            evaluator=self._evaluator(FixedSignalStrategy(_signal())),
+            row_quality_policy="strict",
+        )
+
+        comparison = result.summary["weather_hidden_gem_comparison"]
+
+        self.assertEqual(len(result.rows), 2)
+        self.assertEqual(result.summary["input_total"], 3)
+        self.assertEqual(comparison["strict"]["rows"], 2)
+        self.assertEqual(comparison["strict"]["card_rows"], 1)
+        self.assertEqual(comparison["coverage"]["rows"], 3)
+        self.assertEqual(comparison["coverage"]["coverage_only_rows"], 1)
+        self.assertEqual(comparison["coverage"]["card_rows"], 2)
+        self.assertEqual(comparison["coverage"]["no_card_rows"], 1)
+        self.assertEqual(comparison["coverage"]["hidden_gem_evidence_cards"]["insufficient_data_rows"], 1)
+
+    def test_weather_hidden_gem_replay_comparison_is_card_derived_not_replay_action_derived(self):
+        approved_card_risk_skipped = _row_with_hidden_gem_card(
+            market_id="KXHIGHNY-26APR29-T80",
+            card=_hidden_gem_card(
+                market_id="KXHIGHNY-26APR29-T80",
+                entry_price=0.01,
+                distribution_probability=0.24,
+            ),
+        )
+        bridge_rejected_original_bad_buy = _row_with_hidden_gem_card(
+            market_id="KXHIGHNY-26APR29-T81",
+            card=_hidden_gem_card(
+                market_id="KXHIGHNY-26APR29-T81",
+                entry_price=0.03,
+                distribution_probability=None,
+                beta_reject="weather_bucket_hidden_gem_missing_distribution_probability",
+            ),
+        )
+
+        result = replay_recorded_artifacts(
+            [approved_card_risk_skipped, bridge_rejected_original_bad_buy],
+            evaluator=self._evaluator(FixedSignalStrategy(_signal()), risk_policy=DenyRisk()),
+            resolution_records=[
+                {"market_id": "KXHIGHNY-26APR29-T81", "resolution": {"outcome": "NO", "resolved_at": "2026-04-30T00:00:00+00:00"}},
+            ],
+        )
+
+        strict = result.summary["weather_hidden_gem_comparison"]["strict"]
+
+        self.assertEqual(strict["comparators"]["evidence_card"]["approvals"], 1)
+        self.assertEqual(strict["comparators"]["evidence_card"]["rejections"], 1)
+        self.assertEqual(strict["hidden_gem_evidence_cards"]["approved_cards"], 1)
+        self.assertEqual(strict["hidden_gem_evidence_cards"]["rejected_cards"], 1)
+        self.assertEqual(strict["comparators"]["hotfix_bridge"]["bad_bucket_buys_removed"], 1)
+
+    def test_weather_hidden_gem_replay_comparison_excludes_non_weather_rows(self):
+        weather_row = _row_with_hidden_gem_card(
+            market_id="KXHIGHNY-26APR29-T80",
+            card=_hidden_gem_card(market_id="KXHIGHNY-26APR29-T80", entry_price=0.01, distribution_probability=0.24),
+        )
+        sports_row = _row(
+            artifact_patch={
+                "market_id": "SPORTS-1",
+                "source_context": {
+                    "source": "provided",
+                    "data": {"market_metadata": {"market_group": "sports", "series": "unit"}},
+                },
+            },
+            row_patch={"market_id": "SPORTS-1", "group": "sports", "series": "unit"},
+        )
+
+        result = replay_recorded_artifacts(
+            [weather_row, sports_row],
+            evaluator=self._evaluator(FixedSignalStrategy(_signal())),
+        )
+
+        strict = result.summary["weather_hidden_gem_comparison"]["strict"]
+
+        self.assertEqual(result.summary["input_total"], 2)
+        self.assertEqual(strict["rows"], 1)
+        self.assertEqual(strict["card_rows"], 1)
+        self.assertEqual(strict["no_card_rows"], 0)
+        self.assertEqual(strict["comparators"]["recorded_or_pre_hotfix_proxy"]["buy_rows"], 1)
 
     def test_metadata_only_source_context_is_not_recorded_as_of(self):
         row = _row(

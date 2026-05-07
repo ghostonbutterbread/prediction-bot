@@ -16,6 +16,10 @@ from bot.decision_pipeline import (
     build_fixed_opportunity_risk_policy,
 )
 from bot.file_ops import load_jsonl
+from bot.hidden_gem_evidence import (
+    extract_hidden_gem_evidence_card,
+    summarize_hidden_gem_evidence_cards,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +84,11 @@ SOURCE_CONTEXT_METADATA_KEYS = {
     "series",
     "group",
     "category",
+}
+
+WEATHER_HIDDEN_GEM_HOTFIX_BRIDGE_REASON_CODES = {
+    "weather_bucket_hidden_gem_missing_distribution_probability",
+    "weather_tail_hidden_gem_live_probability_mismatch",
 }
 
 
@@ -1588,8 +1597,245 @@ def _summarize(rows: list[ReplayComparisonRow], *, all_rows: list[ReplayComparis
         "excluded_row_count": len(excluded_rows),
         "excluded_reason_counts": _counts(reason for row in excluded_rows for reason in (row.reasons or [row.category])),
         "strict_metrics": _summary_metrics(strict_rows),
+        "weather_hidden_gem_comparison": _weather_hidden_gem_replay_comparison(all_rows),
         "warning_count": sum(len(row.warnings) for row in rows),
     }
+
+
+def _weather_hidden_gem_replay_comparison(rows: list[ReplayComparisonRow]) -> dict[str, Any]:
+    rows = [row for row in rows if _is_weather_hidden_gem_scope(row)]
+    strict_rows = [row for row in rows if row.include_in_strict]
+    return {
+        "schema_version": 1,
+        "basis": "artifact_derived_conservative",
+        "basis_note": (
+            "Uses recorded/replayed artifacts and hidden_gem_evidence_card fields when present; "
+            "pre-hotfix and hotfix-bridge labels are conservative artifact-derived comparators, not exact "
+            "historical logic reconstruction."
+        ),
+        "strict": _weather_hidden_gem_slice(strict_rows),
+        "coverage": _weather_hidden_gem_slice(rows),
+    }
+
+
+def _is_weather_hidden_gem_scope(row: ReplayComparisonRow) -> bool:
+    if _comparison_hidden_gem_card(row) is not None:
+        return True
+    if str(row.series or "") == "daily_temperature":
+        return True
+    for artifact in (row.replayed_artifact, row.original_artifact):
+        if not isinstance(artifact, dict):
+            continue
+        source_context = artifact.get("source_context") if isinstance(artifact.get("source_context"), dict) else {}
+        data = source_context.get("data") if isinstance(source_context.get("data"), dict) else {}
+        metadata = data.get("market_metadata") if isinstance(data.get("market_metadata"), dict) else {}
+        route = artifact.get("market_route") if isinstance(artifact.get("market_route"), dict) else {}
+        if metadata.get("market_group") == "weather" or route.get("group") == "weather":
+            return True
+    return False
+
+
+def _weather_hidden_gem_slice(rows: list[ReplayComparisonRow]) -> dict[str, Any]:
+    card_rows = [_row_hidden_gem_card_payload(row, _comparison_hidden_gem_card(row)) for row in rows]
+    bucket_rows = [
+        (row, card)
+        for row in rows
+        for card in [_comparison_hidden_gem_card(row)]
+        if isinstance(card, dict) and _clean_label(card.get("weather_shape")) == "bucket"
+    ]
+    hotfix_bridge_rows = [
+        (row, card)
+        for row in rows
+        for card in [_comparison_hidden_gem_card(row)]
+        if isinstance(card, dict) and _has_hotfix_bridge_reason(card, row)
+    ]
+    evidence_rejected_rows = [
+        (row, card)
+        for row in rows
+        for card in [_comparison_hidden_gem_card(row)]
+        if isinstance(card, dict) and _card_rejection_reason(card, row) is not None
+    ]
+    evidence_approved_rows = [
+        (row, card)
+        for row in rows
+        for card in [_comparison_hidden_gem_card(row)]
+        if isinstance(card, dict) and _card_rejection_reason(card, row) is None
+    ]
+    no_card_rows = sum(1 for row in rows if _comparison_hidden_gem_card(row) is None)
+    return {
+        "rows": len(rows),
+        "strict_rows": sum(1 for row in rows if row.include_in_strict),
+        "coverage_only_rows": sum(1 for row in rows if not row.include_in_strict),
+        "card_rows": len(rows) - no_card_rows,
+        "no_card_rows": no_card_rows,
+        "hidden_gem_evidence_cards": summarize_hidden_gem_evidence_cards(card_rows),
+        "bucket_distribution": _bucket_distribution_summary(bucket_rows),
+        "comparators": {
+            "recorded_or_pre_hotfix_proxy": {
+                "basis": "recorded_final_action",
+                "buy_rows": sum(1 for row in rows if _normalize_action(row.original_action) in {"BUY_YES", "BUY_NO"}),
+                "skip_rows": sum(1 for row in rows if _is_skip(row.original_action)),
+            },
+            "hotfix_bridge": {
+                "basis": "artifact_reason_code",
+                "reason_codes": sorted(WEATHER_HIDDEN_GEM_HOTFIX_BRIDGE_REASON_CODES),
+                "inferred_rejections": len(hotfix_bridge_rows),
+                "winners_skipped": sum(
+                    1
+                    for row, _card in hotfix_bridge_rows
+                    if _normalize_action(row.original_action) in {"BUY_YES", "BUY_NO"}
+                    and _is_correct_buy(row.original_action, row.outcome)
+                ),
+                "bad_bucket_buys_removed": sum(
+                    1
+                    for row, card in hotfix_bridge_rows
+                    if _clean_label(card.get("weather_shape")) == "bucket"
+                    and _is_incorrect_buy(row.original_action, row.outcome)
+                ),
+            },
+            "evidence_card": {
+                "basis": "hidden_gem_evidence_card",
+                "approvals": len(evidence_approved_rows),
+                "rejections": len(evidence_rejected_rows),
+                "bad_bucket_buys_removed": sum(
+                    1
+                    for row, card in evidence_rejected_rows
+                    if _clean_label(card.get("weather_shape")) == "bucket"
+                    and _is_incorrect_buy(row.original_action, row.outcome)
+                ),
+            },
+        },
+        "outcomes": _counts(row.outcome or "unknown" for row in rows),
+        "quality_counts": _counts(row.category for row in rows),
+    }
+
+
+def _row_hidden_gem_card_payload(row: ReplayComparisonRow, card: dict[str, Any] | None = None) -> dict[str, Any]:
+    card_rejection = _card_rejection_reason(card, row) if isinstance(card, dict) else None
+    evidence_action = "SKIP" if card_rejection else _card_approved_action(row)
+    evidence_reason = card_rejection or "approved"
+    payload: dict[str, Any] = {
+        "market_id": row.market_id,
+        "direction": evidence_action,
+        "final_action": evidence_action,
+        "final_reason_code": evidence_reason,
+        "decision_reason_code": evidence_reason,
+        "status": "rejected" if card_rejection else "approved",
+    }
+    if isinstance(card, dict):
+        payload["hidden_gem_evidence_card"] = card
+    return payload
+
+
+def _card_approved_action(row: ReplayComparisonRow) -> str:
+    for action in (row.original_action, row.replayed_action):
+        normalized = _normalize_action(action)
+        if normalized in {"BUY_YES", "BUY_NO"}:
+            return normalized
+    return "BUY_YES"
+
+
+def _comparison_hidden_gem_card(row: ReplayComparisonRow) -> dict[str, Any] | None:
+    for artifact in (row.replayed_artifact, row.original_artifact):
+        if isinstance(artifact, dict):
+            card = extract_hidden_gem_evidence_card({"decision_artifact": artifact})
+            if isinstance(card, dict):
+                return card
+    return None
+
+
+def _bucket_distribution_summary(bucket_rows: list[tuple[ReplayComparisonRow, dict[str, Any]]]) -> dict[str, Any]:
+    with_distribution = 0
+    without_distribution = 0
+    insufficient_threshold_data = 0
+    threshold_counts = {
+        "distribution_probability_gte_entry_plus_0_05": {"pass": 0, "fail": 0},
+        "distribution_probability_gte_3x_entry": {"pass": 0, "fail": 0},
+        "combined_gate": {"pass": 0, "fail": 0},
+    }
+    for row, card in bucket_rows:
+        distribution_probability = _card_distribution_probability(card)
+        entry_price = _card_entry_price(card, row)
+        if distribution_probability is None:
+            without_distribution += 1
+            insufficient_threshold_data += 1
+            continue
+        with_distribution += 1
+        if entry_price is None:
+            insufficient_threshold_data += 1
+            continue
+        entry_plus = distribution_probability + 1e-9 >= entry_price + 0.05
+        three_x = distribution_probability + 1e-9 >= 3 * entry_price
+        _threshold_increment(threshold_counts["distribution_probability_gte_entry_plus_0_05"], entry_plus)
+        _threshold_increment(threshold_counts["distribution_probability_gte_3x_entry"], three_x)
+        _threshold_increment(threshold_counts["combined_gate"], entry_plus and three_x)
+    return {
+        "bucket_rows": len(bucket_rows),
+        "with_distribution_probability": with_distribution,
+        "without_distribution_probability": without_distribution,
+        "threshold_insufficient_data_rows": insufficient_threshold_data,
+        "threshold_slices": threshold_counts,
+    }
+
+
+def _threshold_increment(counts: dict[str, int], passed: bool) -> None:
+    counts["pass" if passed else "fail"] += 1
+
+
+def _card_distribution_probability(card: dict[str, Any]) -> float | None:
+    bucket = card.get("bucket") if isinstance(card.get("bucket"), dict) else {}
+    return _first_number(bucket.get("distribution_probability"), card.get("distribution_probability"), default=None)
+
+
+def _card_entry_price(card: dict[str, Any], row: ReplayComparisonRow) -> float | None:
+    original_signal = (row.original_artifact or {}).get("strategy_signal") if isinstance(row.original_artifact, dict) else {}
+    replayed_signal = (row.replayed_artifact or {}).get("strategy_signal") if isinstance(row.replayed_artifact, dict) else {}
+    return _first_number(
+        card.get("entry_price"),
+        original_signal.get("market_price") if isinstance(original_signal, dict) else None,
+        replayed_signal.get("market_price") if isinstance(replayed_signal, dict) else None,
+        default=None,
+    )
+
+
+def _has_hotfix_bridge_reason(card: dict[str, Any], row: ReplayComparisonRow) -> bool:
+    return any(reason in WEATHER_HIDDEN_GEM_HOTFIX_BRIDGE_REASON_CODES for reason in _card_reason_codes(card, row))
+
+
+def _card_rejection_reason(card: dict[str, Any], _row: ReplayComparisonRow) -> str | None:
+    reason_codes = card.get("reason_codes") if isinstance(card.get("reason_codes"), dict) else {}
+    for value in (reason_codes.get("beta_reject"), reason_codes.get("weather_reject")):
+        reason = _clean_optional_label(value)
+        if reason:
+            return reason
+    return None
+
+
+def _card_reason_codes(card: dict[str, Any], row: ReplayComparisonRow) -> list[str]:
+    reason_codes = card.get("reason_codes") if isinstance(card.get("reason_codes"), dict) else {}
+    values = [
+        reason_codes.get("beta_reject"),
+        reason_codes.get("weather_reject"),
+        row.replayed_reason_code,
+        row.original_reason_code,
+    ]
+    cleaned: list[str] = []
+    for value in values:
+        label = _clean_optional_label(value)
+        if label and label not in cleaned:
+            cleaned.append(label)
+    return cleaned
+
+
+def _clean_label(value: Any) -> str:
+    return _clean_optional_label(value) or "unknown"
+
+
+def _clean_optional_label(value: Any) -> str | None:
+    if value is None:
+        return None
+    cleaned = str(value).strip()
+    return cleaned or None
 
 
 def _apply_resolution_scoring(
