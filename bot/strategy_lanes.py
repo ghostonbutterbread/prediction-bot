@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from math import isfinite
 from typing import Any, Mapping
 
 from bot.strategy_policy import coerce_strategy_policy, strategy_policy_status
@@ -13,6 +14,7 @@ CONFIDENCE_SLOW_PROFIT_LANE = "confidence_slow_profit"
 HIDDEN_GEM_LANE = "hidden_gem"
 HIDDEN_GEM_LANE_GATES_FEATURE = "hidden_gem_lane_gates"
 DEFAULT_ENABLED_LANES = (EDGE_LANE, HIDDEN_GEM_LANE)
+SUPPORTED_LANES = {EDGE_LANE, CONFIDENCE_SLOW_PROFIT_LANE, HIDDEN_GEM_LANE}
 
 
 @dataclass(frozen=True)
@@ -34,6 +36,11 @@ def default_strategy_lane_config() -> dict[str, Any]:
     return {
         "enabled": False,
         "enabled_lanes": list(DEFAULT_ENABLED_LANES),
+        "sizing": {
+            EDGE_LANE: _default_lane_sizing_config(),
+            HIDDEN_GEM_LANE: _default_lane_sizing_config(),
+            CONFIDENCE_SLOW_PROFIT_LANE: _default_lane_sizing_config(),
+        },
         "confidence_slow_profit": {
             "enabled": False,
             "min_edge": None,
@@ -54,8 +61,16 @@ def normalize_strategy_lane_config(value: Any) -> dict[str, Any]:
     config["enabled_lanes"] = [
         _normalize_lane_id(lane)
         for lane in (enabled_lanes or [])
-        if _normalize_lane_id(lane) in {EDGE_LANE, CONFIDENCE_SLOW_PROFIT_LANE, HIDDEN_GEM_LANE}
+        if _normalize_lane_id(lane) in SUPPORTED_LANES
     ] or list(DEFAULT_ENABLED_LANES)
+
+    if isinstance(value.get("sizing"), Mapping):
+        sizing = {lane: dict(meta) for lane, meta in config["sizing"].items()}
+        for lane, raw_lane_sizing in value["sizing"].items():
+            lane_id = _normalize_lane_id(lane)
+            if lane_id in SUPPORTED_LANES and isinstance(raw_lane_sizing, Mapping):
+                sizing[lane_id] = _normalize_lane_sizing_config(raw_lane_sizing)
+        config["sizing"] = sizing
 
     slow_profit = dict(config["confidence_slow_profit"])
     if isinstance(value.get("confidence_slow_profit"), Mapping):
@@ -130,6 +145,8 @@ def select_strategy_lane(
         slow_profit_config=slow_profit_config,
         slow_profit_enabled=beta_slow_profit_explicitly_enabled,
     )
+    lane_sizing = _lane_sizing_evidence(lane_id, lane_config)
+    beta_lane_sizing = _lane_sizing_evidence(beta_lane_id, lane_config)
 
     return StrategyLaneDecision(
         lane_id=lane_id,
@@ -150,6 +167,7 @@ def select_strategy_lane(
             "confidence_slow_profit_enabled": slow_profit_explicitly_enabled,
             "confidence_slow_profit_min_edge": slow_profit_config.get("min_edge"),
             "confidence_slow_profit_min_confidence": slow_profit_config.get("min_confidence"),
+            "lane_sizing": lane_sizing,
             "strategy_policy": strategy_policy_status(policy),
             "beta_lane_gate": {
                 "feature": HIDDEN_GEM_LANE_GATES_FEATURE,
@@ -162,11 +180,13 @@ def select_strategy_lane(
                 "reason_code": beta_reason_code,
                 "effective_min_edge": beta_effective_min_edge,
                 "effective_min_confidence": beta_effective_min_confidence,
+                "lane_sizing": beta_lane_sizing,
                 "differs_from_final": (
                     beta_lane_id != lane_id
                     or beta_allowed != allowed
                     or beta_effective_min_edge != effective_min_edge
                     or beta_effective_min_confidence != effective_min_confidence
+                    or beta_lane_sizing != lane_sizing
                 ),
             },
         },
@@ -239,6 +259,49 @@ def _normalize_lane_id(value: Any) -> str:
     return str(value or "").strip().lower().replace("-", "_").replace("/", "_")
 
 
+def _default_lane_sizing_config() -> dict[str, float | None]:
+    return {
+        "size_multiplier": None,
+        "max_position_usd": None,
+        "max_position_pct": None,
+    }
+
+
+def _normalize_lane_sizing_config(value: Mapping[str, Any]) -> dict[str, float | None]:
+    sizing = _default_lane_sizing_config()
+    sizing["size_multiplier"] = _coerce_optional_bounded_float(
+        value.get("size_multiplier"),
+        minimum=0.0,
+        maximum=1.0,
+    )
+    sizing["max_position_usd"] = _coerce_optional_bounded_float(
+        value.get("max_position_usd"),
+        minimum=0.0,
+    )
+    sizing["max_position_pct"] = _coerce_optional_bounded_float(
+        value.get("max_position_pct"),
+        minimum=0.0,
+        maximum=1.0,
+    )
+    return sizing
+
+
+def _lane_sizing_evidence(lane_id: str, lane_config: Mapping[str, Any]) -> dict[str, Any]:
+    sizing_by_lane = lane_config.get("sizing") if isinstance(lane_config, Mapping) else None
+    raw_sizing = {}
+    if isinstance(sizing_by_lane, Mapping) and isinstance(sizing_by_lane.get(lane_id), Mapping):
+        raw_sizing = dict(sizing_by_lane.get(lane_id) or {})
+    configured = any(raw_sizing.get(key) is not None for key in _default_lane_sizing_config())
+    return {
+        "lane_id": lane_id,
+        "configured": configured,
+        "metadata_only": True,
+        "size_multiplier": raw_sizing.get("size_multiplier"),
+        "max_position_usd": raw_sizing.get("max_position_usd"),
+        "max_position_pct": raw_sizing.get("max_position_pct"),
+    }
+
+
 def _coerce_optional_float(value: Any) -> float | None:
     try:
         if value is None:
@@ -246,3 +309,19 @@ def _coerce_optional_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _coerce_optional_bounded_float(
+    value: Any,
+    *,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> float | None:
+    coerced = _coerce_optional_float(value)
+    if coerced is None or not isfinite(coerced):
+        return None
+    if minimum is not None:
+        coerced = max(float(minimum), coerced)
+    if maximum is not None:
+        coerced = min(float(maximum), coerced)
+    return coerced

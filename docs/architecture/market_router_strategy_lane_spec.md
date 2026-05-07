@@ -1,6 +1,6 @@
 # Market Router + Strategy Lane Spec
 
-_Last updated: 2026-05-06_
+_Last updated: 2026-05-07_
 
 ## Purpose
 
@@ -467,6 +467,12 @@ Phase 3G implementation note, 2026-05-07:
 - when tail `distribution_probability` is present, beta/enforce with `weather_hidden_gem_evidence_card` can reject candidates below the configured tail threshold with `weather_tail_hidden_gem_distribution_probability_below_threshold`
 - when tail `distribution_probability` is missing, the existing bridge behavior remains in place and continues to use `weather_tail_hidden_gem_live_probability_mismatch`
 - stable/off and beta/shadow preserve final actions while recording beta deltas and evidence-card tail probability-scoring details
+
+Phase 3H implementation note, 2026-05-07:
+
+- strategy-lane config now accepts metadata-only `strategy_lanes.sizing` entries for known lanes with optional `size_multiplier`, `max_position_usd`, and `max_position_pct`
+- shared-core records selected-lane sizing metadata after Kelly as `decision.reasoning["lane_sizing"]`, including whether the metadata would have adjusted the requested size
+- this slice does not apply lane-specific caps or multipliers in stable, shadow, or enforce mode; actual sizing behavior remains owned by the existing Kelly, weather-risk, event, and risk-policy paths
 
 ### Bucket hidden-gem direction
 

@@ -88,6 +88,55 @@ class StrategyLaneTests(unittest.TestCase):
         self.assertEqual(decision.reasoning["strategy_lane"]["reason_code"], "hidden_gem_lane_selected")
         self.assertTrue(decision.reasoning["hidden_gem"]["triggered"])
 
+    def test_lane_sizing_config_records_metadata_without_changing_size(self):
+        context = self._context(
+            market_price=0.40,
+            model_probability=0.70,
+            edge=0.30,
+            confidence=0.90,
+            metadata={
+                "strategy_lanes": {
+                    "enabled": False,
+                    "sizing": {
+                        "edge": {
+                            "size_multiplier": 0.25,
+                            "max_position_usd": 2.0,
+                            "max_position_pct": 0.05,
+                        },
+                    },
+                }
+            },
+        )
+        kelly_sizer, risk_policy = self._approving_dependencies(size=10.0)
+
+        decision = build_trade_decision(
+            context,
+            kelly_sizer=kelly_sizer,
+            risk_policy=risk_policy,
+            min_edge=0.05,
+            min_confidence=0.50,
+            max_entry_price=0.70,
+        )
+
+        self.assertTrue(decision.approved)
+        self.assertEqual(decision.requested_position_size, 10.0)
+        self.assertEqual(decision.position_size, 10.0)
+        risk_policy.check_trade.assert_called_once_with(
+            context.source_context,
+            10.0,
+            available_cash=100.0,
+        )
+        lane_sizing = decision.reasoning["lane_sizing"]
+        self.assertTrue(lane_sizing["configured"])
+        self.assertTrue(lane_sizing["metadata_only"])
+        self.assertFalse(lane_sizing["applied"])
+        self.assertTrue(lane_sizing["would_adjust_size"])
+        self.assertEqual(lane_sizing["metadata_adjusted_size"], 2.0)
+        self.assertEqual(
+            decision.reasoning["strategy_lane"]["evidence"]["lane_sizing"]["max_position_usd"],
+            2.0,
+        )
+
     def test_slow_profit_config_does_not_change_defaults_until_enabled(self):
         context = self._context(
             market_price=0.50,
@@ -253,6 +302,26 @@ class StrategyLaneTests(unittest.TestCase):
         self.assertFalse(config["confidence_slow_profit"]["enabled"])
         self.assertEqual(config["confidence_slow_profit"]["min_edge"], 0.02)
         self.assertEqual(config["confidence_slow_profit"]["min_confidence"], 0.9)
+
+    def test_config_normalization_records_known_lane_sizing_metadata(self):
+        config = normalize_strategy_lane_config(
+            {
+                "sizing": {
+                    "hidden-gem": {
+                        "size_multiplier": "0.2",
+                        "max_position_usd": "3",
+                        "max_position_pct": "0.04",
+                    },
+                    "unsupported": {"max_position_usd": 100},
+                },
+            }
+        )
+
+        self.assertEqual(
+            config["sizing"][HIDDEN_GEM_LANE],
+            {"size_multiplier": 0.2, "max_position_usd": 3.0, "max_position_pct": 0.04},
+        )
+        self.assertNotIn("unsupported", config["sizing"])
 
     def test_explicit_slow_profit_enabled_adds_lane_to_allowlist(self):
         config = normalize_strategy_lane_config(
