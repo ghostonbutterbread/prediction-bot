@@ -21,6 +21,10 @@ from bot.trade_audit import (
     summarize_event_performance,
 )
 from bot.config import load_config
+from bot.hidden_gem_evidence import (
+    format_hidden_gem_evidence_summary,
+    summarize_hidden_gem_evidence_cards,
+)
 from bot.status import prune_log_storage, summarize_log_storage
 from bot.strategy_policy import strategy_policy_status
 
@@ -102,7 +106,7 @@ def _strategy_policy_status_from_latest(latest: dict, fallback_config: dict) -> 
         latest.get("config_snapshot", {}) if isinstance(latest.get("config_snapshot"), dict) else {},
         latest.get("config", {}) if isinstance(latest.get("config"), dict) else {},
     ]
-    for trade in reversed(latest.get("trades", []) or []):
+    for trade in reversed(latest.get("raw_trades", latest.get("trades", [])) or []):
         if not isinstance(trade, dict):
             continue
         artifact = trade.get("decision_artifact") if isinstance(trade.get("decision_artifact"), dict) else {}
@@ -131,6 +135,7 @@ def analyze(*, prune_logs: bool = True) -> dict:
     sessions = load_sessions()
     latest = sessions[-1] if sessions else {}
     trades = latest.get("trades", [])
+    raw_trades = latest.get("raw_trades", trades)
     ignored_trades = latest.get("summary", {}).get("ignored_invalid_trades", 0)
     resolved = [t for t in trades if t.get("resolved")]
     trusted_resolved = [t for t in resolved if t.get("integrity_status") == "ok"]
@@ -188,6 +193,7 @@ def analyze(*, prune_logs: bool = True) -> dict:
 
     config = load_config(PROJECT_ROOT / "config.yaml")
     result["strategy_policy_status"] = _strategy_policy_status_from_latest(latest, config)
+    result["hidden_gem_evidence_cards"] = summarize_hidden_gem_evidence_cards(raw_trades)
     prune_result = prune_log_storage(config, project_root=PROJECT_ROOT) if prune_logs else None
     storage_summary = summarize_log_storage(config, project_root=PROJECT_ROOT)
     if storage_summary:
@@ -506,6 +512,10 @@ def format_report(analysis: dict) -> str:
     
     if sq:
         lines.append(f"Edge: {sq.get('avg_edge', 0)}% avg, {sq.get('max_edge', 0)}% max | Conf: {sq.get('avg_confidence', 0)}%")
+
+    hidden_gem_line = format_hidden_gem_evidence_summary(analysis.get("hidden_gem_evidence_cards"))
+    if hidden_gem_line:
+        lines.append(hidden_gem_line)
     
     storage = analysis.get("storage", {})
     if storage:
@@ -557,7 +567,9 @@ def load_sessions() -> list:
                     with open(f) as fp:
                         session = json.load(fp)
                         session["_file"] = f
-                        trade_rows, ignored = _effective_trades(session.get("trades", []))
+                        raw_trade_rows = list(session.get("trades", []) or [])
+                        trade_rows, ignored = _effective_trades(raw_trade_rows)
+                        session["raw_trades"] = raw_trade_rows
                         session["trades"] = trade_rows
                         session.setdefault("summary", {})
                         session["summary"]["ignored_invalid_trades"] = ignored

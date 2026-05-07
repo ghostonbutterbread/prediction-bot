@@ -433,6 +433,13 @@ Phase 3B implementation note, 2026-05-06:
 - this slice does not add new rejection rules beyond existing beta/enforce weather-risk gates
 - Prediction Lab/shared decision artifacts preserve the card through their existing `shared_core_decision.reasoning` payload
 
+Phase 3C implementation note, 2026-05-06:
+
+- hidden-gem evidence cards are now summarized by `weather_shape x hidden_gem_tier x reason_code`
+- reports include final approvals/rejections, beta-rejection counts, no-card legacy rows, and incomplete-card rows
+- `scripts/analyze.py` and Prediction Lab summary paths share the same reporting helper
+- this slice is reporting-only and does not alter strategy selection, trade decisions, sizing, risk checks, or order behavior
+
 ### Bucket hidden-gem direction
 
 The 2026-05-06 paper/archive check showed cheap bucket rows were the clearest danger:
