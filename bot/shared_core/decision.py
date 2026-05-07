@@ -788,6 +788,7 @@ def _weather_rejection_feature(reason_code: Any) -> str | None:
         return WEATHER_BUCKET_SCORING_FEATURE
     if code in {
         "weather_tail_hidden_gem_live_probability_mismatch",
+        "weather_tail_hidden_gem_distribution_probability_below_threshold",
         "weather_hidden_gem_without_strong_evidence",
         "weather_extreme_disagreement_without_perfect_evidence",
     }:
@@ -884,7 +885,11 @@ def _build_hidden_gem_evidence_card(
     if shape == "bucket":
         card["bucket"] = _bucket_evidence(source_signal, weather_evidence)
     if shape in {"tail_low", "tail_high"}:
-        card["tail"] = _tail_evidence(source_signal, candidate_probability=win_probability)
+        card["tail"] = _tail_evidence(
+            source_signal,
+            candidate_probability=win_probability,
+            weather_assessment=weather_assessment,
+        )
     return card
 
 
@@ -927,7 +932,12 @@ def _bucket_evidence(source_signal: dict[str, Any], weather_evidence: dict[str, 
     }
 
 
-def _tail_evidence(source_signal: dict[str, Any], *, candidate_probability: float) -> dict[str, Any]:
+def _tail_evidence(
+    source_signal: dict[str, Any],
+    *,
+    candidate_probability: float,
+    weather_assessment: Any,
+) -> dict[str, Any]:
     return {
         "threshold": _first_float(source_signal, "threshold", "tail_threshold"),
         "threshold_probability": _first_float(
@@ -949,6 +959,23 @@ def _tail_evidence(source_signal: dict[str, Any], *, candidate_probability: floa
             "distance_from_threshold",
             "forecast_threshold_distance",
         ),
+        "probability_scoring": {
+            "source": getattr(weather_assessment, "tail_probability_source", None),
+            "candidate_probability": (
+                round(float(getattr(weather_assessment, "tail_candidate_probability")), 6)
+                if getattr(weather_assessment, "tail_candidate_probability", None) is not None
+                else None
+            ),
+            "threshold": (
+                round(float(getattr(weather_assessment, "tail_probability_threshold")), 6)
+                if getattr(weather_assessment, "tail_probability_threshold", None) is not None
+                else None
+            ),
+            "reason_code": getattr(weather_assessment, "tail_probability_reason_code", None),
+            "distribution_probability_present": bool(
+                getattr(weather_assessment, "tail_distribution_probability_present", False)
+            ),
+        },
     }
 
 

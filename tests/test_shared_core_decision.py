@@ -820,8 +820,144 @@ class SharedCoreDecisionTests(unittest.TestCase):
         self.assertFalse(decision.approved)
         self.assertEqual(decision.reason_code, "weather_tail_hidden_gem_live_probability_mismatch")
         self.assertIn("tail_directional_mismatch", decision.reasoning["weather_risk"]["flags"])
+        self.assertEqual(decision.reasoning["weather_risk"]["tail_probability"]["source"], "bridge")
         kelly_sizer.calculate.assert_not_called()
         risk_policy.check_trade.assert_not_called()
+
+    def test_stable_policy_preserves_tail_distribution_rejection(self):
+        context = self._tail_hidden_gem_context(distribution_probability=0.12)
+        kelly_sizer, risk_policy = self._approving_dependencies(size=2.0)
+
+        decision = build_trade_decision(
+            context,
+            kelly_sizer=kelly_sizer,
+            risk_policy=risk_policy,
+            min_edge=0.05,
+            min_confidence=0.5,
+            max_entry_price=0.7,
+        )
+
+        self.assertTrue(decision.approved)
+        gate = decision.reasoning["weather_risk"]["beta_gate"]
+        self.assertEqual(
+            gate["reason_code"],
+            "weather_tail_hidden_gem_distribution_probability_below_threshold",
+        )
+        self.assertEqual(gate["feature"], "weather_hidden_gem_evidence_card")
+        self.assertFalse(gate["active"])
+        self.assertFalse(gate["enforced"])
+        card = decision.reasoning["hidden_gem_evidence_card"]
+        self.assertEqual(card["tail"]["probability_scoring"]["source"], "distribution")
+        self.assertEqual(
+            card["tail"]["probability_scoring"]["reason_code"],
+            "weather_tail_hidden_gem_distribution_probability_below_threshold",
+        )
+        risk_policy.check_trade.assert_called_once_with(context.source_context, 2.0, available_cash=100.0)
+
+    def test_shadow_policy_records_tail_distribution_delta_but_preserves_final_action(self):
+        context = self._tail_hidden_gem_context(
+            distribution_probability=0.12,
+            strategy_policy=self._beta_policy("shadow", weather_hidden_gem_evidence_card=True),
+        )
+        kelly_sizer, risk_policy = self._approving_dependencies(size=2.0)
+
+        decision = build_trade_decision(
+            context,
+            kelly_sizer=kelly_sizer,
+            risk_policy=risk_policy,
+            min_edge=0.05,
+            min_confidence=0.5,
+            max_entry_price=0.7,
+        )
+
+        self.assertTrue(decision.approved)
+        gate = decision.reasoning["weather_risk"]["beta_gate"]
+        self.assertTrue(gate["active"])
+        self.assertTrue(gate["shadow"])
+        self.assertFalse(gate["enforced"])
+        self.assertTrue(gate["differs_from_final"])
+        self.assertEqual(
+            decision.reasoning["hidden_gem_evidence_card"]["reason_codes"]["beta_reject"],
+            "weather_tail_hidden_gem_distribution_probability_below_threshold",
+        )
+        risk_policy.check_trade.assert_called_once_with(context.source_context, 2.0, available_cash=100.0)
+
+    def test_enforce_policy_rejects_tail_distribution_only_with_hidden_gem_feature(self):
+        context_without_feature = self._tail_hidden_gem_context(
+            distribution_probability=0.12,
+            strategy_policy=self._beta_policy("enforce", bucket_distribution_scoring=True),
+        )
+        kelly_sizer, risk_policy = self._approving_dependencies(size=2.0)
+
+        preserved = build_trade_decision(
+            context_without_feature,
+            kelly_sizer=kelly_sizer,
+            risk_policy=risk_policy,
+            min_edge=0.05,
+            min_confidence=0.5,
+            max_entry_price=0.7,
+        )
+
+        self.assertTrue(preserved.approved)
+        self.assertFalse(preserved.reasoning["weather_risk"]["beta_gate"]["enforced"])
+        risk_policy.check_trade.assert_called_once_with(
+            context_without_feature.source_context,
+            2.0,
+            available_cash=100.0,
+        )
+
+        context_with_feature = self._tail_hidden_gem_context(
+            distribution_probability=0.12,
+            strategy_policy=self._beta_policy("enforce", weather_hidden_gem_evidence_card=True),
+        )
+        rejecting_kelly = Mock()
+        rejecting_risk = Mock()
+
+        rejected = build_trade_decision(
+            context_with_feature,
+            kelly_sizer=rejecting_kelly,
+            risk_policy=rejecting_risk,
+            min_edge=0.05,
+            min_confidence=0.5,
+            max_entry_price=0.7,
+        )
+
+        self.assertFalse(rejected.approved)
+        self.assertEqual(
+            rejected.reason_code,
+            "weather_tail_hidden_gem_distribution_probability_below_threshold",
+        )
+        self.assertTrue(rejected.reasoning["weather_risk"]["beta_gate"]["enforced"])
+        rejecting_kelly.calculate.assert_not_called()
+        rejecting_risk.check_trade.assert_not_called()
+
+    def test_enforce_policy_allows_strong_tail_distribution_even_when_bridge_disagrees(self):
+        context = self._tail_hidden_gem_context(
+            distribution_probability=0.24,
+            live_probability=0.05,
+            strategy_policy=self._beta_policy("enforce", weather_hidden_gem_evidence_card=True),
+        )
+        kelly_sizer, risk_policy = self._approving_dependencies(size=2.0)
+
+        decision = build_trade_decision(
+            context,
+            kelly_sizer=kelly_sizer,
+            risk_policy=risk_policy,
+            min_edge=0.05,
+            min_confidence=0.5,
+            max_entry_price=0.7,
+        )
+
+        self.assertTrue(decision.approved)
+        self.assertEqual(decision.reason_code, "approved")
+        tail = decision.reasoning["hidden_gem_evidence_card"]["tail"]
+        self.assertEqual(tail["probability_scoring"]["source"], "distribution")
+        self.assertEqual(
+            tail["probability_scoring"]["reason_code"],
+            "weather_tail_hidden_gem_distribution_probability_passed",
+        )
+        self.assertFalse(decision.reasoning["weather_risk"]["beta_gate"]["would_reject"])
+        risk_policy.check_trade.assert_called_once_with(context.source_context, 2.0, available_cash=100.0)
 
     def test_build_trade_decision_allows_exceptional_hidden_gem_with_helper_derived_weather_evidence(self):
         account_state = AccountState(
@@ -1373,6 +1509,57 @@ class SharedCoreDecisionTests(unittest.TestCase):
                 "station_id": "KMIA",
                 "signals": {"live": 0.15, "price": 0.14},
             },
+            metadata=metadata,
+        )
+
+    def _tail_hidden_gem_context(
+        self,
+        *,
+        distribution_probability: float | None,
+        live_probability: float = 0.75,
+        strategy_policy: dict | None = None,
+    ) -> TradeContext:
+        metadata = {"market_route": ALLOWED_MARKET_ROUTE}
+        if strategy_policy is not None:
+            metadata["strategy_policy"] = strategy_policy
+        source_context = {
+            "market_id": "KXHIGHATL-26APR26-T90",
+            "question": "Will Atlanta high temperature be above 90 degrees?",
+            "market_volume": 900,
+            "station_id": "KATL",
+            "weather_station_mapping": "exact",
+            "weather_confidence_score": 0.86,
+            "source_agreement_score": 0.86,
+            "signal_details": {
+                "live": {
+                    "signal_type": "weather",
+                    "predicted_prob": live_probability,
+                    "confidence": 0.92,
+                }
+            },
+        }
+        if distribution_probability is not None:
+            source_context["distribution_probability"] = distribution_probability
+        return TradeContext(
+            exchange="kalshi",
+            market_id="KXHIGHATL-26APR26-T90",
+            question="Will Atlanta high temperature be above 90 degrees?",
+            direction="BUY_YES",
+            market_price=0.04,
+            yes_price=0.04,
+            no_price=0.96,
+            model_probability=0.16,
+            edge=0.12,
+            confidence=0.9,
+            account_state=AccountState(
+                starting_balance=100.0,
+                current_balance=100.0,
+                available_cash=100.0,
+                reserved_capital=0.0,
+                total_exposure=0.0,
+                open_positions=0,
+            ),
+            source_context=source_context,
             metadata=metadata,
         )
 

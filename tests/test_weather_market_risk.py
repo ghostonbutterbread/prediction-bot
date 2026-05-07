@@ -288,6 +288,7 @@ class WeatherMarketRiskTests(unittest.TestCase):
         self.assertTrue(assessment.should_skip)
         self.assertEqual(assessment.reason_code, "weather_tail_hidden_gem_live_probability_mismatch")
         self.assertIn("tail_directional_mismatch", assessment.flags)
+        self.assertEqual(assessment.tail_probability_source, "bridge")
 
     def test_tail_hidden_gem_directional_mismatch_is_symmetric_for_buy_no(self):
         assessment = assess_weather_market_risk(
@@ -305,6 +306,7 @@ class WeatherMarketRiskTests(unittest.TestCase):
 
         self.assertTrue(assessment.should_skip)
         self.assertEqual(assessment.reason_code, "weather_tail_hidden_gem_live_probability_mismatch")
+        self.assertAlmostEqual(assessment.tail_candidate_probability, 0.09)
 
     def test_tail_hidden_gem_does_not_skip_on_low_confidence_live_probability(self):
         assessment = assess_weather_market_risk(
@@ -324,6 +326,107 @@ class WeatherMarketRiskTests(unittest.TestCase):
 
         self.assertFalse(assessment.should_skip)
         self.assertEqual(assessment.hidden_gem_tier, "normal")
+        self.assertEqual(assessment.tail_probability_source, "bridge")
+        self.assertEqual(
+            assessment.tail_probability_reason_code,
+            "weather_tail_hidden_gem_bridge_insufficient_evidence",
+        )
+
+    def test_tail_hidden_gem_uses_distribution_probability_before_live_bridge(self):
+        assessment = assess_weather_market_risk(
+            {
+                "market_id": "KXHIGHATL-26APR26-T90",
+                "question": "Will Atlanta high temperature be above 90 degrees?",
+                "market_volume": 900,
+                "candidate_direction": "BUY_YES",
+                "source_agreement_score": 0.86,
+                "weather_station_mapping": "exact",
+                "weather_confidence_score": 0.82,
+                "distribution_probability": 0.24,
+                "signal_details": {"live": {"signal_type": "weather", "predicted_prob": 0.05, "confidence": 0.92}},
+            },
+            entry_price=0.04,
+            win_probability=0.16,
+        )
+
+        self.assertFalse(assessment.should_skip)
+        self.assertEqual(assessment.hidden_gem_tier, "normal")
+        self.assertEqual(assessment.tail_probability_source, "distribution")
+        self.assertEqual(
+            assessment.tail_probability_reason_code,
+            "weather_tail_hidden_gem_distribution_probability_passed",
+        )
+        self.assertIn("tail_distribution_probability_used", assessment.flags)
+
+    def test_tail_hidden_gem_skips_when_distribution_probability_rejects_candidate_side(self):
+        assessment = assess_weather_market_risk(
+            {
+                "market_id": "KXHIGHATL-26APR26-T90",
+                "question": "Will Atlanta high temperature be above 90 degrees?",
+                "market_volume": 900,
+                "candidate_direction": "BUY_YES",
+                "source_agreement_score": 0.86,
+                "weather_station_mapping": "exact",
+                "weather_confidence_score": 0.82,
+                "distribution_probability": 0.12,
+                "signal_details": {"live": {"signal_type": "weather", "predicted_prob": 0.75, "confidence": 0.92}},
+            },
+            entry_price=0.04,
+            win_probability=0.16,
+        )
+
+        self.assertTrue(assessment.should_skip)
+        self.assertEqual(
+            assessment.reason_code,
+            "weather_tail_hidden_gem_distribution_probability_below_threshold",
+        )
+        self.assertEqual(assessment.tail_probability_source, "distribution")
+
+    def test_tail_hidden_gem_does_not_invert_candidate_distribution_for_buy_no(self):
+        assessment = assess_weather_market_risk(
+            {
+                "market_id": "KXHIGHATL-26APR26-T90",
+                "question": "Will Atlanta high temperature be above 90 degrees?",
+                "market_volume": 900,
+                "candidate_direction": "BUY_NO",
+                "source_agreement_score": 0.86,
+                "weather_station_mapping": "exact",
+                "weather_confidence_score": 0.82,
+                "distribution_probability": 0.12,
+                "signal_details": {"live": {"signal_type": "weather", "predicted_prob": 0.05, "confidence": 0.92}},
+            },
+            entry_price=0.04,
+            win_probability=0.16,
+        )
+
+        self.assertTrue(assessment.should_skip)
+        self.assertEqual(assessment.tail_probability_source, "distribution")
+        self.assertAlmostEqual(assessment.tail_candidate_probability, 0.12)
+        self.assertEqual(
+            assessment.reason_code,
+            "weather_tail_hidden_gem_distribution_probability_below_threshold",
+        )
+
+    def test_tail_hidden_gem_threshold_probability_keeps_bridge_behavior(self):
+        assessment = assess_weather_market_risk(
+            {
+                "market_id": "KXHIGHATL-26APR26-T90",
+                "question": "Will Atlanta high temperature be above 90 degrees?",
+                "market_volume": 900,
+                "candidate_direction": "BUY_YES",
+                "source_agreement_score": 0.86,
+                "weather_station_mapping": "exact",
+                "weather_confidence_score": 0.82,
+                "threshold_probability": 0.24,
+                "signal_details": {"live": {"signal_type": "weather", "predicted_prob": 0.05, "confidence": 0.92}},
+            },
+            entry_price=0.04,
+            win_probability=0.16,
+        )
+
+        self.assertTrue(assessment.should_skip)
+        self.assertEqual(assessment.tail_probability_source, "bridge")
+        self.assertEqual(assessment.reason_code, "weather_tail_hidden_gem_live_probability_mismatch")
 
     def test_exceptional_hidden_gem_skips_without_perfect_evidence(self):
         assessment = assess_weather_market_risk(
@@ -334,7 +437,7 @@ class WeatherMarketRiskTests(unittest.TestCase):
                 "weather_station_mapping": "inferred",
                 "weather_confidence_score": 0.8,
                 "source_agreement_score": 0.7,
-                "distribution_probability": 0.18,
+                "distribution_probability": 0.22,
             },
             entry_price=0.03,
             win_probability=0.48,  # 16x price

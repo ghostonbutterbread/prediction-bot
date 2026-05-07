@@ -38,9 +38,13 @@ def summarize_hidden_gem_evidence_cards(rows: list[dict[str, Any]] | tuple[dict[
         "unknown_outcome_cards": 0,
         "by_shape_tier_reason": [],
         "reason_code_counts": {},
+        "tail_probability_source_counts": {},
+        "tail_scoring_reason_code_counts": {},
     }
     groups: dict[tuple[str, str, str], Counter] = {}
     reason_counts: Counter[str] = Counter()
+    tail_source_counts: Counter[str] = Counter()
+    tail_scoring_reason_counts: Counter[str] = Counter()
 
     for row in rows or []:
         summary["rows_scanned"] += 1
@@ -83,6 +87,15 @@ def summarize_hidden_gem_evidence_cards(rows: list[dict[str, Any]] | tuple[dict[
         bucket["unknown_outcome"] += int(not approved and not rejected)
         reason_counts[reason_code] += 1
 
+        tail = card.get("tail") if isinstance(card.get("tail"), dict) else {}
+        scoring = tail.get("probability_scoring") if isinstance(tail.get("probability_scoring"), dict) else {}
+        tail_source = _clean_optional(scoring.get("source"))
+        tail_scoring_reason = _clean_optional(scoring.get("reason_code"))
+        if tail_source:
+            tail_source_counts[tail_source] += 1
+        if tail_scoring_reason:
+            tail_scoring_reason_counts[tail_scoring_reason] += 1
+
     summary["by_shape_tier_reason"] = [
         {
             "weather_shape": weather_shape,
@@ -100,6 +113,8 @@ def summarize_hidden_gem_evidence_cards(rows: list[dict[str, Any]] | tuple[dict[
         )
     ]
     summary["reason_code_counts"] = dict(sorted(reason_counts.items()))
+    summary["tail_probability_source_counts"] = dict(sorted(tail_source_counts.items()))
+    summary["tail_scoring_reason_code_counts"] = dict(sorted(tail_scoring_reason_counts.items()))
     return summary
 
 
@@ -130,6 +145,13 @@ def format_hidden_gem_evidence_summary(summary: dict[str, Any] | None, *, max_gr
             for group in groups
         )
         parts.append(f"top {rendered}")
+    tail_sources = summary.get("tail_probability_source_counts")
+    if isinstance(tail_sources, dict) and tail_sources:
+        rendered = " ".join(
+            f"{source} {int(count or 0)}"
+            for source, count in sorted(tail_sources.items())
+        )
+        parts.append(f"tail probability {rendered}")
     return " | ".join(parts)
 
 

@@ -423,6 +423,7 @@ Tails should also use distribution scoring, even if they remain easier than buck
 - tail approvals should depend on threshold mass, not only point forecast
 - extreme disagreement should be harder to justify when distribution mass is weak
 - Tier 0 `tail_high` probes should be reduced or retired once real distribution scoring exists
+- current Phase 3G beta behavior uses candidate-side `distribution_probability` for tails when populated and records `distribution` vs `bridge` scoring basis in the hidden-gem evidence card; missing distribution data keeps the live-probability bridge path instead of widening exposure
 
 `v3` is successful if:
 
