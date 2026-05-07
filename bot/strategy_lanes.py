@@ -103,6 +103,7 @@ def select_strategy_lane(
     beta_behavior_enabled = configured_behavior_enabled and policy.feature_enabled(HIDDEN_GEM_LANE_GATES_FEATURE)
     behavior_enabled = configured_behavior_enabled and policy.feature_enforced(HIDDEN_GEM_LANE_GATES_FEATURE)
     slow_profit_config = dict(lane_config.get("confidence_slow_profit") or {})
+    configured_slow_profit_explicitly_enabled = configured_behavior_enabled and bool(slow_profit_config.get("enabled", False))
     slow_profit_explicitly_enabled = behavior_enabled and bool(slow_profit_config.get("enabled", False))
     beta_slow_profit_explicitly_enabled = beta_behavior_enabled and bool(slow_profit_config.get("enabled", False))
 
@@ -142,9 +143,9 @@ def select_strategy_lane(
         min_confidence=min_confidence,
         hidden_gem_entry_price_cap=hidden_gem_entry_price_cap,
         enabled_lanes=enabled_lanes,
-        behavior_enabled=beta_behavior_enabled,
+        behavior_enabled=configured_behavior_enabled,
         slow_profit_config=slow_profit_config,
-        slow_profit_enabled=beta_slow_profit_explicitly_enabled,
+        slow_profit_enabled=configured_slow_profit_explicitly_enabled,
     )
     lane_sizing = _lane_sizing_evidence(lane_id, lane_config)
     beta_lane_sizing = _lane_sizing_evidence(beta_lane_id, lane_config)
@@ -166,6 +167,7 @@ def select_strategy_lane(
             "base_min_confidence": round(float(min_confidence), 6),
             "enabled_lanes": sorted(enabled_lanes),
             "confidence_slow_profit_enabled": slow_profit_explicitly_enabled,
+            "confidence_slow_profit_configured_enabled": configured_slow_profit_explicitly_enabled,
             "confidence_slow_profit_min_edge": slow_profit_config.get("min_edge"),
             "confidence_slow_profit_min_confidence": slow_profit_config.get("min_confidence"),
             "lane_sizing": lane_sizing,
@@ -176,6 +178,7 @@ def select_strategy_lane(
                 "beta_behavior_enabled": beta_behavior_enabled,
                 "beta_behavior_enforced": behavior_enabled,
                 "confidence_slow_profit_enabled": beta_slow_profit_explicitly_enabled,
+                "confidence_slow_profit_configured_enabled": configured_slow_profit_explicitly_enabled,
                 "lane_id": beta_lane_id,
                 "allowed": beta_allowed,
                 "reason_code": beta_reason_code,

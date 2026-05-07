@@ -26,6 +26,7 @@ from bot.hidden_gem_evidence import (
     summarize_hidden_gem_evidence_cards,
 )
 from bot.status import prune_log_storage, summarize_log_storage
+from bot.strategy_lane_reporting import format_strategy_lane_summary, summarize_strategy_lanes
 from bot.strategy_policy import strategy_policy_status
 
 DATA_DIR = Path(__file__).parent.parent / "data"
@@ -193,6 +194,7 @@ def analyze(*, prune_logs: bool = True) -> dict:
 
     config = load_config(PROJECT_ROOT / "config.yaml")
     result["strategy_policy_status"] = _strategy_policy_status_from_latest(latest, config)
+    result["strategy_lanes"] = summarize_strategy_lanes(raw_trades)
     result["hidden_gem_evidence_cards"] = summarize_hidden_gem_evidence_cards(raw_trades)
     prune_result = prune_log_storage(config, project_root=PROJECT_ROOT) if prune_logs else None
     storage_summary = summarize_log_storage(config, project_root=PROJECT_ROOT)
@@ -516,6 +518,9 @@ def format_report(analysis: dict) -> str:
     hidden_gem_line = format_hidden_gem_evidence_summary(analysis.get("hidden_gem_evidence_cards"))
     if hidden_gem_line:
         lines.append(hidden_gem_line)
+    strategy_lane_line = format_strategy_lane_summary(analysis.get("strategy_lanes"))
+    if strategy_lane_line:
+        lines.append(strategy_lane_line)
     
     storage = analysis.get("storage", {})
     if storage:

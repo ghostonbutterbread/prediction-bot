@@ -482,6 +482,13 @@ Phase 3I implementation note, 2026-05-07:
 - beta/enforce applies explicit selected-lane `strategy_lanes.sizing` reductions before `risk_policy.check_trade`; caps fail closed by clamping to non-negative values and never increasing the post-weather/event requested size
 - this slice does not promote live behavior or introduce runtime config changes; defaults remain unchanged
 
+Phase 3J implementation note, 2026-05-07:
+
+- `confidence_slow_profit` remains inert by default and still requires explicit `strategy_lanes.enabled`, `strategy_lanes.confidence_slow_profit.enabled`, lane thresholds, and beta/enforce `hidden_gem_lane_gates` before it can change final admission thresholds
+- explicit slow-profit config records `strategy_lane.evidence.beta_lane_gate` would-select metadata in stable/off and beta/shadow without changing the final selected lane or final action
+- `bot.strategy_lane_reporting`, `scripts/analyze.py`, and Prediction Lab replay summaries report selected lanes, would-select lanes, lane-selection deltas, and how often slow-profit would differ from the final stable action
+- this slice is observability/reporting-focused except for preserving the already beta/enforce-gated slow-profit admission path
+
 ### Bucket hidden-gem direction
 
 The 2026-05-06 paper/archive check showed cheap bucket rows were the clearest danger:

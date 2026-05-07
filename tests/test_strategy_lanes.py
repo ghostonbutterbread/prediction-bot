@@ -368,6 +368,52 @@ class StrategyLaneTests(unittest.TestCase):
         kelly_sizer.calculate.assert_not_called()
         risk_policy.check_trade.assert_not_called()
 
+    def test_stable_slow_profit_records_would_select_delta_without_admission(self):
+        context = self._context(
+            market_price=0.50,
+            model_probability=0.53,
+            edge=0.03,
+            confidence=0.95,
+            metadata={
+                "strategy_lanes": {
+                    "enabled": True,
+                    "enabled_lanes": ["edge", "hidden_gem", "confidence_slow_profit"],
+                    "confidence_slow_profit": {
+                        "enabled": True,
+                        "min_edge": 0.02,
+                        "min_confidence": 0.90,
+                    },
+                }
+            },
+        )
+        kelly_sizer = Mock()
+        risk_policy = Mock()
+
+        decision = build_trade_decision(
+            context,
+            kelly_sizer=kelly_sizer,
+            risk_policy=risk_policy,
+            min_edge=0.05,
+            min_confidence=0.50,
+            max_entry_price=0.70,
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertEqual(decision.reason_code, "edge_below_threshold")
+        lane = decision.reasoning["strategy_lane"]
+        self.assertEqual(lane["lane_id"], EDGE_LANE)
+        self.assertFalse(lane["behavior_enabled"])
+        beta_gate = lane["evidence"]["beta_lane_gate"]
+        self.assertTrue(beta_gate["configured_behavior_enabled"])
+        self.assertFalse(beta_gate["beta_behavior_enabled"])
+        self.assertFalse(beta_gate["beta_behavior_enforced"])
+        self.assertTrue(beta_gate["confidence_slow_profit_configured_enabled"])
+        self.assertFalse(beta_gate["confidence_slow_profit_enabled"])
+        self.assertEqual(beta_gate["lane_id"], CONFIDENCE_SLOW_PROFIT_LANE)
+        self.assertTrue(beta_gate["differs_from_final"])
+        kelly_sizer.calculate.assert_not_called()
+        risk_policy.check_trade.assert_not_called()
+
     def test_explicit_slow_profit_lane_can_use_configured_thresholds(self):
         context = self._context(
             market_price=0.50,
@@ -405,6 +451,50 @@ class StrategyLaneTests(unittest.TestCase):
         self.assertTrue(lane["new_behavior_enabled"])
         self.assertEqual(decision.reasoning["thresholds"]["effective_min_edge"], 0.02)
         self.assertEqual(decision.reasoning["thresholds"]["effective_min_confidence"], 0.90)
+
+    def test_enforce_slow_profit_feature_off_preserves_base_rejection(self):
+        context = self._context(
+            market_price=0.50,
+            model_probability=0.53,
+            edge=0.03,
+            confidence=0.95,
+            metadata={
+                "strategy_lanes": {
+                    "enabled": True,
+                    "enabled_lanes": ["edge", "hidden_gem", "confidence_slow_profit"],
+                    "confidence_slow_profit": {
+                        "enabled": True,
+                        "min_edge": 0.02,
+                        "min_confidence": 0.90,
+                    },
+                },
+                "strategy_policy": self._beta_policy("enforce", hidden_gem_lane_gates=False),
+            },
+        )
+        kelly_sizer = Mock()
+        risk_policy = Mock()
+
+        decision = build_trade_decision(
+            context,
+            kelly_sizer=kelly_sizer,
+            risk_policy=risk_policy,
+            min_edge=0.05,
+            min_confidence=0.50,
+            max_entry_price=0.70,
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertEqual(decision.reason_code, "edge_below_threshold")
+        lane = decision.reasoning["strategy_lane"]
+        self.assertEqual(lane["lane_id"], EDGE_LANE)
+        self.assertFalse(lane["behavior_enabled"])
+        beta_gate = lane["evidence"]["beta_lane_gate"]
+        self.assertEqual(beta_gate["lane_id"], CONFIDENCE_SLOW_PROFIT_LANE)
+        self.assertFalse(beta_gate["beta_behavior_enabled"])
+        self.assertFalse(beta_gate["beta_behavior_enforced"])
+        self.assertTrue(beta_gate["differs_from_final"])
+        kelly_sizer.calculate.assert_not_called()
+        risk_policy.check_trade.assert_not_called()
 
     def test_shadow_slow_profit_lane_records_beta_delta_without_admission(self):
         context = self._context(
