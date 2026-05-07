@@ -426,6 +426,13 @@ For each hidden-gem candidate, record at least:
 - for tails: threshold probability mass and distance to threshold
 - reason code for approve / reject / resize
 
+Phase 3B implementation note, 2026-05-06:
+
+- shared-core now emits `decision.reasoning["hidden_gem_evidence_card"]` for weather hidden-gem candidates after weather assessment
+- the card is observability-only in stable/off and beta/shadow; beta gate and sizing deltas are copied from the existing gated weather-risk metadata
+- this slice does not add new rejection rules beyond existing beta/enforce weather-risk gates
+- Prediction Lab/shared decision artifacts preserve the card through their existing `shared_core_decision.reasoning` payload
+
 ### Bucket hidden-gem direction
 
 The 2026-05-06 paper/archive check showed cheap bucket rows were the clearest danger:

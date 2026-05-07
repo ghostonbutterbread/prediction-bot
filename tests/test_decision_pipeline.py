@@ -208,6 +208,73 @@ class DecisionPipelineTests(unittest.TestCase):
         self.assertEqual(row["shared_pipeline"]["order_book_source"], "missing")
         self.assertEqual(row["decision_artifact"]["execution_snapshot_source"], "fallback")
 
+    def test_prediction_lab_artifact_preserves_hidden_gem_evidence_card_in_reasoning(self):
+        signal = {
+            "market_id": "KXHIGHNY-260506-T71",
+            "exchange": "kalshi",
+            "question": "Will the high temperature in New York exceed 71 degrees?",
+            "direction": "BUY_YES",
+            "model_probability": 0.16,
+            "market_price": 0.04,
+            "yes_market_price": 0.04,
+            "no_market_price": 0.96,
+            "edge": 0.12,
+            "confidence": 0.9,
+            "source_mode": "recorded_as_of",
+            "station_id": "KNYC",
+            "source_agreement_score": 0.92,
+            "weather_confidence_score": 0.9,
+            "threshold": 71,
+            "distance_to_threshold": 4.0,
+            "signals": {"live": 0.16, "price": 0.15},
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lab = PredictionLab(
+                {
+                    "data_dir": tmpdir,
+                    "scan": {"allowed_market_routes": ["weather.daily_temperature"]},
+                    "prediction_lab": {
+                        "enabled": True,
+                        "mode": "collector",
+                        "groups": ["weather"],
+                        "use_shared_pipeline": True,
+                        "score_only": False,
+                    },
+                    "strategy": {"min_edge": 0.01, "min_confidence": 0.5},
+                }
+            )
+            lab.decision_evaluator = DecisionPipelineEvaluator(
+                lab.config,
+                strategy=TracedStrategy(signal),
+                kelly_sizer=FixedKelly(2.0),
+                risk_policy=AllowRisk(),
+            )
+            market = FakeMarket(
+                id="KXHIGHNY-260506-T71",
+                question="Will the high temperature in New York exceed 71 degrees?",
+                yes_price=0.04,
+                no_price=0.96,
+                metadata={"market_group": "weather", "market_family": "daily_temperature"},
+            )
+
+            artifact = lab._evaluate_shared_pipeline(market)
+            row = lab._build_market_snapshot_row(
+                "run-1",
+                market,
+                signal,
+                decision_type="trade",
+                prediction_recorded=True,
+                decision_artifact=artifact,
+            )
+
+        reasoning = row["decision_artifact"]["shared_core_decision"]["reasoning"]
+        card = reasoning["hidden_gem_evidence_card"]
+        self.assertEqual(card["market_family"], "daily_temperature")
+        self.assertEqual(card["weather_shape"], "tail_high")
+        self.assertEqual(card["source_mode"], "recorded")
+        self.assertEqual(card["tail"]["threshold"], 71.0)
+        self.assertEqual(card["tail"]["distance_to_threshold"], 4.0)
+
     def test_prediction_lab_shared_pipeline_config_default_is_off(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "config.yaml"

@@ -352,6 +352,101 @@ class SharedCoreDecisionTests(unittest.TestCase):
         self.assertTrue(gate["preserved_stable_action"])
         risk_policy.check_trade.assert_called_once_with(context.source_context, 2.0, available_cash=100.0)
 
+    def test_hidden_gem_weather_decision_includes_evidence_card(self):
+        route = {**ALLOWED_MARKET_ROUTE, "subcategory": "bucket"}
+        context = TradeContext(
+            exchange="kalshi",
+            market_id="KXHIGHMIA-26APR26-B82.5",
+            question="Will the high temp in Miami be 82-83° on Apr 26?",
+            direction="BUY_YES",
+            market_price=0.03,
+            yes_price=0.03,
+            no_price=0.97,
+            model_probability=0.24,
+            edge=0.21,
+            confidence=0.9,
+            account_state=AccountState(
+                starting_balance=100.0,
+                current_balance=100.0,
+                available_cash=100.0,
+                reserved_capital=0.0,
+                total_exposure=0.0,
+                open_positions=0,
+            ),
+            source_context={
+                "market_id": "KXHIGHMIA-26APR26-B82.5",
+                "question": "Will the high temp in Miami be 82-83° on Apr 26?",
+                "source_mode": "recorded_as_of",
+                "market_volume": 900,
+                "liquidity": 1200,
+                "station_id": "KMIA",
+                "source_agreement_score": 0.91,
+                "weather_confidence_score": 0.88,
+                "source_timestamp": "2026-05-06T12:00:00+00:00",
+                "distribution_probability": 0.24,
+                "forecast_mean": 82.8,
+                "forecast_spread": 1.6,
+                "bucket_center": 82.5,
+                "bucket_width": 1.0,
+                "distance_to_center": 0.3,
+            },
+            metadata={"market_route": route},
+        )
+        kelly_sizer, risk_policy = self._approving_dependencies(size=2.0)
+
+        decision = build_trade_decision(
+            context,
+            kelly_sizer=kelly_sizer,
+            risk_policy=risk_policy,
+            min_edge=0.05,
+            min_confidence=0.5,
+            max_entry_price=0.7,
+        )
+
+        self.assertTrue(decision.approved)
+        card = decision.reasoning["hidden_gem_evidence_card"]
+        self.assertEqual(card["lane"], "hidden_gem")
+        self.assertEqual(card["market_route"]["family"], "daily_temperature")
+        self.assertEqual(card["weather_shape"], "bucket")
+        self.assertEqual(card["entry_price"], 0.03)
+        self.assertEqual(card["source_mode"], "recorded")
+        self.assertEqual(card["station_mapping_quality"], "exact")
+        self.assertEqual(card["source_agreement_score"], 0.91)
+        self.assertEqual(card["market_volume"], 900.0)
+        self.assertEqual(card["liquidity"], 1200.0)
+        self.assertEqual(card["bucket"]["distribution_probability"], 0.24)
+        self.assertEqual(card["bucket"]["forecast_mean"], 82.8)
+        self.assertEqual(card["bucket"]["bucket_center"], 82.5)
+        self.assertFalse(card["beta_gate"]["active"])
+
+    def test_hidden_gem_evidence_card_represents_missing_fields_safely(self):
+        route = {**ALLOWED_MARKET_ROUTE, "subcategory": "bucket"}
+        context = self._bucket_missing_distribution_context()
+        context.metadata["market_route"] = route
+        context.source_context.pop("station_id", None)
+        context.source_context.pop("market_volume", None)
+        kelly_sizer, risk_policy = self._approving_dependencies(size=2.0)
+
+        decision = build_trade_decision(
+            context,
+            kelly_sizer=kelly_sizer,
+            risk_policy=risk_policy,
+            min_edge=0.05,
+            min_confidence=0.5,
+            max_entry_price=0.7,
+        )
+
+        self.assertTrue(decision.approved)
+        card = decision.reasoning["hidden_gem_evidence_card"]
+        self.assertEqual(card["source_mode"], "missing")
+        self.assertFalse(card["volume_known"])
+        self.assertIsNone(card["market_volume"])
+        self.assertIsNone(card["liquidity"])
+        self.assertIsNone(card["bucket"]["distribution_probability"])
+        self.assertIsNone(card["bucket"]["forecast"])
+        self.assertEqual(card["reason_codes"]["weather_reject"], "weather_bucket_hidden_gem_missing_distribution_probability")
+        self.assertFalse(card["beta_gate"]["active"])
+
     def test_shadow_policy_records_weather_beta_delta_but_preserves_final_action(self):
         context = self._bucket_missing_distribution_context(
             self._beta_policy("shadow", bucket_distribution_scoring=True)
@@ -374,6 +469,10 @@ class SharedCoreDecisionTests(unittest.TestCase):
         self.assertFalse(gate["enforced"])
         self.assertTrue(gate["differs_from_final"])
         self.assertEqual(gate["reason_code"], "weather_bucket_hidden_gem_missing_distribution_probability")
+        card = decision.reasoning["hidden_gem_evidence_card"]
+        self.assertTrue(card["beta_gate"]["shadow"])
+        self.assertTrue(card["beta_deltas"]["rejection_differs_from_final"])
+        self.assertEqual(card["reason_codes"]["beta_reject"], "weather_bucket_hidden_gem_missing_distribution_probability")
 
     def test_enforce_policy_without_relevant_feature_preserves_final_action(self):
         context = self._bucket_missing_distribution_context(
