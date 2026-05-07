@@ -178,6 +178,66 @@ class WeatherMarketRiskTests(unittest.TestCase):
         self.assertEqual(assessment.hidden_gem_tier, "normal")
         self.assertEqual(assessment.reason_code, "weather_bucket_hidden_gem_missing_distribution_probability")
 
+    def test_bucket_hidden_gem_skips_when_distribution_probability_below_entry_buffer(self):
+        assessment = assess_weather_market_risk(
+            {
+                "market_id": "KXHIGHMIA-26APR26-B82.5",
+                "question": "Will the high temp in Miami be 82-83° on Apr 26?",
+                "market_volume": 900,
+                "weather_station_mapping": "exact",
+                "weather_confidence_score": 0.94,
+                "source_agreement_score": 0.9,
+                "distribution_probability": 0.07,
+            },
+            entry_price=0.03,
+            win_probability=0.15,
+        )
+
+        self.assertTrue(assessment.should_skip)
+        self.assertEqual(
+            assessment.reason_code,
+            "weather_bucket_hidden_gem_distribution_probability_below_entry_plus_buffer",
+        )
+
+    def test_bucket_hidden_gem_skips_when_distribution_probability_below_price_multiple(self):
+        assessment = assess_weather_market_risk(
+            {
+                "market_id": "KXHIGHMIA-26APR26-B82.5",
+                "question": "Will the high temp in Miami be 82-83° on Apr 26?",
+                "market_volume": 900,
+                "weather_station_mapping": "exact",
+                "weather_confidence_score": 0.94,
+                "source_agreement_score": 0.9,
+                "distribution_probability": 0.12,
+            },
+            entry_price=0.05,
+            win_probability=0.20,
+        )
+
+        self.assertTrue(assessment.should_skip)
+        self.assertEqual(
+            assessment.reason_code,
+            "weather_bucket_hidden_gem_distribution_probability_below_multiple",
+        )
+
+    def test_bucket_hidden_gem_allows_strong_distribution_probability(self):
+        assessment = assess_weather_market_risk(
+            {
+                "market_id": "KXHIGHMIA-26APR26-B82.5",
+                "question": "Will the high temp in Miami be 82-83° on Apr 26?",
+                "market_volume": 900,
+                "weather_station_mapping": "exact",
+                "weather_confidence_score": 0.94,
+                "source_agreement_score": 0.9,
+                "distribution_probability": 0.24,
+            },
+            entry_price=0.03,
+            win_probability=0.15,
+        )
+
+        self.assertFalse(assessment.should_skip)
+        self.assertEqual(assessment.hidden_gem_tier, "normal")
+
     def test_tail_hidden_gem_skips_when_live_probability_rejects_candidate_side(self):
         assessment = assess_weather_market_risk(
             {

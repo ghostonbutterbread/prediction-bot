@@ -779,7 +779,11 @@ def _weather_sizing_beta_gate(
 
 def _weather_rejection_feature(reason_code: Any) -> str | None:
     code = str(reason_code or "")
-    if code == "weather_bucket_hidden_gem_missing_distribution_probability":
+    if code in {
+        "weather_bucket_hidden_gem_missing_distribution_probability",
+        "weather_bucket_hidden_gem_distribution_probability_below_entry_plus_buffer",
+        "weather_bucket_hidden_gem_distribution_probability_below_multiple",
+    }:
         return WEATHER_BUCKET_SCORING_FEATURE
     if code in {
         "weather_tail_hidden_gem_live_probability_mismatch",
