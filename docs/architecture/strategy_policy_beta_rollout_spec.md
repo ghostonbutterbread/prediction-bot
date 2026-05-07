@@ -16,6 +16,7 @@ strategy_policy:
       weather_hidden_gem_evidence_card: false
       bucket_distribution_scoring: false
       hidden_gem_lane_gates: false
+      lane_sizing_caps: false
 ```
 
 The loader exposes the parsed value at `config["strategy_policy_normalized"]`. Invalid `version` or beta mode values fail closed to `stable` and `off`.
@@ -49,3 +50,4 @@ Stable main remains the default everywhere. Prediction Lab may opt into `version
 - Phase 3F extends the same beta-gated bucket path with source/station evidence quality: enforce requires exact station mapping and `source_agreement_score >= 0.65`; stable/off and beta/shadow record deltas without changing final actions.
 - Phase 3G adds beta-gated tail hidden-gem candidate-side distribution scoring under `weather_hidden_gem_evidence_card`: tails use `distribution_probability` when present, otherwise retain the live-probability bridge, and evidence cards/reporting record which path was used.
 - Phase 3H adds metadata-only lane sizing/cap records under `strategy_lanes.sizing`; shared-core reports selected-lane potential size adjustments without applying them or changing stable/shadow/enforce sizing behavior.
+- Phase 3I adds beta/enforce application for selected-lane sizing caps under `lane_sizing_caps`: stable/off and beta/shadow preserve final requested/approved sizes while reporting deltas; enforce only applies explicit `strategy_lanes.sizing` reductions before `risk_policy.check_trade`.

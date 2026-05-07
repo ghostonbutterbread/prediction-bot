@@ -20,6 +20,7 @@ class StrategyPolicyConfigTests(unittest.TestCase):
         self.assertFalse(policy.feature_enabled("weather_hidden_gem_evidence_card"))
         self.assertFalse(policy.feature_enabled("bucket_distribution_scoring"))
         self.assertFalse(policy.feature_enabled("hidden_gem_lane_gates"))
+        self.assertFalse(policy.feature_enabled("lane_sizing_caps"))
 
     def test_beta_shadow_parses_correctly(self):
         policy = normalize_strategy_policy(
@@ -45,6 +46,7 @@ class StrategyPolicyConfigTests(unittest.TestCase):
         self.assertTrue(policy.feature_enabled("weather_hidden_gem_evidence_card"))
         self.assertTrue(policy.feature_enabled("bucket_distribution_scoring"))
         self.assertFalse(policy.feature_enabled("hidden_gem_lane_gates"))
+        self.assertFalse(policy.feature_enabled("lane_sizing_caps"))
 
     def test_beta_enforce_parses_correctly(self):
         policy = normalize_strategy_policy(

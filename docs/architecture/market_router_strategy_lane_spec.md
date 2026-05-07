@@ -401,6 +401,7 @@ strategy_policy:
       weather_hidden_gem_evidence_card: true
       bucket_distribution_scoring: true
       hidden_gem_lane_gates: true
+      lane_sizing_caps: true
 ```
 
 Recommended implementation order:
@@ -473,6 +474,13 @@ Phase 3H implementation note, 2026-05-07:
 - strategy-lane config now accepts metadata-only `strategy_lanes.sizing` entries for known lanes with optional `size_multiplier`, `max_position_usd`, and `max_position_pct`
 - shared-core records selected-lane sizing metadata after Kelly as `decision.reasoning["lane_sizing"]`, including whether the metadata would have adjusted the requested size
 - this slice does not apply lane-specific caps or multipliers in stable, shadow, or enforce mode; actual sizing behavior remains owned by the existing Kelly, weather-risk, event, and risk-policy paths
+
+Phase 3I implementation note, 2026-05-07:
+
+- `strategy_policy.beta.features.lane_sizing_caps` is the dedicated feature flag for applying selected-lane sizing caps
+- stable/off and beta/shadow preserve final requested/approved sizes and only record `lane_sizing` deltas, including the beta-adjusted size that would have reached risk
+- beta/enforce applies explicit selected-lane `strategy_lanes.sizing` reductions before `risk_policy.check_trade`; caps fail closed by clamping to non-negative values and never increasing the post-weather/event requested size
+- this slice does not promote live behavior or introduce runtime config changes; defaults remain unchanged
 
 ### Bucket hidden-gem direction
 

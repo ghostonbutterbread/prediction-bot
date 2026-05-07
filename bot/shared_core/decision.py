@@ -7,7 +7,7 @@ from math import isfinite
 from typing import Any, Protocol
 
 from bot.trade_audit import trade_event_key
-from bot.strategy_lanes import select_strategy_lane
+from bot.strategy_lanes import LANE_SIZING_CAPS_FEATURE, select_strategy_lane
 from bot.strategy_policy import coerce_strategy_policy, strategy_policy_status
 
 from .interfaces import TradeContext, TradeDecision
@@ -445,6 +445,25 @@ def build_trade_decision(
             reasoning=reasoning,
         )
 
+    requested_size = _apply_lane_sizing_caps(
+        requested_size,
+        strategy_policy=strategy_policy,
+        lane_sizing=reasoning["lane_sizing"],
+    )
+    if requested_size <= 0:
+        return TradeDecision(
+            action="SKIP",
+            approved=False,
+            reason_code="lane_sizing_cap_zero_size",
+            reason="Lane sizing caps left no positive position size",
+            edge=edge,
+            confidence=confidence,
+            entry_price=entry_price,
+            win_probability=win_probability,
+            requested_position_size=requested_size,
+            reasoning=reasoning,
+        )
+
     if event_snapshot["retrade"]:
         cost_summary = estimate_retrade_costs(
             edge=edge,
@@ -756,12 +775,13 @@ def _lane_sizing_metadata(
         constraints.append("size_multiplier")
 
     max_position_pct = _coerce_optional_float(sizing.get("max_position_pct"))
+    max_position_pct_cap = None
     if max_position_pct is not None:
-        pct_cap = max(0.0, float(current_balance or 0.0)) * max(
+        max_position_pct_cap = max(0.0, float(current_balance or 0.0)) * max(
             0.0,
             min(1.0, max_position_pct),
         )
-        metadata_size = min(metadata_size, pct_cap)
+        metadata_size = min(metadata_size, max_position_pct_cap)
         constraints.append("max_position_pct")
 
     max_position_usd = _coerce_optional_float(sizing.get("max_position_usd"))
@@ -783,7 +803,57 @@ def _lane_sizing_metadata(
         "size_multiplier": size_multiplier,
         "max_position_usd": max_position_usd,
         "max_position_pct": max_position_pct,
+        "max_position_pct_cap": round(max_position_pct_cap, 4) if max_position_pct_cap is not None else None,
     }
+
+
+def _apply_lane_sizing_caps(
+    requested_size: float,
+    *,
+    strategy_policy: Any,
+    lane_sizing: dict[str, Any],
+) -> float:
+    policy = coerce_strategy_policy(strategy_policy)
+    if not isinstance(lane_sizing, dict):
+        return requested_size
+
+    configured = bool(lane_sizing.get("configured", False))
+    requested_size_rounded = round(max(0.0, float(requested_size or 0.0)), 4)
+    beta_adjusted_size = requested_size_rounded
+    size_multiplier = _coerce_optional_float(lane_sizing.get("size_multiplier"))
+    if size_multiplier is not None:
+        beta_adjusted_size *= max(0.0, min(1.0, size_multiplier))
+    max_position_pct_cap = _coerce_optional_float(lane_sizing.get("max_position_pct_cap"))
+    if max_position_pct_cap is not None:
+        beta_adjusted_size = min(beta_adjusted_size, max(0.0, max_position_pct_cap))
+    max_position_usd = _coerce_optional_float(lane_sizing.get("max_position_usd"))
+    if max_position_usd is not None:
+        beta_adjusted_size = min(beta_adjusted_size, max(0.0, max_position_usd))
+    beta_adjusted_size = round(min(max(0.0, beta_adjusted_size), requested_size_rounded), 4)
+    would_adjust = bool(configured and beta_adjusted_size < requested_size_rounded)
+    active = bool(would_adjust and policy.feature_enabled(LANE_SIZING_CAPS_FEATURE))
+    enforced = bool(would_adjust and policy.feature_enforced(LANE_SIZING_CAPS_FEATURE))
+
+    lane_sizing.update(
+        {
+            "feature": LANE_SIZING_CAPS_FEATURE,
+            "policy": strategy_policy_status(policy),
+            "beta_adjusted_size": beta_adjusted_size,
+            "active": active,
+            "shadow": bool(active and policy.is_shadow),
+            "enforced": enforced,
+            "applied": enforced,
+            "metadata_only": not enforced,
+            "preserved_stable_size": bool(would_adjust and not enforced),
+            "differs_from_final": bool(would_adjust and active and not enforced),
+            "final_requested_size_before_lane_caps": requested_size_rounded,
+        }
+    )
+    if not enforced:
+        return requested_size
+
+    lane_sizing["applied_size"] = beta_adjusted_size
+    return beta_adjusted_size
 
 
 def _weather_rejection_beta_gate(strategy_policy: Any, weather_assessment) -> dict[str, Any]:

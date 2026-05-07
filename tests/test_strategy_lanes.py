@@ -137,6 +137,200 @@ class StrategyLaneTests(unittest.TestCase):
             2.0,
         )
 
+    def test_stable_lane_sizing_caps_preserve_requested_and_approved_size(self):
+        context = self._context(
+            market_price=0.40,
+            model_probability=0.70,
+            edge=0.30,
+            confidence=0.90,
+            metadata={
+                "strategy_lanes": {
+                    "enabled": False,
+                    "sizing": {
+                        "edge": {
+                            "size_multiplier": 0.25,
+                            "max_position_usd": 2.0,
+                        },
+                    },
+                },
+                "strategy_policy": {
+                    "version": "stable",
+                    "beta": {"mode": "enforce", "features": {"lane_sizing_caps": True}},
+                },
+            },
+        )
+        kelly_sizer, risk_policy = self._approving_dependencies(size=10.0)
+
+        decision = build_trade_decision(
+            context,
+            kelly_sizer=kelly_sizer,
+            risk_policy=risk_policy,
+            min_edge=0.05,
+            min_confidence=0.50,
+            max_entry_price=0.70,
+        )
+
+        self.assertTrue(decision.approved)
+        self.assertEqual(decision.requested_position_size, 10.0)
+        self.assertEqual(decision.position_size, 10.0)
+        risk_policy.check_trade.assert_called_once_with(
+            context.source_context,
+            10.0,
+            available_cash=100.0,
+        )
+        lane_sizing = decision.reasoning["lane_sizing"]
+        self.assertTrue(lane_sizing["configured"])
+        self.assertFalse(lane_sizing["active"])
+        self.assertFalse(lane_sizing["enforced"])
+        self.assertFalse(lane_sizing["applied"])
+        self.assertTrue(lane_sizing["preserved_stable_size"])
+        self.assertEqual(lane_sizing["beta_adjusted_size"], 2.0)
+
+    def test_shadow_lane_sizing_caps_report_delta_without_changing_size(self):
+        context = self._context(
+            market_price=0.40,
+            model_probability=0.70,
+            edge=0.30,
+            confidence=0.90,
+            metadata={
+                "strategy_lanes": {
+                    "enabled": False,
+                    "sizing": {
+                        "edge": {
+                            "size_multiplier": 0.25,
+                            "max_position_usd": 2.0,
+                        },
+                    },
+                },
+                "strategy_policy": self._beta_policy("shadow", lane_sizing_caps=True),
+            },
+        )
+        kelly_sizer, risk_policy = self._approving_dependencies(size=10.0)
+
+        decision = build_trade_decision(
+            context,
+            kelly_sizer=kelly_sizer,
+            risk_policy=risk_policy,
+            min_edge=0.05,
+            min_confidence=0.50,
+            max_entry_price=0.70,
+        )
+
+        self.assertTrue(decision.approved)
+        self.assertEqual(decision.requested_position_size, 10.0)
+        self.assertEqual(decision.position_size, 10.0)
+        risk_policy.check_trade.assert_called_once_with(
+            context.source_context,
+            10.0,
+            available_cash=100.0,
+        )
+        lane_sizing = decision.reasoning["lane_sizing"]
+        self.assertTrue(lane_sizing["active"])
+        self.assertTrue(lane_sizing["shadow"])
+        self.assertFalse(lane_sizing["enforced"])
+        self.assertFalse(lane_sizing["applied"])
+        self.assertTrue(lane_sizing["differs_from_final"])
+        self.assertEqual(lane_sizing["beta_adjusted_size"], 2.0)
+
+    def test_enforce_lane_sizing_caps_apply_before_risk_policy(self):
+        context = self._context(
+            market_price=0.40,
+            model_probability=0.70,
+            edge=0.30,
+            confidence=0.90,
+            metadata={
+                "strategy_lanes": {
+                    "enabled": False,
+                    "sizing": {
+                        "edge": {
+                            "size_multiplier": 0.25,
+                            "max_position_usd": 2.0,
+                        },
+                    },
+                },
+                "strategy_policy": self._beta_policy("enforce", lane_sizing_caps=True),
+            },
+        )
+        kelly_sizer = Mock()
+        kelly_sizer.calculate.return_value = 10.0
+        risk_policy = Mock()
+        risk_policy.check_trade.return_value = SimpleNamespace(
+            approved=True,
+            reason="Approved",
+            adjusted_size=2.0,
+            risk_score=0.0,
+            warnings=[],
+        )
+
+        decision = build_trade_decision(
+            context,
+            kelly_sizer=kelly_sizer,
+            risk_policy=risk_policy,
+            min_edge=0.05,
+            min_confidence=0.50,
+            max_entry_price=0.70,
+        )
+
+        self.assertTrue(decision.approved)
+        self.assertEqual(decision.requested_position_size, 2.0)
+        self.assertEqual(decision.position_size, 2.0)
+        risk_policy.check_trade.assert_called_once_with(
+            context.source_context,
+            2.0,
+            available_cash=100.0,
+        )
+        lane_sizing = decision.reasoning["lane_sizing"]
+        self.assertTrue(lane_sizing["active"])
+        self.assertFalse(lane_sizing["shadow"])
+        self.assertTrue(lane_sizing["enforced"])
+        self.assertTrue(lane_sizing["applied"])
+        self.assertFalse(lane_sizing["metadata_only"])
+        self.assertEqual(lane_sizing["applied_size"], 2.0)
+
+    def test_lane_sizing_caps_feature_off_preserves_size_even_in_enforce(self):
+        context = self._context(
+            market_price=0.40,
+            model_probability=0.70,
+            edge=0.30,
+            confidence=0.90,
+            metadata={
+                "strategy_lanes": {
+                    "enabled": False,
+                    "sizing": {
+                        "edge": {
+                            "size_multiplier": 0.25,
+                            "max_position_usd": 2.0,
+                        },
+                    },
+                },
+                "strategy_policy": self._beta_policy("enforce", lane_sizing_caps=False),
+            },
+        )
+        kelly_sizer, risk_policy = self._approving_dependencies(size=10.0)
+
+        decision = build_trade_decision(
+            context,
+            kelly_sizer=kelly_sizer,
+            risk_policy=risk_policy,
+            min_edge=0.05,
+            min_confidence=0.50,
+            max_entry_price=0.70,
+        )
+
+        self.assertTrue(decision.approved)
+        self.assertEqual(decision.requested_position_size, 10.0)
+        self.assertEqual(decision.position_size, 10.0)
+        risk_policy.check_trade.assert_called_once_with(
+            context.source_context,
+            10.0,
+            available_cash=100.0,
+        )
+        lane_sizing = decision.reasoning["lane_sizing"]
+        self.assertFalse(lane_sizing["active"])
+        self.assertFalse(lane_sizing["enforced"])
+        self.assertFalse(lane_sizing["applied"])
+        self.assertEqual(lane_sizing["beta_adjusted_size"], 2.0)
+
     def test_slow_profit_config_does_not_change_defaults_until_enabled(self):
         context = self._context(
             market_price=0.50,
@@ -487,6 +681,7 @@ class StrategyLaneTests(unittest.TestCase):
         weather_hidden_gem_evidence_card: bool = False,
         bucket_distribution_scoring: bool = False,
         hidden_gem_lane_gates: bool = False,
+        lane_sizing_caps: bool = False,
     ) -> dict:
         return {
             "version": "beta",
@@ -496,6 +691,7 @@ class StrategyLaneTests(unittest.TestCase):
                     "weather_hidden_gem_evidence_card": weather_hidden_gem_evidence_card,
                     "bucket_distribution_scoring": bucket_distribution_scoring,
                     "hidden_gem_lane_gates": hidden_gem_lane_gates,
+                    "lane_sizing_caps": lane_sizing_caps,
                 },
             },
         }
