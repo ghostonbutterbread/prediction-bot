@@ -38,3 +38,9 @@ Unknown feature names are ignored. Only keys listed in the default feature set a
 ## Rollout
 
 Stable main remains the default everywhere. Prediction Lab may opt into `version: beta` with `mode: shadow` to collect parallel evidence without changing decisions. Paper may move to `mode: enforce` after shadow data is reviewed. Live stays `stable` until the beta policy is explicitly promoted.
+
+## Phase 3 Observability Notes
+
+- Phase 3A added weather-lane beta gating under `strategy_policy`; stable behavior remains unchanged unless beta policy is active.
+- Phase 3B added `decision.reasoning["hidden_gem_evidence_card"]` for weather hidden-gem candidates, and Prediction Lab preserves the card inside shared pipeline decision artifacts.
+- Phase 3C adds reporting-only aggregation for those cards. Reports summarize card counts by `weather_shape x hidden_gem_tier x reason_code`, include final approvals/rejections plus beta-rejection counts where artifacts carry them, and count legacy no-card or incomplete-card rows without failing. This slice does not alter strategy selection, trade decisions, sizing, risk checks, or order behavior.

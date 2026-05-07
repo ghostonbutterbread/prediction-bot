@@ -19,6 +19,10 @@ from bot.decision_pipeline import (
     build_fixed_opportunity_risk_policy,
 )
 from bot.file_ops import append_jsonl, atomic_write_json, load_jsonl, locked_file, rewrite_jsonl
+from bot.hidden_gem_evidence import (
+    extract_hidden_gem_evidence_card,
+    summarize_hidden_gem_evidence_cards,
+)
 from bot.strategies.enhanced import EnhancedStrategyEngine, KellySizer, strategy_config_with_policy
 from bot.market_classification import apply_classification_metadata, classify_market_object
 from bot.market_router import route_market
@@ -362,7 +366,63 @@ class PredictionLab:
             "net_pnl": round(pnl_total, 4),
             "group_counts": dict(group_counts),
             "confidence_buckets": dict(confidence_buckets),
+            "hidden_gem_evidence_cards": summarize_hidden_gem_evidence_cards(
+                self._hidden_gem_summary_rows(
+                    rows,
+                    self._iter_recent_hidden_gem_snapshot_rows(self.market_snapshots_path),
+                )
+            ),
         }
+
+    @staticmethod
+    def _hidden_gem_summary_rows(
+        prediction_rows: list[dict[str, Any]],
+        snapshot_rows,
+    ) -> list[dict[str, Any]]:
+        by_key: dict[tuple[str, str], dict[str, Any]] = {}
+        unkeyed: list[dict[str, Any]] = []
+        for row in list(prediction_rows or []):
+            PredictionLab._add_hidden_gem_summary_row(by_key, unkeyed, row)
+        for row in snapshot_rows or []:
+            PredictionLab._add_hidden_gem_summary_row(by_key, unkeyed, row)
+        return list(by_key.values()) + unkeyed
+
+    @staticmethod
+    def _add_hidden_gem_summary_row(
+        by_key: dict[tuple[str, str], dict[str, Any]],
+        unkeyed: list[dict[str, Any]],
+        row: dict[str, Any],
+    ) -> None:
+        if not isinstance(row, dict):
+            return
+        key = (str(row.get("run_id") or ""), str(row.get("market_id") or row.get("snapshot_key") or ""))
+        if not key[0] or not key[1]:
+            unkeyed.append(row)
+            return
+        existing = by_key.get(key)
+        if existing is None or (
+            extract_hidden_gem_evidence_card(existing) is None
+            and extract_hidden_gem_evidence_card(row) is not None
+        ):
+            by_key[key] = row
+
+    @staticmethod
+    def _iter_recent_hidden_gem_snapshot_rows(path: Path, *, max_bytes: int = 25 * 1024 * 1024):
+        """Yield recent snapshot rows with cards without loading huge ledgers into memory."""
+        if not path.exists():
+            return
+        file_size = path.stat().st_size
+        with path.open("rb") as fh:
+            if file_size > max_bytes:
+                fh.seek(max(0, file_size - max_bytes))
+                fh.readline()  # discard partial line
+            for raw_line in fh:
+                try:
+                    row = json.loads(raw_line)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+                if isinstance(row, dict) and extract_hidden_gem_evidence_card(row) is not None:
+                    yield row
 
     def _build_prediction_row(
         self,
