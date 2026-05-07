@@ -489,6 +489,13 @@ Phase 3J implementation note, 2026-05-07:
 - `bot.strategy_lane_reporting`, `scripts/analyze.py`, and Prediction Lab replay summaries report selected lanes, would-select lanes, lane-selection deltas, and how often slow-profit would differ from the final stable action
 - this slice is observability/reporting-focused except for preserving the already beta/enforce-gated slow-profit admission path
 
+Phase 3K implementation note, 2026-05-07:
+
+- strategy-lane reporting now also summarizes `lane_sizing` cap deltas from direct rows, paper/live `decision_trace`, and `decision_artifact.shared_core_decision.reasoning`
+- the compact report includes configured lane-sizing rows, would-adjust rows, applied rows, preserved/shadow rows, selected sizing-lane counts, and safe requested/beta/applied size totals and averages
+- `scripts/analyze.py` and Prediction Lab replay summaries receive the sizing-delta view through the existing shared `bot.strategy_lane_reporting` helper, including original-vs-replayed replay slices
+- this slice is observability-only and does not change strategy selection, trade admission, sizing, risk checks, or order behavior
+
 ### Bucket hidden-gem direction
 
 The 2026-05-06 paper/archive check showed cheap bucket rows were the clearest danger:

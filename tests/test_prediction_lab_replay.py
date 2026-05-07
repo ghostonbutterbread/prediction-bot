@@ -514,6 +514,73 @@ class PredictionLabReplayTests(unittest.TestCase):
         self.assertEqual(original["would_select_slow_profit_rows"], 1)
         self.assertEqual(original["slow_profit_differs_from_final_rows"], 1)
 
+    def test_replay_summary_includes_original_and_replayed_lane_sizing_deltas(self):
+        row = _row(
+            artifact_patch={
+                "shared_core_decision": {
+                    "approved": True,
+                    "reason_code": "approved",
+                    "reasoning": {
+                        "strategy_lane": {
+                            "lane_id": "edge",
+                            "allowed": True,
+                            "reason_code": "edge_lane_selected",
+                            "evidence": {},
+                        },
+                        "lane_sizing": {
+                            "lane_id": "edge",
+                            "configured": True,
+                            "requested_size": 10.0,
+                            "beta_adjusted_size": 4.0,
+                            "would_adjust_size": True,
+                            "applied": False,
+                            "preserved_stable_size": True,
+                        },
+                    },
+                },
+            }
+        )
+
+        result = replay_recorded_artifacts(
+            [row],
+            config={
+                "strategy": {"min_edge": 0.01, "min_confidence": 0.5},
+                "scan": {"allowed_market_routes": ["weather.daily_temperature"]},
+                "max_entry_price": 0.7,
+                "strategy_lanes": {
+                    "sizing": {
+                        "edge": {"max_position_usd": 2.0},
+                    },
+                },
+                "strategy_policy": {
+                    "version": "beta",
+                    "beta": {
+                        "mode": "enforce",
+                        "features": {"lane_sizing_caps": True},
+                    },
+                },
+            },
+            evaluator=self._evaluator(FixedSignalStrategy(_signal())),
+        )
+
+        original = result.summary["strategy_lanes"]["original"]
+        self.assertEqual(original["lane_sizing_rows"], 1)
+        self.assertEqual(original["lane_sizing_configured_rows"], 1)
+        self.assertEqual(original["lane_sizing_would_adjust_rows"], 1)
+        self.assertEqual(original["lane_sizing_preserved_rows"], 1)
+        self.assertEqual(original["lane_sizing_size_totals"]["requested"], 10.0)
+        self.assertEqual(original["lane_sizing_size_totals"]["beta_adjusted"], 4.0)
+
+        replayed = result.summary["strategy_lanes"]["replayed"]
+        self.assertEqual(replayed["lane_sizing_rows"], 1)
+        self.assertEqual(replayed["lane_sizing_configured_rows"], 1)
+        self.assertEqual(replayed["lane_sizing_would_adjust_rows"], 1)
+        self.assertEqual(replayed["lane_sizing_applied_rows"], 1)
+        self.assertEqual(replayed["lane_sizing_selected_lane_counts"], {"edge": 1})
+        self.assertEqual(replayed["lane_sizing_size_totals"]["requested"], 10.0)
+        self.assertEqual(replayed["lane_sizing_size_totals"]["beta_adjusted"], 2.0)
+        self.assertEqual(replayed["lane_sizing_size_totals"]["applied"], 2.0)
+
     def test_recorded_source_and_order_book_modes_are_labeled(self):
         row = _row()
 
