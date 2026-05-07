@@ -384,6 +384,11 @@ def build_trade_decision(
         "requested_size": requested_size,
         "available_cash": round(context.account_state.available_cash, 2),
     }
+    reasoning["lane_sizing"] = _lane_sizing_metadata(
+        reasoning["strategy_lane"],
+        requested_size=requested_size,
+        current_balance=context.account_state.current_balance,
+    )
 
     if not isfinite(requested_size) or requested_size <= 0:
         return TradeDecision(
@@ -730,6 +735,55 @@ def _strategy_policy_for_context(context: TradeContext, source_signal: dict[str,
         if isinstance(value, dict) and value:
             return coerce_strategy_policy(value)
     return coerce_strategy_policy(None)
+
+
+def _lane_sizing_metadata(
+    strategy_lane: dict[str, Any],
+    *,
+    requested_size: float,
+    current_balance: float,
+) -> dict[str, Any]:
+    evidence = strategy_lane.get("evidence") if isinstance(strategy_lane, dict) else {}
+    sizing = evidence.get("lane_sizing") if isinstance(evidence, dict) else {}
+    if not isinstance(sizing, Mapping):
+        sizing = {}
+
+    metadata_size = max(0.0, float(requested_size or 0.0))
+    constraints = []
+    size_multiplier = _coerce_optional_float(sizing.get("size_multiplier"))
+    if size_multiplier is not None:
+        metadata_size *= max(0.0, min(1.0, size_multiplier))
+        constraints.append("size_multiplier")
+
+    max_position_pct = _coerce_optional_float(sizing.get("max_position_pct"))
+    if max_position_pct is not None:
+        pct_cap = max(0.0, float(current_balance or 0.0)) * max(
+            0.0,
+            min(1.0, max_position_pct),
+        )
+        metadata_size = min(metadata_size, pct_cap)
+        constraints.append("max_position_pct")
+
+    max_position_usd = _coerce_optional_float(sizing.get("max_position_usd"))
+    if max_position_usd is not None:
+        metadata_size = min(metadata_size, max(0.0, max_position_usd))
+        constraints.append("max_position_usd")
+
+    metadata_size = round(metadata_size, 4)
+    requested_size_rounded = round(max(0.0, float(requested_size or 0.0)), 4)
+    return {
+        "lane_id": strategy_lane.get("lane_id") if isinstance(strategy_lane, dict) else None,
+        "configured": bool(sizing.get("configured", False)),
+        "metadata_only": True,
+        "applied": False,
+        "requested_size": requested_size_rounded,
+        "metadata_adjusted_size": metadata_size,
+        "would_adjust_size": bool(metadata_size != requested_size_rounded),
+        "constraints": constraints,
+        "size_multiplier": size_multiplier,
+        "max_position_usd": max_position_usd,
+        "max_position_pct": max_position_pct,
+    }
 
 
 def _weather_rejection_beta_gate(strategy_policy: Any, weather_assessment) -> dict[str, Any]:
