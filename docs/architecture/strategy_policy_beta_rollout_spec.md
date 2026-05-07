@@ -52,3 +52,19 @@ Stable main remains the default everywhere. Prediction Lab may opt into `version
 - Phase 3H adds metadata-only lane sizing/cap records under `strategy_lanes.sizing`; shared-core reports selected-lane potential size adjustments without applying them or changing stable/shadow/enforce sizing behavior.
 - Phase 3I adds beta/enforce application for selected-lane sizing caps under `lane_sizing_caps`: stable/off and beta/shadow preserve final requested/approved sizes while reporting deltas; enforce only applies explicit `strategy_lanes.sizing` reductions before `risk_policy.check_trade`.
 - Phase 3J finalizes confidence-slow-profit observability: explicit slow-profit lane config now records would-select lane metadata even in stable/off, while final admission remains gated behind beta/enforce plus `hidden_gem_lane_gates`. Analyze and Prediction Lab replay summaries report selected lanes, would-select lanes, and slow-profit deltas from final stable actions.
+- Phase 3K adds lane-sizing delta reporting to analyze/replay summaries. This is observability-only: it extracts lane-sizing metadata from known artifact shapes and reports configured/would-adjust/applied/preserved/shadow counts plus size totals without changing decisions.
+- Phase 3L hardens validation hermeticity by moving `paper_loop.py` env/logging setup out of import time. Normal runtime execution still loads `.env`, sets `PAPER_MODE`, refreshes settings, and configures logging; importing the module no longer mutates env controls, root logging, log files, or `sys.path`.
+- Phase 3M adds analyze-only rollout readiness reporting for the beta strategy-lane system. The checklist is deterministic and conservative: it reports policy mode/features, hidden-gem evidence-card presence/cleanliness, beta lane-gate delta coverage, and lane-sizing delta coverage. Missing shadow evidence becomes a blocker or warning in the report, but the checklist is observational only and must not be treated as a decision, sizing, or order-placement input.
+
+## Beta Strategy-Lane Readiness Checklist
+
+`scripts/analyze.py` now emits `strategy_lane_rollout_readiness` next to the existing hidden-gem and strategy-lane summaries.
+
+The checklist targets pre-enforce evidence collection, so a clean pass requires:
+- `strategy_policy` is `beta/shadow`
+- active beta features include `weather_hidden_gem_evidence_card`, `hidden_gem_lane_gates`, and `lane_sizing_caps`
+- hidden-gem evidence cards are present and have no insufficient-data rows
+- strategy-lane rows contain beta lane-gate metadata, so final-vs-would-select deltas are measurable
+- lane-sizing rows contain shadow sizing metadata, so final-vs-would-size deltas are measurable
+
+The readiness line is intentionally fail-closed. It can say `blocked` or `needs_review` even when trading behavior is working as configured, because it only answers whether the collected artifacts are clean enough to review before considering enforce. It does not change stable/off, beta/shadow, or beta/enforce final decisions.

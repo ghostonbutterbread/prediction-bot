@@ -94,6 +94,43 @@ class AnalyzeStrategyPolicyStatusTests(unittest.TestCase):
         self.assertEqual(result["strategy_policy_status"]["mode"], "shadow")
         self.assertTrue(result["strategy_policy_status"]["enabled_features"]["hidden_gem_lane_gates"])
 
+    def test_report_formats_malformed_strategy_policy_flags_fail_closed(self):
+        report = paper_analyze.format_report(
+            {
+                "timestamp": "2026-05-06T08:00:00-07:00",
+                "summary": {
+                    "current_session": "s1",
+                    "scans": 0,
+                    "current_trades": 0,
+                    "resolved": 0,
+                    "trusted_resolved_positions": 0,
+                    "resolved_events": 0,
+                    "current_session_file": "data/paper/sim.json",
+                },
+                "strategy_policy_status": {
+                    "version": "beta",
+                    "mode": "shadow",
+                    "active": "false",
+                    "shadow": "true",
+                    "enforce": "",
+                    "enabled_features": {
+                        "weather_hidden_gem_evidence_card": "true",
+                        "hidden_gem_lane_gates": True,
+                    },
+                },
+                "performance": {},
+                "event_performance": {},
+                "signal_quality": {},
+                "issues": [],
+                "actions": [],
+            }
+        )
+
+        self.assertIn("Strategy policy: beta/shadow", report)
+        self.assertIn("active=False shadow=False enforce=False", report)
+        self.assertIn("features=hidden_gem_lane_gates", report)
+        self.assertNotIn("weather_hidden_gem_evidence_card", report)
+
     def test_report_includes_concise_strategy_policy_line(self):
         report = paper_analyze.format_report(
             {
