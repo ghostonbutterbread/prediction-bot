@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from math import isfinite
 from typing import Any, Protocol
 
@@ -297,6 +298,20 @@ def build_trade_decision(
             "evidence": weather_evidence,
             "beta_gate": _weather_rejection_beta_gate(strategy_policy, weather_assessment),
         }
+        if _should_emit_hidden_gem_evidence_card(reasoning):
+            reasoning["hidden_gem_evidence_card"] = _build_hidden_gem_evidence_card(
+                context=context,
+                source_signal=weather_signal,
+                route_metadata=route_metadata,
+                strategy_policy=strategy_policy,
+                strategy_lane=reasoning["strategy_lane"],
+                hidden_gem=reasoning["hidden_gem"],
+                weather_assessment=weather_assessment,
+                weather_evidence=weather_evidence,
+                weather_risk=reasoning["weather_risk"],
+                entry_price=entry_price,
+                win_probability=win_probability,
+            )
         if weather_assessment.should_skip and reasoning["weather_risk"]["beta_gate"]["enforced"]:
             return TradeDecision(
                 action="SKIP",
@@ -399,6 +414,11 @@ def build_trade_decision(
             requested_size=requested_size,
             adjusted_size=weather_adjusted_size,
         )
+        if isinstance(reasoning.get("hidden_gem_evidence_card"), dict):
+            _attach_hidden_gem_sizing_gate(
+                reasoning["hidden_gem_evidence_card"],
+                reasoning["weather_risk"]["beta_sizing_gate"],
+            )
         if weather_adjusted_size != requested_size:
             reasoning["weather_risk"]["requested_size_before_weather_limits"] = round(requested_size, 4)
             reasoning["weather_risk"]["requested_size_after_weather_limits"] = weather_adjusted_size
@@ -784,6 +804,237 @@ def _weather_sizing_features(weather_assessment) -> list[str]:
     ):
         features.add(WEATHER_EVIDENCE_CARD_FEATURE)
     return sorted(features)
+
+
+def _should_emit_hidden_gem_evidence_card(reasoning: dict[str, Any]) -> bool:
+    lane = reasoning.get("strategy_lane")
+    hidden_gem = reasoning.get("hidden_gem")
+    return (
+        isinstance(lane, dict)
+        and lane.get("lane_id") == "hidden_gem"
+        and isinstance(hidden_gem, dict)
+        and bool(hidden_gem.get("triggered"))
+    )
+
+
+def _build_hidden_gem_evidence_card(
+    *,
+    context: TradeContext,
+    source_signal: dict[str, Any],
+    route_metadata: dict[str, Any] | None,
+    strategy_policy: Any,
+    strategy_lane: dict[str, Any],
+    hidden_gem: dict[str, Any],
+    weather_assessment: Any,
+    weather_evidence: dict[str, Any],
+    weather_risk: dict[str, Any],
+    entry_price: float,
+    win_probability: float,
+) -> dict[str, Any]:
+    route = dict(route_metadata or {})
+    beta_gate = dict(weather_risk.get("beta_gate") or {})
+    shape = weather_assessment.shape
+    card = {
+        "artifact_version": 1,
+        "lane": "hidden_gem",
+        "market_id": context.market_id,
+        "market_route": route or None,
+        "market_group": route.get("group"),
+        "market_family": route.get("family"),
+        "market_subcategory": route.get("subcategory"),
+        "route_handler_id": route.get("handler_id"),
+        "weather_shape": shape,
+        "entry_price": round(float(entry_price), 6),
+        "probability_multiple": hidden_gem.get("probability_multiple"),
+        "model_probability": _coerce_optional_float(context.model_probability),
+        "candidate_probability": round(float(win_probability), 6),
+        "source_mode": _hidden_gem_source_mode(source_signal),
+        "station_mapping_quality": weather_evidence.get("weather_station_mapping"),
+        "station_mapping": weather_evidence.get("weather_station_resolution"),
+        "source_agreement_score": weather_evidence.get("source_agreement_score"),
+        "source_freshness": _source_freshness(source_signal),
+        "market_volume": weather_evidence.get("market_volume"),
+        "liquidity": _first_float(source_signal, "liquidity", "market_liquidity"),
+        "volume_known": bool(weather_assessment.volume_known),
+        "weather_confidence_score": weather_evidence.get("weather_confidence_score"),
+        "hidden_gem_tier": weather_assessment.hidden_gem_tier,
+        "weather_flags": list(weather_assessment.flags or []),
+        "strategy_lane": {
+            "reason_code": strategy_lane.get("reason_code"),
+            "behavior_enabled": bool(strategy_lane.get("behavior_enabled")),
+            "new_behavior_enabled": bool(strategy_lane.get("new_behavior_enabled")),
+        },
+        "strategy_policy": strategy_policy_status(strategy_policy),
+        "reason_codes": {
+            "weather_reject": weather_assessment.reason_code,
+            "beta_reject": beta_gate.get("reason_code") if beta_gate.get("active") else None,
+            "resize": None,
+        },
+        "beta_gate": beta_gate,
+        "beta_deltas": {
+            "rejection_differs_from_final": bool(beta_gate.get("differs_from_final", False)),
+            "sizing_differs_from_final": False,
+        },
+    }
+    if shape == "bucket":
+        card["bucket"] = _bucket_evidence(source_signal, weather_evidence)
+    if shape in {"tail_low", "tail_high"}:
+        card["tail"] = _tail_evidence(source_signal, candidate_probability=win_probability)
+    return card
+
+
+def _attach_hidden_gem_sizing_gate(card: dict[str, Any], sizing_gate: dict[str, Any]) -> None:
+    card["beta_sizing_gate"] = dict(sizing_gate)
+    card.setdefault("reason_codes", {})["resize"] = (
+        "weather_size_limit" if sizing_gate.get("enforced") else None
+    )
+    card.setdefault("reason_codes", {})["potential_resize"] = (
+        "weather_size_limit" if sizing_gate.get("active") and not sizing_gate.get("enforced") else None
+    )
+    card.setdefault("beta_deltas", {})["sizing_differs_from_final"] = bool(
+        sizing_gate.get("differs_from_final", False)
+    )
+
+
+def _bucket_evidence(source_signal: dict[str, Any], weather_evidence: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "distribution_probability": weather_evidence.get("distribution_probability"),
+        "forecast": _first_present(source_signal, "forecast", "weather_forecast"),
+        "forecast_mean": _first_float(
+            source_signal,
+            "forecast_mean",
+            "predicted_temp",
+            "current_forecast",
+        ),
+        "forecast_high": _first_float(source_signal, "forecast_high", "predicted_high"),
+        "forecast_low": _first_float(source_signal, "forecast_low", "predicted_low"),
+        "forecast_spread": _first_float(
+            source_signal,
+            "forecast_spread",
+            "forecast_uncertainty",
+            "forecast_stddev",
+            "forecast_sigma",
+        ),
+        "bucket": _first_present(source_signal, "bucket", "bucket_range"),
+        "bucket_center": _first_float(source_signal, "bucket_center", "range_center"),
+        "bucket_width": _first_float(source_signal, "bucket_width", "range_width"),
+        "distance_to_center": _first_float(source_signal, "distance_to_center", "distance_from_bucket_center"),
+    }
+
+
+def _tail_evidence(source_signal: dict[str, Any], *, candidate_probability: float) -> dict[str, Any]:
+    return {
+        "threshold": _first_float(source_signal, "threshold", "tail_threshold"),
+        "threshold_probability": _first_float(
+            source_signal,
+            "threshold_probability",
+            "tail_threshold_probability",
+            "tail_probability",
+            "distribution_probability",
+        ),
+        "candidate_tail_probability": round(float(candidate_probability), 6),
+        "raw_live_weather_probability": _first_float(
+            source_signal,
+            "live_weather_probability",
+            "weather_probability",
+        ),
+        "distance_to_threshold": _first_float(
+            source_signal,
+            "distance_to_threshold",
+            "distance_from_threshold",
+            "forecast_threshold_distance",
+        ),
+    }
+
+
+def _source_freshness(source_signal: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "source_agreement_score": _first_float(source_signal, "source_agreement_score", "agreement"),
+        "source_age_seconds": _first_float(source_signal, "source_age_seconds", "age_seconds"),
+        "source_age_minutes": _first_float(source_signal, "source_age_minutes", "age_minutes", "staleness_minutes"),
+        "source_timestamp": _first_present(source_signal, "source_timestamp", "fetched_at", "as_of", "observed_at"),
+        "freshness": _first_present(source_signal, "source_freshness", "freshness"),
+    }
+
+
+def _hidden_gem_source_mode(source_signal: dict[str, Any]) -> str:
+    explicit = _first_present(source_signal, "source_mode", "source_provenance", "mode")
+    normalized = str(explicit or "").strip().lower()
+    if "recorded" in normalized:
+        return "recorded"
+    if "historical" in normalized or "backfill" in normalized or "replay" in normalized:
+        return "historical"
+    if "synthetic" in normalized or "simulated" in normalized:
+        return "synthetic"
+    if "live" in normalized or "current" in normalized:
+        return "live"
+
+    source_snapshot = source_signal.get("source_snapshot")
+    if isinstance(source_snapshot, Mapping):
+        source = str(source_snapshot.get("source") or "").lower()
+        mode = str(source_snapshot.get("mode") or "").lower()
+        if source == "missing":
+            return "missing"
+        if "recorded" in source or "recorded" in mode:
+            return "recorded"
+        if "historical" in source or "historical" in mode:
+            return "historical"
+        if "synthetic" in source or "synthetic" in mode:
+            return "synthetic"
+        if "live" in source or "live" in mode:
+            return "live"
+    return "missing"
+
+
+def _first_float(source_signal: dict[str, Any], *keys: str) -> float | None:
+    for mapping in _iter_signal_mappings(source_signal):
+        for key in keys:
+            value = _coerce_optional_float(mapping.get(key))
+            if value is not None:
+                return value
+    return None
+
+
+def _first_present(source_signal: dict[str, Any], *keys: str) -> Any:
+    for mapping in _iter_signal_mappings(source_signal):
+        for key in keys:
+            value = mapping.get(key)
+            if value not in (None, "", [], {}):
+                return value
+    return None
+
+
+def _iter_signal_mappings(source_signal: Mapping[str, Any]):
+    nested_keys = (
+        "data",
+        "weather",
+        "weather_context",
+        "weather_market_context",
+        "metadata",
+        "forecast",
+        "bucket",
+        "signal_details",
+        "live",
+    )
+    seen: set[int] = set()
+
+    def visit(mapping: Mapping[str, Any], depth: int):
+        marker = id(mapping)
+        if marker in seen:
+            return
+        seen.add(marker)
+        yield mapping
+        if depth <= 0:
+            return
+        for nested_key in nested_keys:
+            nested = mapping.get(nested_key)
+            if isinstance(nested, Mapping):
+                yield from visit(nested, depth - 1)
+                for value in nested.values():
+                    if isinstance(value, Mapping):
+                        yield from visit(value, depth - 1)
+
+    yield from visit(source_signal, 4)
 
 
 def normalize_trade_context(context: TradeContext) -> dict[str, float | str] | None:
