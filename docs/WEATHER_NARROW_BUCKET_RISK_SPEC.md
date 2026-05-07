@@ -407,6 +407,7 @@ Interpretation:
 - a `$0.01` bucket with `distribution_probability = 0.24` remains eligible as a 24x-style hidden gem, subject to source/station and sizing caps
 - a `$0.03` bucket with only a nearby point forecast and no distribution probability is rejected
 - a `$0.05` bucket with `distribution_probability = 0.08` is not enough; the probability is above market but not high enough to justify hidden-gem treatment
+- current Phase 3F source/station minimums are exact station mapping and `source_agreement_score >= 0.65`, enforced only through the beta-gated bucket distribution path
 
 Important:
 

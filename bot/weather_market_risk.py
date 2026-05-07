@@ -38,6 +38,11 @@ DEFAULT_WEATHER_RISK_POLICY: dict[str, Any] = {
             "min_edge_buffer": 0.05,
             "min_probability_multiple": 3.0,
         },
+        "bucket_source_station_quality": {
+            "enabled": True,
+            "min_station_mapping": "exact",
+            "min_source_agreement": 0.65,
+        },
         "tail_directional_mismatch": {
             "enabled": True,
             "probability_threshold": 0.20,
@@ -220,6 +225,15 @@ def assess_weather_market_risk(
                 assessment.reason_code = threshold_rejection[0]
                 assessment.reason = threshold_rejection[1]
                 return assessment
+            quality_rejection = _bucket_source_station_quality_rejection(
+                signal,
+                hidden_cfg=hidden_cfg,
+            )
+            if quality_rejection is not None:
+                assessment.should_skip = True
+                assessment.reason_code = quality_rejection[0]
+                assessment.reason = quality_rejection[1]
+                return assessment
         tail_mismatch = _tail_directional_mismatch_reason(signal, hidden_cfg, shape)
         if tail_mismatch is not None:
             assessment.should_skip = True
@@ -278,6 +292,39 @@ def _bucket_distribution_threshold_rejection(
         return (
             "weather_bucket_hidden_gem_distribution_probability_below_multiple",
             "Cheap weather bucket hidden gem requires distribution probability at least the configured price multiple",
+        )
+    return None
+
+
+def _bucket_source_station_quality_rejection(
+    signal: dict[str, Any],
+    *,
+    hidden_cfg: dict[str, Any],
+) -> tuple[str, str] | None:
+    cfg = dict(hidden_cfg.get("bucket_source_station_quality") or {})
+    if not cfg.get("enabled", True):
+        return None
+
+    mapping_rank = {"unknown": 0, "inferred": 1, "exact": 2}
+    required_mapping = str(cfg.get("min_station_mapping", "exact") or "exact").lower()
+    mapping = str(
+        signal.get("weather_station_mapping")
+        or signal.get("station_mapping")
+        or signal.get("station_mapping_quality")
+        or "unknown"
+    ).lower()
+    if mapping_rank.get(mapping, 0) < mapping_rank.get(required_mapping, 2):
+        return (
+            "weather_bucket_hidden_gem_source_station_quality_below_minimum",
+            "Cheap weather bucket hidden gem requires minimum source and station evidence quality",
+        )
+
+    source_agreement = _coerce_float(signal.get("source_agreement_score"), 0.0) or 0.0
+    min_source_agreement = _coerce_float(cfg.get("min_source_agreement"), 0.65) or 0.65
+    if source_agreement < min_source_agreement:
+        return (
+            "weather_bucket_hidden_gem_source_station_quality_below_minimum",
+            "Cheap weather bucket hidden gem requires minimum source and station evidence quality",
         )
     return None
 

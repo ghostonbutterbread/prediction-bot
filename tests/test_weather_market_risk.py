@@ -238,6 +238,33 @@ class WeatherMarketRiskTests(unittest.TestCase):
         self.assertFalse(assessment.should_skip)
         self.assertEqual(assessment.hidden_gem_tier, "normal")
 
+    def test_bucket_hidden_gem_skips_when_source_or_station_quality_is_weak(self):
+        base_signal = {
+            "market_id": "KXHIGHMIA-26APR26-B82.5",
+            "question": "Will the high temp in Miami be 82-83° on Apr 26?",
+            "market_volume": 900,
+            "weather_confidence_score": 0.94,
+            "distribution_probability": 0.24,
+        }
+        cases = [
+            {**base_signal, "weather_station_mapping": "inferred", "source_agreement_score": 0.9},
+            {**base_signal, "weather_station_mapping": "exact", "source_agreement_score": 0.6},
+        ]
+
+        for signal in cases:
+            with self.subTest(signal=signal):
+                assessment = assess_weather_market_risk(
+                    signal,
+                    entry_price=0.03,
+                    win_probability=0.15,
+                )
+
+                self.assertTrue(assessment.should_skip)
+                self.assertEqual(
+                    assessment.reason_code,
+                    "weather_bucket_hidden_gem_source_station_quality_below_minimum",
+                )
+
     def test_tail_hidden_gem_skips_when_live_probability_rejects_candidate_side(self):
         assessment = assess_weather_market_risk(
             {

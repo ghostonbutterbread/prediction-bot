@@ -783,6 +783,7 @@ def _weather_rejection_feature(reason_code: Any) -> str | None:
         "weather_bucket_hidden_gem_missing_distribution_probability",
         "weather_bucket_hidden_gem_distribution_probability_below_entry_plus_buffer",
         "weather_bucket_hidden_gem_distribution_probability_below_multiple",
+        "weather_bucket_hidden_gem_source_station_quality_below_minimum",
     }:
         return WEATHER_BUCKET_SCORING_FEATURE
     if code in {

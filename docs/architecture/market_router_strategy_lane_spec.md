@@ -454,6 +454,13 @@ Phase 3E implementation note, 2026-05-06:
 - stable/off and beta/shadow preserve final actions while recording the beta gate and hidden-gem evidence-card deltas; beta/enforce can change paper-like decisions only when `bucket_distribution_scoring` is enabled
 - this slice changes only beta-gated bucket hidden-gem behavior and leaves stable defaults/live promotion untouched
 
+Phase 3F implementation note, 2026-05-07:
+
+- bucket hidden-gem distribution scoring now also requires minimum source/station evidence quality before beta/enforce approval
+- the first gate requires exact station mapping and `source_agreement_score >= 0.65`; failures use `weather_bucket_hidden_gem_source_station_quality_below_minimum`
+- stable/off and beta/shadow preserve final actions while recording beta gate and hidden-gem evidence-card deltas; beta/enforce can change paper-like decisions only when `bucket_distribution_scoring` is enabled
+- this slice keeps the behavior feature-gated, does not promote live behavior, and does not relax bucket sizing/caps
+
 ### Bucket hidden-gem direction
 
 The 2026-05-06 paper/archive check showed cheap bucket rows were the clearest danger:
