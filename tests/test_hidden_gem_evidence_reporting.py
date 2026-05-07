@@ -113,6 +113,23 @@ class HiddenGemEvidenceReportingTests(unittest.TestCase):
         self.assertEqual(summary["by_shape_tier_reason"][0]["approved"], 0)
         self.assertEqual(summary["by_shape_tier_reason"][0]["rejected"], 1)
 
+    def test_bucket_source_station_quality_beta_reason_is_reported(self):
+        reason = "weather_bucket_hidden_gem_source_station_quality_below_minimum"
+        summary = summarize_hidden_gem_evidence_cards(
+            [
+                _artifact_row(
+                    action="BUY_YES",
+                    reason_code="approved",
+                    approved=True,
+                    card=_card(shape="bucket", tier="normal", beta_reject=reason),
+                )
+            ]
+        )
+
+        self.assertEqual(summary["beta_rejected_cards"], 1)
+        self.assertEqual(summary["reason_code_counts"], {reason: 1})
+        self.assertEqual(summary["by_shape_tier_reason"][0]["reason_code"], reason)
+
     def test_incomplete_card_counts_as_insufficient_data_without_crashing(self):
         summary = summarize_hidden_gem_evidence_cards(
             [{"market_id": "incomplete", "hidden_gem_evidence_card": {"reason_codes": {}}}]
