@@ -461,6 +461,13 @@ Phase 3F implementation note, 2026-05-07:
 - stable/off and beta/shadow preserve final actions while recording beta gate and hidden-gem evidence-card deltas; beta/enforce can change paper-like decisions only when `bucket_distribution_scoring` is enabled
 - this slice keeps the behavior feature-gated, does not promote live behavior, and does not relax bucket sizing/caps
 
+Phase 3G implementation note, 2026-05-07:
+
+- tail hidden-gem scoring now records whether the candidate-side probability check used `distribution_probability` or the live-probability bridge
+- when tail `distribution_probability` is present, beta/enforce with `weather_hidden_gem_evidence_card` can reject candidates below the configured tail threshold with `weather_tail_hidden_gem_distribution_probability_below_threshold`
+- when tail `distribution_probability` is missing, the existing bridge behavior remains in place and continues to use `weather_tail_hidden_gem_live_probability_mismatch`
+- stable/off and beta/shadow preserve final actions while recording beta deltas and evidence-card tail probability-scoring details
+
 ### Bucket hidden-gem direction
 
 The 2026-05-06 paper/archive check showed cheap bucket rows were the clearest danger:

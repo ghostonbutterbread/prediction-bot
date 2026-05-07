@@ -49,6 +49,10 @@ DEFAULT_WEATHER_RISK_POLICY: dict[str, Any] = {
             "min_source_agreement": 0.75,
             "min_live_confidence": 0.60,
         },
+        "tail_distribution_scoring": {
+            "enabled": True,
+            "probability_threshold": 0.20,
+        },
         "strong_evidence": {
             "enabled": True,
             "min_station_mapping": "inferred",
@@ -84,6 +88,11 @@ class WeatherRiskAssessment:
     max_position_usd: float | None = None
     evidence_perfect: bool = False
     flags: list[str] = field(default_factory=list)
+    tail_probability_source: str | None = None
+    tail_candidate_probability: float | None = None
+    tail_probability_threshold: float | None = None
+    tail_probability_reason_code: str | None = None
+    tail_distribution_probability_present: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -101,6 +110,25 @@ class WeatherRiskAssessment:
             "max_position_usd": self.max_position_usd,
             "evidence_perfect": self.evidence_perfect,
             "flags": list(self.flags),
+            "tail_probability": (
+                {
+                    "source": self.tail_probability_source,
+                    "candidate_probability": (
+                        round(self.tail_candidate_probability, 4)
+                        if self.tail_candidate_probability is not None
+                        else None
+                    ),
+                    "threshold": (
+                        round(self.tail_probability_threshold, 4)
+                        if self.tail_probability_threshold is not None
+                        else None
+                    ),
+                    "reason_code": self.tail_probability_reason_code,
+                    "distribution_probability_present": self.tail_distribution_probability_present,
+                }
+                if self.tail_probability_source or self.tail_probability_reason_code
+                else None
+            ),
         }
 
 
@@ -234,13 +262,27 @@ def assess_weather_market_risk(
                 assessment.reason_code = quality_rejection[0]
                 assessment.reason = quality_rejection[1]
                 return assessment
-        tail_mismatch = _tail_directional_mismatch_reason(signal, hidden_cfg, shape)
-        if tail_mismatch is not None:
-            assessment.should_skip = True
-            assessment.reason_code = tail_mismatch[0]
-            assessment.reason = tail_mismatch[1]
-            assessment.flags.append("tail_directional_mismatch")
-            return assessment
+        tail_probability = _tail_probability_assessment(signal, hidden_cfg, shape)
+        if tail_probability is not None:
+            assessment.tail_probability_source = str(tail_probability.get("source") or "")
+            assessment.tail_candidate_probability = _coerce_float(
+                tail_probability.get("candidate_probability"), default=None
+            )
+            assessment.tail_probability_threshold = _coerce_float(tail_probability.get("threshold"), default=None)
+            assessment.tail_probability_reason_code = str(tail_probability.get("reason_code") or "")
+            assessment.tail_distribution_probability_present = bool(
+                tail_probability.get("distribution_probability_present", False)
+            )
+            flag = str(tail_probability.get("flag") or "")
+            if flag:
+                assessment.flags.append(flag)
+            if bool(tail_probability.get("should_skip", False)):
+                assessment.should_skip = True
+                assessment.reason_code = str(tail_probability.get("reason_code") or "")
+                assessment.reason = str(tail_probability.get("reason") or "")
+                if assessment.reason_code == "weather_tail_hidden_gem_live_probability_mismatch":
+                    assessment.flags.append("tail_directional_mismatch")
+                return assessment
         if assessment.hidden_gem_tier != "exceptional" and not _strong_hidden_gem_evidence_passes(signal, hidden_cfg):
             assessment.should_skip = True
             assessment.reason_code = "weather_hidden_gem_without_strong_evidence"
@@ -352,47 +394,158 @@ def _strong_hidden_gem_evidence_passes(signal: dict[str, Any], hidden_cfg: dict[
     return weather_confidence >= min_weather_confidence and source_agreement >= min_source_agreement
 
 
-def _tail_directional_mismatch_reason(
+def _tail_probability_assessment(
     signal: dict[str, Any],
     hidden_cfg: dict[str, Any],
     shape: MarketShape,
-) -> tuple[str, str] | None:
+) -> dict[str, Any] | None:
     if shape not in {"tail_low", "tail_high"}:
         return None
+
+    distribution_cfg = dict(hidden_cfg.get("tail_distribution_scoring") or {})
+    if distribution_cfg.get("enabled", True):
+        candidate_distribution = _tail_candidate_distribution_probability(signal)
+        if candidate_distribution is not None:
+            threshold = _coerce_float(distribution_cfg.get("probability_threshold"), 0.20) or 0.20
+            threshold = max(0.0, min(0.5, threshold))
+            should_skip = candidate_distribution <= threshold
+            return {
+                "source": "distribution",
+                "candidate_probability": candidate_distribution,
+                "threshold": threshold,
+                "distribution_probability_present": True,
+                "reason_code": (
+                    "weather_tail_hidden_gem_distribution_probability_below_threshold"
+                    if should_skip
+                    else "weather_tail_hidden_gem_distribution_probability_passed"
+                ),
+                "reason": (
+                    "Cheap weather tail hidden gem requires candidate-side distribution probability above threshold"
+                    if should_skip
+                    else "Cheap weather tail hidden gem passed candidate-side distribution probability threshold"
+                ),
+                "should_skip": should_skip,
+                "flag": "tail_distribution_probability_used",
+            }
+
+    return _tail_directional_bridge_assessment(signal, hidden_cfg, shape)
+
+
+def _tail_candidate_distribution_probability(signal: dict[str, Any]) -> float | None:
+    for key in (
+        "candidate_distribution_probability",
+        "candidate_side_distribution_probability",
+        "tail_candidate_distribution_probability",
+    ):
+        probability = _bounded_probability(signal.get(key))
+        if probability is not None:
+            return probability
+
+    # Phase 3G treats distribution_probability as candidate-side probability.
+    # Do not fall back to threshold_probability here: if candidate-side
+    # distribution data is missing, the tail path must retain bridge behavior.
+    return _bounded_probability(signal.get("distribution_probability"))
+
+
+def _tail_directional_bridge_assessment(
+    signal: dict[str, Any],
+    hidden_cfg: dict[str, Any],
+    shape: MarketShape,
+) -> dict[str, Any] | None:
     cfg = dict(hidden_cfg.get("tail_directional_mismatch") or {})
     if not cfg.get("enabled", True):
         return None
 
     direction = str(signal.get("candidate_direction") or signal.get("direction") or "").upper()
     if direction not in {"BUY_YES", "BUY_NO"}:
-        return None
+        return {
+            "source": "bridge",
+            "candidate_probability": None,
+            "threshold": None,
+            "distribution_probability_present": False,
+            "reason_code": "weather_tail_hidden_gem_bridge_missing_direction",
+            "reason": "Cheap weather tail hidden gem bridge could not identify candidate direction",
+            "should_skip": False,
+            "flag": "tail_bridge_probability_used",
+        }
 
     live_signal = _extract_live_weather_signal(signal)
     if live_signal is None:
-        return None
+        return {
+            "source": "bridge",
+            "candidate_probability": None,
+            "threshold": None,
+            "distribution_probability_present": False,
+            "reason_code": "weather_tail_hidden_gem_bridge_missing_live_probability",
+            "reason": "Cheap weather tail hidden gem bridge had no live weather probability",
+            "should_skip": False,
+            "flag": "tail_bridge_probability_used",
+        }
     probability = _bounded_probability(live_signal.get("predicted_prob"))
     if probability is None:
-        return None
+        return {
+            "source": "bridge",
+            "candidate_probability": None,
+            "threshold": None,
+            "distribution_probability_present": False,
+            "reason_code": "weather_tail_hidden_gem_bridge_missing_live_probability",
+            "reason": "Cheap weather tail hidden gem bridge had no live weather probability",
+            "should_skip": False,
+            "flag": "tail_bridge_probability_used",
+        }
 
     live_confidence = _coerce_float(live_signal.get("confidence"), 0.0) or 0.0
     min_live_confidence = _coerce_float(cfg.get("min_live_confidence"), 0.60) or 0.60
+    threshold = _coerce_float(cfg.get("probability_threshold"), 0.20) or 0.20
+    threshold = max(0.0, min(0.5, threshold))
+    candidate_probability = probability if direction == "BUY_YES" else 1.0 - probability
     if live_confidence < min_live_confidence:
-        return None
+        return {
+            "source": "bridge",
+            "candidate_probability": candidate_probability,
+            "threshold": threshold,
+            "distribution_probability_present": False,
+            "reason_code": "weather_tail_hidden_gem_bridge_insufficient_evidence",
+            "reason": "Cheap weather tail hidden gem bridge ignored weak live weather confidence",
+            "should_skip": False,
+            "flag": "tail_bridge_probability_used",
+        }
 
     source_agreement = _coerce_float(signal.get("source_agreement_score"), 0.0) or 0.0
     min_source_agreement = _coerce_float(cfg.get("min_source_agreement"), 0.75) or 0.75
     if source_agreement < min_source_agreement:
-        return None
+        return {
+            "source": "bridge",
+            "candidate_probability": candidate_probability,
+            "threshold": threshold,
+            "distribution_probability_present": False,
+            "reason_code": "weather_tail_hidden_gem_bridge_insufficient_evidence",
+            "reason": "Cheap weather tail hidden gem bridge ignored weak source agreement",
+            "should_skip": False,
+            "flag": "tail_bridge_probability_used",
+        }
 
-    threshold = _coerce_float(cfg.get("probability_threshold"), 0.20) or 0.20
-    threshold = max(0.0, min(0.5, threshold))
-    candidate_probability = probability if direction == "BUY_YES" else 1.0 - probability
     if candidate_probability <= threshold:
-        return (
-            "weather_tail_hidden_gem_live_probability_mismatch",
-            "Cheap weather tail hidden gem conflicts with live weather probability",
-        )
-    return None
+        return {
+            "source": "bridge",
+            "candidate_probability": candidate_probability,
+            "threshold": threshold,
+            "distribution_probability_present": False,
+            "reason_code": "weather_tail_hidden_gem_live_probability_mismatch",
+            "reason": "Cheap weather tail hidden gem conflicts with live weather probability",
+            "should_skip": True,
+            "flag": "tail_bridge_probability_used",
+        }
+    return {
+        "source": "bridge",
+        "candidate_probability": candidate_probability,
+        "threshold": threshold,
+        "distribution_probability_present": False,
+        "reason_code": "weather_tail_hidden_gem_bridge_probability_passed",
+        "reason": "Cheap weather tail hidden gem bridge probability did not veto candidate side",
+        "should_skip": False,
+        "flag": "tail_bridge_probability_used",
+    }
 
 
 def _extract_live_weather_signal(signal: dict[str, Any]) -> dict[str, Any] | None:

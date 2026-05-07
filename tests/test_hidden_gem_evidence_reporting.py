@@ -15,7 +15,7 @@ from scripts import analyze as paper_analyze
 
 
 def _card(*, shape="bucket", tier="current", weather_reject=None, beta_reject=None):
-    return {
+    card = {
         "artifact_version": 1,
         "lane": "hidden_gem",
         "market_id": "KXHIGHNY-260506-T71",
@@ -27,6 +27,14 @@ def _card(*, shape="bucket", tier="current", weather_reject=None, beta_reject=No
             "resize": None,
         },
     }
+    if shape in {"tail_low", "tail_high"}:
+        card["tail"] = {
+            "probability_scoring": {
+                "source": "distribution",
+                "reason_code": "weather_tail_hidden_gem_distribution_probability_below_threshold",
+            }
+        }
+    return card
 
 
 def _artifact_row(*, action, reason_code, approved, card):
@@ -129,6 +137,25 @@ class HiddenGemEvidenceReportingTests(unittest.TestCase):
         self.assertEqual(summary["beta_rejected_cards"], 1)
         self.assertEqual(summary["reason_code_counts"], {reason: 1})
         self.assertEqual(summary["by_shape_tier_reason"][0]["reason_code"], reason)
+
+    def test_tail_distribution_probability_scoring_is_reported(self):
+        reason = "weather_tail_hidden_gem_distribution_probability_below_threshold"
+        summary = summarize_hidden_gem_evidence_cards(
+            [
+                _artifact_row(
+                    action="BUY_YES",
+                    reason_code="approved",
+                    approved=True,
+                    card=_card(shape="tail_high", tier="normal", beta_reject=reason),
+                )
+            ]
+        )
+
+        self.assertEqual(summary["beta_rejected_cards"], 1)
+        self.assertEqual(summary["reason_code_counts"], {reason: 1})
+        self.assertEqual(summary["tail_probability_source_counts"], {"distribution": 1})
+        self.assertEqual(summary["tail_scoring_reason_code_counts"], {reason: 1})
+        self.assertIn("tail probability distribution 1", format_hidden_gem_evidence_summary(summary))
 
     def test_incomplete_card_counts_as_insufficient_data_without_crashing(self):
         summary = summarize_hidden_gem_evidence_cards(
