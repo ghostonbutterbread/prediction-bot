@@ -26,7 +26,12 @@ from bot.hidden_gem_evidence import (
     summarize_hidden_gem_evidence_cards,
 )
 from bot.status import prune_log_storage, summarize_log_storage
-from bot.strategy_lane_reporting import format_strategy_lane_summary, summarize_strategy_lanes
+from bot.strategy_lane_reporting import (
+    build_strategy_lane_rollout_readiness,
+    format_strategy_lane_rollout_readiness,
+    format_strategy_lane_summary,
+    summarize_strategy_lanes,
+)
 from bot.strategy_policy import strategy_policy_status
 
 DATA_DIR = Path(__file__).parent.parent / "data"
@@ -196,6 +201,11 @@ def analyze(*, prune_logs: bool = True) -> dict:
     result["strategy_policy_status"] = _strategy_policy_status_from_latest(latest, config)
     result["strategy_lanes"] = summarize_strategy_lanes(raw_trades)
     result["hidden_gem_evidence_cards"] = summarize_hidden_gem_evidence_cards(raw_trades)
+    result["strategy_lane_rollout_readiness"] = build_strategy_lane_rollout_readiness(
+        policy_status=result["strategy_policy_status"],
+        strategy_lane_summary=result["strategy_lanes"],
+        hidden_gem_evidence_summary=result["hidden_gem_evidence_cards"],
+    )
     prune_result = prune_log_storage(config, project_root=PROJECT_ROOT) if prune_logs else None
     storage_summary = summarize_log_storage(config, project_root=PROJECT_ROOT)
     if storage_summary:
@@ -473,12 +483,14 @@ def format_report(analysis: dict) -> str:
         lines.append(f"Source: {s['current_session_file']}")
     policy_status = analysis.get("strategy_policy_status") or {}
     if policy_status:
-        features = policy_status.get("enabled_features") or {}
-        enabled = ", ".join(sorted(name for name, enabled in features.items() if enabled)) or "none"
+        features = policy_status.get("enabled_features") if isinstance(policy_status.get("enabled_features"), dict) else {}
+        enabled = ", ".join(sorted(name for name, enabled in features.items() if enabled is True)) or "none"
+        active = policy_status.get("active") is True
+        shadow = policy_status.get("shadow") is True
+        enforce = policy_status.get("enforce") is True
         lines.append(
             f"Strategy policy: {policy_status.get('version', 'stable')}/{policy_status.get('mode', 'off')} | "
-            f"active={bool(policy_status.get('active'))} shadow={bool(policy_status.get('shadow'))} "
-            f"enforce={bool(policy_status.get('enforce'))} | features={enabled}"
+            f"active={active} shadow={shadow} enforce={enforce} | features={enabled}"
         )
     if s.get("ignored_invalid_trades"):
         lines.append(f"Ignored invalid trade rows: {s['ignored_invalid_trades']}")
@@ -521,6 +533,9 @@ def format_report(analysis: dict) -> str:
     strategy_lane_line = format_strategy_lane_summary(analysis.get("strategy_lanes"))
     if strategy_lane_line:
         lines.append(strategy_lane_line)
+    readiness_line = format_strategy_lane_rollout_readiness(analysis.get("strategy_lane_rollout_readiness"))
+    if readiness_line:
+        lines.append(readiness_line)
     
     storage = analysis.get("storage", {})
     if storage:

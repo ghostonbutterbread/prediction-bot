@@ -60,6 +60,8 @@ def summarize_strategy_lanes(rows: list[dict[str, Any]] | tuple[dict[str, Any], 
         "selected_slow_profit_rows": 0,
         "would_select_slow_profit_rows": 0,
         "slow_profit_differs_from_final_rows": 0,
+        "beta_lane_gate_rows": 0,
+        "beta_lane_gate_missing_rows": 0,
         "lane_selection_delta_rows": 0,
         "approved_lane_rows": 0,
         "rejected_lane_rows": 0,
@@ -119,6 +121,10 @@ def summarize_strategy_lanes(rows: list[dict[str, Any]] | tuple[dict[str, Any], 
 
         evidence = lane.get("evidence") if isinstance(lane.get("evidence"), dict) else {}
         beta_gate = evidence.get("beta_lane_gate") if isinstance(evidence.get("beta_lane_gate"), dict) else {}
+        if beta_gate:
+            summary["beta_lane_gate_rows"] += 1
+        else:
+            summary["beta_lane_gate_missing_rows"] += 1
         would_select_lane = _clean_label(beta_gate.get("lane_id") or selected_lane)
         would_select_counts[would_select_lane] += 1
         would_select_allowed_counts["allowed" if beta_gate.get("allowed", True) else "rejected"] += 1
@@ -143,6 +149,173 @@ def summarize_strategy_lanes(rows: list[dict[str, Any]] | tuple[dict[str, Any], 
         if count
     }
     return summary
+
+
+def build_strategy_lane_rollout_readiness(
+    *,
+    policy_status: dict[str, Any] | None,
+    strategy_lane_summary: dict[str, Any] | None,
+    hidden_gem_evidence_summary: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Build an observability-only checklist for beta strategy-lane enforce readiness."""
+    policy = _normalize_policy_status(policy_status)
+    lane_summary = strategy_lane_summary if isinstance(strategy_lane_summary, dict) else {}
+    hidden_summary = hidden_gem_evidence_summary if isinstance(hidden_gem_evidence_summary, dict) else {}
+
+    rows_scanned = _coerce_int(lane_summary.get("rows_scanned"))
+    lane_rows = _coerce_int(lane_summary.get("lane_rows"))
+    hidden_rows = _coerce_int(hidden_summary.get("rows_scanned")) or rows_scanned
+    card_rows = _coerce_int(hidden_summary.get("card_rows"))
+    insufficient_card_rows = _coerce_int(hidden_summary.get("insufficient_data_rows"))
+    clean_card_rows = max(0, card_rows - insufficient_card_rows)
+    beta_lane_gate_rows = _coerce_int(lane_summary.get("beta_lane_gate_rows"))
+    lane_delta_rows = _coerce_int(lane_summary.get("lane_selection_delta_rows"))
+    sizing_rows = _coerce_int(lane_summary.get("lane_sizing_rows"))
+    sizing_diff_rows = _coerce_int(lane_summary.get("lane_sizing_differs_from_final_rows"))
+    sizing_would_adjust_rows = _coerce_int(lane_summary.get("lane_sizing_would_adjust_rows"))
+    sizing_shadow_rows = _coerce_int(lane_summary.get("lane_sizing_shadow_rows"))
+
+    enabled_features = set(policy["enabled_features"])
+    checks: list[dict[str, Any]] = []
+    blockers: list[str] = []
+    warnings: list[str] = []
+
+    def add_check(name: str, ok: bool, detail: str, *, severity: str = "blocker") -> None:
+        check = {"name": name, "ok": bool(ok), "severity": severity, "detail": detail}
+        checks.append(check)
+        if ok:
+            return
+        if severity == "warning":
+            warnings.append(f"{name}: {detail}")
+        else:
+            blockers.append(f"{name}: {detail}")
+
+    add_check(
+        "pre_enforce_shadow_policy",
+        (
+            policy["version"] == "beta"
+            and policy["mode"] == "shadow"
+            and policy["active"] is True
+            and policy["shadow"] is True
+            and policy["enforce"] is False
+        ),
+        (
+            f"policy is {policy['version']}/{policy['mode']} "
+            f"active={policy['active']} shadow={policy['shadow']} enforce={policy['enforce']}; "
+            "collect clean normalized shadow evidence before enforce"
+        ),
+    )
+    add_check(
+        "beta_features_enabled",
+        bool(enabled_features),
+        "no active beta features are enabled",
+    )
+    add_check(
+        "weather_hidden_gem_evidence_card_feature",
+        "weather_hidden_gem_evidence_card" in enabled_features,
+        "weather_hidden_gem_evidence_card is not active",
+    )
+    add_check(
+        "hidden_gem_lane_gates_feature",
+        "hidden_gem_lane_gates" in enabled_features,
+        "hidden_gem_lane_gates is not active",
+    )
+    add_check(
+        "lane_sizing_caps_feature",
+        "lane_sizing_caps" in enabled_features,
+        "lane_sizing_caps is not active",
+    )
+    add_check(
+        "strategy_lane_rows_present",
+        rows_scanned > 0 and lane_rows > 0,
+        f"strategy lane rows {lane_rows}/{rows_scanned}",
+    )
+    add_check(
+        "hidden_gem_evidence_cards_present",
+        hidden_rows > 0 and card_rows > 0,
+        f"hidden-gem evidence cards {card_rows}/{hidden_rows}",
+    )
+    add_check(
+        "hidden_gem_evidence_cards_clean",
+        card_rows > 0 and insufficient_card_rows == 0,
+        f"insufficient hidden-gem evidence cards {insufficient_card_rows}/{card_rows}",
+        severity="warning",
+    )
+    add_check(
+        "lane_delta_coverage_present",
+        lane_rows > 0 and beta_lane_gate_rows > 0,
+        f"beta lane-gate coverage {beta_lane_gate_rows}/{lane_rows}",
+    )
+    add_check(
+        "lane_delta_coverage_complete",
+        lane_rows > 0 and beta_lane_gate_rows == lane_rows,
+        f"beta lane-gate coverage {beta_lane_gate_rows}/{lane_rows}",
+        severity="warning",
+    )
+    add_check(
+        "lane_deltas_observed",
+        lane_delta_rows > 0,
+        "no lane-selection deltas observed in this sample",
+        severity="warning",
+    )
+    add_check(
+        "lane_sizing_delta_coverage_present",
+        sizing_rows > 0,
+        f"lane sizing rows {sizing_rows}/{lane_rows or rows_scanned}",
+    )
+    add_check(
+        "lane_sizing_delta_coverage_complete",
+        lane_rows > 0 and sizing_rows >= lane_rows,
+        f"lane sizing rows {sizing_rows}/{lane_rows}",
+        severity="warning",
+    )
+    add_check(
+        "lane_sizing_deltas_observed",
+        sizing_diff_rows > 0 or sizing_would_adjust_rows > 0,
+        "no lane-sizing deltas observed in this sample",
+        severity="warning",
+    )
+
+    ready = not blockers and not warnings
+    status = "ready" if ready else "blocked" if blockers else "needs_review"
+    return {
+        "schema_version": 1,
+        "basis": "strategy_lane_rollout_readiness",
+        "target": "beta_shadow_evidence_before_enforce",
+        "status": status,
+        "ready_for_enforce": ready,
+        "policy": policy,
+        "coverage": {
+            "rows_scanned": rows_scanned,
+            "hidden_gem_evidence_cards": {
+                "rows_scanned": hidden_rows,
+                "card_rows": card_rows,
+                "clean_card_rows": clean_card_rows,
+                "insufficient_data_rows": insufficient_card_rows,
+                "no_card_rows": _coerce_int(hidden_summary.get("no_card_rows")),
+                "coverage_pct": _coverage_pct(card_rows, hidden_rows),
+            },
+            "lane_delta": {
+                "lane_rows": lane_rows,
+                "beta_lane_gate_rows": beta_lane_gate_rows,
+                "beta_lane_gate_missing_rows": _coerce_int(lane_summary.get("beta_lane_gate_missing_rows")),
+                "delta_rows": lane_delta_rows,
+                "coverage_pct": _coverage_pct(beta_lane_gate_rows, lane_rows),
+            },
+            "lane_sizing_delta": {
+                "lane_rows": lane_rows,
+                "lane_sizing_rows": sizing_rows,
+                "configured_rows": _coerce_int(lane_summary.get("lane_sizing_configured_rows")),
+                "would_adjust_rows": sizing_would_adjust_rows,
+                "differs_from_final_rows": sizing_diff_rows,
+                "shadow_rows": sizing_shadow_rows,
+                "coverage_pct": _coverage_pct(sizing_rows, lane_rows),
+            },
+        },
+        "checks": checks,
+        "blockers": blockers,
+        "warnings": warnings,
+    }
 
 
 def format_strategy_lane_summary(summary: dict[str, Any] | None, *, max_lanes: int = 3) -> str | None:
@@ -171,6 +344,41 @@ def format_strategy_lane_summary(summary: dict[str, Any] | None, *, max_lanes: i
     lane_sizing = _format_lane_sizing_summary(summary, max_lanes=max_lanes)
     if lane_sizing:
         parts.append(lane_sizing)
+    return " | ".join(parts)
+
+
+def format_strategy_lane_rollout_readiness(readiness: dict[str, Any] | None) -> str | None:
+    if not isinstance(readiness, dict):
+        return None
+
+    policy = readiness.get("policy") if isinstance(readiness.get("policy"), dict) else {}
+    coverage = readiness.get("coverage") if isinstance(readiness.get("coverage"), dict) else {}
+    hidden = coverage.get("hidden_gem_evidence_cards") if isinstance(coverage.get("hidden_gem_evidence_cards"), dict) else {}
+    lane_delta = coverage.get("lane_delta") if isinstance(coverage.get("lane_delta"), dict) else {}
+    sizing_delta = coverage.get("lane_sizing_delta") if isinstance(coverage.get("lane_sizing_delta"), dict) else {}
+    enabled_features = policy.get("enabled_features") if isinstance(policy.get("enabled_features"), list) else []
+    features = ",".join(enabled_features) if enabled_features else "none"
+    parts = [
+        f"Strategy lane readiness: {readiness.get('status', 'unknown')}",
+        f"policy {policy.get('version', 'stable')}/{policy.get('mode', 'off')} features={features}",
+        (
+            f"cards {_coerce_int(hidden.get('card_rows'))}/{_coerce_int(hidden.get('rows_scanned'))} "
+            f"clean {_coerce_int(hidden.get('clean_card_rows'))}"
+        ),
+        (
+            f"lane-delta {_coerce_int(lane_delta.get('beta_lane_gate_rows'))}/"
+            f"{_coerce_int(lane_delta.get('lane_rows'))} diff {_coerce_int(lane_delta.get('delta_rows'))}"
+        ),
+        (
+            f"sizing-delta {_coerce_int(sizing_delta.get('lane_sizing_rows'))}/"
+            f"{_coerce_int(sizing_delta.get('lane_rows'))} diff "
+            f"{_coerce_int(sizing_delta.get('differs_from_final_rows'))}"
+        ),
+        (
+            f"blockers {len(readiness.get('blockers') or [])} "
+            f"warnings {len(readiness.get('warnings') or [])}"
+        ),
+    ]
     return " | ".join(parts)
 
 
@@ -280,6 +488,35 @@ def _coerce_finite_float(value: Any) -> float | None:
     if not isfinite(number):
         return None
     return number
+
+
+def _coerce_int(value: Any) -> int:
+    try:
+        number = float(value or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    if not isfinite(number):
+        return 0
+    return int(number)
+
+
+def _coverage_pct(part: int, total: int) -> float | None:
+    if total <= 0:
+        return None
+    return round(part / total * 100, 1)
+
+
+def _normalize_policy_status(policy_status: dict[str, Any] | None) -> dict[str, Any]:
+    raw = policy_status if isinstance(policy_status, dict) else {}
+    features = raw.get("enabled_features") if isinstance(raw.get("enabled_features"), dict) else {}
+    return {
+        "version": _clean_label(raw.get("version") or "stable"),
+        "mode": _clean_label(raw.get("mode") or "off"),
+        "active": raw.get("active") is True,
+        "shadow": raw.get("shadow") is True,
+        "enforce": raw.get("enforce") is True,
+        "enabled_features": sorted(name for name, enabled in features.items() if enabled is True),
+    }
 
 
 def _shared_core_decision(row: dict[str, Any]) -> dict[str, Any]:
