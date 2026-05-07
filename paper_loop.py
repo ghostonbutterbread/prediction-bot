@@ -14,23 +14,6 @@ from logging.handlers import RotatingFileHandler
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Ensure PAPER_MODE=true so RiskManager uses paper limits, not live limits.
-# KALSHI_USE_DEMO=false means "use real market data" (not demo API), but that
-# does not mean real-money trading — PAPER_MODE controls the risk layer.
-os.environ.setdefault("PAPER_MODE", "true")
-
-# Setup logging — allow per-instance override via PAPER_LOG_FILE env var
-_log_file = os.getenv("PAPER_LOG_FILE")
-_log_max_bytes = int(os.getenv("PAPER_LOG_MAX_BYTES", str(5 * 1024 * 1024)))
-_log_backups = int(os.getenv("PAPER_LOG_BACKUPS", "3"))
-if _log_file:
-    _log_path = Path(_log_file)
-    _log_path.parent.mkdir(parents=True, exist_ok=True)
-else:
-    log_dir = Path(__file__).parent / "data"
-    log_dir.mkdir(exist_ok=True)
-    _log_path = log_dir / "paper_loop.log"
-
 
 class CompactLogFormatter(logging.Formatter):
     """Single-line formatter that suppresses traceback dumps in the log file."""
@@ -39,42 +22,18 @@ class CompactLogFormatter(logging.Formatter):
         return ""
 
 
-_log_handler = RotatingFileHandler(
-    _log_path,
-    maxBytes=_log_max_bytes,
-    backupCount=_log_backups,
-)
-_stream_handler = logging.StreamHandler()
-_formatter = CompactLogFormatter(
-    "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-for _handler in (_log_handler, _stream_handler):
-    _handler.setFormatter(_formatter)
-
-_root_logger = logging.getLogger()
-_root_logger.handlers.clear()
-_root_logger.setLevel(logging.WARNING)
-_root_logger.addHandler(_log_handler)
-_root_logger.addHandler(_stream_handler)
-
-for _logger_name in (
+_RUNTIME_LOGGER_NAMES = (
     "bot.simulator",
     "bot.runner",
     "bot.exchanges.kalshi",
     "bot.risk",
     "bot.resolver",
     "bot.feeds.ai_signal",
-):
-    logging.getLogger(_logger_name).setLevel(logging.WARNING)
+)
 
 logger = logging.getLogger("paper-loop")
-logger.setLevel(logging.INFO)
-
-sys.path.insert(0, str(Path(__file__).parent))
 
 from dotenv import load_dotenv
-load_dotenv()
 
 from bot.config import ensure_mode_storage_dir, load_config
 from bot.runner import PredictionBot
@@ -87,6 +46,65 @@ INTERVAL = int(os.getenv("PAPER_SCAN_INTERVAL", "120"))  # 2 min default
 SIMULATE_ONLY = os.getenv("SIMULATE_ONLY", "true").lower() == "true"
 SUMMARY_SCAN_INTERVAL = int(os.getenv("PAPER_SUMMARY_SCAN_INTERVAL", "100"))
 SUMMARY_LOG_SECONDS = int(os.getenv("PAPER_SUMMARY_LOG_SECONDS", "3600"))
+
+
+def configure_logging():
+    """Configure paper-loop runtime logging."""
+    # Allow per-instance override via PAPER_LOG_FILE env var.
+    log_file = os.getenv("PAPER_LOG_FILE")
+    log_max_bytes = int(os.getenv("PAPER_LOG_MAX_BYTES", str(5 * 1024 * 1024)))
+    log_backups = int(os.getenv("PAPER_LOG_BACKUPS", "3"))
+    if log_file:
+        log_path = Path(log_file)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        log_dir = Path(__file__).parent / "data"
+        log_dir.mkdir(exist_ok=True)
+        log_path = log_dir / "paper_loop.log"
+
+    log_handler = RotatingFileHandler(
+        log_path,
+        maxBytes=log_max_bytes,
+        backupCount=log_backups,
+    )
+    stream_handler = logging.StreamHandler()
+    formatter = CompactLogFormatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    for handler in (log_handler, stream_handler):
+        handler.setFormatter(formatter)
+
+    root_logger = logging.getLogger()
+    root_logger.handlers.clear()
+    root_logger.setLevel(logging.WARNING)
+    root_logger.addHandler(log_handler)
+    root_logger.addHandler(stream_handler)
+
+    for logger_name in _RUNTIME_LOGGER_NAMES:
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
+
+    logger.setLevel(logging.INFO)
+
+
+def _refresh_runtime_settings():
+    global INTERVAL, SIMULATE_ONLY, SUMMARY_SCAN_INTERVAL, SUMMARY_LOG_SECONDS
+    INTERVAL = int(os.getenv("PAPER_SCAN_INTERVAL", "120"))  # 2 min default
+    SIMULATE_ONLY = os.getenv("SIMULATE_ONLY", "true").lower() == "true"
+    SUMMARY_SCAN_INTERVAL = int(os.getenv("PAPER_SUMMARY_SCAN_INTERVAL", "100"))
+    SUMMARY_LOG_SECONDS = int(os.getenv("PAPER_SUMMARY_LOG_SECONDS", "3600"))
+
+
+def load_runtime_env(dotenv_path: str | Path | None = None):
+    # Ensure PAPER_MODE=true so RiskManager uses paper limits, not live limits.
+    # KALSHI_USE_DEMO=false means "use real market data" (not demo API), but that
+    # does not mean real-money trading — PAPER_MODE controls the risk layer.
+    os.environ.setdefault("PAPER_MODE", "true")
+    if dotenv_path is None:
+        load_dotenv()
+    else:
+        load_dotenv(dotenv_path)
+    _refresh_runtime_settings()
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -456,4 +474,6 @@ def run():
 
 
 if __name__ == "__main__":
+    configure_logging()
+    load_runtime_env()
     run()
