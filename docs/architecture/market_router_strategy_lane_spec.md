@@ -447,6 +447,13 @@ Phase 3D implementation note, 2026-05-06:
 - the report includes bad bucket buys removed, winners skipped by the hotfix bridge, approvals/rejections by `weather_shape x hidden_gem_tier x reason_code`, bucket rows with/without `distribution_probability`, and the `entry_price + 0.05` / `3x entry_price` threshold slices
 - this slice is reporting-only and does not alter strategy selection, trade decisions, sizing, risk checks, runtime config, or order behavior
 
+Phase 3E implementation note, 2026-05-06:
+
+- bucket hidden-gem distribution scoring now rejects beta/enforce candidates unless `distribution_probability >= entry_price + 0.05` and `distribution_probability >= 3x entry_price`
+- the new rejection reasons are `weather_bucket_hidden_gem_distribution_probability_below_entry_plus_buffer` and `weather_bucket_hidden_gem_distribution_probability_below_multiple`
+- stable/off and beta/shadow preserve final actions while recording the beta gate and hidden-gem evidence-card deltas; beta/enforce can change paper-like decisions only when `bucket_distribution_scoring` is enabled
+- this slice changes only beta-gated bucket hidden-gem behavior and leaves stable defaults/live promotion untouched
+
 ### Bucket hidden-gem direction
 
 The 2026-05-06 paper/archive check showed cheap bucket rows were the clearest danger:

@@ -33,6 +33,11 @@ DEFAULT_WEATHER_RISK_POLICY: dict[str, Any] = {
         "normal_multiple_max": 10.0,
         "suspicious_multiple_max": 15.0,
         "bucket_requires_distribution_probability": True,
+        "bucket_distribution_thresholds": {
+            "enabled": True,
+            "min_edge_buffer": 0.05,
+            "min_probability_multiple": 3.0,
+        },
         "tail_directional_mismatch": {
             "enabled": True,
             "probability_threshold": 0.20,
@@ -199,10 +204,21 @@ def assess_weather_market_risk(
         else:
             assessment.hidden_gem_tier = "exceptional"
         if shape == "bucket" and bool(hidden_cfg.get("bucket_requires_distribution_probability", True)):
-            if _coerce_float(signal.get("distribution_probability"), default=None) is None:
+            distribution_probability = _coerce_float(signal.get("distribution_probability"), default=None)
+            if distribution_probability is None:
                 assessment.should_skip = True
                 assessment.reason_code = "weather_bucket_hidden_gem_missing_distribution_probability"
                 assessment.reason = "Cheap weather bucket hidden gem requires distribution probability support"
+                return assessment
+            threshold_rejection = _bucket_distribution_threshold_rejection(
+                distribution_probability,
+                entry=entry,
+                hidden_cfg=hidden_cfg,
+            )
+            if threshold_rejection is not None:
+                assessment.should_skip = True
+                assessment.reason_code = threshold_rejection[0]
+                assessment.reason = threshold_rejection[1]
                 return assessment
         tail_mismatch = _tail_directional_mismatch_reason(signal, hidden_cfg, shape)
         if tail_mismatch is not None:
@@ -240,6 +256,30 @@ def assess_weather_market_risk(
 
     assessment.size_multiplier = max(0.0, min(1.0, assessment.size_multiplier))
     return assessment
+
+
+def _bucket_distribution_threshold_rejection(
+    distribution_probability: float,
+    *,
+    entry: float | None,
+    hidden_cfg: dict[str, Any],
+) -> tuple[str, str] | None:
+    cfg = dict(hidden_cfg.get("bucket_distribution_thresholds") or {})
+    if not cfg.get("enabled", True) or entry is None or entry <= 0:
+        return None
+    min_edge_buffer = _coerce_float(cfg.get("min_edge_buffer"), 0.05) or 0.05
+    min_multiple = _coerce_float(cfg.get("min_probability_multiple"), 3.0) or 3.0
+    if distribution_probability + 1e-9 < entry + min_edge_buffer:
+        return (
+            "weather_bucket_hidden_gem_distribution_probability_below_entry_plus_buffer",
+            "Cheap weather bucket hidden gem requires distribution probability at least entry price plus buffer",
+        )
+    if distribution_probability + 1e-9 < entry * min_multiple:
+        return (
+            "weather_bucket_hidden_gem_distribution_probability_below_multiple",
+            "Cheap weather bucket hidden gem requires distribution probability at least the configured price multiple",
+        )
+    return None
 
 
 def _strong_hidden_gem_evidence_passes(signal: dict[str, Any], hidden_cfg: dict[str, Any]) -> bool:
