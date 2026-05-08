@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
+
 REPO_CANDIDATES=(
-  "/home/ryushe/active-projects/prediction-bot"
+  "$SCRIPT_REPO"
   "/home/ryushe/projects/prediction-bot"
+  "/home/ryushe/active-projects/prediction-bot"
 )
 REPO=""
 for candidate in "${REPO_CANDIDATES[@]}"; do
@@ -19,19 +23,26 @@ if [[ -z "$REPO" ]]; then
 fi
 
 CONFIG_PATH="config.prediction_lab_weather_overnight.yaml"
-if [[ "$REPO" == "/home/ryushe/active-projects/prediction-bot" && -f "$REPO/config.yaml" ]]; then
-  CONFIG_PATH="config.yaml"
+STATE_FILE="data/paper/prediction_lab/monitor_state.json"
+LOCK="data/paper/prediction_lab/monitor.lock"
+LOG="data/paper/prediction_lab/logs/monitor_cron.log"
+
+# If the beta-shadow collector is intentionally active, monitor that isolated
+# project instead of alerting on the normal active-project/config.yaml runtime.
+if pgrep -af '^python3 scripts/prediction_lab_collect.py --config config.prediction_lab_beta_shadow_weather.yaml --observer' >/dev/null 2>&1 \
+  && [[ -f "$REPO/config.prediction_lab_beta_shadow_weather.yaml" ]]; then
+  CONFIG_PATH="config.prediction_lab_beta_shadow_weather.yaml"
+  STATE_FILE="data/beta_shadow/paper/prediction_lab/monitor_state.json"
+  LOCK="data/beta_shadow/paper/prediction_lab/monitor.lock"
+  LOG="data/beta_shadow/paper/prediction_lab/logs/monitor_cron.log"
 elif [[ ! -f "$REPO/$CONFIG_PATH" && -f "$REPO/config.yaml" ]]; then
   CONFIG_PATH="config.yaml"
 fi
 
-LOCK="$REPO/data/paper/prediction_lab/monitor.lock"
-LOG="$REPO/data/paper/prediction_lab/logs/monitor_cron.log"
-
 export PATH="/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 export OPENCLAW_BIN="${OPENCLAW_BIN:-/home/linuxbrew/.linuxbrew/bin/openclaw}"
 
-mkdir -p "$(dirname "$LOCK")" "$(dirname "$LOG")"
+mkdir -p "$(dirname "$REPO/$LOCK")" "$(dirname "$REPO/$LOG")"
 cd "$REPO" || exit 1
 
 # Avoid overlapping checks if the host is slow.
@@ -42,14 +53,14 @@ if ! flock -n 9; then
 fi
 
 {
-  echo "--- $(date -Is) prediction_lab_monitor start ---"
+  echo "--- $(date -Is) prediction_lab_monitor start config=$CONFIG_PATH ---"
   PYTHONPATH=. python3 scripts/prediction_lab_monitor.py \
     --config "$CONFIG_PATH" \
-    --state-file data/paper/prediction_lab/monitor_state.json \
+    --state-file "$STATE_FILE" \
     --notify \
     --target -1003763915138 \
     --thread-id 8 \
-    --repair-cron-job-id c4dc2e07-df12-4cc2-8150-1b5221d9e383
+    --repair-cron-job-id c4dc2e07-df12-4cc2-8150-1b82f96acef7
   status=$?
   echo "--- $(date -Is) prediction_lab_monitor exit=$status ---"
   exit "$status"
