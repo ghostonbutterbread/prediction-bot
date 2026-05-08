@@ -125,7 +125,19 @@ This is the immediate pre-lane bugfix/spec for market routing and category handl
 
 ---
 
-### 9. `docs/PREDICTION_LAB_TUNING_DIRECTION_SPEC.md`
+### 9. `docs/architecture/strategy_lane_shadow_validation_spec.md`
+Read this when working on beta-shadow lane validation and old-vs-new evidence.
+
+Use it to understand:
+- why beta-shadow configs must enable real lane/cap settings
+- why paper must record stable-skip shadow-intent candidates
+- what remains blocked before exact apples-to-apples lane PnL is trustworthy
+
+This is the current spec for making lane shadow evidence useful without changing paper/live execution.
+
+---
+
+### 10. `docs/PREDICTION_LAB_TUNING_DIRECTION_SPEC.md`
 Read this for the current immediate strategy direction.
 
 Use it to understand:

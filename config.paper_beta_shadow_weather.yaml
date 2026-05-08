@@ -33,6 +33,31 @@ strategy_policy:
       hidden_gem_lane_gates: true
       lane_sizing_caps: true
 
+strategy_lanes:
+  # Beta-shadow only: compute lane gate/sizing deltas without changing final
+  # paper/collector actions unless strategy_policy.beta.mode is promoted.
+  enabled: true
+  enabled_lanes:
+    - edge
+    - hidden_gem
+    - confidence_slow_profit
+  sizing:
+    edge:
+      max_position_usd: 5.0
+      max_position_pct: 0.05
+    hidden_gem:
+      size_multiplier: 0.5
+      max_position_usd: 3.0
+      max_position_pct: 0.03
+    confidence_slow_profit:
+      size_multiplier: 0.5
+      max_position_usd: 2.0
+      max_position_pct: 0.02
+  confidence_slow_profit:
+    enabled: true
+    min_edge: 0.02
+    min_confidence: 0.75
+
 scan:
   allowed_market_groups:
     - weather
