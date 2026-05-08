@@ -252,13 +252,16 @@ def evaluate_health(
     log_dir = lab_dir / "logs"
     latest_log = max(log_dir.glob("collector_*.log"), key=lambda p: p.stat().st_mtime, default=None) if log_dir.exists() else None
     details["latest_log"] = str(latest_log) if latest_log else None
+    heartbeat_age = details.get("state_heartbeat_age_seconds")
+    heartbeat_fresh = isinstance(heartbeat_age, (int, float)) and heartbeat_age <= stale_log_seconds
     if latest_log is None:
-        issues.append(MonitorIssue("missing_log", f"no collector logs under {log_dir}"))
+        if not heartbeat_fresh:
+            issues.append(MonitorIssue("missing_log", f"no collector logs under {log_dir}"))
+        else:
+            details["latest_log_status"] = "missing_but_state_heartbeat_fresh"
     else:
         age = file_age_seconds(latest_log, now=now)
         details["latest_log_age_seconds"] = age
-        heartbeat_age = details.get("state_heartbeat_age_seconds")
-        heartbeat_fresh = isinstance(heartbeat_age, (int, float)) and heartbeat_age <= stale_log_seconds
         if age is not None and age > stale_log_seconds and not heartbeat_fresh:
             issues.append(MonitorIssue("stale_log", f"latest collector log is {int(age)}s old; threshold {stale_log_seconds}s"))
 

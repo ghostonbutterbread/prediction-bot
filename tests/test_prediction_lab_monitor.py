@@ -195,6 +195,41 @@ class PredictionLabMonitorTests(unittest.TestCase):
             self.assertTrue(result.healthy, result.summary())
             self.assertNotIn("stale_log", [issue.code for issue in result.issues])
 
+    def test_evaluate_health_accepts_missing_log_when_state_heartbeat_is_fresh(self):
+        now = datetime(2026, 4, 28, 18, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = self._write_config(root)
+            lab_dir = root / "data" / "paper" / "prediction_lab"
+            self._write_state(lab_dir, now=now)
+            for log in (lab_dir / "logs").glob("collector_*.log"):
+                log.unlink()
+            state_path = lab_dir / "state.json"
+            state = json.loads(state_path.read_text())
+            state["last_storage_check_at"] = (now - timedelta(seconds=30)).isoformat()
+            state_path.write_text(json.dumps(state))
+
+            result = monitor.evaluate_health(
+                config_path,
+                now=now,
+                cmdlines=[
+                    (
+                        123,
+                        [
+                            "python3",
+                            "scripts/prediction_lab_collect.py",
+                            "--config",
+                            str(config_path),
+                        ],
+                    )
+                ],
+                stale_log_seconds=1800,
+            )
+
+            self.assertTrue(result.healthy, result.summary())
+            self.assertNotIn("missing_log", [issue.code for issue in result.issues])
+            self.assertEqual(result.details["latest_log_status"], "missing_but_state_heartbeat_fresh")
+
     def test_evaluate_health_uses_nested_prediction_lab_config(self):
         now = datetime(2026, 4, 28, 18, 0, tzinfo=timezone.utc)
         with tempfile.TemporaryDirectory() as tmpdir:
