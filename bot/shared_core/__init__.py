@@ -21,6 +21,14 @@ from .interfaces import (
     ResolutionEvent,
     StateAdapter,
 )
+from .shadow_intents import (
+    SHADOW_INTENT_SCHEMA_NAME,
+    SHADOW_INTENT_SCHEMA_VERSION,
+    append_hypothetical_shadow_intent_row,
+    build_hypothetical_shadow_intent_row,
+    build_hypothetical_shadow_intent_rows,
+    is_hypothetical_shadow_intent_row,
+)
 from .weather_risk import (
     apply_weather_size_limits,
     assess_weather_market_risk,
@@ -43,15 +51,21 @@ __all__ = [
     "PositionState",
     "ResolutionAdapter",
     "ResolutionEvent",
+    "SHADOW_INTENT_SCHEMA_NAME",
+    "SHADOW_INTENT_SCHEMA_VERSION",
     "StateAdapter",
     "TradeContext",
     "TradeDecision",
+    "append_hypothetical_shadow_intent_row",
     "apply_weather_size_limits",
     "assess_weather_market_risk",
     "build_execution_snapshot",
+    "build_hypothetical_shadow_intent_row",
+    "build_hypothetical_shadow_intent_rows",
     "build_weather_source_confidence_evidence",
     "build_trade_decision",
     "classify_weather_market",
+    "is_hypothetical_shadow_intent_row",
     "normalize_trade_context",
     "reason_to_key",
 ]

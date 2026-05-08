@@ -9,6 +9,7 @@ Usage:
 import sys
 import os
 import time
+import argparse
 import logging
 from logging.handlers import RotatingFileHandler
 from datetime import datetime, timezone
@@ -46,6 +47,15 @@ INTERVAL = int(os.getenv("PAPER_SCAN_INTERVAL", "120"))  # 2 min default
 SIMULATE_ONLY = os.getenv("SIMULATE_ONLY", "true").lower() == "true"
 SUMMARY_SCAN_INTERVAL = int(os.getenv("PAPER_SUMMARY_SCAN_INTERVAL", "100"))
 SUMMARY_LOG_SECONDS = int(os.getenv("PAPER_SUMMARY_LOG_SECONDS", "3600"))
+
+
+def _resolve_paper_config_path(config_path: str | Path | None = None) -> Path | None:
+    if config_path:
+        return Path(config_path)
+    env_path = os.getenv("PAPER_CONFIG")
+    if env_path:
+        return Path(env_path)
+    return None
 
 
 def configure_logging():
@@ -129,11 +139,19 @@ def _env_int(name: str, default: int) -> int:
 
 
 def get_config(config_path: str | Path | None = None):
-    config = load_config(config_path)
-    paper_mode = os.getenv("PAPER_MODE", "true").lower() == "true"
+    resolved_config_path = _resolve_paper_config_path(config_path)
+    config = load_config(resolved_config_path)
+    if resolved_config_path is not None:
+        config["_config_path"] = str(resolved_config_path)
+    runtime_cfg = config.get("runtime", {}) or {}
+    isolated_runtime = bool(runtime_cfg.get("isolated", False))
+    loaded_trading = config.get("trading", {}) or {}
+    if isolated_runtime and str(loaded_trading.get("mode", "paper")).strip().lower() == "paper":
+        paper_mode = True
+    else:
+        paper_mode = os.getenv("PAPER_MODE", "true").lower() == "true"
     mode_dir = "paper" if paper_mode else "live"
 
-    loaded_trading = config.get("trading", {}) or {}
     trading_enabled = _env_bool(
         "TRADING_ENABLED",
         bool(loaded_trading.get("enabled", loaded_trading.get("trading_enabled", config.get("trading_enabled", True)))),
@@ -208,8 +226,12 @@ def get_config(config_path: str | Path | None = None):
     config["max_position_size_usd"] = max_position_size_usd
     config["status_update_interval_minutes"] = status_update_interval_minutes
 
-    data_dir = os.getenv("DATA_DIR", config.get("data_dir", f"data/{mode_dir}"))
-    log_dir = os.getenv("LOG_DIR", config.get("log_dir", f"data/{mode_dir}"))
+    if isolated_runtime:
+        data_dir = config.get("data_dir", f"data/{mode_dir}")
+        log_dir = config.get("log_dir", f"data/{mode_dir}")
+    else:
+        data_dir = os.getenv("DATA_DIR", config.get("data_dir", f"data/{mode_dir}"))
+        log_dir = os.getenv("LOG_DIR", config.get("log_dir", f"data/{mode_dir}"))
     config["data_dir"] = str(ensure_mode_storage_dir(data_dir, mode_dir))
     config["log_dir"] = str(ensure_mode_storage_dir(log_dir, mode_dir))
     config.setdefault("runtime", {})["mode"] = mode_dir
@@ -232,9 +254,9 @@ def get_config(config_path: str | Path | None = None):
 
 
 
-def create_bot_and_sim():
+def create_bot_and_sim(config_path: str | Path | None = None):
     """Create exchange bot + simulator (shared state across scans)."""
-    config = get_config()
+    config = get_config(config_path)
 
     api_key = os.getenv("KALSHI_API_KEY_ID")
     private_key_path = os.getenv("KALSHI_PRIVATE_KEY_PATH", "kalshi_private_key")
@@ -359,8 +381,8 @@ def _log_blockers(scan_num: int, blocked_reasons: dict):
     logger.info("SCAN BLOCKERS scan=%s %s", scan_num, top)
 
 
-def run():
-    config = get_config()
+def run(config_path: str | Path | None = None):
+    config = get_config(config_path)
     mode = "PAPER (simulation)" if config["paper_mode"] else "LIVE (real orders)"
     logger.info("Starting [%s] interval=%ss data=%s", mode, INTERVAL, config["data_dir"])
 
@@ -379,7 +401,7 @@ def run():
         try:
             # Init (or re-init after crash) — Simulator auto-loads latest session
             if bot is None:
-                bot, sim = create_bot_and_sim()
+                bot, sim = create_bot_and_sim(config_path)
                 consecutive_errors = 0
                 scan_num = sim.scan_count
 
@@ -473,7 +495,20 @@ def run():
             time.sleep(wait)
 
 
-if __name__ == "__main__":
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Run paper simulation loop")
+    parser.add_argument(
+        "--config",
+        default=None,
+        help="Config path for this paper loop. Defaults to PAPER_CONFIG, then config.yaml discovery.",
+    )
+    args = parser.parse_args(argv)
+
     configure_logging()
     load_runtime_env()
-    run()
+    run(args.config)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,6 +1,6 @@
 # Prediction Bot Docs Index
 
-_Last updated: 2026-04-29_
+_Last updated: 2026-05-08_
 
 ## Why this file exists
 
@@ -199,12 +199,14 @@ These define what code and tests should enforce:
 
 ### Supporting architecture lane
 These are narrower supporting specs for adjacent workstreams:
+- `docs/BETA_SHADOW_WEATHER_RUNBOOK.md` — safe beta-shadow weather paper/Prediction Lab runtime commands and data-root separation
 - `docs/architecture/shared_core_adapters_design.md` — shared-core/adapters split
 - `docs/architecture/event_retrade_spec.md` — event-aware retrade behavior
 - `docs/architecture/event_retrade_v2_spec.md` — stronger retrade follow-up pass
 - `docs/architecture/paper_live_rollout_log.md` — rollout logging concept
 - `docs/architecture/paper_live_rollout_log_and_standby_spec.md` — rollout + standby design
 - `docs/architecture/prediction_lab_shared_pipeline_spec.md` — shared collector/replay/paper/live decision-pipeline architecture for Prediction Lab as a wrapper, not duplicated logic
+- `docs/architecture/prediction_lab_shadow_delta_spec.md` — beta/shadow comparison metadata as row-level Prediction Lab deltas, not duplicate trade or prediction streams
 - `docs/architecture/prediction_lab_blind_replay_validator_spec.md` — blind replay, separate resolution ledger, replay-output table, and active dataset validator requirements
 - `docs/architecture/prediction_lab_backfill_upgrader_spec.md` — old-row inventory, artifact/log/historical recovery, evidence tiers, and provenance-labeled upgraded datasets
 - `docs/architecture/prediction_lab_long_run_collection_spec.md` — Prediction Lab long-run collection direction

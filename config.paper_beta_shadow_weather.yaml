@@ -1,0 +1,46 @@
+# Weather lane beta-shadow paper runtime.
+# Shadow data is intentionally rooted under data/beta_shadow so normal
+# paper replay/analyze paths do not pick it up by default.
+runtime:
+  base_dir: data/beta_shadow
+  isolated: true
+
+storage:
+  logs:
+    enabled: true
+    auto_prune: false
+    include_paths:
+      - data/beta_shadow/paper/paper_loop.log
+      - data/beta_shadow/paper/prediction_lab/
+      - data/beta_shadow/paper/archive/ops/
+    exclude_paths:
+      - data/paper/
+      - data/live/
+      - logs/
+
+trading:
+  # Paper loop remains paper/simulated only. Start it with SIMULATE_ONLY=true.
+  mode: paper
+  enabled: true
+
+strategy_policy:
+  version: beta
+  beta:
+    mode: shadow
+    features:
+      weather_hidden_gem_evidence_card: true
+      bucket_distribution_scoring: true
+      hidden_gem_lane_gates: true
+      lane_sizing_caps: true
+
+scan:
+  allowed_market_groups:
+    - weather
+  allowed_market_routes:
+    - weather.daily_temperature
+
+strategy:
+  enable_news: false
+  enable_social: false
+  enable_ai: false
+

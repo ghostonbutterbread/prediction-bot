@@ -1,9 +1,13 @@
 import tempfile
 import unittest
+import os
 from pathlib import Path
+from unittest.mock import patch
 
 from bot.config import load_config
 from bot.strategy_policy import normalize_strategy_policy
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class StrategyPolicyConfigTests(unittest.TestCase):
@@ -183,6 +187,42 @@ prediction_lab:
             self.assertTrue(policy.is_shadow)
             self.assertTrue(policy.is_active)
             self.assertTrue(policy.feature_enabled("weather_hidden_gem_evidence_card"))
+
+    def test_repo_beta_shadow_configs_normalize_active_shadow_policy(self):
+        paper_path = REPO_ROOT / "config.paper_beta_shadow_weather.yaml"
+        lab_path = REPO_ROOT / "config.prediction_lab_beta_shadow_weather.yaml"
+
+        with patch.dict(os.environ, {}, clear=True):
+            paper_config = load_config(paper_path)
+            lab_config = load_config(lab_path)
+
+        for config in (paper_config, lab_config):
+            policy = config["strategy_policy_normalized"]
+            self.assertEqual(policy["version"], "beta")
+            self.assertEqual(policy["beta_mode"], "shadow")
+            self.assertTrue(policy.is_active)
+            self.assertTrue(policy.is_shadow)
+            self.assertFalse(policy.is_enforce)
+            self.assertTrue(policy.feature_enabled("weather_hidden_gem_evidence_card"))
+            self.assertTrue(policy.feature_enabled("bucket_distribution_scoring"))
+            self.assertTrue(policy.feature_enabled("hidden_gem_lane_gates"))
+            self.assertTrue(policy.feature_enabled("lane_sizing_caps"))
+            self.assertEqual(Path(config["data_dir"]), Path("data/beta_shadow/paper"))
+            self.assertEqual(Path(config["log_dir"]), Path("data/beta_shadow/paper"))
+            self.assertFalse(config["storage"]["logs"]["auto_prune"])
+            include_paths = config["storage"]["logs"]["include_paths"]
+            self.assertTrue(all(str(path).startswith("data/beta_shadow/") for path in include_paths))
+            self.assertNotIn("data/paper_loop.log", include_paths)
+            self.assertNotIn("logs/", include_paths)
+
+        self.assertEqual(paper_config["trading"]["mode"], "paper")
+        self.assertTrue(paper_config["trading"]["enabled"])
+        self.assertEqual(lab_config["trading"]["mode"], "paper")
+        self.assertFalse(lab_config["trading"]["enabled"])
+        self.assertFalse(lab_config["trading_enabled"])
+        self.assertTrue(lab_config["prediction_lab"]["observer_mode"])
+        self.assertTrue(lab_config["prediction_lab"]["score_only"])
+        self.assertEqual(lab_config["prediction_lab"]["experiment_id"], "weather-beta-shadow")
 
 
 if __name__ == "__main__":

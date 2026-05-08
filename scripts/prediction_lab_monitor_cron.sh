@@ -1,7 +1,30 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-REPO="/home/ryushe/projects/prediction-bot"
+REPO_CANDIDATES=(
+  "/home/ryushe/active-projects/prediction-bot"
+  "/home/ryushe/projects/prediction-bot"
+)
+REPO=""
+for candidate in "${REPO_CANDIDATES[@]}"; do
+  if [[ -d "$candidate" ]]; then
+    REPO="$candidate"
+    break
+  fi
+done
+
+if [[ -z "$REPO" ]]; then
+  echo "prediction_lab_monitor_cron: no prediction-bot repo found" >&2
+  exit 1
+fi
+
+CONFIG_PATH="config.prediction_lab_weather_overnight.yaml"
+if [[ "$REPO" == "/home/ryushe/active-projects/prediction-bot" && -f "$REPO/config.yaml" ]]; then
+  CONFIG_PATH="config.yaml"
+elif [[ ! -f "$REPO/$CONFIG_PATH" && -f "$REPO/config.yaml" ]]; then
+  CONFIG_PATH="config.yaml"
+fi
+
 LOCK="$REPO/data/paper/prediction_lab/monitor.lock"
 LOG="$REPO/data/paper/prediction_lab/logs/monitor_cron.log"
 
@@ -21,7 +44,7 @@ fi
 {
   echo "--- $(date -Is) prediction_lab_monitor start ---"
   PYTHONPATH=. python3 scripts/prediction_lab_monitor.py \
-    --config config.prediction_lab_weather_overnight.yaml \
+    --config "$CONFIG_PATH" \
     --state-file data/paper/prediction_lab/monitor_state.json \
     --notify \
     --target -1003763915138 \

@@ -18,9 +18,10 @@ from bot.live_execution import RunnerLiveExecutionAdapter
 from bot.live_sync import RunnerLiveSync
 from bot.market_router import DEFAULT_ALLOWED_MARKET_ROUTES, route_market
 from bot.notifications import build_notification, normalize_verbosity
+from bot.prediction_lab_shadow_delta import build_shadow_delta
 from bot.risk import RiskManager
 from bot.telegram_notifier import TelegramNotifier
-from bot.shared_core import AccountState, TradeContext, build_trade_decision
+from bot.shared_core import AccountState, TradeContext, append_hypothetical_shadow_intent_row, build_trade_decision
 from bot.parity_audit import normalize_parity_trade_row, summarize_normalized_rows
 from bot.status import build_snapshot, summarize_log_storage
 from bot.trade_audit import (
@@ -1323,6 +1324,7 @@ class PredictionBot:
             signal=signal,
             config_snapshot=self.config,
         )
+        self._append_shadow_intent_if_any(decision_artifact, signal)
 
         if not decision.approved:
             logger.info(f"🛑 Shared decision skipped: {decision.reason}")
@@ -1347,6 +1349,30 @@ class PredictionBot:
             return {"order": result, "decision": decision}
         self._record_live_failure(exchange_name or "", "execution_failed")
         return {"blocked_reason": "execution_failed", "decision": decision}
+
+    def _append_shadow_intent_if_any(self, decision_artifact: dict, signal: dict) -> dict | None:
+        market_id = str(signal.get("market_id") or decision_artifact.get("market_id") or "")
+        run_id = f"live-runner:scan-{self.stats.get('scans', 0) + 1}"
+        shadow_delta = build_shadow_delta(
+            decision_artifact,
+            market_id,
+            run_id,
+            fallback_strategy_policy=self.config.get("strategy_policy_normalized") or self.config.get("strategy_policy") or {},
+        )
+        if shadow_delta is None:
+            return None
+        observed_at = decision_artifact.get("observed_at")
+        return append_hypothetical_shadow_intent_row(
+            self.log_dir / "shadow_intents.jsonl",
+            {
+                "market_id": market_id,
+                "run_id": run_id,
+                "timestamp": observed_at,
+                "shadow_delta": shadow_delta,
+            },
+            runtime_mode="live" if self._is_live_mode() else "paper",
+            recorded_at=observed_at,
+        )
 
     def _market_route_enforcement_enabled(self) -> bool:
         """Market routing is stable route safety; policy flags do not disable it."""

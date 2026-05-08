@@ -10,6 +10,7 @@ from typing import Optional
 from bot.config import ensure_mode_storage_dir
 from bot.decision_pipeline import build_pre_execution_decision_artifact
 from bot.market_router import DEFAULT_ALLOWED_MARKET_ROUTES
+from bot.prediction_lab_shadow_delta import build_shadow_delta
 from bot.paper_adapters import (
     LoadedPaperSession,
     SimulatorPaperExecutionAdapter,
@@ -25,6 +26,7 @@ from bot.shared_core import (
     ResolutionEvent,
     TradeContext,
     TradeDecision,
+    append_hypothetical_shadow_intent_row,
     build_trade_decision,
     build_execution_snapshot,
     normalize_trade_context,
@@ -744,6 +746,7 @@ class Simulator:
             execution_snapshot=execution_snapshot,
             config_snapshot=self.config,
         )
+        self._append_shadow_intent_if_any(decision_artifact, signal)
 
         if not decision.approved:
             if blockers is not None:
@@ -921,6 +924,30 @@ class Simulator:
         """Execute a shared decision through the paper execution adapter."""
 
         return self.execution_adapter.execute(decision, context)
+
+    def _append_shadow_intent_if_any(self, decision_artifact: dict, signal: dict) -> dict | None:
+        market_id = str(signal.get("market_id") or decision_artifact.get("market_id") or "")
+        run_id = f"{self.session_id}:scan-{self.scan_count}"
+        shadow_delta = build_shadow_delta(
+            decision_artifact,
+            market_id,
+            run_id,
+            fallback_strategy_policy=self.config.get("strategy_policy_normalized") or self.config.get("strategy_policy") or {},
+        )
+        if shadow_delta is None:
+            return None
+        observed_at = decision_artifact.get("observed_at")
+        return append_hypothetical_shadow_intent_row(
+            self.data_dir / "shadow_intents.jsonl",
+            {
+                "market_id": market_id,
+                "run_id": run_id,
+                "timestamp": observed_at,
+                "shadow_delta": shadow_delta,
+            },
+            runtime_mode="paper",
+            recorded_at=observed_at,
+        )
 
     def resolve_open_positions(self, settlement_source=None) -> list[ResolutionEvent]:
         """Resolve paper positions through the paper resolution adapter."""
