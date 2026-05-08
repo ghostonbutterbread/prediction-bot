@@ -48,6 +48,7 @@ def main() -> int:
                 'min_confidence_to_record': 0.0,
             },
             'trading': {
+                'mode': 'paper',
                 'enabled': False,
                 'trading_enabled': False,
             },

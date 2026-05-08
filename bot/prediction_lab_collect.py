@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from bot.config import load_config
+from bot.config import ensure_mode_storage_dir, get_runtime_mode, load_config
 from bot.prediction_lab import PredictionLab
 from bot.prediction_lab_support import build_prediction_lab_exchange
 
@@ -59,8 +59,22 @@ class PredictionLabCollectorDaemon:
                 config["trading_enabled"] = bool(trading_cfg.get("enabled"))
             elif "trading_enabled" in trading_cfg:
                 config["trading_enabled"] = bool(trading_cfg.get("trading_enabled"))
+            self._refresh_runtime_paths(config)
         config["_config_path"] = str(self.config_path)
         return config
+
+    @staticmethod
+    def _refresh_runtime_paths(config: dict[str, Any]) -> None:
+        mode = get_runtime_mode(config)
+        runtime = config.setdefault("runtime", {})
+        base_dir = Path(runtime.get("base_dir", config.get("data_dir", "data")))
+        mode_dir = ensure_mode_storage_dir(base_dir, mode)
+        runtime["mode"] = mode
+        runtime["base_dir"] = str(base_dir)
+        runtime["mode_dir"] = str(mode_dir)
+        config["data_dir"] = str(mode_dir)
+        config["log_dir"] = str(mode_dir)
+        config.setdefault("logging", {})["log_dir"] = str(mode_dir)
 
     @staticmethod
     def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:

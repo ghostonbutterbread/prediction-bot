@@ -201,6 +201,108 @@ scan:
 
         self.assertEqual(cfg["scan"]["markets_per_exchange"], 222)
 
+    def test_get_config_uses_paper_config_env_for_shadow_runtime_root(self):
+        paper_loop = import_paper_loop()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            shadow_base = Path(tmpdir) / "data" / "beta_shadow"
+            cfg_path = Path(tmpdir) / "shadow.yaml"
+            cfg_path.write_text(
+                f"""
+runtime:
+  base_dir: {shadow_base}
+trading:
+  mode: paper
+strategy_policy:
+  version: beta
+  beta:
+    mode: shadow
+    features:
+      weather_hidden_gem_evidence_card: true
+      bucket_distribution_scoring: true
+      hidden_gem_lane_gates: true
+      lane_sizing_caps: true
+"""
+            )
+
+            with patch.dict(os.environ, {"PAPER_MODE": "true", "PAPER_CONFIG": str(cfg_path)}, clear=False):
+                os.environ.pop("DATA_DIR", None)
+                os.environ.pop("LOG_DIR", None)
+                cfg = paper_loop.get_config()
+
+        expected_shadow_root = shadow_base / "paper"
+        self.assertEqual(cfg["_config_path"], str(cfg_path))
+        self.assertEqual(Path(cfg["data_dir"]), expected_shadow_root)
+        self.assertEqual(Path(cfg["log_dir"]), expected_shadow_root)
+        self.assertEqual(cfg["runtime"]["base_dir"], str(shadow_base))
+        self.assertEqual(Path(cfg["runtime"]["mode_dir"]), expected_shadow_root)
+        self.assertEqual(Path(cfg["logging"]["log_dir"]), expected_shadow_root)
+        self.assertTrue(cfg["strategy"]["strategy_policy_normalized"].is_shadow)
+
+    def test_isolated_shadow_config_ignores_inherited_runtime_path_env(self):
+        paper_loop = import_paper_loop()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            shadow_base = Path(tmpdir) / "data" / "beta_shadow"
+            cfg_path = Path(tmpdir) / "shadow.yaml"
+            cfg_path.write_text(
+                f"""
+runtime:
+  base_dir: {shadow_base}
+  isolated: true
+trading:
+  mode: paper
+"""
+            )
+
+            with patch.dict(
+                os.environ,
+                {"PAPER_MODE": "false", "DATA_DIR": str(Path(tmpdir) / "data"), "LOG_DIR": str(Path(tmpdir) / "logs")},
+                clear=False,
+            ):
+                cfg = paper_loop.get_config(cfg_path)
+
+        self.assertTrue(cfg["paper_mode"])
+        self.assertEqual(cfg["trading"]["mode"], "paper")
+        self.assertEqual(Path(cfg["data_dir"]), shadow_base / "paper")
+        self.assertEqual(Path(cfg["log_dir"]), shadow_base / "paper")
+
+    def test_explicit_config_path_overrides_paper_config_env(self):
+        paper_loop = import_paper_loop()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_base = Path(tmpdir) / "env_data"
+            explicit_base = Path(tmpdir) / "explicit_data" / "beta_shadow"
+            env_cfg = Path(tmpdir) / "env.yaml"
+            explicit_cfg = Path(tmpdir) / "explicit.yaml"
+            env_cfg.write_text(
+                f"""
+runtime:
+  base_dir: {env_base}
+trading:
+  mode: paper
+scan:
+  markets_per_exchange: 111
+"""
+            )
+            explicit_cfg.write_text(
+                f"""
+runtime:
+  base_dir: {explicit_base}
+trading:
+  mode: paper
+scan:
+  markets_per_exchange: 222
+"""
+            )
+
+            with patch.dict(os.environ, {"PAPER_MODE": "true", "PAPER_CONFIG": str(env_cfg)}, clear=False):
+                os.environ.pop("DATA_DIR", None)
+                os.environ.pop("LOG_DIR", None)
+                os.environ.pop("MARKETS_PER_EXCHANGE", None)
+                cfg = paper_loop.get_config(explicit_cfg)
+
+        self.assertEqual(cfg["_config_path"], str(explicit_cfg))
+        self.assertEqual(cfg["scan"]["markets_per_exchange"], 222)
+        self.assertEqual(Path(cfg["data_dir"]), explicit_base / "paper")
+
     def test_paper_mode_forces_stable_hidden_gem_guard_but_not_directional_mismatch(self):
         paper_loop = import_paper_loop()
         with tempfile.TemporaryDirectory() as tmpdir:

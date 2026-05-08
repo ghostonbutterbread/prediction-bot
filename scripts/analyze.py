@@ -25,6 +25,10 @@ from bot.hidden_gem_evidence import (
     format_hidden_gem_evidence_summary,
     summarize_hidden_gem_evidence_cards,
 )
+from bot.prediction_lab_shadow_delta import (
+    format_shadow_delta_summary,
+    summarize_shadow_delta_rows,
+)
 from bot.status import prune_log_storage, summarize_log_storage
 from bot.strategy_lane_reporting import (
     build_strategy_lane_rollout_readiness,
@@ -37,6 +41,7 @@ from bot.strategy_policy import strategy_policy_status
 DATA_DIR = Path(__file__).parent.parent / "data"
 PACIFIC = timezone(timedelta(hours=-7))
 DEFAULT_SESSION_GLOBS = ("paper/sim_*.json", "live/sim_*.json", "sim_*.json")
+PREDICTION_LAB_SHADOW_DELTA_FILES = ("predictions.jsonl", "market_snapshots.jsonl")
 
 
 def _coerce_float(value, default: float = 0.0) -> float:
@@ -132,6 +137,27 @@ def _strategy_policy_status_from_latest(latest: dict, fallback_config: dict) -> 
     return strategy_policy_status(fallback_config.get("strategy_policy_normalized"))
 
 
+def _analysis_config_path() -> Path:
+    raw = os.getenv("ANALYZE_CONFIG")
+    if raw:
+        return Path(raw)
+    return PROJECT_ROOT / "config.yaml"
+
+
+def _isolated_env_data_dir_enabled() -> bool:
+    return bool(os.getenv("ANALYZE_DATA_DIR")) and _env_bool("ANALYZE_DATA_DIR_ONLY")
+
+
+def _disable_storage_audit(config: dict) -> dict:
+    patched = dict(config or {})
+    storage = dict(patched.get("storage", {}) or {})
+    logs = dict(storage.get("logs", {}) or {})
+    logs["enabled"] = False
+    storage["logs"] = logs
+    patched["storage"] = storage
+    return patched
+
+
 def analyze(*, prune_logs: bool = True) -> dict:
     """Run full analysis and return structured insights.
 
@@ -197,10 +223,19 @@ def analyze(*, prune_logs: bool = True) -> dict:
         "actions": [],
     }
 
-    config = load_config(PROJECT_ROOT / "config.yaml")
+    config = load_config(_analysis_config_path())
+    if _isolated_env_data_dir_enabled() and not os.getenv("ANALYZE_CONFIG"):
+        config = _disable_storage_audit(config)
     result["strategy_policy_status"] = _strategy_policy_status_from_latest(latest, config)
     result["strategy_lanes"] = summarize_strategy_lanes(raw_trades)
     result["hidden_gem_evidence_cards"] = summarize_hidden_gem_evidence_cards(raw_trades)
+    result["shadow_delta"] = summarize_shadow_delta_rows(
+        _iter_shadow_delta_analysis_rows(
+            raw_trades,
+            latest,
+            include_prediction_lab_files=(result["strategy_policy_status"].get("shadow") is True),
+        )
+    )
     result["strategy_lane_rollout_readiness"] = build_strategy_lane_rollout_readiness(
         policy_status=result["strategy_policy_status"],
         strategy_lane_summary=result["strategy_lanes"],
@@ -533,6 +568,9 @@ def format_report(analysis: dict) -> str:
     strategy_lane_line = format_strategy_lane_summary(analysis.get("strategy_lanes"))
     if strategy_lane_line:
         lines.append(strategy_lane_line)
+    shadow_delta_line = format_shadow_delta_summary(analysis.get("shadow_delta"))
+    if shadow_delta_line:
+        lines.append(shadow_delta_line)
     readiness_line = format_strategy_lane_rollout_readiness(analysis.get("strategy_lane_rollout_readiness"))
     if readiness_line:
         lines.append(readiness_line)
@@ -569,13 +607,16 @@ def format_report(analysis: dict) -> str:
     return "\n".join(lines)
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def load_sessions() -> list:
     sessions = []
-    roots = []
-    env_data_dir = os.getenv("ANALYZE_DATA_DIR")
-    if env_data_dir:
-        roots.append(Path(env_data_dir))
-    roots.append(DATA_DIR)
+    roots = _analysis_data_roots()
 
     seen_files = set()
     for root in roots:
@@ -599,6 +640,69 @@ def load_sessions() -> list:
                     pass
     sessions.sort(key=_session_sort_key)
     return sessions
+
+
+def _analysis_data_roots() -> list[Path]:
+    roots = []
+    env_data_dir = os.getenv("ANALYZE_DATA_DIR")
+    if env_data_dir:
+        roots.append(Path(env_data_dir))
+    if not env_data_dir or not _env_bool("ANALYZE_DATA_DIR_ONLY"):
+        roots.append(DATA_DIR)
+    return roots
+
+
+def _iter_shadow_delta_analysis_rows(
+    raw_trades: list[dict],
+    latest_session: dict | None = None,
+    *,
+    include_prediction_lab_files: bool = False,
+):
+    for trade in raw_trades or []:
+        if isinstance(trade, dict) and isinstance(trade.get("shadow_delta"), dict):
+            yield trade
+
+    if not include_prediction_lab_files:
+        return
+
+    seen_paths: set[str] = set()
+    for lab_dir in _prediction_lab_dirs_for_session(latest_session or {}):
+        for filename in PREDICTION_LAB_SHADOW_DELTA_FILES:
+            path = lab_dir / filename
+            path_key = str(path.expanduser().resolve(strict=False))
+            if path_key in seen_paths:
+                continue
+            seen_paths.add(path_key)
+            if not path.exists():
+                continue
+            yield from _iter_shadow_delta_jsonl_rows(path)
+
+
+def _prediction_lab_dirs_for_session(session: dict) -> list[Path]:
+    source_file = session.get("_file")
+    if not source_file:
+        return []
+    source_path = Path(source_file)
+    parent = source_path.parent
+    dirs = [parent / "prediction_lab"]
+    if parent.name in {"paper", "live"}:
+        dirs.append(parent.parent / "prediction_lab")
+    return dirs
+
+
+def _iter_shadow_delta_jsonl_rows(path: Path):
+    try:
+        with path.open("rb") as fh:
+            for raw_line in fh:
+                try:
+                    row = json.loads(raw_line)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+                if isinstance(row, dict) and isinstance(row.get("shadow_delta"), dict):
+                    row["_source_path"] = str(path)
+                    yield row
+    except OSError:
+        return
 
 
 if __name__ == "__main__":

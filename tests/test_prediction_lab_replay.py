@@ -459,6 +459,55 @@ class PredictionLabReplayTests(unittest.TestCase):
         self.assertFalse(result.rows[0].action_changed)
         self.assertEqual(result.rows[0].source_path, str(path))
 
+    def test_replay_summary_counts_shadow_delta_once_without_adding_replay_rows(self):
+        shadow_delta = {
+            "schema_version": 1,
+            "mode": "beta_shadow_delta",
+            "status": "complete",
+            "comparison_complete": True,
+            "action_comparison_available": True,
+            "stable": {"action": "SKIP", "selected_lane": "edge"},
+            "shadow": {"action": "BUY_YES", "selected_lane": "hidden_gem"},
+            "changed": True,
+            "action_changed": True,
+            "side_changed": True,
+            "buy_decision_changed": True,
+            "reason_changed": True,
+            "size_changed": False,
+            "lane_changed": True,
+            "dedupe_key": "KXHIGHNY-26APR29-T80|run-1|beta-shadow",
+            "evidence_sources": ["beta_lane_gate"],
+        }
+        prediction = _row(
+            row_patch={
+                "run_id": "run-1",
+                "prediction_id": "p1",
+                "recorded_prediction": True,
+                "shadow_delta": shadow_delta,
+            }
+        )
+        snapshot = _row(
+            row_patch={
+                "run_id": "run-1",
+                "recorded_prediction": False,
+                "shadow_delta": {**shadow_delta, "changed": False, "action_changed": False},
+            }
+        )
+
+        result = replay_recorded_artifacts(
+            [prediction, snapshot],
+            evaluator=self._evaluator(FixedSignalStrategy(_signal())),
+        )
+
+        self.assertEqual(result.summary["input_total"], 2)
+        self.assertEqual(result.summary["total"], 2)
+        summary = result.summary["shadow_delta"]
+        self.assertEqual(summary["total_shadow_delta_rows"], 2)
+        self.assertEqual(summary["total_shadow_delta_opportunities"], 1)
+        self.assertEqual(summary["deduped_duplicate_rows"], 1)
+        self.assertEqual(summary["changed_rows"], 1)
+        self.assertEqual(summary["action_changed"], 1)
+
     def test_changed_reason_and_action_are_reported(self):
         result = replay_recorded_artifacts(
             [_row()],

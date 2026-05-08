@@ -20,6 +20,7 @@ from bot.hidden_gem_evidence import (
     extract_hidden_gem_evidence_card,
     summarize_hidden_gem_evidence_cards,
 )
+from bot.prediction_lab_shadow_delta import summarize_shadow_delta_rows
 from bot.strategy_lane_reporting import summarize_strategy_lanes
 
 logger = logging.getLogger(__name__)
@@ -254,6 +255,7 @@ def replay_recorded_artifacts(
     )
     rows: list[ReplayComparisonRow] = []
     all_rows: list[ReplayComparisonRow] = []
+    shadow_delta_rows: list[dict[str, Any]] = []
     policy = str(live_source_policy or "fail").lower()
     if policy not in {"fail", "warn_skip", "allow"}:
         raise ValueError("live_source_policy must be one of: fail, warn_skip, allow")
@@ -263,6 +265,11 @@ def replay_recorded_artifacts(
 
     for raw_record in records:
         record = _coerce_record(raw_record)
+        if isinstance(record.row.get("shadow_delta"), dict):
+            shadow_row = dict(record.row)
+            if record.source_path:
+                shadow_row["_source_path"] = record.source_path
+            shadow_delta_rows.append(shadow_row)
         original_artifact = record.artifact
         original_action = _normalize_action(original_artifact.get("final_action") or _stored_action(record.row))
         original_reason = _coerce_reason(original_artifact.get("final_reason_code") or _shared_pipeline_reason(record.row))
@@ -353,7 +360,11 @@ def replay_recorded_artifacts(
         rows.append(row)
 
     _apply_resolution_scoring(all_rows, resolution_records=resolution_records, resolution_paths=resolution_paths)
-    return PredictionLabReplayResult(rows=rows, summary=_summarize(rows, all_rows=all_rows), all_rows=all_rows)
+    return PredictionLabReplayResult(
+        rows=rows,
+        summary=_summarize(rows, all_rows=all_rows, shadow_delta_rows=shadow_delta_rows),
+        all_rows=all_rows,
+    )
 
 
 def replay_from_paths(
@@ -1577,7 +1588,12 @@ def _source_mode_warnings(source_mode: str, order_book_mode: str) -> list[str]:
     return warnings
 
 
-def _summarize(rows: list[ReplayComparisonRow], *, all_rows: list[ReplayComparisonRow] | None = None) -> dict[str, Any]:
+def _summarize(
+    rows: list[ReplayComparisonRow],
+    *,
+    all_rows: list[ReplayComparisonRow] | None = None,
+    shadow_delta_rows: Iterable[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     all_rows = all_rows or rows
     strict_rows = [row for row in all_rows if row.include_in_strict]
     excluded_rows = [row for row in all_rows if not row.include_in_strict]
@@ -1603,6 +1619,7 @@ def _summarize(rows: list[ReplayComparisonRow], *, all_rows: list[ReplayComparis
             "replayed": summarize_strategy_lanes(_strategy_lane_summary_rows(rows, artifact_attr="replayed_artifact")),
         },
         "weather_hidden_gem_comparison": _weather_hidden_gem_replay_comparison(all_rows),
+        "shadow_delta": summarize_shadow_delta_rows(shadow_delta_rows or ()),
         "warning_count": sum(len(row.warnings) for row in rows),
     }
 

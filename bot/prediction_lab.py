@@ -23,6 +23,7 @@ from bot.hidden_gem_evidence import (
     extract_hidden_gem_evidence_card,
     summarize_hidden_gem_evidence_cards,
 )
+from bot.prediction_lab_shadow_delta import build_shadow_delta, summarize_shadow_delta_rows
 from bot.strategies.enhanced import EnhancedStrategyEngine, KellySizer, strategy_config_with_policy
 from bot.market_classification import apply_classification_metadata, classify_market_object
 from bot.market_router import route_market
@@ -372,7 +373,28 @@ class PredictionLab:
                     self._iter_recent_hidden_gem_snapshot_rows(self.market_snapshots_path),
                 )
             ),
+            "shadow_delta": summarize_shadow_delta_rows(
+                self._shadow_delta_summary_rows(
+                    rows,
+                    (
+                        self._iter_shadow_delta_snapshot_rows(self.market_snapshots_path)
+                        if self._shadow_delta_snapshot_summary_enabled(rows)
+                        else ()
+                    ),
+                ),
+                prediction_lab_rows=True,
+            ),
         }
+
+    def _shadow_delta_snapshot_summary_enabled(self, prediction_rows: list[dict[str, Any]]) -> bool:
+        if any(isinstance(row, dict) and isinstance(row.get("shadow_delta"), dict) for row in prediction_rows or []):
+            return True
+        for policy in (self.config.get("strategy_policy_normalized"), self.config.get("strategy_policy")):
+            if getattr(policy, "is_shadow", False):
+                return True
+            if isinstance(policy, dict) and policy.get("shadow") is True:
+                return True
+        return False
 
     @staticmethod
     def _hidden_gem_summary_rows(
@@ -386,6 +408,18 @@ class PredictionLab:
         for row in snapshot_rows or []:
             PredictionLab._add_hidden_gem_summary_row(by_key, unkeyed, row)
         return list(by_key.values()) + unkeyed
+
+    @staticmethod
+    def _shadow_delta_summary_rows(
+        prediction_rows: list[dict[str, Any]],
+        snapshot_rows,
+    ):
+        for row in prediction_rows or []:
+            if isinstance(row, dict) and isinstance(row.get("shadow_delta"), dict):
+                yield row
+        for row in snapshot_rows or []:
+            if isinstance(row, dict) and isinstance(row.get("shadow_delta"), dict):
+                yield row
 
     @staticmethod
     def _add_hidden_gem_summary_row(
@@ -422,6 +456,19 @@ class PredictionLab:
                 except (json.JSONDecodeError, UnicodeDecodeError):
                     continue
                 if isinstance(row, dict) and extract_hidden_gem_evidence_card(row) is not None:
+                    yield row
+
+    @staticmethod
+    def _iter_shadow_delta_snapshot_rows(path: Path):
+        if not path.exists():
+            return
+        with path.open("rb") as fh:
+            for raw_line in fh:
+                try:
+                    row = json.loads(raw_line)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+                if isinstance(row, dict) and isinstance(row.get("shadow_delta"), dict):
                     yield row
 
     def _build_prediction_row(
@@ -481,6 +528,14 @@ class PredictionLab:
         if decision_artifact is not None:
             row["shared_pipeline"] = self._shared_pipeline_summary(decision_artifact)
             row["decision_artifact"] = decision_artifact
+            shadow_delta = build_shadow_delta(
+                decision_artifact,
+                market_id=str(market.id),
+                run_id=run_id,
+                fallback_strategy_policy=self.config.get("strategy_policy_normalized") or self.config.get("strategy_policy"),
+            )
+            if shadow_delta is not None:
+                row["shadow_delta"] = shadow_delta
         return row
 
     def _record_market_route_rejection_snapshot(self, run_id: str, market, market_route: dict[str, Any]) -> None:
@@ -559,6 +614,14 @@ class PredictionLab:
         if decision_artifact is not None:
             row["shared_pipeline"] = self._shared_pipeline_summary(decision_artifact)
             row["decision_artifact"] = decision_artifact
+            shadow_delta = build_shadow_delta(
+                decision_artifact,
+                market_id=str(market.id),
+                run_id=run_id,
+                fallback_strategy_policy=self.config.get("strategy_policy_normalized") or self.config.get("strategy_policy"),
+            )
+            if shadow_delta is not None:
+                row["shadow_delta"] = shadow_delta
         return row
 
     def _evaluate_shared_pipeline(self, market, *, exchange: Any | None = None) -> dict[str, Any]:

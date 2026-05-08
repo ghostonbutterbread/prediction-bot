@@ -192,6 +192,75 @@ class PredictionLabCollectorTests(unittest.TestCase):
         row["exchange_book_calls"] = exchange.book_calls
         return row["decision_artifact"]
 
+    def _collect_shadow_delta_rows(self, tmpdir: str, *, strategy_policy: dict) -> tuple[list[dict], list[dict]]:
+        config = {
+            "data_dir": tmpdir,
+            "scan": {"allowed_market_routes": ["weather.daily_temperature"]},
+            "strategy_policy": strategy_policy,
+            "strategy_lanes": {
+                "enabled": True,
+                "sizing": {
+                    "edge": {"max_position_usd": 4.0},
+                },
+            },
+            "prediction_lab": {
+                "enabled": True,
+                "mode": "collector",
+                "observer_mode": True,
+                "groups": ["weather"],
+                "score_only": False,
+                "record_all_scored": True,
+                "collector_record_predictions": True,
+                "collector_record_market_snapshots": True,
+                "use_shared_pipeline": True,
+            },
+            "strategy": {"min_edge": 0.01, "min_confidence": 0.5, "enable_news": False, "enable_social": False, "enable_ai": False},
+            "max_entry_price": 0.7,
+        }
+        lab = PredictionLab(config)
+        signal = {
+            "market_id": "KXHIGHNY-260506-T71",
+            "exchange": "kalshi",
+            "question": "Will the high temperature in New York exceed 71 degrees?",
+            "direction": "BUY_YES",
+            "model_probability": 0.7,
+            "market_price": 0.4,
+            "yes_market_price": 0.4,
+            "no_market_price": 0.6,
+            "edge": 0.3,
+            "confidence": 0.9,
+            "signals": {"unit": 0.7},
+        }
+        lab.decision_evaluator = DecisionPipelineEvaluator(
+            lab.config,
+            strategy=_TracedSignalStrategy(signal),
+            kelly_sizer=_FixedKelly(10.0),
+            risk_policy=_AllowRisk(),
+        )
+        market = SimpleNamespace(
+            id="KXHIGHNY-260506-T71",
+            exchange="kalshi",
+            question="Will the high temperature in New York exceed 71 degrees?",
+            category="KXHIGHNY",
+            yes_price=0.4,
+            no_price=0.6,
+            volume=1000,
+            closes_at=datetime.now(timezone.utc) + timedelta(hours=6),
+            metadata={"market_group": "weather", "market_family": "daily_temperature", "series_ticker": "KXHIGHNY", "series": "daily_temperature"},
+        )
+        exchange = SimpleNamespace(
+            get_markets_direct=lambda **kwargs: [market],
+            get_order_book=lambda market_id: {
+                "best_yes_ask": 0.41,
+                "best_yes_bid": 0.4,
+                "best_no_ask": 0.61,
+                "best_no_bid": 0.6,
+            },
+        )
+
+        lab.run(exchange)
+        return load_jsonl(lab.predictions_path), load_jsonl(lab.market_snapshots_path)
+
     def _write_config(self, path: Path, *, data_dir: Path, paused: bool = False, enabled: bool = True, cap_gb: float = 5.0, groups: str = "[weather]", score_only: bool = True):
         path.write_text(
             "\n".join(
@@ -228,6 +297,113 @@ class PredictionLabCollectorTests(unittest.TestCase):
 
             self.assertTrue(config["prediction_lab"]["paused"])
             self.assertFalse(config["prediction_lab"]["observer_mode"])
+
+    def test_observer_patch_refreshes_runtime_paths_after_env_trading_mode_override(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "shadow.yaml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        f"runtime:",
+                        f"  base_dir: {Path(tmpdir) / 'data' / 'beta_shadow'}",
+                        "trading:",
+                        "  mode: paper",
+                        "  enabled: false",
+                        "prediction_lab:",
+                        "  enabled: true",
+                        "  mode: collector",
+                        "  observer_mode: true",
+                    ]
+                )
+            )
+            daemon = PredictionLabCollectorDaemon(
+                config_path,
+                config_patch={
+                    "prediction_lab": {"observer_mode": True, "mode": "collector"},
+                    "trading": {"mode": "paper", "enabled": False, "trading_enabled": False},
+                    "trading_enabled": False,
+                },
+            )
+
+            with patch.dict(os.environ, {"TRADING_MODE": "live"}, clear=False):
+                config = daemon._load_config()
+
+        self.assertEqual(config["trading"]["mode"], "paper")
+        self.assertEqual(Path(config["data_dir"]), Path(tmpdir) / "data" / "beta_shadow" / "paper")
+        self.assertEqual(Path(config["runtime"]["mode_dir"]), Path(tmpdir) / "data" / "beta_shadow" / "paper")
+
+    def test_prediction_lab_stable_and_beta_off_rows_omit_shadow_delta(self):
+        policies = [
+            {"version": "stable"},
+            {
+                "version": "beta",
+                "beta": {
+                    "mode": "off",
+                    "features": {"lane_sizing_caps": True},
+                },
+            },
+        ]
+        for policy in policies:
+            with self.subTest(policy=policy), tempfile.TemporaryDirectory() as tmpdir:
+                prediction_rows, snapshot_rows = self._collect_shadow_delta_rows(tmpdir, strategy_policy=policy)
+
+                self.assertEqual(len(prediction_rows), 1)
+                self.assertEqual(len(snapshot_rows), 1)
+                self.assertNotIn("shadow_delta", prediction_rows[0])
+                self.assertNotIn("shadow_delta", snapshot_rows[0])
+
+    def test_prediction_lab_beta_shadow_rows_include_compact_shadow_delta(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            prediction_rows, snapshot_rows = self._collect_shadow_delta_rows(
+                tmpdir,
+                strategy_policy={
+                    "version": "beta",
+                    "beta": {
+                        "mode": "shadow",
+                        "features": {"lane_sizing_caps": True},
+                    },
+                },
+            )
+
+            prediction_delta = prediction_rows[0]["shadow_delta"]
+            snapshot_delta = snapshot_rows[0]["shadow_delta"]
+
+        self.assertEqual(prediction_delta["schema_version"], 1)
+        self.assertEqual(prediction_delta["mode"], "beta_shadow_delta")
+        self.assertEqual(prediction_delta["status"], "complete")
+        self.assertTrue(prediction_delta["comparison_complete"])
+        self.assertTrue(prediction_delta["action_comparison_available"])
+        self.assertEqual(prediction_delta["policy"]["version"], "beta")
+        self.assertEqual(prediction_delta["policy"]["mode"], "shadow")
+        self.assertEqual(prediction_delta["policy"]["enabled_features"], ["lane_sizing_caps"])
+        self.assertEqual(prediction_delta["stable"]["action"], "BUY_YES")
+        self.assertEqual(prediction_delta["stable"]["requested_position_size"], 10.0)
+        self.assertEqual(prediction_delta["shadow"]["action"], "BUY_YES")
+        self.assertEqual(prediction_delta["shadow"]["requested_position_size"], 4.0)
+        self.assertTrue(prediction_delta["changed"])
+        self.assertTrue(prediction_delta["size_changed"])
+        self.assertFalse(prediction_delta["action_changed"])
+        self.assertIn("lane_sizing", prediction_delta["evidence_sources"])
+        self.assertEqual(snapshot_delta["dedupe_key"], prediction_delta["dedupe_key"])
+        self.assertNotIn("shadow_delta", prediction_rows[0]["decision_artifact"])
+
+    def test_prediction_lab_beta_shadow_does_not_create_duplicate_prediction_rows(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            prediction_rows, snapshot_rows = self._collect_shadow_delta_rows(
+                tmpdir,
+                strategy_policy={
+                    "version": "beta",
+                    "beta": {
+                        "mode": "shadow",
+                        "features": {"lane_sizing_caps": True},
+                    },
+                },
+            )
+
+        self.assertEqual(len(prediction_rows), 1)
+        self.assertEqual(len(snapshot_rows), 1)
+        self.assertIn("shadow_delta", prediction_rows[0])
+        self.assertTrue(snapshot_rows[0]["recorded_prediction"])
 
     def test_prediction_lab_run_respects_manual_pause(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1805,6 +1981,7 @@ class PredictionLabCollectorTests(unittest.TestCase):
         self.assertNotIn("score_only", _DaemonStub.kwargs["config_patch"]["prediction_lab"])
         self.assertEqual(_DaemonStub.kwargs["config_patch"]["prediction_lab"]["min_confidence_to_record"], 0.0)
         self.assertNotIn("min_edge_to_record", _DaemonStub.kwargs["config_patch"]["prediction_lab"])
+        self.assertEqual(_DaemonStub.kwargs["config_patch"]["trading"]["mode"], "paper")
         self.assertFalse(_DaemonStub.kwargs["config_patch"]["trading"]["enabled"])
         self.assertFalse(_DaemonStub.kwargs["config_patch"]["trading_enabled"])
 
