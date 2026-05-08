@@ -498,6 +498,7 @@ class Simulator:
                     else:
                         signal["_blocked"] = gate_reason
                         blockers[gate_reason] += 1
+                        self._append_shadow_intent_for_stable_skip(signal, gate_reason)
 
             except Exception as e:
                 logger.debug(f"Error analyzing {market.id}: {e}")
@@ -924,6 +925,52 @@ class Simulator:
         """Execute a shared decision through the paper execution adapter."""
 
         return self.execution_adapter.execute(decision, context)
+
+    def _append_shadow_intent_for_stable_skip(self, signal: dict, reason_code: str | None = None) -> dict | None:
+        """Record beta-shadow evidence for stable paper signals blocked before trade creation.
+
+        This is audit-only: it builds a pre-execution artifact and writes only to
+        shadow_intents.jsonl. It must not append trades, reserve capital, or touch
+        paper risk/PnL state.
+        """
+
+        try:
+            context = self.state_adapter.build_trade_context(signal)
+            decision = build_trade_decision(
+                context,
+                kelly_sizer=self.kelly,
+                risk_policy=self.risk,
+                min_edge=self.min_edge,
+                min_confidence=self.min_confidence,
+                max_entry_price=self.max_entry_price,
+            )
+            if decision.approved:
+                decision = TradeDecision(
+                    action="SKIP",
+                    approved=False,
+                    reason_code=reason_code or "stable_gate_skipped",
+                    reason=reason_code or "Stable pre-trade gate skipped before paper trade creation",
+                    confidence=decision.confidence,
+                    edge=decision.edge,
+                    entry_price=decision.entry_price,
+                    win_probability=decision.win_probability,
+                    requested_position_size=decision.requested_position_size,
+                    position_size=decision.position_size,
+                    risk_score=decision.risk_score,
+                    warnings=list(decision.warnings or []),
+                    reasoning=dict(decision.reasoning or {}),
+                )
+            decision_artifact = build_pre_execution_decision_artifact(
+                mode="paper_portfolio",
+                context=context,
+                decision=decision,
+                signal=signal,
+                config_snapshot=self.config,
+            )
+            return self._append_shadow_intent_if_any(decision_artifact, signal)
+        except Exception as exc:
+            logger.debug("paper_shadow_intent_stable_skip_failed market_id=%s error=%s", signal.get("market_id"), exc)
+            return None
 
     def _append_shadow_intent_if_any(self, decision_artifact: dict, signal: dict) -> dict | None:
         market_id = str(signal.get("market_id") or decision_artifact.get("market_id") or "")

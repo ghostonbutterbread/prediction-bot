@@ -75,6 +75,8 @@ class ShadowIntentRuntimePathTests(unittest.TestCase):
                     "data_dir": tmpdir,
                     "enable_social": False,
                     "strategy": {
+                        "min_edge": 0.05,
+                        "min_confidence": 0.5,
                         "enable_news": False,
                         "enable_social": False,
                         "enable_ai": False,
@@ -106,6 +108,68 @@ class ShadowIntentRuntimePathTests(unittest.TestCase):
 
             ledger_path = Path(tmpdir) / "paper" / "shadow_intents.jsonl"
             self.assertEqual(len(load_jsonl(ledger_path)), 1)
+            self.assertFalse((Path(tmpdir) / "paper" / "trades.jsonl").exists())
+
+
+    def test_paper_stable_skip_shadow_intent_append_does_not_mutate_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = Simulator(
+                {
+                    "data_dir": tmpdir,
+                    "enable_social": False,
+                    "strategy": {
+                        "min_edge": 0.05,
+                        "min_confidence": 0.5,
+                        "enable_news": False,
+                        "enable_social": False,
+                        "enable_ai": False,
+                    },
+                    "strategy_policy": {
+                        "version": "beta",
+                        "beta": {"mode": "shadow", "features": {"hidden_gem_lane_gates": True}},
+                    },
+                    "strategy_lanes": {
+                        "enabled": True,
+                        "confidence_slow_profit": {"enabled": True, "min_edge": 0.02, "min_confidence": 0.75},
+                    },
+                }
+            )
+            before = {
+                "trades": list(sim.trades),
+                "balance": sim.balance,
+                "available_cash": sim.available_cash,
+                "reserved_capital": sim.reserved_capital,
+                "risk_exposure": sim.risk.state.total_exposure,
+                "risk_pnl": sim.risk.state.daily_pnl,
+            }
+            signal = {
+                "exchange": "kalshi",
+                "market_id": "KXHIGHNY-26MAY08-T71",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
+                "direction": "BUY_YES",
+                "market_price": 0.5,
+                "yes_price": 0.5,
+                "no_price": 0.5,
+                "model_probability": 0.54,
+                "edge": 0.04,
+                "confidence": 0.8,
+                "category": "weather",
+            }
+
+            row = sim._append_shadow_intent_for_stable_skip(signal, "edge_below_threshold")
+
+            self.assertIsNotNone(row)
+            self.assertEqual(sim.trades, before["trades"])
+            self.assertEqual(sim.balance, before["balance"])
+            self.assertEqual(sim.available_cash, before["available_cash"])
+            self.assertEqual(sim.reserved_capital, before["reserved_capital"])
+            self.assertEqual(sim.risk.state.total_exposure, before["risk_exposure"])
+            self.assertEqual(sim.risk.state.daily_pnl, before["risk_pnl"])
+
+            ledger_path = Path(tmpdir) / "paper" / "shadow_intents.jsonl"
+            rows = load_jsonl(ledger_path)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["shadow_intent"]["intent_kind"], "unknown")
             self.assertFalse((Path(tmpdir) / "paper" / "trades.jsonl").exists())
 
     def test_live_shadow_intent_on_stable_skip_does_not_place_order_or_mutate_live_state(self):

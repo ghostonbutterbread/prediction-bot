@@ -17,10 +17,19 @@ strategy_policy:
   version: beta
   beta:
     mode: shadow
+strategy_lanes:
+  enabled: true
+  enabled_lanes: [edge, hidden_gem, confidence_slow_profit]
 ```
 
 with `weather_hidden_gem_evidence_card`, `bucket_distribution_scoring`,
-`hidden_gem_lane_gates`, and `lane_sizing_caps` set to `true`.
+`hidden_gem_lane_gates`, and `lane_sizing_caps` set to `true`. Lane sizing caps
+are configured for shadow comparison only; they do not alter final paper/live
+actions unless beta mode is explicitly promoted to `enforce`.
+
+Paper beta-shadow also records `shadow_intents.jsonl` for stable-skip candidates
+when beta lane metadata differs, so old `SKIP -> beta candidate` cases are not
+invisible during later PnL/replay review.
 
 ## Stop Normal Runtimes
 

@@ -48,7 +48,10 @@ def build_shadow_delta(
     action_comparison_available = True
 
     beta_lane_gate = _beta_lane_gate(reasoning)
-    if beta_lane_gate:
+    if beta_lane_gate and (
+        beta_lane_gate.get("allowed") is False
+        or beta_lane_gate.get("differs_from_final") is True
+    ):
         evidence_sources.append("beta_lane_gate")
         shadow["selected_lane"] = beta_lane_gate.get("lane_id") or shadow.get("selected_lane")
         if beta_lane_gate.get("allowed") is False:
