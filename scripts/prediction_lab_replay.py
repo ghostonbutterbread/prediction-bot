@@ -49,6 +49,12 @@ def main() -> int:
         default=[],
         help="Optional Prediction Lab resolutions.jsonl path; joined after replay for scoring only",
     )
+    parser.add_argument(
+        "--decision-input",
+        action="append",
+        default=[],
+        help="Optional agent_decisions.jsonl path; joined by shared_candidate_id for coverage summaries",
+    )
     parser.add_argument("--validate-only", action="store_true", help="Validate Prediction Lab input/resolution table quality and exit")
     parser.add_argument("--validation-output", default=None, help="Optional JSON path for validation result")
     parser.add_argument("--fail-on-validation-errors", action="store_true", help="Exit nonzero if validation reports errors")
@@ -72,6 +78,7 @@ def main() -> int:
         require_recorded_source=args.require_recorded_source,
         row_quality_policy=args.row_quality_policy,
         resolution_paths=args.resolution_input,
+        decision_paths=args.decision_input,
     )
 
     if args.output:

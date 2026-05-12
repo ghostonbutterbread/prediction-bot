@@ -914,6 +914,61 @@ class PredictionLabCollectorTests(unittest.TestCase):
             self.assertEqual(source_ref["signal_role"], "rejected")
             self.assertEqual(snapshot["source_signal"]["data"]["actual_temp_used"], 150.0)
 
+    def test_prediction_lab_historical_weather_snapshot_is_post_facto_not_recorded_as_of(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lab = PredictionLab(
+                {
+                    "data_dir": tmpdir,
+                    "prediction_lab": {"enabled": True, "mode": "collector", "groups": ["weather"]},
+                    "strategy": {"enable_news": False, "enable_social": False, "enable_ai": False},
+                }
+            )
+            artifact = {
+                "market_id": "KXHIGHTOKC-26APR27-T80",
+                "as_of": "2026-04-28T00:00:00+00:00",
+                "strategy_signal": {
+                    "signal_details": {
+                        "live": {
+                            "signal_type": "weather",
+                            "predicted_prob": 0.95,
+                            "confidence": 0.98,
+                            "source_timestamp": "2026-04-27T23:59:59+00:00",
+                            "question_side": "above",
+                            "data": {
+                                "forecast_high": 86.0,
+                                "forecast_low": 63.0,
+                                "actual_temp_used": 86.0,
+                                "predicted_temp": 86.0,
+                                "threshold": 80.0,
+                                "sources": ["noaa_daily_summaries_station"],
+                                "historical_replay": True,
+                                "weather_date": "2026-04-27",
+                                "date_validation": {
+                                    "ok": True,
+                                    "reason": "matched",
+                                    "market_date": "2026-04-27",
+                                    "weather_date": "2026-04-27",
+                                },
+                            },
+                        },
+                    }
+                },
+            }
+            market = SimpleNamespace(
+                id="KXHIGHTOKC-26APR27-T80",
+                question="Will the high temperature in Oklahoma City be above 80 degrees on Apr 27?",
+                metadata={"market_group": "weather", "series": "daily_temperature"},
+            )
+
+            lab._attach_weather_source_snapshot(artifact, market)
+            snapshot = artifact["source_context"]["data"]["weather_source_snapshot"]
+
+            self.assertEqual(artifact["source_context"]["source_mode"], "historical_post_facto")
+            self.assertEqual(snapshot["mode"], "historical_post_facto")
+            self.assertEqual(snapshot["source_provenance"], "historical_post_facto_backfill")
+            self.assertEqual(snapshot["provenance"]["anti_hindsight"], "post_facto_weather_not_recorded_as_of")
+            self.assertEqual(artifact["source_snapshots"][0]["mode"], "historical_post_facto")
+
     def test_prediction_lab_weather_snapshot_missing_weather_date_does_not_use_market_date_as_forecast_date(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = {
@@ -2182,6 +2237,338 @@ class PredictionLabCollectorTests(unittest.TestCase):
             self.assertAlmostEqual(resolutions[0]["resolution"]["net_pnl"], 18.6)
             self.assertAlmostEqual(resolutions[0]["resolution"]["position_size"], 20.0)
 
+    def test_prediction_lab_resolution_links_back_to_shared_candidate_without_mutating_snapshot_truth(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "data_dir": tmpdir,
+                "scan": {"allowed_market_routes": ["weather.daily_temperature"]},
+                "prediction_lab": {
+                    "enabled": True,
+                    "mode": "collector",
+                    "groups": ["weather"],
+                    "score_only": False,
+                    "record_all_scored": True,
+                    "collector_record_predictions": True,
+                    "collector_record_market_snapshots": True,
+                    "use_shared_pipeline": True,
+                    "paper_lab_mode": "opportunity",
+                    "flat_notional_usd": 10.0,
+                },
+                "strategy": {"min_edge": 0.01, "min_confidence": 0.5, "enable_news": False, "enable_social": False, "enable_ai": False},
+                "max_entry_price": 0.7,
+                "kalshi_fee_rate": 0.07,
+            }
+            lab = PredictionLab(config)
+            signal = {
+                "market_id": "KXHIGHNY-260506-T71",
+                "exchange": "kalshi",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
+                "direction": "BUY_YES",
+                "model_probability": 0.7,
+                "market_price": 0.4,
+                "yes_market_price": 0.4,
+                "no_market_price": 0.6,
+                "edge": 0.3,
+                "confidence": 0.9,
+                "signals": {"unit": 0.7},
+            }
+            lab.decision_evaluator = DecisionPipelineEvaluator(
+                lab.config,
+                strategy=_TracedSignalStrategy(signal),
+                kelly_sizer=_FixedKelly(10.0),
+                risk_policy=_AllowRisk(),
+            )
+            market = SimpleNamespace(
+                id="KXHIGHNY-260506-T71",
+                exchange="kalshi",
+                question="Will the high temperature in New York exceed 71 degrees?",
+                category="KXHIGHNY",
+                yes_price=0.4,
+                no_price=0.6,
+                volume=1000,
+                closes_at=datetime.now(timezone.utc) + timedelta(hours=6),
+                metadata={"market_group": "weather", "market_family": "daily_temperature", "series_ticker": "KXHIGHNY", "series": "daily_temperature"},
+            )
+            exchange = SimpleNamespace(
+                get_markets_direct=lambda **kwargs: [market],
+                get_order_book=lambda market_id: {
+                    "best_yes_ask": 0.41,
+                    "best_yes_bid": 0.4,
+                    "best_no_ask": 0.61,
+                    "best_no_bid": 0.6,
+                },
+                _fetch_market_raw=lambda market_id: {
+                    "status": "settled",
+                    "result": "YES",
+                    "close_price": 1.0,
+                },
+            )
+
+            lab.run(exchange)
+            prediction_row = load_jsonl(lab.predictions_path)[0]
+            snapshot_row = load_jsonl(lab.market_snapshots_path)[0]
+
+            result = lab.resolve_open_predictions(exchange)
+            resolved_prediction = load_jsonl(lab.predictions_path)[0]
+            resolution_row = load_jsonl(lab.resolutions_path)[0]
+
+        shared = snapshot_row["shared_candidate"]
+        self.assertEqual(result["resolved"], 1)
+        self.assertEqual(shared["run_id"], prediction_row["run_id"])
+        self.assertEqual(shared["run_id"], resolution_row["run_id"])
+        self.assertEqual(shared["market_id"], prediction_row["market_id"])
+        self.assertEqual(shared["market_id"], resolution_row["market_id"])
+        self.assertEqual(shared["candidate_id"], snapshot_row["shared_candidate_id"])
+        self.assertEqual(shared["candidate_id"], prediction_row["shared_candidate_id"])
+        self.assertEqual(shared["candidate_id"], resolution_row["shared_candidate_id"])
+        self.assertEqual(shared["main_runtime"], "prediction_lab")
+        self.assertEqual(shared["main_decision"]["runtime"], "prediction_lab")
+        self.assertTrue(snapshot_row["recorded_prediction"])
+        self.assertTrue(snapshot_row["observer_mode"])
+        self.assertFalse(snapshot_row["trading_enabled"])
+        self.assertFalse(snapshot_row["order_execution_enabled"])
+        self.assertFalse(snapshot_row["paper_lab"]["mutates_portfolio_account"])
+        self.assertNotIn("resolution", shared)
+        self.assertNotIn("resolution", resolved_prediction)
+        self.assertAlmostEqual(resolution_row["resolution"]["position_size"], 10.0)
+        self.assertAlmostEqual(resolution_row["resolution"]["entry_price"], 0.4)
+        self.assertGreater(resolution_row["resolution"]["net_pnl"], 0.0)
+
+    def test_prediction_lab_resolution_backfills_shared_candidate_id_from_snapshot_when_prediction_is_legacy(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "data_dir": tmpdir,
+                "prediction_lab": {
+                    "enabled": True,
+                    "mode": "collector",
+                    "groups": ["weather"],
+                    "score_only": False,
+                    "record_all_scored": True,
+                    "collector_record_predictions": True,
+                    "collector_record_market_snapshots": True,
+                    "flat_notional_usd": 10.0,
+                },
+                "strategy": {"enable_news": False, "enable_social": False, "enable_ai": False},
+                "kalshi_fee_rate": 0.07,
+            }
+            lab = PredictionLab(config)
+            market = SimpleNamespace(
+                id="KXHIGHNY-260506-T71",
+                exchange="kalshi",
+                question="Will the high temperature in New York exceed 71 degrees?",
+                category="weather",
+                yes_price=0.4,
+                no_price=0.6,
+                volume=1000,
+                metadata={"market_group": "weather", "series": "daily_temperature"},
+            )
+            signal = {
+                "market_id": market.id,
+                "exchange": "kalshi",
+                "question": market.question,
+                "direction": "BUY_YES",
+                "model_probability": 0.7,
+                "market_price": 0.4,
+                "yes_market_price": 0.4,
+                "no_market_price": 0.6,
+                "edge": 0.3,
+                "confidence": 0.9,
+                "signals": {"unit": 0.7},
+            }
+            observed_at = "2026-05-06T12:00:00+00:00"
+            prediction_row = lab._build_prediction_row(
+                "run-legacy",
+                market,
+                signal,
+                decision_type="buy_yes",
+                observed_at=observed_at,
+            )
+            prediction_row.pop("shared_candidate_id", None)
+            snapshot_row = lab._build_market_snapshot_row(
+                "run-legacy",
+                market,
+                signal,
+                decision_type="buy_yes",
+                prediction_recorded=True,
+                observed_at=observed_at,
+            )
+            append_jsonl(lab.predictions_path, prediction_row)
+            append_jsonl(lab.market_snapshots_path, snapshot_row)
+
+            exchange = SimpleNamespace(
+                _fetch_market_raw=lambda market_id: {
+                    "status": "settled",
+                    "result": "YES",
+                    "close_price": 1.0,
+                }
+            )
+
+            result = lab.resolve_open_predictions(exchange)
+            resolution_row = load_jsonl(lab.resolutions_path)[0]
+
+        self.assertEqual(result["resolved"], 1)
+        self.assertNotIn("shared_candidate_id", prediction_row)
+        self.assertEqual(resolution_row["run_id"], "run-legacy")
+        self.assertEqual(resolution_row["market_id"], market.id)
+        self.assertEqual(resolution_row["shared_candidate_id"], snapshot_row["shared_candidate_id"])
+
+    def test_prediction_lab_emits_agent_runs_and_decisions_linked_to_shared_candidate_id(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "data_dir": tmpdir,
+                "scan": {"allowed_market_routes": ["weather.daily_temperature"]},
+                "prediction_lab": {
+                    "enabled": True,
+                    "mode": "collector",
+                    "groups": ["weather"],
+                    "score_only": False,
+                    "record_all_scored": True,
+                    "collector_record_predictions": True,
+                    "collector_record_market_snapshots": True,
+                    "use_shared_pipeline": True,
+                },
+                "strategy": {"min_edge": 0.01, "min_confidence": 0.5, "enable_news": False, "enable_social": False, "enable_ai": False},
+                "max_entry_price": 0.7,
+            }
+            lab = PredictionLab(config)
+            signal = {
+                "market_id": "KXHIGHNY-260506-T71",
+                "exchange": "kalshi",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
+                "direction": "BUY_YES",
+                "model_probability": 0.7,
+                "market_price": 0.4,
+                "yes_market_price": 0.4,
+                "no_market_price": 0.6,
+                "edge": 0.3,
+                "confidence": 0.9,
+                "signals": {"unit": 0.7},
+            }
+            lab.decision_evaluator = DecisionPipelineEvaluator(
+                lab.config,
+                strategy=_TracedSignalStrategy(signal),
+                kelly_sizer=_FixedKelly(10.0),
+                risk_policy=_AllowRisk(),
+            )
+            market = SimpleNamespace(
+                id="KXHIGHNY-260506-T71",
+                exchange="kalshi",
+                question="Will the high temperature in New York exceed 71 degrees?",
+                category="KXHIGHNY",
+                yes_price=0.4,
+                no_price=0.6,
+                volume=1000,
+                closes_at=datetime.now(timezone.utc) + timedelta(hours=6),
+                metadata={"market_group": "weather", "market_family": "daily_temperature", "series_ticker": "KXHIGHNY", "series": "daily_temperature"},
+            )
+            exchange = SimpleNamespace(
+                get_markets_direct=lambda **kwargs: [market],
+                get_order_book=lambda market_id: {
+                    "best_yes_ask": 0.41,
+                    "best_yes_bid": 0.4,
+                    "best_no_ask": 0.61,
+                    "best_no_bid": 0.6,
+                },
+            )
+
+            result = lab.run(exchange)
+            snapshot_row = load_jsonl(lab.market_snapshots_path)[0]
+            agent_run_rows = load_jsonl(lab.agent_runs_path)
+            decision_rows = load_jsonl(lab.agent_decisions_path)
+
+        self.assertEqual(result.recorded_predictions, 1)
+        self.assertEqual(len(agent_run_rows), 1)
+        self.assertEqual(agent_run_rows[0]["agent_run_id"], f"prediction_lab:{result.run_id}")
+        self.assertEqual(agent_run_rows[0]["run_id"], result.run_id)
+        self.assertEqual(agent_run_rows[0]["candidate_dataset_path"], str(lab.market_snapshots_path))
+        self.assertEqual(agent_run_rows[0]["decision_ledger_path"], str(lab.agent_decisions_path))
+        self.assertFalse(agent_run_rows[0]["mutates_accounting"])
+        self.assertEqual([row["decision_role"] for row in decision_rows], ["main", "normal", "prediction_lab_paper"])
+        self.assertTrue(all(row["agent_run_id"] == f"prediction_lab:{result.run_id}" for row in decision_rows))
+        self.assertTrue(all(row["run_id"] == result.run_id for row in decision_rows))
+        self.assertTrue(all(row["shared_candidate_id"] == snapshot_row["shared_candidate_id"] for row in decision_rows))
+        self.assertTrue(all(row["candidate_dataset_path"] == str(lab.market_snapshots_path) for row in decision_rows))
+        paper_row = next(row for row in decision_rows if row["decision_role"] == "prediction_lab_paper")
+        self.assertEqual(paper_row["accounting_ref"]["namespace"], str(Path(tmpdir) / "prediction_lab" / "paper_accounting"))
+        self.assertNotIn("ledger_path", paper_row["accounting_ref"])
+        self.assertFalse(paper_row["accounting_ref"]["mutates_balance"])
+        self.assertFalse(paper_row["accounting_ref"]["mutates_accounting"])
+        self.assertFalse(paper_row["accounting_ref"]["places_orders"])
+        self.assertEqual(paper_row["accounting_ref"]["balance_model"], "fixed_opportunity")
+        self.assertFalse(paper_row["mutation_contract"]["mutates_shared_candidate"])
+        self.assertFalse(paper_row["mutation_contract"]["mutates_accounting"])
+        self.assertFalse(paper_row["mutation_contract"]["places_orders"])
+        self.assertEqual(paper_row["shared_candidate_id"], snapshot_row["shared_candidate_id"])
+        self.assertNotIn("shadow_decision", snapshot_row)
+
+    def test_prediction_lab_prediction_only_agent_decisions_keep_candidate_dataset_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "data_dir": tmpdir,
+                "scan": {"allowed_market_routes": ["weather.daily_temperature"]},
+                "prediction_lab": {
+                    "enabled": True,
+                    "mode": "collector",
+                    "groups": ["weather"],
+                    "score_only": False,
+                    "record_all_scored": True,
+                    "collector_record_predictions": True,
+                    "collector_record_market_snapshots": False,
+                    "use_shared_pipeline": True,
+                },
+                "strategy": {"min_edge": 0.01, "min_confidence": 0.5, "enable_news": False, "enable_social": False, "enable_ai": False},
+                "max_entry_price": 0.7,
+            }
+            lab = PredictionLab(config)
+            signal = {
+                "market_id": "KXHIGHNY-260506-T71",
+                "exchange": "kalshi",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
+                "direction": "BUY_YES",
+                "model_probability": 0.7,
+                "market_price": 0.4,
+                "yes_market_price": 0.4,
+                "no_market_price": 0.6,
+                "edge": 0.3,
+                "confidence": 0.9,
+                "signals": {"unit": 0.7},
+            }
+            lab.decision_evaluator = DecisionPipelineEvaluator(
+                lab.config,
+                strategy=_TracedSignalStrategy(signal),
+                kelly_sizer=_FixedKelly(10.0),
+                risk_policy=_AllowRisk(),
+            )
+            market = SimpleNamespace(
+                id="KXHIGHNY-260506-T71",
+                exchange="kalshi",
+                question="Will the high temperature in New York exceed 71 degrees?",
+                category="KXHIGHNY",
+                yes_price=0.4,
+                no_price=0.6,
+                volume=1000,
+                closes_at=datetime.now(timezone.utc) + timedelta(hours=6),
+                metadata={"market_group": "weather", "market_family": "daily_temperature", "series_ticker": "KXHIGHNY", "series": "daily_temperature"},
+            )
+            exchange = SimpleNamespace(
+                get_markets_direct=lambda **kwargs: [market],
+                get_order_book=lambda market_id: {
+                    "best_yes_ask": 0.41,
+                    "best_yes_bid": 0.4,
+                    "best_no_ask": 0.61,
+                    "best_no_bid": 0.6,
+                },
+            )
+
+            result = lab.run(exchange)
+            decision_rows = load_jsonl(lab.agent_decisions_path)
+
+        self.assertEqual(result.recorded_predictions, 1)
+        self.assertFalse(lab.market_snapshots_path.exists())
+        self.assertTrue(decision_rows)
+        self.assertTrue(all(row["run_id"] == result.run_id for row in decision_rows))
+        self.assertTrue(all(row["candidate_dataset_path"] == str(lab.market_snapshots_path) for row in decision_rows))
+
     def test_prediction_lab_rows_include_weather_risk_metadata_when_derivable(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = {
@@ -2415,10 +2802,12 @@ class PredictionLabCollectorTests(unittest.TestCase):
 
             result = lab.run(exchange)
             rows = load_jsonl(lab.market_snapshots_path)
+            decision_rows = load_jsonl(lab.agent_decisions_path)
 
             self.assertEqual(result.recorded_predictions, 0)
             self.assertEqual(rows[0]["decision_artifact"]["final_reason_code"], "unknown_market_route")
             self.assertEqual(rows[0]["market_route"]["group"], "unknown")
+            self.assertNotIn("prediction_lab_paper", [row["decision_role"] for row in decision_rows])
 
 
 if __name__ == "__main__":

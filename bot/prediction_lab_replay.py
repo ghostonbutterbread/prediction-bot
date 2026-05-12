@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Iterable
 
+from bot.agent_decision_ledger import load_agent_decision_rows, summarize_agent_decision_coverage
 from bot.decision_pipeline import (
     DecisionPipelineEvaluator,
     build_fixed_opportunity_account_state,
@@ -21,6 +22,11 @@ from bot.hidden_gem_evidence import (
     summarize_hidden_gem_evidence_cards,
 )
 from bot.prediction_lab_shadow_delta import summarize_shadow_delta_rows
+from bot.shared_market_feed import (
+    shared_candidate_id_from_row,
+    summarize_dual_policy_pnl_snapshot_rows,
+    summarize_dual_policy_snapshot_rows,
+)
 from bot.strategy_lane_reporting import summarize_strategy_lanes
 
 logger = logging.getLogger(__name__)
@@ -123,8 +129,10 @@ class ReplayComparisonRow:
     series: str | None
     event_ticker: str | None
     prediction_id: str | None
+    run_id: str | None
     experiment_id: str | None
     strategy_version: str | None
+    shared_candidate_id: str | None
     original_action: str
     replayed_action: str
     original_reason_code: str | None
@@ -237,6 +245,8 @@ def replay_recorded_artifacts(
     row_quality_policy: str = "annotate",
     resolution_records: Iterable[dict[str, Any]] | None = None,
     resolution_paths: Iterable[str | Path] | None = None,
+    decision_records: Iterable[dict[str, Any]] | None = None,
+    decision_paths: Iterable[str | Path] | None = None,
 ) -> PredictionLabReplayResult:
     """Replay recorded artifacts and compare original vs replayed decisions.
 
@@ -256,6 +266,7 @@ def replay_recorded_artifacts(
     rows: list[ReplayComparisonRow] = []
     all_rows: list[ReplayComparisonRow] = []
     shadow_delta_rows: list[dict[str, Any]] = []
+    dual_policy_rows: list[dict[str, Any]] = []
     policy = str(live_source_policy or "fail").lower()
     if policy not in {"fail", "warn_skip", "allow"}:
         raise ValueError("live_source_policy must be one of: fail, warn_skip, allow")
@@ -270,6 +281,8 @@ def replay_recorded_artifacts(
             if record.source_path:
                 shadow_row["_source_path"] = record.source_path
             shadow_delta_rows.append(shadow_row)
+        if _has_dual_policy_metadata(record.row):
+            dual_policy_rows.append(dict(record.row))
         original_artifact = record.artifact
         original_action = _normalize_action(original_artifact.get("final_action") or _stored_action(record.row))
         original_reason = _coerce_reason(original_artifact.get("final_reason_code") or _shared_pipeline_reason(record.row))
@@ -331,8 +344,10 @@ def replay_recorded_artifacts(
             series=_record_series(record, market),
             event_ticker=_record_event_ticker(record, market),
             prediction_id=_record_prediction_id(record),
+            run_id=_record_run_id(record),
             experiment_id=_record_experiment_id(record),
             strategy_version=_record_strategy_version(record),
+            shared_candidate_id=shared_candidate_id_from_row(record.row),
             original_action=original_action,
             replayed_action=replayed_action,
             original_reason_code=original_reason,
@@ -359,10 +374,19 @@ def replay_recorded_artifacts(
             continue
         rows.append(row)
 
-    _apply_resolution_scoring(all_rows, resolution_records=resolution_records, resolution_paths=resolution_paths)
+    loaded_resolutions = _load_resolution_records(resolution_records=resolution_records, resolution_paths=resolution_paths)
+    loaded_decisions = _load_agent_decision_records(decision_records=decision_records, decision_paths=decision_paths)
+    _apply_resolution_scoring(all_rows, resolution_records=loaded_resolutions)
+    _apply_resolution_outcomes(dual_policy_rows, resolution_records=loaded_resolutions)
     return PredictionLabReplayResult(
         rows=rows,
-        summary=_summarize(rows, all_rows=all_rows, shadow_delta_rows=shadow_delta_rows),
+        summary=_summarize(
+            rows,
+            all_rows=all_rows,
+            shadow_delta_rows=shadow_delta_rows,
+            dual_policy_rows=dual_policy_rows,
+            agent_decision_rows=loaded_decisions,
+        ),
         all_rows=all_rows,
     )
 
@@ -378,6 +402,7 @@ def replay_from_paths(
     require_recorded_source: bool = False,
     row_quality_policy: str = "annotate",
     resolution_paths: Iterable[str | Path] | None = None,
+    decision_paths: Iterable[str | Path] | None = None,
 ) -> PredictionLabReplayResult:
     records = load_replay_artifacts(paths, limit=limit)
     return replay_recorded_artifacts(
@@ -389,6 +414,7 @@ def replay_from_paths(
         require_recorded_source=require_recorded_source,
         row_quality_policy=row_quality_policy,
         resolution_paths=resolution_paths,
+        decision_paths=decision_paths,
     )
 
 
@@ -420,10 +446,17 @@ def classify_source_mode(artifact: dict[str, Any], row: dict[str, Any] | None = 
         if SOURCE_LIVE_CURRENT_FORBIDDEN in modes or (modes & {"live_current", "current", "live"}) or (snapshot_sources & {"live_current", "current"}):
             return SOURCE_LIVE_CURRENT_FORBIDDEN
         has_evidence = any(_snapshot_has_source_evidence(snapshot) for snapshot in snapshots if isinstance(snapshot, dict))
-        if SOURCE_RECORDED_AS_OF in modes and has_evidence:
-            return SOURCE_RECORDED_AS_OF
+        has_post_facto_evidence = any(
+            _snapshot_has_historical_post_facto_provenance(artifact, snapshot)
+            for snapshot in snapshots
+            if isinstance(snapshot, dict)
+        )
+        if has_post_facto_evidence and (has_evidence or _source_context_has_evidence((artifact.get("source_context") or {}).get("data") if isinstance(artifact.get("source_context"), dict) else None)):
+            return SOURCE_HISTORICAL_POST_FACTO
         if SOURCE_HISTORICAL_POST_FACTO in modes and has_evidence:
             return SOURCE_HISTORICAL_POST_FACTO
+        if SOURCE_RECORDED_AS_OF in modes and has_evidence:
+            return SOURCE_RECORDED_AS_OF
         if SOURCE_SYNTHETIC in modes and has_evidence:
             return SOURCE_SYNTHETIC
         if has_evidence:
@@ -433,20 +466,20 @@ def classify_source_mode(artifact: dict[str, Any], row: dict[str, Any] | None = 
     mode = str(source_context.get("source_mode") or source_context.get("mode") or "").lower()
     data = source_context.get("data")
     has_context_evidence = _source_context_has_evidence(data)
+    source = str(source_context.get("source") or "").lower()
+    if mode == SOURCE_LIVE_CURRENT_FORBIDDEN or mode in {"live", "live_current", "current"} or source in {"live", "live_current", "current"}:
+        return SOURCE_LIVE_CURRENT_FORBIDDEN
+    if has_context_evidence and _has_historical_post_facto_provenance(data):
+        return SOURCE_HISTORICAL_POST_FACTO
     if mode in {SOURCE_RECORDED_AS_OF, SOURCE_HISTORICAL_POST_FACTO, SOURCE_LIVE_CURRENT_FORBIDDEN, SOURCE_SYNTHETIC, SOURCE_MISSING}:
         if mode in {SOURCE_RECORDED_AS_OF, SOURCE_HISTORICAL_POST_FACTO, SOURCE_SYNTHETIC} and not has_context_evidence:
             return SOURCE_MISSING
         return mode
-    if mode in {"live", "live_current", "current"}:
-        return SOURCE_LIVE_CURRENT_FORBIDDEN
-    if mode in {"historical", "post_facto"}:
+    if mode in {"historical", "historical_replay", "post_facto"}:
         if not has_context_evidence:
             return SOURCE_MISSING
         return SOURCE_HISTORICAL_POST_FACTO
 
-    source = str(source_context.get("source") or "").lower()
-    if source in {"live", "live_current", "current"}:
-        return SOURCE_LIVE_CURRENT_FORBIDDEN
     if source in {"historical", "post_facto"}:
         if not has_context_evidence:
             return SOURCE_MISSING
@@ -937,6 +970,11 @@ def _record_prediction_id(record: ReplayArtifactInput) -> str | None:
     return str(value) if value not in (None, "") else None
 
 
+def _record_run_id(record: ReplayArtifactInput) -> str | None:
+    value = record.row.get("run_id")
+    return str(value) if value not in (None, "") else None
+
+
 def _record_experiment_id(record: ReplayArtifactInput) -> str | None:
     value = record.row.get("experiment_id")
     return str(value) if value not in (None, "") else None
@@ -1220,6 +1258,37 @@ def _has_backfill_provenance(artifact: dict[str, Any], row: dict[str, Any]) -> b
     if any(any(token in str(value or "").lower() for token in tokens) for value in values):
         return True
     return _nested_backfill_signal(weather_snapshot)
+
+
+def _snapshot_has_historical_post_facto_provenance(artifact: dict[str, Any], snapshot: dict[str, Any]) -> bool:
+    if _has_historical_post_facto_provenance(snapshot):
+        return True
+    resolved = _resolve_snapshot_ref(artifact, snapshot)
+    return isinstance(resolved, dict) and _has_historical_post_facto_provenance(resolved)
+
+
+def _has_historical_post_facto_provenance(value: Any) -> bool:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_text = str(key or "").lower()
+            item_text = str(item or "").lower()
+            if key_text == "historical_replay" and bool(item):
+                return True
+            if key_text in {
+                "mode",
+                "source_mode",
+                "source",
+                "source_provenance",
+                "provenance",
+                "collection_source",
+                "replay_source",
+            } and any(token in item_text for token in ("historical_post_facto", "post_facto", "historical_replay")):
+                return True
+            if _has_historical_post_facto_provenance(item):
+                return True
+    elif isinstance(value, (list, tuple, set)):
+        return any(_has_historical_post_facto_provenance(item) for item in value)
+    return False
 
 
 def _nested_backfill_signal(value: Any) -> bool:
@@ -1593,11 +1662,13 @@ def _summarize(
     *,
     all_rows: list[ReplayComparisonRow] | None = None,
     shadow_delta_rows: Iterable[dict[str, Any]] | None = None,
+    dual_policy_rows: Iterable[dict[str, Any]] | None = None,
+    agent_decision_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     all_rows = all_rows or rows
     strict_rows = [row for row in all_rows if row.include_in_strict]
     excluded_rows = [row for row in all_rows if not row.include_in_strict]
-    return {
+    summary = {
         "total": len(rows),
         "input_total": len(all_rows),
         "action_changed": sum(1 for row in rows if row.action_changed),
@@ -1619,9 +1690,17 @@ def _summarize(
             "replayed": summarize_strategy_lanes(_strategy_lane_summary_rows(rows, artifact_attr="replayed_artifact")),
         },
         "weather_hidden_gem_comparison": _weather_hidden_gem_replay_comparison(all_rows),
+        "dual_policy_replay_comparison": _summarize_dual_policy_replay_rows(dual_policy_rows or ()),
         "shadow_delta": summarize_shadow_delta_rows(shadow_delta_rows or ()),
         "warning_count": sum(len(row.warnings) for row in rows),
     }
+    if agent_decision_rows is not None:
+        replay_candidate_ids = [row.shared_candidate_id for row in all_rows if row.shared_candidate_id not in (None, "")]
+        summary["agent_decision_coverage"] = summarize_agent_decision_coverage(
+            agent_decision_rows,
+            shared_candidate_ids=replay_candidate_ids,
+        )
+    return summary
 
 
 def _strategy_lane_summary_rows(rows: list[ReplayComparisonRow], *, artifact_attr: str) -> list[dict[str, Any]]:
@@ -1875,27 +1954,18 @@ def _apply_resolution_scoring(
     resolution_records: Iterable[dict[str, Any]] | None = None,
     resolution_paths: Iterable[str | Path] | None = None,
 ) -> None:
-    resolutions = list(resolution_records or [])
-    for path_value in resolution_paths or []:
-        resolutions.extend(load_jsonl(Path(path_value)))
+    resolutions = _load_resolution_records(resolution_records=resolution_records, resolution_paths=resolution_paths)
     if not resolutions:
         return
 
-    exact: dict[tuple[str, str, str], str] = {}
-    by_market: dict[str, str] = {}
-    for resolution_row in resolutions:
-        outcome = _row_outcome(resolution_row)
-        if outcome is None:
-            continue
-        market_id = str(resolution_row.get("market_id") or "")
-        if not market_id:
-            continue
-        identity = _resolution_identity(resolution_row)
-        exact[identity] = outcome
-        by_market.setdefault(market_id, outcome)
-
+    exact, by_run_market, by_shared_candidate, by_market = _build_resolution_outcome_maps(resolutions)
     for row in rows:
-        outcome = exact.get(_comparison_identity(row)) or by_market.get(row.market_id)
+        outcome = (
+            (by_shared_candidate.get(row.shared_candidate_id) if row.shared_candidate_id not in (None, "") else None)
+            or by_run_market.get(_comparison_run_market_identity(row))
+            or exact.get(_comparison_identity(row))
+            or by_market.get(row.market_id)
+        )
         if outcome is None:
             continue
         row.outcome = outcome
@@ -1920,6 +1990,93 @@ def _comparison_identity(row: ReplayComparisonRow) -> tuple[str, str, str]:
     )
 
 
+def _resolution_run_market_identity(row: dict[str, Any]) -> tuple[str, str]:
+    return (
+        str(row.get("run_id") or ""),
+        str(row.get("market_id") or ""),
+    )
+
+
+def _comparison_run_market_identity(row: ReplayComparisonRow) -> tuple[str, str]:
+    return (
+        str(row.run_id or ""),
+        row.market_id,
+    )
+
+
+def _load_resolution_records(
+    *,
+    resolution_records: Iterable[dict[str, Any]] | None = None,
+    resolution_paths: Iterable[str | Path] | None = None,
+) -> list[dict[str, Any]]:
+    resolutions = list(resolution_records or [])
+    for path_value in resolution_paths or []:
+        resolutions.extend(load_jsonl(Path(path_value)))
+    return resolutions
+
+
+def _load_agent_decision_records(
+    *,
+    decision_records: Iterable[dict[str, Any]] | None = None,
+    decision_paths: Iterable[str | Path] | None = None,
+) -> list[dict[str, Any]] | None:
+    if decision_records is None and not decision_paths:
+        return None
+    rows = list(decision_records or [])
+    if decision_paths:
+        rows.extend(load_agent_decision_rows(decision_paths))
+    return rows
+
+
+def _build_resolution_outcome_maps(
+    resolutions: Iterable[dict[str, Any]],
+) -> tuple[dict[tuple[str, str, str], str], dict[tuple[str, str], str], dict[str, str], dict[str, str]]:
+    exact: dict[tuple[str, str, str], str] = {}
+    by_run_market: dict[tuple[str, str], str] = {}
+    by_shared_candidate: dict[str, str] = {}
+    by_market: dict[str, str] = {}
+    for resolution_row in resolutions:
+        outcome = _row_outcome(resolution_row)
+        if outcome is None:
+            continue
+        market_id = str(resolution_row.get("market_id") or "")
+        if not market_id:
+            continue
+        exact[_resolution_identity(resolution_row)] = outcome
+        by_run_market.setdefault(_resolution_run_market_identity(resolution_row), outcome)
+        shared_candidate_id = shared_candidate_id_from_row(resolution_row)
+        if shared_candidate_id not in (None, ""):
+            by_shared_candidate.setdefault(shared_candidate_id, outcome)
+        by_market.setdefault(market_id, outcome)
+    return exact, by_run_market, by_shared_candidate, by_market
+
+
+def _apply_resolution_outcomes(
+    rows: list[dict[str, Any]],
+    *,
+    resolution_records: Iterable[dict[str, Any]] | None = None,
+    resolution_paths: Iterable[str | Path] | None = None,
+) -> None:
+    resolutions = _load_resolution_records(resolution_records=resolution_records, resolution_paths=resolution_paths)
+    if not resolutions:
+        return
+    exact, by_run_market, by_shared_candidate, by_market = _build_resolution_outcome_maps(resolutions)
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        shared_candidate_id = shared_candidate_id_from_row(row)
+        outcome = (
+            (by_shared_candidate.get(shared_candidate_id) if shared_candidate_id not in (None, "") else None)
+            or by_run_market.get(_resolution_run_market_identity(row))
+            or exact.get(_resolution_identity(row))
+            or by_market.get(str(row.get("market_id") or ""))
+        )
+        if outcome is None:
+            continue
+        resolution = row.get("resolution") if isinstance(row.get("resolution"), dict) else {}
+        row["resolution"] = {**resolution, "outcome": outcome}
+
+
 def _summary_metrics(rows: list[ReplayComparisonRow]) -> dict[str, Any]:
     return {
         "total": len(rows),
@@ -1931,6 +2088,54 @@ def _summary_metrics(rows: list[ReplayComparisonRow]) -> dict[str, Any]:
         "bad_buys_added": sum(1 for row in rows if row.bad_buy_added),
         "outcomes": _counts(row.outcome or "unknown" for row in rows),
     }
+
+
+def _summarize_dual_policy_replay_rows(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    eligible_rows = [dict(row) for row in rows if _has_dual_policy_metadata(row)]
+    return {
+        "schema_version": 1,
+        "eligible_rows": len(eligible_rows),
+        "authoritative_main": {
+            "decision_path": "main_decision",
+            "normal_policy_path": "normal_decision",
+            "runtime_counts": _counts(_dual_policy_main_runtime(row) or "unknown" for row in eligible_rows),
+            "authoritative": True,
+        },
+        "hypothetical_shadow": {
+            "decision_path": "shadow_decision",
+            "non_mutating": True,
+        },
+        "decision_columns": summarize_dual_policy_snapshot_rows(eligible_rows),
+        "pnl_comparison": summarize_dual_policy_pnl_snapshot_rows(eligible_rows),
+    }
+
+
+def _has_dual_policy_metadata(row: dict[str, Any] | None) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if any(isinstance(row.get(key), dict) for key in ("main_decision", "normal_decision", "shadow_decision", "decision_delta")):
+        return True
+    shared = row.get("shared_candidate")
+    return isinstance(shared, dict) and any(isinstance(shared.get(key), dict) for key in ("main_decision", "normal_decision", "shadow_decision", "decision_delta"))
+
+
+def _dual_policy_main_runtime(row: dict[str, Any]) -> str | None:
+    if not isinstance(row, dict):
+        return None
+    value = row.get("main_runtime")
+    if value not in (None, ""):
+        return str(value)
+    shared = row.get("shared_candidate")
+    if isinstance(shared, dict) and shared.get("main_runtime") not in (None, ""):
+        return str(shared.get("main_runtime"))
+    main_decision = row.get("main_decision")
+    if isinstance(main_decision, dict) and main_decision.get("runtime") not in (None, ""):
+        return str(main_decision.get("runtime"))
+    if isinstance(shared, dict):
+        shared_main_decision = shared.get("main_decision")
+        if isinstance(shared_main_decision, dict) and shared_main_decision.get("runtime") not in (None, ""):
+            return str(shared_main_decision.get("runtime"))
+    return None
 
 
 def _counts(values: Iterable[str]) -> dict[str, int]:
