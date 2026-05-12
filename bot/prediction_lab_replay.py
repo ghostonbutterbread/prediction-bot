@@ -10,7 +10,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Iterable
 
-from bot.agent_decision_ledger import load_agent_decision_rows, summarize_agent_decision_coverage
+from bot.agent_decision_ledger import (
+    load_agent_decision_rows,
+    summarize_agent_decision_coverage,
+    summarize_agent_decision_reporting,
+)
 from bot.decision_pipeline import (
     DecisionPipelineEvaluator,
     build_fixed_opportunity_account_state,
@@ -1698,6 +1702,11 @@ def _summarize(
         replay_candidate_ids = [row.shared_candidate_id for row in all_rows if row.shared_candidate_id not in (None, "")]
         summary["agent_decision_coverage"] = summarize_agent_decision_coverage(
             agent_decision_rows,
+            shared_candidate_ids=replay_candidate_ids,
+        )
+        summary["agent_decision_report"] = summarize_agent_decision_reporting(
+            agent_decision_rows,
+            replay_rows=all_rows,
             shared_candidate_ids=replay_candidate_ids,
         )
     return summary

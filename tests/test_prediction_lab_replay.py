@@ -1145,6 +1145,12 @@ class PredictionLabReplayTests(unittest.TestCase):
         self.assertEqual(coverage["by_agent_id"], {"prediction_lab": 3})
         self.assertEqual(coverage["by_policy"], {"stable": 2, "beta_shadow": 1})
         self.assertEqual(coverage["by_decision_role"], {"main": 1, "normal": 1, "shadow": 1})
+        report = result.summary["agent_decision_report"]
+        self.assertEqual(report["total_rows"], 3)
+        self.assertEqual(report["coverage"], coverage)
+        self.assertEqual(report["policy_drift"]["candidate_count_with_action_drift"], 1)
+        self.assertEqual(report["overlap"]["candidate_count_with_multiple_policies"], 1)
+        self.assertEqual(report["outcomes"]["unresolved_rows"], 3)
 
     def test_weather_hidden_gem_replay_comparison_is_card_derived_not_replay_action_derived(self):
         approved_card_risk_skipped = _row_with_hidden_gem_card(

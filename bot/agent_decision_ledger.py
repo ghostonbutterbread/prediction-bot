@@ -266,6 +266,403 @@ def summarize_agent_decision_coverage(
     }
 
 
+def summarize_agent_decision_reporting(
+    rows: Iterable[dict[str, Any]],
+    *,
+    replay_rows: Iterable[Any] | None = None,
+    shared_candidate_ids: Iterable[str] | None = None,
+    sample_limit: int = 10,
+) -> dict[str, Any]:
+    input_rows = [row for row in rows if isinstance(row, dict)]
+    filtered_rows, unmatched_input_rows = _filter_decision_rows(input_rows, shared_candidate_ids=shared_candidate_ids)
+    row_views = [_decision_report_row_view(row, index) for index, row in enumerate(filtered_rows)]
+    grouped = _group_by(row_views, "identity_key")
+    outcome_by_shared_candidate_id = _outcome_rows_by_shared_candidate_id(replay_rows or ())
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "total_rows": len(row_views),
+        "unmatched_input_rows": unmatched_input_rows,
+        "coverage": summarize_agent_decision_coverage(input_rows, shared_candidate_ids=shared_candidate_ids),
+        "overlap": _summarize_decision_overlap(grouped, sample_limit=sample_limit),
+        "policy_drift": _summarize_policy_drift(grouped, sample_limit=sample_limit),
+        "outcomes": _summarize_decision_outcomes(row_views, outcome_by_shared_candidate_id),
+    }
+
+
+def _filter_decision_rows(
+    rows: Iterable[dict[str, Any]],
+    *,
+    shared_candidate_ids: Iterable[str] | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    requested_ids = {str(value) for value in (shared_candidate_ids or []) if str(value)}
+    filter_by_candidate = shared_candidate_ids is not None
+    filtered_rows: list[dict[str, Any]] = []
+    unmatched_input_rows = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        shared_candidate_id = shared_candidate_id_from_row(row)
+        if filter_by_candidate and shared_candidate_id not in requested_ids:
+            unmatched_input_rows += 1
+            continue
+        filtered_rows.append(row)
+    return filtered_rows, unmatched_input_rows
+
+
+def _decision_report_row_view(row: dict[str, Any], index: int) -> dict[str, Any]:
+    shared_candidate_id = shared_candidate_id_from_row(row)
+    action = _clean_report_label(row.get("action"))
+    reason_code = _clean_optional_report_label(row.get("reason_code"))
+    reason = _clean_optional_report_label(row.get("reason"))
+    return {
+        "row": row,
+        "identity_key": _decision_identity_key(row, index),
+        "shared_candidate_id": shared_candidate_id,
+        "decision_id": _clean_optional_report_label(row.get("decision_id")),
+        "agent_id": _clean_report_label(row.get("agent_id")),
+        "runtime": _clean_report_label(row.get("runtime")),
+        "policy": _clean_report_label(row.get("policy")),
+        "decision_role": _clean_report_label(row.get("decision_role")),
+        "action": action,
+        "reason_key": reason_code or reason or "unknown",
+        "reason_code": reason_code,
+        "reason": reason,
+    }
+
+
+def _decision_identity_key(row: dict[str, Any], index: int) -> str:
+    shared_candidate_id = shared_candidate_id_from_row(row)
+    if shared_candidate_id not in (None, ""):
+        return f"shared_candidate_id:{shared_candidate_id}"
+    legacy_identity = row.get("legacy_candidate_identity")
+    if isinstance(legacy_identity, dict) and legacy_identity:
+        fingerprint = legacy_identity.get("row_fingerprint_sha256") or legacy_identity.get("fingerprint")
+        if fingerprint not in (None, ""):
+            return f"legacy_fingerprint:{fingerprint}"
+        return f"legacy_candidate_identity:{_stable_json(legacy_identity)}"
+    candidate_dataset_identity = row.get("candidate_dataset_identity")
+    if candidate_dataset_identity not in (None, ""):
+        return f"candidate_dataset_identity:{candidate_dataset_identity}"
+    decision_id = row.get("decision_id")
+    if decision_id not in (None, ""):
+        return f"decision_id:{decision_id}"
+    return f"missing_identity:{index}"
+
+
+def _summarize_decision_overlap(grouped: dict[str, list[dict[str, Any]]], *, sample_limit: int) -> dict[str, Any]:
+    duplicate_identity_rows = 0
+    duplicate_identity_action_groups = 0
+    top_overlaps: list[dict[str, Any]] = []
+    for identity_key, views in sorted(grouped.items()):
+        if len(views) < 2:
+            continue
+        action_groups = _group_by(views, "action")
+        duplicate_identity_rows += sum(max(0, len(action_views) - 1) for action_views in action_groups.values())
+        duplicate_identity_action_groups += sum(1 for action_views in action_groups.values() if len(action_views) > 1)
+        top_overlaps.append(_candidate_overlap_sample(identity_key, views))
+    return {
+        "candidate_count_with_multiple_decisions": sum(1 for views in grouped.values() if len(views) > 1),
+        "candidate_count_with_multiple_agents": sum(1 for views in grouped.values() if _distinct_count(views, "agent_id") > 1),
+        "candidate_count_with_multiple_policies": sum(1 for views in grouped.values() if _distinct_count(views, "policy") > 1),
+        "duplicate_identity_rows": duplicate_identity_rows,
+        "duplicate_identity_action_groups": duplicate_identity_action_groups,
+        "top_overlaps": sorted(top_overlaps, key=lambda item: (-item["row_count"], item["identity_key"]))[:sample_limit],
+    }
+
+
+def _candidate_overlap_sample(identity_key: str, views: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "identity_key": identity_key,
+        "shared_candidate_id": _first_sorted_value(view.get("shared_candidate_id") for view in views),
+        "row_count": len(views),
+        "agents": _sorted_distinct(view["agent_id"] for view in views),
+        "runtimes": _sorted_distinct(view["runtime"] for view in views),
+        "policies": _sorted_distinct(view["policy"] for view in views),
+        "decision_roles": _sorted_distinct(view["decision_role"] for view in views),
+        "actions": _sorted_distinct(view["action"] for view in views),
+    }
+
+
+def _summarize_policy_drift(grouped: dict[str, list[dict[str, Any]]], *, sample_limit: int) -> dict[str, Any]:
+    by_policy_pair: dict[str, dict[str, int]] = {}
+    drift_samples: list[dict[str, Any]] = []
+    action_drift_count = 0
+    reason_drift_count = 0
+    for identity_key, views in sorted(grouped.items()):
+        if _distinct_count(views, "policy") < 2:
+            continue
+        pair_drift = _record_policy_pair_drift(by_policy_pair, views)
+        action_drift = pair_drift["action_drift"]
+        reason_drift = pair_drift["reason_drift"]
+        if not action_drift and not reason_drift:
+            continue
+        if action_drift:
+            action_drift_count += 1
+        if reason_drift:
+            reason_drift_count += 1
+        drift_samples.append(
+            {
+                "identity_key": identity_key,
+                "shared_candidate_id": _first_sorted_value(view.get("shared_candidate_id") for view in views),
+                "action_drift": action_drift,
+                "reason_drift": reason_drift,
+                "agents": _sorted_distinct(view["agent_id"] for view in views),
+                "policies": _sorted_distinct(view["policy"] for view in views),
+                "decision_roles": _sorted_distinct(view["decision_role"] for view in views),
+                "actions": _sorted_distinct(view["action"] for view in views),
+                "reason_codes": _sorted_distinct(view["reason_code"] or view["reason_key"] for view in views),
+                "decisions": _decision_sample_rows(views),
+            }
+        )
+    return {
+        "candidate_count_with_action_drift": action_drift_count,
+        "candidate_count_with_reason_drift": reason_drift_count,
+        "by_policy_pair": {key: by_policy_pair[key] for key in sorted(by_policy_pair)},
+        "by_candidate": sorted(drift_samples, key=lambda item: item["identity_key"])[:sample_limit],
+    }
+
+
+def _record_policy_pair_drift(
+    by_policy_pair: dict[str, dict[str, int]],
+    views: list[dict[str, Any]],
+) -> dict[str, bool]:
+    policies = _sorted_distinct(view["policy"] for view in views)
+    any_action_drift = False
+    any_reason_drift = False
+    for left_index, left_policy in enumerate(policies):
+        for right_policy in policies[left_index + 1 :]:
+            pair_views = [view for view in views if view["policy"] in {left_policy, right_policy}]
+            left_views = [view for view in pair_views if view["policy"] == left_policy]
+            right_views = [view for view in pair_views if view["policy"] == right_policy]
+            pair_action_drift = _value_set(left_views, "action") != _value_set(right_views, "action")
+            pair_reason_drift = _value_set(left_views, "reason_key") != _value_set(right_views, "reason_key")
+            if not pair_action_drift and not pair_reason_drift:
+                continue
+            any_action_drift = any_action_drift or pair_action_drift
+            any_reason_drift = any_reason_drift or pair_reason_drift
+            pair_key = f"{left_policy}|{right_policy}"
+            bucket = by_policy_pair.setdefault(
+                pair_key,
+                {"candidate_count": 0, "action_drift_count": 0, "reason_drift_count": 0},
+            )
+            bucket["candidate_count"] += 1
+            if pair_action_drift:
+                bucket["action_drift_count"] += 1
+            if pair_reason_drift:
+                bucket["reason_drift_count"] += 1
+    return {"action_drift": any_action_drift, "reason_drift": any_reason_drift}
+
+
+def _decision_sample_rows(views: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "agent_id": view["agent_id"],
+            "policy": view["policy"],
+            "decision_role": view["decision_role"],
+            "action": view["action"],
+            "reason_code": view["reason_code"],
+        }
+        for view in sorted(views, key=lambda item: (item["agent_id"], item["policy"], item["decision_role"], item["action"], item["reason_key"]))
+    ]
+
+
+def _summarize_decision_outcomes(
+    row_views: list[dict[str, Any]],
+    outcome_by_shared_candidate_id: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    joined_candidate_ids = {
+        str(view.get("shared_candidate_id"))
+        for view in row_views
+        if view.get("shared_candidate_id") not in (None, "") and str(view.get("shared_candidate_id")) in outcome_by_shared_candidate_id
+    }
+    report = {
+        "joined_rows": 0,
+        "unresolved_rows": 0,
+        "by_outcome": {},
+        "by_agent_id": {},
+        "by_policy": {},
+        "by_decision_role": {},
+        "by_action": {},
+        "candidate_delta_flags": _summarize_candidate_delta_flags(outcome_by_shared_candidate_id, shared_candidate_ids=joined_candidate_ids),
+    }
+    for view in row_views:
+        outcome_info = outcome_by_shared_candidate_id.get(str(view.get("shared_candidate_id") or ""))
+        outcome = _clean_optional_report_label((outcome_info or {}).get("outcome"))
+        metrics = _outcome_metrics_for_decision(view, outcome_info or {})
+        if outcome is None:
+            report["unresolved_rows"] += 1
+        else:
+            report["joined_rows"] += 1
+            _increment_count(report["by_outcome"], outcome)
+        _add_outcome_group(report["by_agent_id"], view["agent_id"], metrics)
+        _add_outcome_group(report["by_policy"], view["policy"], metrics)
+        _add_outcome_group(report["by_decision_role"], view["decision_role"], metrics)
+        _add_outcome_group(report["by_action"], view["action"], metrics)
+    report["by_outcome"] = _sorted_count_dict(report["by_outcome"])
+    for key in ("by_agent_id", "by_policy", "by_decision_role", "by_action"):
+        report[key] = {bucket_key: report[key][bucket_key] for bucket_key in sorted(report[key])}
+    return report
+
+
+def _outcome_metrics_for_decision(view: dict[str, Any], outcome_info: dict[str, Any]) -> dict[str, int]:
+    outcome = _clean_optional_report_label(outcome_info.get("outcome"))
+    action = str(view.get("action") or "").upper()
+    resolved = outcome is not None
+    resolved_yes_no = str(outcome or "").upper() in {"YES", "NO"}
+    is_skip = action == "SKIP"
+    win = resolved_yes_no and _decision_action_matches_outcome(action, str(outcome))
+    loss = resolved_yes_no and _decision_action_is_buy(action) and not win
+    return {
+        "rows": 1,
+        "joined_rows": 1 if resolved else 0,
+        "unresolved_rows": 0 if resolved else 1,
+        "wins": 1 if win else 0,
+        "losses": 1 if loss else 0,
+        "skips": 1 if is_skip else 0,
+    }
+
+
+def _add_outcome_group(groups: dict[str, dict[str, int]], key: str, metrics: dict[str, int]) -> None:
+    bucket = groups.setdefault(
+        key,
+        {
+            "rows": 0,
+            "joined_rows": 0,
+            "unresolved_rows": 0,
+            "wins": 0,
+            "losses": 0,
+            "skips": 0,
+        },
+    )
+    for metric_key, value in metrics.items():
+        bucket[metric_key] += int(value)
+
+
+def _summarize_candidate_delta_flags(
+    outcome_by_shared_candidate_id: dict[str, dict[str, Any]],
+    *,
+    shared_candidate_ids: set[str],
+) -> dict[str, Any]:
+    flagged_candidates = []
+    missed_win_candidate_count = 0
+    bad_buy_added_candidate_count = 0
+    bad_buy_removed_candidate_count = 0
+    for shared_candidate_id, outcome_info in sorted(outcome_by_shared_candidate_id.items()):
+        if shared_candidate_id not in shared_candidate_ids:
+            continue
+        flags = {
+            "missed_win": bool(outcome_info.get("missed_win")),
+            "bad_buy_added": bool(outcome_info.get("bad_buy_added")),
+            "bad_buy_removed": bool(outcome_info.get("bad_buy_removed")),
+        }
+        if not any(flags.values()):
+            continue
+        missed_win_candidate_count += int(flags["missed_win"])
+        bad_buy_added_candidate_count += int(flags["bad_buy_added"])
+        bad_buy_removed_candidate_count += int(flags["bad_buy_removed"])
+        flagged_candidates.append(
+            {
+                "shared_candidate_id": shared_candidate_id,
+                "outcome": _clean_optional_report_label(outcome_info.get("outcome")),
+                **flags,
+            }
+        )
+    return {
+        "missed_win_candidate_count": missed_win_candidate_count,
+        "bad_buy_added_candidate_count": bad_buy_added_candidate_count,
+        "bad_buy_removed_candidate_count": bad_buy_removed_candidate_count,
+        "flagged_candidate_count": len(flagged_candidates),
+        "by_candidate": flagged_candidates,
+    }
+
+
+def _outcome_rows_by_shared_candidate_id(rows: Iterable[Any]) -> dict[str, dict[str, Any]]:
+    by_shared_candidate_id: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        shared_candidate_id = _row_value(row, "shared_candidate_id")
+        if shared_candidate_id in (None, ""):
+            continue
+        key = str(shared_candidate_id)
+        current = by_shared_candidate_id.setdefault(
+            key,
+            {
+                "outcome": None,
+                "missed_win": False,
+                "bad_buy_added": False,
+                "bad_buy_removed": False,
+            },
+        )
+        outcome = _row_value(row, "outcome")
+        if current["outcome"] in (None, "") and outcome not in (None, ""):
+            current["outcome"] = str(outcome)
+        current["missed_win"] = bool(current["missed_win"] or _row_value(row, "missed_win"))
+        current["bad_buy_added"] = bool(current["bad_buy_added"] or _row_value(row, "bad_buy_added"))
+        current["bad_buy_removed"] = bool(current["bad_buy_removed"] or _row_value(row, "bad_buy_removed"))
+    return by_shared_candidate_id
+
+
+def _decision_action_is_buy(action: str) -> bool:
+    return action in {"BUY_YES", "BUY_NO"}
+
+
+def _decision_action_matches_outcome(action: str, outcome: str) -> bool:
+    normalized_outcome = outcome.upper()
+    return (action == "BUY_YES" and normalized_outcome == "YES") or (action == "BUY_NO" and normalized_outcome == "NO")
+
+
+def _group_by(rows: Iterable[dict[str, Any]], key: str) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(str(row.get(key) or "unknown"), []).append(row)
+    return grouped
+
+
+def _distinct_count(rows: Iterable[dict[str, Any]], key: str) -> int:
+    return len(_sorted_distinct(row.get(key) for row in rows))
+
+
+def _value_set(rows: Iterable[dict[str, Any]], key: str) -> set[str]:
+    return {str(row.get(key)) for row in rows if row.get(key) not in (None, "")}
+
+
+def _sorted_distinct(values: Iterable[Any]) -> list[str]:
+    return sorted({str(value) for value in values if value not in (None, "")})
+
+
+def _first_sorted_value(values: Iterable[Any]) -> str | None:
+    sorted_values = _sorted_distinct(values)
+    return sorted_values[0] if sorted_values else None
+
+
+def _increment_count(counts: dict[str, int], key: str) -> None:
+    counts[key] = counts.get(key, 0) + 1
+
+
+def _sorted_count_dict(counts: dict[str, int]) -> dict[str, int]:
+    return {key: counts[key] for key in sorted(counts)}
+
+
+def _clean_report_label(value: Any) -> str:
+    return _clean_optional_report_label(value) or "unknown"
+
+
+def _clean_optional_report_label(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _stable_json(value: Any) -> str:
+    return json.dumps(_json_safe(value), sort_keys=True, separators=(",", ":"))
+
+
+def _row_value(row: Any, key: str) -> Any:
+    if isinstance(row, dict):
+        return row.get(key)
+    return getattr(row, key, None)
+
+
 def _decision_role_rows(source_row: dict[str, Any], *, candidate_dataset_path: str | Path | None = None) -> list[tuple[str, dict[str, Any]]]:
     role_rows: list[tuple[str, dict[str, Any]]] = []
     for decision_role, key in (("main", "main_decision"), ("normal", "normal_decision"), ("shadow", "shadow_decision")):
