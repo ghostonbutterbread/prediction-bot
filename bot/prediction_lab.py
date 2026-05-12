@@ -10,6 +10,11 @@ from math import isfinite
 from pathlib import Path
 from typing import Any, Optional
 
+from bot.agent_decision_ledger import (
+    build_agent_decision_rows_from_source_row,
+    build_agent_run_id,
+    build_agent_run_row,
+)
 from bot.decision_pipeline import (
     DecisionPipelineEvaluator,
     FixedOpportunityAccountStateProvider,
@@ -28,6 +33,13 @@ from bot.strategies.enhanced import EnhancedStrategyEngine, KellySizer, strategy
 from bot.market_classification import apply_classification_metadata, classify_market_object
 from bot.market_router import route_market
 from bot.shared_core.resolution import detect_market_outcome
+from bot.shared_market_feed import (
+    build_dual_policy_decision_metadata,
+    build_shared_market_candidate_row,
+    shared_candidate_id_from_row,
+    summarize_dual_policy_pnl_snapshot_rows,
+    summarize_dual_policy_snapshot_rows,
+)
 from bot.shared_core.weather_risk import (
     assess_weather_market_risk,
     build_weather_source_confidence_evidence,
@@ -119,6 +131,8 @@ class PredictionLab:
         self.predictions_path = self.root_dir / "predictions.jsonl"
         self.resolutions_path = self.root_dir / "resolutions.jsonl"
         self.market_snapshots_path = self.root_dir / "market_snapshots.jsonl"
+        self.agent_runs_path = self.root_dir / "agent_runs.jsonl"
+        self.agent_decisions_path = self.root_dir / "agent_decisions.jsonl"
         self.state_path = self.root_dir / "state.json"
         self.reports_dir = self.root_dir / "reports"
         self.reports_dir.mkdir(parents=True, exist_ok=True)
@@ -126,17 +140,39 @@ class PredictionLab:
 
     def run(self, exchange) -> PredictionLabRunResult:
         run_id = datetime.now(timezone.utc).strftime("plab_%Y%m%dT%H%M%SZ")
+        run_started_at = datetime.now(timezone.utc).isoformat()
         self._validate_v1_groups()
         if not bool(self.lab_cfg.get("enabled", True)):
             self._update_state(mode=self.mode, paused=False, last_run_id=run_id, paused_reason="disabled")
+            self._safe_upsert_agent_run(
+                run_id=run_id,
+                started_at=run_started_at,
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                status="completed",
+                notes="disabled",
+            )
             return PredictionLabRunResult(run_id=run_id, scanned_markets=0, recorded_predictions=0, group_counts={}, series_counts={}, ledger_path=str(self.predictions_path))
 
         if self.paused:
             self._update_state(mode=self.mode, paused=True, last_run_id=run_id, paused_reason="manual_pause")
+            self._safe_upsert_agent_run(
+                run_id=run_id,
+                started_at=run_started_at,
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                status="completed",
+                notes="manual_pause",
+            )
             return PredictionLabRunResult(run_id=run_id, scanned_markets=0, recorded_predictions=0, group_counts={}, series_counts={}, ledger_path=str(self.predictions_path))
 
         if self.mode == "resolve_only":
             self._update_state(mode=self.mode, paused=False, last_run_id=run_id, paused_reason="resolve_only")
+            self._safe_upsert_agent_run(
+                run_id=run_id,
+                started_at=run_started_at,
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                status="completed",
+                notes="resolve_only",
+            )
             return PredictionLabRunResult(run_id=run_id, scanned_markets=0, recorded_predictions=0, group_counts={}, series_counts={}, ledger_path=str(self.predictions_path))
 
         markets = self._get_candidate_markets(exchange)
@@ -206,6 +242,9 @@ class PredictionLab:
                 and (not observation_mode or self.collector_record_predictions)
                 and not self.score_only
             )
+            observed_at = None
+            if should_record_prediction or (observation_mode and self.collector_record_market_snapshots):
+                observed_at = datetime.now(timezone.utc).isoformat()
             if should_record_prediction:
                 row = self._build_prediction_row(
                     run_id,
@@ -213,24 +252,35 @@ class PredictionLab:
                     signal,
                     decision_type=decision_type,
                     decision_artifact=decision_artifact,
+                    observed_at=observed_at,
                 )
                 prediction_recorded = self._append_prediction_if_absent(row)
                 if prediction_recorded:
                     recorded += 1
+                    if not (observation_mode and self.collector_record_market_snapshots):
+                        self._safe_append_agent_decisions(
+                            row,
+                            run_id=run_id,
+                            decided_at=observed_at,
+                        )
 
             if observation_mode and self.collector_record_market_snapshots:
+                snapshot_row = self._build_market_snapshot_row(
+                    run_id,
+                    market,
+                    signal,
+                    decision_type=decision_type,
+                    prediction_recorded=prediction_recorded,
+                    decision_artifact=decision_artifact,
+                    observed_at=observed_at,
+                )
                 with self._prediction_ledger_lock():
-                    append_jsonl(
-                        self.market_snapshots_path,
-                        self._build_market_snapshot_row(
-                            run_id,
-                            market,
-                            signal,
-                            decision_type=decision_type,
-                            prediction_recorded=prediction_recorded,
-                            decision_artifact=decision_artifact,
-                        ),
-                    )
+                    append_jsonl(self.market_snapshots_path, snapshot_row)
+                self._safe_append_agent_decisions(
+                    snapshot_row,
+                    run_id=run_id,
+                    decided_at=observed_at,
+                )
 
             if self.mode == "seed_and_watch" and recorded >= self.max_new_predictions_per_seed:
                 break
@@ -244,6 +294,13 @@ class PredictionLab:
             open_prediction_count=self._count_open_predictions(),
             resolved_prediction_count=self._count_resolved_predictions(),
             paused_reason=paused_reason,
+        )
+        self._safe_upsert_agent_run(
+            run_id=run_id,
+            started_at=run_started_at,
+            finished_at=datetime.now(timezone.utc).isoformat(),
+            status="completed",
+            notes="collector_observer_only" if self._observation_semantics_enabled() else None,
         )
 
         return PredictionLabRunResult(
@@ -259,7 +316,9 @@ class PredictionLab:
         with self._prediction_ledger_lock():
             rows = load_jsonl(self.predictions_path)
             existing_resolutions = load_jsonl(self.resolutions_path)
+            snapshot_rows = load_jsonl(self.market_snapshots_path)
             resolved_keys = {self._prediction_identity(row) for row in existing_resolutions}
+            shared_candidate_ids = self._shared_candidate_ids_by_run_market(snapshot_rows)
             unresolved = [row for row in rows if row.get("status") == "open"]
             resolved_count = 0
             correct = 0
@@ -300,7 +359,18 @@ class PredictionLab:
                         fee_model=fee_model,
                     )
                     row["status"] = "resolved"
-                append_jsonl(self.resolutions_path, self._build_resolution_row(row, outcome=outcome, scored=scored))
+                append_jsonl(
+                    self.resolutions_path,
+                    self._build_resolution_row(
+                        row,
+                        outcome=outcome,
+                        scored=scored,
+                        shared_candidate_id=self._shared_candidate_id_for_prediction(
+                            row,
+                            snapshot_shared_candidate_ids=shared_candidate_ids,
+                        ),
+                    ),
+                )
                 resolved_keys.add(identity)
                 resolved_count += 1
                 if scored.get("is_correct") is True:
@@ -334,6 +404,7 @@ class PredictionLab:
         with self._prediction_ledger_lock():
             rows = load_jsonl(self.predictions_path)
             resolution_rows = load_jsonl(self.resolutions_path)
+            snapshot_rows = load_jsonl(self.market_snapshots_path)
         resolved_by_identity = {self._prediction_identity(row): row for row in resolution_rows if isinstance(row.get("resolution"), dict)}
         resolved = [row for row in rows if self._prediction_identity(row) in resolved_by_identity]
         open_rows = [row for row in rows if row.get("status") == "open"]
@@ -384,6 +455,8 @@ class PredictionLab:
                 ),
                 prediction_lab_rows=True,
             ),
+            "dual_policy_columns": summarize_dual_policy_snapshot_rows(snapshot_rows),
+            "dual_policy_pnl_comparison": summarize_dual_policy_pnl_snapshot_rows(snapshot_rows),
         }
 
     def _shadow_delta_snapshot_summary_enabled(self, prediction_rows: list[dict[str, Any]]) -> bool:
@@ -479,6 +552,7 @@ class PredictionLab:
         *,
         decision_type: str,
         decision_artifact: dict[str, Any] | None = None,
+        observed_at: str | None = None,
     ) -> dict[str, Any]:
         metadata = dict(getattr(market, "metadata", {}) or {})
         context = None
@@ -492,7 +566,7 @@ class PredictionLab:
                     }
             except Exception:
                 context = None
-        timestamp = datetime.now(timezone.utc).isoformat()
+        timestamp = observed_at or datetime.now(timezone.utc).isoformat()
         row = {
             "prediction_id": f"{run_id}_{market.id}",
             "run_id": run_id,
@@ -536,6 +610,19 @@ class PredictionLab:
             )
             if shadow_delta is not None:
                 row["shadow_delta"] = shadow_delta
+        row["shared_candidate_id"] = build_shared_market_candidate_row(
+            run_id=run_id,
+            market=market,
+            signal=signal,
+            decision_artifact=decision_artifact,
+            shadow_delta=row.get("shadow_delta") if isinstance(row.get("shadow_delta"), dict) else None,
+            source_runtime="prediction_lab",
+            provenance="live_known_at_time",
+            observed_at=timestamp,
+            snapshot_as_of=timestamp,
+            snapshot_ttl_seconds=self.collector_interval_seconds,
+            weather_risk=weather_risk,
+        ).get("candidate_id")
         return row
 
     def _record_market_route_rejection_snapshot(self, run_id: str, market, market_route: dict[str, Any]) -> None:
@@ -561,18 +648,17 @@ class PredictionLab:
             "final_reason": f"Market route rejected: {signal['skip_reason_code']}",
             "market_route": market_route,
         }
+        snapshot_row = self._build_market_snapshot_row(
+            run_id,
+            market,
+            signal,
+            decision_type="skip",
+            prediction_recorded=False,
+            decision_artifact=artifact,
+        )
         with self._prediction_ledger_lock():
-            append_jsonl(
-                self.market_snapshots_path,
-                self._build_market_snapshot_row(
-                    run_id,
-                    market,
-                    signal,
-                    decision_type="skip",
-                    prediction_recorded=False,
-                    decision_artifact=artifact,
-                ),
-            )
+            append_jsonl(self.market_snapshots_path, snapshot_row)
+        self._safe_append_agent_decisions(snapshot_row, run_id=run_id)
 
     def _build_market_snapshot_row(
         self,
@@ -583,9 +669,10 @@ class PredictionLab:
         decision_type: str,
         prediction_recorded: bool,
         decision_artifact: dict[str, Any] | None = None,
+        observed_at: str | None = None,
     ) -> dict[str, Any]:
         metadata = dict(getattr(market, "metadata", {}) or {})
-        timestamp = datetime.now(timezone.utc).isoformat()
+        timestamp = observed_at or datetime.now(timezone.utc).isoformat()
         row = {
             "timestamp": timestamp,
             "observed_at": timestamp,
@@ -611,6 +698,7 @@ class PredictionLab:
         weather_risk = self._build_weather_risk_metadata(market, signal)
         if weather_risk is not None:
             row["weather_risk"] = weather_risk
+        shadow_delta = None
         if decision_artifact is not None:
             row["shared_pipeline"] = self._shared_pipeline_summary(decision_artifact)
             row["decision_artifact"] = decision_artifact
@@ -620,8 +708,30 @@ class PredictionLab:
                 run_id=run_id,
                 fallback_strategy_policy=self.config.get("strategy_policy_normalized") or self.config.get("strategy_policy"),
             )
+            row.update(
+                build_dual_policy_decision_metadata(
+                    decision_artifact,
+                    shadow_delta=shadow_delta,
+                    fallback_signal=signal,
+                    source_runtime="prediction_lab",
+                )
+            )
             if shadow_delta is not None:
                 row["shadow_delta"] = shadow_delta
+        row["shared_candidate"] = build_shared_market_candidate_row(
+            run_id=run_id,
+            market=market,
+            signal=signal,
+            decision_artifact=decision_artifact,
+            shadow_delta=shadow_delta,
+            source_runtime="prediction_lab",
+            provenance="live_known_at_time",
+            observed_at=timestamp,
+            snapshot_as_of=timestamp,
+            snapshot_ttl_seconds=self.collector_interval_seconds,
+            weather_risk=weather_risk,
+        )
+        row["shared_candidate_id"] = row["shared_candidate"].get("candidate_id")
         return row
 
     def _evaluate_shared_pipeline(self, market, *, exchange: Any | None = None) -> dict[str, Any]:
@@ -881,6 +991,7 @@ class PredictionLab:
         snapshot = self._build_weather_source_snapshot(artifact, market)
         if not snapshot:
             return
+        source_mode = str(snapshot.get("mode") or "recorded_as_of")
         source_context = artifact.get("source_context")
         if not isinstance(source_context, dict):
             source_context = {"source": "provided", "mode": artifact.get("mode"), "data": {}}
@@ -890,8 +1001,12 @@ class PredictionLab:
             data = {}
             source_context["data"] = data
         data["weather_source_snapshot"] = snapshot
-        source_context["source"] = "provided"
-        source_context["source_mode"] = "recorded_as_of"
+        source_context["source"] = "historical_post_facto" if source_mode == "historical_post_facto" else "provided"
+        source_context["source_mode"] = source_mode
+        if snapshot.get("source_provenance"):
+            source_context["source_provenance"] = snapshot.get("source_provenance")
+        if snapshot.get("provenance"):
+            source_context["provenance"] = snapshot.get("provenance")
         if snapshot.get("as_of") and not source_context.get("as_of"):
             source_context["as_of"] = snapshot.get("as_of")
 
@@ -903,8 +1018,10 @@ class PredictionLab:
             {
                 key: value
                 for key, value in {
-                    "mode": "recorded_as_of",
+                    "mode": source_mode,
                     "source": "weather",
+                    "source_provenance": snapshot.get("source_provenance"),
+                    "provenance": snapshot.get("provenance"),
                     "method": "_live_data_signal",
                     "signal_name": snapshot.get("signal_name"),
                     "signal_role": snapshot.get("signal_role"),
@@ -930,6 +1047,12 @@ class PredictionLab:
         weather_data = weather_signal.get("data") if isinstance(weather_signal.get("data"), dict) else {}
         if not self._has_weather_snapshot_evidence(weather_signal, weather_data):
             return None
+        source_mode = self._weather_snapshot_source_mode(weather_signal, weather_data)
+        source_provenance = (
+            "historical_post_facto_backfill"
+            if source_mode == "historical_post_facto"
+            else weather_data.get("source_provenance") or weather_signal.get("source_provenance")
+        )
 
         strategy_signal = artifact.get("strategy_signal") if isinstance(artifact.get("strategy_signal"), dict) else {}
         market_id = str(getattr(market, "id", "") or strategy_signal.get("market_id") or artifact.get("market_id") or "")
@@ -984,7 +1107,9 @@ class PredictionLab:
         }
         snapshot = {
             "artifact_version": 1,
-            "mode": "recorded_as_of",
+            "mode": source_mode,
+            "source_provenance": source_provenance,
+            "provenance": self._weather_snapshot_provenance(source_mode, source_provenance),
             "source_name": "weather",
             "signal_name": signal_name,
             "signal_role": signal_role,
@@ -1053,6 +1178,34 @@ class PredictionLab:
         self._copy_optional_weather_date_fields(snapshot, validation_weather_data, validated_weather_date=validated_weather_date)
         self._copy_optional_forecast_metadata(snapshot, validation_weather_data)
         return snapshot
+
+    @staticmethod
+    def _weather_snapshot_source_mode(weather_signal: dict[str, Any], weather_data: dict[str, Any]) -> str:
+        mode_values = [
+            weather_signal.get("mode"),
+            weather_signal.get("source_mode"),
+            weather_signal.get("source_provenance"),
+            weather_data.get("mode"),
+            weather_data.get("source_mode"),
+            weather_data.get("source_provenance"),
+        ]
+        if weather_signal.get("historical_replay") is True or weather_data.get("historical_replay") is True:
+            return "historical_post_facto"
+        if any("historical_post_facto" in str(value or "").lower() or "post_facto" in str(value or "").lower() for value in mode_values):
+            return "historical_post_facto"
+        if any("historical_replay" in str(value or "").lower() or "backfill" in str(value or "").lower() for value in mode_values):
+            return "historical_post_facto"
+        return "recorded_as_of"
+
+    @staticmethod
+    def _weather_snapshot_provenance(source_mode: str, source_provenance: Any) -> dict[str, Any] | None:
+        if source_mode != "historical_post_facto":
+            return None
+        return {
+            "source_mode": "historical_post_facto",
+            "source_provenance": source_provenance or "historical_post_facto_backfill",
+            "anti_hindsight": "post_facto_weather_not_recorded_as_of",
+        }
 
     @staticmethod
     def _find_weather_signal_for_snapshot(artifact: dict[str, Any]) -> tuple[str, dict[str, Any], str] | None:
@@ -1759,9 +1912,16 @@ class PredictionLab:
             return None
         return detect_market_outcome(raw)
 
-    def _build_resolution_row(self, row: dict[str, Any], *, outcome: str, scored: dict[str, Any]) -> dict[str, Any]:
+    def _build_resolution_row(
+        self,
+        row: dict[str, Any],
+        *,
+        outcome: str,
+        scored: dict[str, Any],
+        shared_candidate_id: str | None = None,
+    ) -> dict[str, Any]:
         resolved_at = datetime.now(timezone.utc).isoformat()
-        return {
+        resolution_row = {
             "resolution_id": f"{row.get('prediction_id') or row.get('market_id')}_{resolved_at}",
             "prediction_id": row.get("prediction_id"),
             "market_id": row.get("market_id"),
@@ -1790,6 +1950,34 @@ class PredictionLab:
                 "quoted_entry_price": scored.get("quoted_entry_price"),
             },
         }
+        if shared_candidate_id not in (None, ""):
+            resolution_row["shared_candidate_id"] = shared_candidate_id
+        return resolution_row
+
+    @staticmethod
+    def _shared_candidate_ids_by_run_market(snapshot_rows: list[dict[str, Any]]) -> dict[tuple[str, str], str]:
+        by_run_market: dict[tuple[str, str], str] = {}
+        for row in snapshot_rows or []:
+            candidate_id = shared_candidate_id_from_row(row)
+            if candidate_id in (None, ""):
+                continue
+            key = (str(row.get("run_id") or ""), str(row.get("market_id") or ""))
+            if key == ("", ""):
+                continue
+            by_run_market.setdefault(key, candidate_id)
+        return by_run_market
+
+    @staticmethod
+    def _shared_candidate_id_for_prediction(
+        row: dict[str, Any],
+        *,
+        snapshot_shared_candidate_ids: dict[tuple[str, str], str],
+    ) -> str | None:
+        candidate_id = shared_candidate_id_from_row(row)
+        if candidate_id not in (None, ""):
+            return candidate_id
+        key = (str(row.get("run_id") or ""), str(row.get("market_id") or ""))
+        return snapshot_shared_candidate_ids.get(key)
 
     def _group_allowed(self, group: str) -> bool:
         normalized = str(group or "unknown").lower()
@@ -1805,6 +1993,70 @@ class PredictionLab:
 
     def _prediction_ledger_lock(self):
         return locked_file(self.root_dir / "prediction_lab.ledger.lock", "a+")
+
+    def _safe_append_agent_decisions(
+        self,
+        source_row: dict[str, Any],
+        *,
+        run_id: str,
+        decided_at: str | None = None,
+    ) -> None:
+        try:
+            agent_run_id = build_agent_run_id(agent_id="prediction_lab", run_id=run_id)
+            decision_rows = build_agent_decision_rows_from_source_row(
+                source_row,
+                agent_run_id=agent_run_id,
+                agent_id="prediction_lab",
+                runtime="prediction_lab",
+                candidate_dataset_path=self.market_snapshots_path,
+                decided_at=decided_at,
+            )
+            with self._prediction_ledger_lock():
+                for row in decision_rows:
+                    append_jsonl(self.agent_decisions_path, row)
+        except Exception:
+            logger.exception("failed to append prediction_lab agent decision rows")
+
+    def _safe_upsert_agent_run(
+        self,
+        *,
+        run_id: str,
+        started_at: str,
+        finished_at: str,
+        status: str,
+        notes: str | None = None,
+    ) -> None:
+        try:
+            row = build_agent_run_row(
+                agent_id="prediction_lab",
+                runtime="prediction_lab",
+                policy="normal",
+                mode=self.mode,
+                run_id=run_id,
+                started_at=started_at,
+                finished_at=finished_at,
+                status=status,
+                candidate_dataset_path=self.market_snapshots_path,
+                decision_ledger_path=self.agent_decisions_path,
+                mutates_accounting=False,
+                notes=notes,
+            )
+            with self._prediction_ledger_lock():
+                rows = load_jsonl(self.agent_runs_path)
+                agent_run_id = row["agent_run_id"]
+                replaced = False
+                updated_rows: list[dict[str, Any]] = []
+                for existing in rows:
+                    if str(existing.get("agent_run_id") or "") == agent_run_id:
+                        updated_rows.append(row)
+                        replaced = True
+                    else:
+                        updated_rows.append(existing)
+                if not replaced:
+                    updated_rows.append(row)
+                rewrite_jsonl(self.agent_runs_path, updated_rows)
+        except Exception:
+            logger.exception("failed to upsert prediction_lab agent run row")
 
     def _validate_v1_groups(self) -> None:
         if len(self.groups) != 1:

@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from bot.agent_decision_ledger import build_agent_decision_rows_from_source_row, build_agent_run_id
 from bot.decision_pipeline import DecisionPipelineEvaluator
 from bot.file_ops import append_jsonl
 from bot.prediction_lab_replay import (
@@ -789,7 +790,7 @@ class PredictionLabReplayTests(unittest.TestCase):
         self.assertIn("date_unverified:missing_date_validation", result.rows[0].reasons)
         self.assertFalse(result.rows[0].include_in_strict)
 
-    def test_row_quality_classifies_backfilled_historical_replay_row_as_strict(self):
+    def test_row_quality_classifies_historical_replay_row_as_post_facto(self):
         row = _row(
             artifact_patch={
                 "source_provenance": "historical_replay_backfill",
@@ -814,10 +815,12 @@ class PredictionLabReplayTests(unittest.TestCase):
 
         result = replay_recorded_artifacts([row], evaluator=self._evaluator(FixedSignalStrategy(_signal())))
 
-        self.assertEqual(result.rows[0].category, "replay_grade_backfilled")
-        self.assertTrue(result.rows[0].include_in_strict)
+        self.assertEqual(result.rows[0].source_mode, "historical_post_facto")
+        self.assertEqual(result.rows[0].category, "historical_post_facto")
+        self.assertIn("historical_post_facto", result.rows[0].reasons)
+        self.assertFalse(result.rows[0].include_in_strict)
 
-    def test_row_quality_classifies_nested_historical_replay_weather_signal_as_backfilled(self):
+    def test_row_quality_classifies_nested_historical_replay_weather_signal_as_post_facto(self):
         row = _weather_row()
         weather_snapshot = row["decision_artifact"]["source_context"]["data"]["weather_source_snapshot"]
         weather_snapshot["source_signal"] = {
@@ -832,8 +835,11 @@ class PredictionLabReplayTests(unittest.TestCase):
 
         result = replay_recorded_artifacts([row], evaluator=self._evaluator(FixedSignalStrategy(_signal())))
 
-        self.assertEqual(result.rows[0].category, "replay_grade_backfilled")
-        self.assertTrue(result.rows[0].include_in_strict)
+        self.assertEqual(result.rows[0].source_mode, "historical_post_facto")
+        self.assertEqual(result.rows[0].category, "historical_post_facto")
+        self.assertIn("historical_post_facto", result.rows[0].reasons)
+        self.assertNotIn("missing_weather_snapshot", result.rows[0].reasons)
+        self.assertFalse(result.rows[0].include_in_strict)
 
     def test_row_quality_policy_strict_drops_incomplete_rows_from_result_rows(self):
         good = _row()
@@ -1007,6 +1013,138 @@ class PredictionLabReplayTests(unittest.TestCase):
         self.assertEqual(comparison["coverage"]["card_rows"], 2)
         self.assertEqual(comparison["coverage"]["no_card_rows"], 1)
         self.assertEqual(comparison["coverage"]["hidden_gem_evidence_cards"]["insufficient_data_rows"], 1)
+
+    def test_replay_summary_includes_dual_policy_main_vs_shadow_aggregate(self):
+        avoided_loss = _row(
+            artifact_patch={"market_id": "KXHIGHNY-26APR29-T80"},
+            row_patch={
+                "run_id": "run-dual",
+                "market_id": "KXHIGHNY-26APR29-T80",
+                "shared_candidate_id": "candidate-1",
+                "main_runtime": "prediction_lab",
+                "main_decision": {"action": "BUY_YES", "runtime": "prediction_lab", "authoritative": True},
+                "normal_decision": {"action": "BUY_YES", "size": 10.0},
+                "shadow_decision": {"action": "SKIP", "size": 0.0},
+                "decision_delta": {"action_changed": True, "size_changed": True},
+            },
+        )
+        shadow_win = _row(
+            artifact_patch={"market_id": "KXHIGHNY-26APR29-T81"},
+            row_patch={
+                "run_id": "run-dual",
+                "market_id": "KXHIGHNY-26APR29-T81",
+                "question": "Will NYC high temperature be above 81 degrees?",
+                "yes_market_price": 0.75,
+                "no_market_price": 0.25,
+                "direction": "SKIP",
+                "decision_type": "skip",
+                "shared_candidate_id": "candidate-2",
+                "main_runtime": "prediction_lab",
+                "main_decision": {"action": "SKIP", "runtime": "prediction_lab", "authoritative": True},
+                "normal_decision": {"action": "SKIP", "size": 0.0},
+                "shadow_decision": {"action": "BUY_NO", "size": 5.0},
+                "decision_delta": {"action_changed": True, "size_changed": True},
+            },
+        )
+        unresolved = _row(
+            artifact_patch={"market_id": "KXHIGHNY-26APR29-T82"},
+            row_patch={
+                "run_id": "run-dual",
+                "market_id": "KXHIGHNY-26APR29-T82",
+                "shared_candidate_id": "candidate-3",
+                "main_runtime": "prediction_lab",
+                "main_decision": {"action": "BUY_YES", "runtime": "prediction_lab", "authoritative": True},
+                "normal_decision": {"action": "BUY_YES", "size": 4.0},
+                "shadow_decision": {"action": "SKIP", "size": 0.0},
+                "decision_delta": {"action_changed": True, "size_changed": True},
+            },
+        )
+
+        result = replay_recorded_artifacts(
+            [avoided_loss, shadow_win, unresolved],
+            evaluator=self._evaluator(FixedSignalStrategy(_signal())),
+            resolution_records=[
+                {
+                    "run_id": "run-dual",
+                    "market_id": "KXHIGHNY-26APR29-T80",
+                    "shared_candidate_id": "candidate-1",
+                    "resolution": {"outcome": "NO", "resolved_at": "2026-04-30T00:00:00+00:00"},
+                },
+                {
+                    "run_id": "run-dual",
+                    "market_id": "KXHIGHNY-26APR29-T81",
+                    "shared_candidate_id": "candidate-2",
+                    "resolution": {"outcome": "NO", "resolved_at": "2026-04-30T00:00:00+00:00"},
+                },
+            ],
+        )
+
+        summary = result.summary["dual_policy_replay_comparison"]
+        self.assertEqual(summary["schema_version"], 1)
+        self.assertEqual(summary["eligible_rows"], 3)
+        self.assertEqual(summary["authoritative_main"]["decision_path"], "main_decision")
+        self.assertEqual(summary["authoritative_main"]["normal_policy_path"], "normal_decision")
+        self.assertEqual(summary["authoritative_main"]["runtime_counts"], {"prediction_lab": 3})
+        self.assertTrue(summary["authoritative_main"]["authoritative"])
+        self.assertEqual(summary["hypothetical_shadow"]["decision_path"], "shadow_decision")
+        self.assertTrue(summary["hypothetical_shadow"]["non_mutating"])
+        self.assertEqual(summary["decision_columns"]["skipped_by_shadow"], 2)
+        self.assertEqual(summary["decision_columns"]["shadow_only_buys"], 1)
+        self.assertEqual(summary["pnl_comparison"]["normal_buy_shadow_skip"]["avoided_loss_count"], 1)
+        self.assertEqual(summary["pnl_comparison"]["normal_skip_shadow_buy"]["shadow_win_count"], 1)
+        self.assertEqual(summary["pnl_comparison"]["unresolved_rows"], 1)
+
+    def test_replay_summary_can_join_optional_agent_decision_input_by_shared_candidate_id(self):
+        replay_row = _row(
+            row_patch={
+                "run_id": "run-ledger",
+                "shared_candidate_id": "candidate-1",
+                "main_decision": {"action": "BUY_YES", "runtime": "prediction_lab", "policy": "stable", "authoritative": True},
+                "normal_decision": {"action": "BUY_YES", "policy": "stable", "size": 10.0},
+                "shadow_decision": {"action": "SKIP", "policy": "beta_shadow", "size": 0.0},
+            }
+        )
+        matched_decisions = build_agent_decision_rows_from_source_row(
+            replay_row,
+            agent_run_id=build_agent_run_id(agent_id="prediction_lab", run_id="run-ledger"),
+            agent_id="prediction_lab",
+            runtime="prediction_lab",
+            candidate_dataset_path=Path("/tmp/prediction_lab/market_snapshots.jsonl"),
+        )
+        unmatched_row = _row(
+            row_patch={
+                "run_id": "run-other",
+                "market_id": "KXHIGHNY-26APR29-T81",
+                "shared_candidate_id": "candidate-2",
+                "main_decision": {"action": "SKIP", "runtime": "prediction_lab", "policy": "stable", "authoritative": True},
+                "normal_decision": {"action": "SKIP", "policy": "stable", "size": 0.0},
+            }
+        )
+        unmatched_decisions = build_agent_decision_rows_from_source_row(
+            unmatched_row,
+            agent_run_id=build_agent_run_id(agent_id="prediction_lab", run_id="run-other"),
+            agent_id="prediction_lab",
+            runtime="prediction_lab",
+            candidate_dataset_path=Path("/tmp/prediction_lab/market_snapshots.jsonl"),
+        )
+
+        result = replay_recorded_artifacts(
+            [replay_row],
+            evaluator=self._evaluator(FixedSignalStrategy(_signal())),
+            decision_records=[*matched_decisions, *unmatched_decisions],
+        )
+
+        coverage = result.summary["agent_decision_coverage"]
+        self.assertEqual(coverage["total_rows"], 3)
+        self.assertEqual(coverage["distinct_shared_candidate_ids"], 1)
+        self.assertEqual(coverage["requested_shared_candidate_ids"], 1)
+        self.assertEqual(coverage["matched_shared_candidate_ids"], 1)
+        self.assertEqual(coverage["unmatched_input_rows"], 2)
+        self.assertEqual(coverage["missing_shared_candidate_ids"], [])
+        self.assertEqual(coverage["by_shared_candidate_id"], {"candidate-1": 3})
+        self.assertEqual(coverage["by_agent_id"], {"prediction_lab": 3})
+        self.assertEqual(coverage["by_policy"], {"stable": 2, "beta_shadow": 1})
+        self.assertEqual(coverage["by_decision_role"], {"main": 1, "normal": 1, "shadow": 1})
 
     def test_weather_hidden_gem_replay_comparison_is_card_derived_not_replay_action_derived(self):
         approved_card_risk_skipped = _row_with_hidden_gem_card(

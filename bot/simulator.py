@@ -36,6 +36,7 @@ from bot.shared_core.decision import HIDDEN_GEM_ENTRY_PRICE_CAP
 from bot.strategy_lanes import select_strategy_lane
 from bot.strategies.enhanced import EnhancedStrategyEngine, KellySizer, strategy_config_with_policy
 from bot.parity_audit import normalize_parity_trade_row, summarize_normalized_rows
+from bot.paper_decision_audit import append_paper_agent_run_once, append_paper_decision_audit
 from bot.trade_audit import (
     enrich_trade_audit_fields,
     summarize_event_performance,
@@ -170,7 +171,8 @@ class Simulator:
         self.parity_mode = dict(config.get("parity_mode", {}) or {})
 
         runtime_mode = str(config.get("trading", {}).get("mode", "paper"))
-        self.data_dir = ensure_mode_storage_dir(config.get("data_dir", "data"), runtime_mode)
+        self.runtime_mode = "live" if runtime_mode.strip().lower() == "live" else "paper"
+        self.data_dir = ensure_mode_storage_dir(config.get("data_dir", "data"), self.runtime_mode)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.state_adapter = SimulatorPaperStateAdapter(self)
         self.session_store = SimulatorPaperSessionStore(self, self.state_adapter)
@@ -207,6 +209,7 @@ class Simulator:
                 logger.info("🐦 Social feed enabled")
             except Exception:
                 pass
+        self._safe_append_agent_run()
 
     def _load_session(self, session_id: str = None) -> bool:
         """
@@ -753,6 +756,7 @@ class Simulator:
             if blockers is not None:
                 blockers[decision.reason_code] += 1
             logger.info(f"  🛑 Shared decision skipped: {decision.reason}")
+            self._safe_append_agent_decision(signal, decision_artifact, accounting_mutated=False)
             if self.parity_mode.get("enabled"):
                 rejected_trade = self._trade_from_execution_rejection(decision, context)
                 rejected_trade.decision_artifact = decision_artifact
@@ -768,10 +772,18 @@ class Simulator:
             if blockers is not None:
                 blockers[result.metadata.get("reason_code", "execution_rejected")] += 1
             logger.info(f"  🛑 Paper execution skipped: {result.message or result.status}")
+            self._safe_append_agent_decision(signal, decision_artifact, execution_result=result, accounting_mutated=False)
             return None
 
         trade = self._trade_from_execution_result(result)
         trade.decision_artifact = decision_artifact
+        self._safe_append_agent_decision(
+            signal,
+            decision_artifact,
+            execution_result=result,
+            trade_id=trade.id,
+            accounting_mutated=True,
+        )
         enrich_trade_audit_fields(trade.__dict__)
         if self.single_trade_mode:
             self.single_trade_completed = True
@@ -967,10 +979,49 @@ class Simulator:
                 signal=signal,
                 config_snapshot=self.config,
             )
+            self._safe_append_agent_decision(signal, decision_artifact, accounting_mutated=False)
             return self._append_shadow_intent_if_any(decision_artifact, signal)
         except Exception as exc:
             logger.debug("paper_shadow_intent_stable_skip_failed market_id=%s error=%s", signal.get("market_id"), exc)
             return None
+
+    def _safe_append_agent_run(self) -> None:
+        if self.runtime_mode != "paper":
+            return
+        try:
+            append_paper_agent_run_once(
+                data_dir=self.data_dir,
+                session_id=self.session_id,
+                config=self.config,
+            )
+        except Exception as exc:
+            logger.warning("failed to append paper agent run audit row: %s", exc)
+
+    def _safe_append_agent_decision(
+        self,
+        signal: dict,
+        decision_artifact: dict,
+        *,
+        execution_result: ExecutionResult | None = None,
+        trade_id: str | None = None,
+        accounting_mutated: bool = False,
+    ) -> None:
+        if self.runtime_mode != "paper":
+            return
+        try:
+            append_paper_decision_audit(
+                data_dir=self.data_dir,
+                session_id=self.session_id,
+                scan_count=self.scan_count,
+                signal=signal,
+                decision_artifact=decision_artifact,
+                execution_result=execution_result,
+                trade_id=trade_id,
+                config=self.config,
+                accounting_mutated=accounting_mutated,
+            )
+        except Exception as exc:
+            logger.warning("failed to append paper agent decision audit row market_id=%s: %s", signal.get("market_id"), exc)
 
     def _append_shadow_intent_if_any(self, decision_artifact: dict, signal: dict) -> dict | None:
         market_id = str(signal.get("market_id") or decision_artifact.get("market_id") or "")
