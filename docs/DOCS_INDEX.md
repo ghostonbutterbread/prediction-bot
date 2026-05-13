@@ -1,6 +1,6 @@
 # Prediction Bot Docs Index
 
-_Last updated: 2026-05-08_
+_Last updated: 2026-05-13_
 
 ## Why this file exists
 
@@ -212,6 +212,7 @@ These define what code and tests should enforce:
 ### Supporting architecture lane
 These are narrower supporting specs for adjacent workstreams:
 - `docs/BETA_SHADOW_WEATHER_RUNBOOK.md` — safe beta-shadow weather paper/Prediction Lab runtime commands and data-root separation
+- `docs/PAPER_DUAL_WALLET_MIGRATION_CANARY.md` — read-only Phase 5 migration/canary plan for preserving existing stable/beta paper accounting while previewing later shared-candidate cutover
 - `docs/architecture/shared_core_adapters_design.md` — shared-core/adapters split
 - `docs/architecture/event_retrade_spec.md` — event-aware retrade behavior
 - `docs/architecture/event_retrade_v2_spec.md` — stronger retrade follow-up pass

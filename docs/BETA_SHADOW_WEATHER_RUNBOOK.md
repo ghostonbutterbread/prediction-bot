@@ -3,6 +3,10 @@
 This setup is for weather strategy lane shadow collection only. It does not
 touch live config, `.env`, or existing process state by itself.
 
+For the read-only Phase 5 migration/canary plan that preserves existing paper
+state and previews later shared-candidate cutover, see
+`docs/PAPER_DUAL_WALLET_MIGRATION_CANARY.md`.
+
 ## Configs
 
 - Paper: `config.paper_beta_shadow_weather.yaml`

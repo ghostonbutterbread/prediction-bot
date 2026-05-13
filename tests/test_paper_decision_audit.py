@@ -61,6 +61,13 @@ class PaperDecisionAuditTests(unittest.TestCase):
         self.assertEqual(run_rows[0]["agent_id"], "paper")
         self.assertEqual(run_rows[0]["runtime"], "paper")
         self.assertEqual(run_rows[0]["decision_ledger_path"], str(Path(tmpdir) / "paper" / "agent_decisions.jsonl"))
+        self.assertEqual(run_rows[0]["wallet_id"], "stable_paper")
+        self.assertEqual(run_rows[0]["policy_id"], "stable")
+        self.assertEqual(run_rows[0]["wallet_namespace"], "paper_stable")
+        self.assertEqual(run_rows[0]["accounting_root"], str(Path(tmpdir) / "paper"))
+        self.assertEqual(run_rows[0]["risk_state_path"], str(Path(tmpdir) / "paper" / "risk_state.json"))
+        self.assertEqual(run_rows[0]["session_path"], str(Path(tmpdir) / "paper" / f"sim_{sim.session_id}.json"))
+        self.assertFalse(run_rows[0]["places_live_orders"])
         self.assertTrue(run_rows[0]["mutates_accounting"])
         self.assertEqual(len(decision_rows), 1)
         row = decision_rows[0]
@@ -68,9 +75,20 @@ class PaperDecisionAuditTests(unittest.TestCase):
         self.assertNotIn("legacy_candidate_identity", row)
         self.assertEqual(row["candidate_dataset_path"], str(dataset_path))
         self.assertEqual(row["decision_role"], "paper")
+        self.assertEqual(row["wallet_id"], "stable_paper")
+        self.assertEqual(row["policy_id"], "stable")
+        self.assertEqual(row["accounting_ref"]["wallet_id"], "stable_paper")
+        self.assertEqual(row["accounting_ref"]["policy_id"], "stable")
         self.assertEqual(row["accounting_ref"]["trade_id"], trade.id)
         self.assertEqual(row["accounting_ref"]["namespace"], str(Path(tmpdir) / "paper"))
+        self.assertEqual(row["accounting_ref"]["wallet_namespace"], "paper_stable")
+        self.assertEqual(row["accounting_ref"]["namespace"], run_rows[0]["accounting_namespace"])
+        self.assertEqual(row["accounting_ref"]["root_path"], str(Path(tmpdir) / "paper"))
+        self.assertEqual(row["accounting_ref"]["risk_state_path"], str(Path(tmpdir) / "paper" / "risk_state.json"))
+        self.assertEqual(row["accounting_ref"]["session_path"], str(Path(tmpdir) / "paper" / f"sim_{sim.session_id}.json"))
         self.assertTrue(row["accounting_ref"]["mutates_balance"])
+        self.assertTrue(row["accounting_ref"]["mutates_accounting"])
+        self.assertFalse(row["accounting_ref"]["places_live_orders"])
         self.assertFalse(row["mutation_contract"]["mutates_shared_candidate"])
         self.assertTrue(row["mutation_contract"]["mutates_accounting"])
         self.assertEqual(row["mutation_contract"]["accounting_mutation_scope"], "paper_only")
@@ -169,9 +187,79 @@ class PaperDecisionAuditTests(unittest.TestCase):
         row = decision_rows[0]
         self.assertEqual(row["shared_candidate_id"], "candidate-rejected")
         self.assertEqual(row["action"], "SKIP")
+        self.assertEqual(row["wallet_id"], "stable_paper")
+        self.assertEqual(row["policy_id"], "stable")
         self.assertFalse(row["accounting_ref"]["mutates_balance"])
+        self.assertFalse(row["accounting_ref"]["mutates_accounting"])
+        self.assertFalse(row["accounting_ref"]["places_live_orders"])
         self.assertFalse(row["mutation_contract"]["mutates_accounting"])
         self.assertIsNone(row["accounting_ref"].get("trade_id"))
+
+    def test_beta_shadow_runtime_uses_beta_wallet_contract_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = Simulator(
+                {
+                    "data_dir": str(Path(tmpdir) / "data" / "beta_shadow"),
+                    "strategy_policy": {"version": "beta", "beta": {"mode": "shadow"}},
+                    "enable_social": False,
+                    "strategy": {
+                        "enable_news": False,
+                        "enable_social": False,
+                        "enable_ai": False,
+                    },
+                }
+            )
+            signal = self._signal(shared_candidate_id="candidate-beta")
+
+            with patch.object(sim.kelly, "calculate", return_value=10.0):
+                trade = sim._create_trade(signal)
+
+            run_rows = load_jsonl(sim.data_dir / "agent_runs.jsonl")
+            decision_rows = load_jsonl(sim.data_dir / "agent_decisions.jsonl")
+
+        self.assertIsNotNone(trade)
+        self.assertEqual(str(sim.data_dir), str(Path(tmpdir) / "data" / "beta_shadow" / "paper"))
+        self.assertEqual(run_rows[0]["wallet_id"], "beta_paper")
+        self.assertEqual(run_rows[0]["policy_id"], "beta")
+        self.assertEqual(run_rows[0]["wallet_namespace"], "paper_beta")
+        self.assertEqual(decision_rows[0]["wallet_id"], "beta_paper")
+        self.assertEqual(decision_rows[0]["policy_id"], "beta")
+        self.assertEqual(decision_rows[0]["accounting_ref"]["wallet_id"], "beta_paper")
+        self.assertEqual(decision_rows[0]["accounting_ref"]["policy_id"], "beta")
+        self.assertEqual(decision_rows[0]["accounting_ref"]["namespace"], str(Path(tmpdir) / "data" / "beta_shadow" / "paper"))
+        self.assertEqual(decision_rows[0]["accounting_ref"]["wallet_namespace"], "paper_beta")
+        self.assertEqual(decision_rows[0]["accounting_ref"]["namespace"], run_rows[0]["accounting_namespace"])
+        self.assertEqual(decision_rows[0]["accounting_ref"]["root_path"], str(Path(tmpdir) / "data" / "beta_shadow" / "paper"))
+    def test_beta_mode_off_runtime_stays_on_stable_wallet_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = Simulator(
+                {
+                    "data_dir": str(Path(tmpdir) / "data"),
+                    "strategy_policy": {"version": "beta", "beta": {"mode": "off"}},
+                    "enable_social": False,
+                    "strategy": {
+                        "enable_news": False,
+                        "enable_social": False,
+                        "enable_ai": False,
+                    },
+                }
+            )
+            signal = self._signal(shared_candidate_id="candidate-beta-off")
+
+            with patch.object(sim.kelly, "calculate", return_value=10.0):
+                trade = sim._create_trade(signal)
+
+            run_rows = load_jsonl(sim.data_dir / "agent_runs.jsonl")
+            decision_rows = load_jsonl(sim.data_dir / "agent_decisions.jsonl")
+
+        self.assertIsNotNone(trade)
+        self.assertEqual(str(sim.data_dir), str(Path(tmpdir) / "data" / "paper"))
+        self.assertEqual(run_rows[0]["wallet_id"], "stable_paper")
+        self.assertEqual(run_rows[0]["policy_id"], "stable")
+        self.assertEqual(decision_rows[0]["wallet_id"], "stable_paper")
+        self.assertEqual(decision_rows[0]["policy_id"], "stable")
+        self.assertEqual(decision_rows[0]["accounting_ref"]["namespace"], str(Path(tmpdir) / "data" / "paper"))
+        self.assertEqual(decision_rows[0]["accounting_ref"]["wallet_namespace"], "paper_stable")
 
 
 

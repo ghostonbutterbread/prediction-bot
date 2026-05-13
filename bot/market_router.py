@@ -12,6 +12,9 @@ DEFAULT_ALLOWED_MARKET_ROUTES = ("weather.daily_temperature",)
 DAILY_TEMPERATURE_ROUTE = "weather.daily_temperature"
 DAILY_TEMPERATURE_HANDLER = "weather.daily_temperature.v1"
 DAILY_TEMPERATURE_PREFIXES = ("KXHIGH", "KXHIGHT", "KXLOW", "KXLOWT", "KXMINTEMP")
+LEGACY_DAILY_TEMPERATURE_RE = re.compile(
+    r"^(?:HIGH|LOW)[A-Z0-9]+-\d{2}(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|SEPT|OCT|NOV|DEC)\d{1,2}(?:-|$)"
+)
 
 
 @dataclass(frozen=True)
@@ -165,6 +168,8 @@ def _daily_temperature_prefix_value(facts: dict[str, Any]) -> str | None:
             continue
         if value.startswith(DAILY_TEMPERATURE_PREFIXES):
             return value
+        if LEGACY_DAILY_TEMPERATURE_RE.search(value):
+            return value
     return None
 
 
@@ -172,7 +177,11 @@ def _shape_from_daily_temperature_prefix(prefix_value: str) -> str:
     upper = str(prefix_value or "").upper()
     if upper.startswith(("KXHIGH", "KXHIGHT")):
         return "tail_high"
+    if upper.startswith("HIGH"):
+        return "tail_high"
     if upper.startswith(("KXLOW", "KXLOWT", "KXMINTEMP")):
+        return "tail_low"
+    if upper.startswith("LOW"):
         return "tail_low"
     return "unknown"
 

@@ -237,6 +237,150 @@ class AnalyzeStrategyPolicyStatusTests(unittest.TestCase):
         self.assertIn("Strategy policy: stable/off", report)
         self.assertIn("features=none", report)
 
+    def test_report_uses_telegram_readable_sections_instead_of_pipe_rows(self):
+        report = paper_analyze.format_report(
+            {
+                "timestamp": "2026-05-09T08:00:00-07:00",
+                "summary": {
+                    "current_session": "s1",
+                    "scans": 4,
+                    "current_trades": 2,
+                    "resolved": 1,
+                    "trusted_resolved_positions": 1,
+                    "resolved_events": 1,
+                    "current_session_file": "data/paper/sim.json",
+                    "ignored_invalid_trades": 1,
+                    "invalid_resolved_positions": 1,
+                    "total_equity": 1005.0,
+                    "available_cash": 990.0,
+                    "reserved_capital": 15.0,
+                    "open_event_count": 1,
+                },
+                "strategy_policy_status": {
+                    "version": "beta",
+                    "mode": "shadow",
+                    "active": True,
+                    "shadow": True,
+                    "enforce": False,
+                    "enabled_features": {"hidden_gem_lane_gates": True},
+                },
+                "performance": {"win_rate": 100.0, "total_pnl": 5.0, "profit_factor": 0},
+                "event_performance": {
+                    "win_rate": 100.0,
+                    "resolved_events": 1,
+                    "avg_pnl_per_event": 5.0,
+                    "avg_positions_per_resolved_event": 1,
+                    "retrade_count": 0,
+                },
+                "signal_quality": {"avg_edge": 2.5, "max_edge": 3.0, "avg_confidence": 70.0},
+                "shadow_delta": {
+                    "total_shadow_delta_opportunities": 1,
+                    "total_shadow_delta_rows": 1,
+                    "action_changed": 1,
+                },
+                "issues": [
+                    {
+                        "severity": "error",
+                        "code": "UNTRUSTED_RESOLVED_ROWS",
+                        "message": "1 resolved rows failed accounting integrity checks",
+                    }
+                ],
+                "actions": [
+                    {
+                        "priority": 1,
+                        "action": "Re-run resolution or clean malformed resolved rows before using paper P&L",
+                        "file": "bot/resolver.py",
+                    }
+                ],
+            }
+        )
+
+        self.assertIn("📋 **Paper / Shadow**", report)
+        self.assertIn("📌 **Snapshot**", report)
+        self.assertIn("Strategy policy: beta/shadow", report)
+        self.assertIn("🔎 **Detail**", report)
+        self.assertIn("`Metric        Paper                 Shadow`", report)
+        self.assertIn("`Trades           ▶ 2", report)
+        self.assertIn("Shadow delta: 1 opportunities", report)
+        self.assertIn("• Resolved: 1 raw / 1 trusted / 1 events", report)
+        self.assertIn("• 🟠 [UNTRUSTED_RESOLVED_ROWS]", report)
+        self.assertNotIn(" | ", report)
+
+    def test_report_omits_shadow_column_when_shadow_is_not_running(self):
+        report = paper_analyze.format_report(
+            {
+                "timestamp": "2026-05-09T08:00:00-07:00",
+                "summary": {
+                    "current_session": "s1",
+                    "scans": 2,
+                    "current_trades": 3,
+                    "resolved": 1,
+                    "trusted_resolved_positions": 1,
+                    "resolved_events": 1,
+                },
+                "strategy_policy_status": {
+                    "version": "stable",
+                    "mode": "off",
+                    "active": False,
+                    "shadow": False,
+                    "enforce": False,
+                    "enabled_features": {},
+                },
+                "performance": {"win_rate": 100.0, "total_pnl": 4.0, "profit_factor": 0},
+                "event_performance": {},
+                "signal_quality": {},
+                "issues": [],
+                "actions": [],
+            }
+        )
+
+        self.assertIn("• Trades: 3", report)
+        self.assertIn("• Open positions: 2", report)
+        self.assertIn("• Closed positions: 1 trusted / 1 raw", report)
+        self.assertIn("• PnL: $+4.00", report)
+        self.assertNotIn("Paper                    Shadow", report)
+        self.assertNotIn("Marker: ▶", report)
+
+    def test_report_marks_shadow_when_shadow_only_evaluation_is_logged(self):
+        report = paper_analyze.format_report(
+            {
+                "timestamp": "2026-05-09T08:00:00-07:00",
+                "summary": {
+                    "current_session": "shadow-only",
+                    "scans": 1,
+                    "current_trades": 0,
+                    "resolved": 0,
+                    "trusted_resolved_positions": 0,
+                    "resolved_events": 0,
+                },
+                "strategy_policy_status": {
+                    "version": "beta",
+                    "mode": "shadow",
+                    "active": True,
+                    "shadow": True,
+                    "enforce": False,
+                    "enabled_features": {"hidden_gem_lane_gates": True},
+                },
+                "performance": {},
+                "event_performance": {},
+                "signal_quality": {},
+                "shadow_delta": {
+                    "total_shadow_delta_opportunities": 3,
+                    "total_shadow_delta_rows": 4,
+                    "changed_rows": 2,
+                    "action_changed": 1,
+                    "size_changed": 1,
+                    "lane_changed": 2,
+                },
+                "issues": [],
+                "actions": [],
+            }
+        )
+
+        self.assertIn("`Trades           0                        ▶ 3 eval`", report)
+        self.assertIn("`Trading          paper sim                ▶ beta/shadow`", report)
+        self.assertIn("• ▶ = actual execution/logging path", report)
+
     def test_analyze_reports_shadow_delta_without_increasing_trade_counts(self):
         shadow_delta = {
             "schema_version": 1,

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -90,60 +91,115 @@ def _format_pids(processes: list[dict[str, Any]]) -> str:
     return ", ".join(str(process["pid"]) for process in processes)
 
 
-def latest_paper_report() -> str | None:
-    analysis = paper_analyze.analyze(prune_logs=False)
+def _config_from_processes(processes: list[dict[str, Any]]) -> Path | None:
+    for process in processes:
+        cmdline = lab_monitor.normalize_cmdline(process.get("cmdline") or [])
+        for index, part in enumerate(cmdline):
+            if part == "--config" and index + 1 < len(cmdline):
+                return Path(cmdline[index + 1])
+    return None
+
+
+def _paper_data_dir_from_config(config_path: Path | None) -> Path | None:
+    if config_path is None:
+        return None
+    config = paper_analyze.load_config(config_path)
+    data_dir = config.get("data_dir")
+    return Path(data_dir) if data_dir else None
+
+
+def latest_paper_report(config_path: Path | None = None) -> str | None:
+    previous_env = {
+        name: os.environ.get(name)
+        for name in ("ANALYZE_CONFIG", "ANALYZE_DATA_DIR", "ANALYZE_DATA_DIR_ONLY")
+    }
+    data_dir = _paper_data_dir_from_config(config_path)
+    try:
+        if config_path is not None:
+            os.environ["ANALYZE_CONFIG"] = str(config_path)
+        if data_dir is not None:
+            os.environ["ANALYZE_DATA_DIR"] = str(data_dir)
+            os.environ["ANALYZE_DATA_DIR_ONLY"] = "1"
+
+        analysis = paper_analyze.analyze(prune_logs=False)
+    finally:
+        for name, value in previous_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
     if not analysis.get("summary", {}).get("total_sessions"):
         return None
-    return paper_analyze.format_report(analysis)
+    report = paper_analyze.format_report(analysis)
+    return _strip_lower_detail(report)
+
+
+def _strip_lower_detail(report: str) -> str:
+    lines = report.splitlines()
+    output: list[str] = []
+    skipping = False
+    for line in lines:
+        if line in {"🔎 **Detail**", "🔎 **Lower Detail**"}:
+            skipping = True
+            continue
+        if skipping and line.startswith(("⚠️ ", "🔧 ")):
+            skipping = False
+        if not skipping:
+            output.append(line)
+    while output and output[-1] == "":
+        output.pop()
+    return "\n".join(output)
 
 
 def format_paper_section(processes: list[dict[str, Any]], report: str | None) -> str:
     lines = [
-        "**Paper Trading**",
-        f"Process: active (PID(s): {_format_pids(processes)})",
+        "📄 **Paper Trading**",
+        f"• 🟢 Process: active (PID(s): {_format_pids(processes)})",
     ]
     if report:
         lines.extend(["", report])
     else:
-        lines.append("Latest paper analysis: unavailable (no paper sessions found).")
+        lines.append("• ⚪ Latest paper analysis: unavailable (no paper sessions found).")
     return "\n".join(lines)
 
 
 def format_live_section(processes: list[dict[str, Any]]) -> str:
     return "\n".join(
         [
-            "**Live Trading**",
-            f"Process: active (PID(s): {_format_pids(processes)})",
-            "Mode: real-money live runner detected; report is read-only and did not start/stop it.",
+            "💵 **Live Trading**",
+            f"• 🔴 Process: active (PID(s): {_format_pids(processes)})",
+            "• Mode: real-money live runner detected; report is read-only and did not start/stop it.",
         ]
     )
 
 
 def format_inactive_section(inactive_modes: list[str]) -> str:
     if not inactive_modes:
-        return "Inactive modes: none"
-    return "Inactive modes: " + ", ".join(inactive_modes)
+        return "⚪ Inactive modes: none"
+    return "⚪ Inactive modes: " + ", ".join(inactive_modes)
 
 
 def format_prediction_lab_section(result: lab_monitor.MonitorResult) -> str:
     details = result.details
     processes = details.get("collector_processes") or []
+    marker = "🟢" if result.healthy else "🟠"
     lines = [
-        "**Prediction Lab Collector**",
-        f"Status: {'healthy' if result.healthy else 'unhealthy'}",
+        "🧪 **Prediction Lab Collector**",
+        f"• {marker} Status: {'healthy' if result.healthy else 'unhealthy'}",
     ]
     if processes:
-        lines.append(f"Process: active (PID(s): {_format_pids(processes)})")
+        lines.append(f"• Process: active (PID(s): {_format_pids(processes)})")
     else:
-        lines.append("Process: active")
+        lines.append("• Process: active")
 
     if details.get("last_collect_age_seconds") is not None:
-        lines.append(f"Last collect age: {int(details['last_collect_age_seconds'])}s")
+        lines.append(f"• Last collect age: {int(details['last_collect_age_seconds'])}s")
     if details.get("latest_log"):
-        lines.append(f"Latest log: {details['latest_log']}")
+        lines.append(f"• Latest log: {details['latest_log']}")
     if result.issues:
         issues = "; ".join(f"{issue.code}: {issue.message}" for issue in result.issues[:3])
-        lines.append(f"Issues: {issues}")
+        lines.append(f"• ⚠️ Issues: {issues}")
     return "\n".join(lines)
 
 
@@ -175,7 +231,7 @@ def build_report(
     paper_report: str | None = None
     if paper_processes:
         active_modes.append(PAPER_MODE_NAME)
-        paper_report = latest_paper_report()
+        paper_report = latest_paper_report(_config_from_processes(paper_processes))
         sections.append(format_paper_section(paper_processes, paper_report))
 
     if collector_processes:
@@ -192,16 +248,16 @@ def build_report(
 
     header = [
         f"🤖 **Morning Bot Status** — {now.isoformat(timespec='seconds')}",
-        f"Active modes: {', '.join(active_modes) if active_modes else 'none'}",
+        f"✅ Active modes: {', '.join(active_modes) if active_modes else 'none'}",
         format_inactive_section(inactive_modes),
     ]
 
     if not active_modes:
         paper_report = latest_paper_report()
         if paper_report:
-            sections.append("**Latest Paper Analysis**\n\n" + paper_report)
+            sections.append("📊 **Latest Paper Analysis**\n\n" + paper_report)
         else:
-            sections.append("Latest paper analysis: unavailable (no paper sessions found).")
+            sections.append("⚪ Latest paper analysis: unavailable (no paper sessions found).")
 
     return "\n\n".join(header + sections)
 
