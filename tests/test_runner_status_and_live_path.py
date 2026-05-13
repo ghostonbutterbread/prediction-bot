@@ -1,8 +1,10 @@
 import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from bot.file_ops import load_jsonl
 from bot.runner import PredictionBot
 from bot.shared_core import build_trade_decision
 
@@ -111,9 +113,48 @@ class RunnerLivePathTests(unittest.TestCase):
             with patch.object(bot.kelly, "calculate", return_value=10.0):
                 result = bot._process_signal(signal)
 
+            decision_rows = load_jsonl(Path(tmpdir) / "live" / "agent_decisions.jsonl")
+            candidate_rows = load_jsonl(Path(tmpdir) / "live" / "live_readonly_candidates.jsonl")
+
             self.assertIn("order", result)
             self.assertEqual(len(bot.exchanges["kalshi"].orders), 1)
             self.assertEqual(bot.exchanges["kalshi"].orders[0]["size"], 2.5)
+            self.assertEqual(len(decision_rows), 1)
+            self.assertEqual(decision_rows[0]["decision_role"], "live_readonly")
+            self.assertEqual(decision_rows[0]["action"], "BUY_YES")
+            self.assertEqual(decision_rows[0]["provenance"]["audit_stage"], "execution_revalidated")
+            self.assertFalse(decision_rows[0]["mutation_contract"]["places_orders"])
+            self.assertFalse(decision_rows[0]["mutation_contract"]["mutates_accounting"])
+            self.assertEqual(len(candidate_rows), 1)
+
+    def test_live_audit_append_failure_does_not_block_approved_order(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = self._make_bot(tmpdir)
+            signal = {
+                "exchange": "kalshi",
+                "market_id": "m1",
+                "question": "Will the high temperature in New York exceed 71 degrees?",
+                "direction": "BUY_YES",
+                "market_price": 0.40,
+                "yes_price": 0.40,
+                "no_price": 0.60,
+                "model_probability": 0.70,
+                "edge": 0.30,
+                "confidence": 0.90,
+                "category": "KXHIGHNY",
+                "market_family": "daily_temperature",
+            }
+
+            with patch.object(bot.kelly, "calculate", return_value=10.0), patch(
+                "bot.live_execution.append_live_readonly_decision_audit",
+                side_effect=RuntimeError("audit unavailable"),
+            ):
+                result = bot._process_signal(signal)
+
+            self.assertIn("order", result)
+            self.assertEqual(len(bot.exchanges["kalshi"].orders), 1)
+            self.assertEqual(bot.exchanges["kalshi"].orders[0]["size"], 2.5)
+            self.assertEqual(load_jsonl(Path(tmpdir) / "live" / "agent_decisions.jsonl"), [])
 
     def test_live_path_blocks_when_startup_reconciliation_gate_is_blocked(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -405,8 +446,22 @@ class RunnerLivePathTests(unittest.TestCase):
             with patch.object(bot.kelly, "calculate", return_value=5.0):
                 result = bot._process_signal(signal)
 
+            decision_rows = load_jsonl(Path(tmpdir) / "live" / "agent_decisions.jsonl")
+            run_rows = load_jsonl(Path(tmpdir) / "live" / "agent_runs.jsonl")
+            candidate_rows = load_jsonl(Path(tmpdir) / "live" / "live_readonly_candidates.jsonl")
+
             self.assertEqual(result["blocked_reason"], "trading_disabled")
             self.assertEqual(len(bot.exchanges["kalshi"].orders), 0)
+            self.assertEqual(len(run_rows), 1)
+            self.assertEqual(run_rows[0]["mode"], "live_readonly")
+            self.assertFalse(run_rows[0]["mutates_accounting"])
+            self.assertEqual(len(decision_rows), 1)
+            self.assertEqual(decision_rows[0]["decision_role"], "live_readonly")
+            self.assertEqual(decision_rows[0]["action"], "SKIP")
+            self.assertEqual(decision_rows[0]["reason_code"], "trading_disabled")
+            self.assertFalse(decision_rows[0]["mutation_contract"]["places_orders"])
+            self.assertFalse(decision_rows[0]["mutation_contract"]["mutates_accounting"])
+            self.assertEqual(len(candidate_rows), 1)
 
     def test_status_snapshot_marks_startup_reconciliation_pending_before_attempt(self):
         with tempfile.TemporaryDirectory() as tmpdir:

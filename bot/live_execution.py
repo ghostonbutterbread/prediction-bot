@@ -9,6 +9,7 @@ from typing import Any, Protocol
 
 from bot.decision_pipeline import build_pre_execution_decision_artifact
 from bot.exchanges.base import BaseExchange
+from bot.live_decision_audit import append_live_readonly_decision_audit
 from bot.market_router import route_market
 from bot.shared_core import TradeContext, TradeDecision, build_execution_snapshot
 from bot.trade_audit import (
@@ -964,6 +965,7 @@ class RunnerLiveExecutionAdapter:
                 "pre_trade_refresh": pre_trade_refresh,
             },
         )
+        self._safe_append_live_readonly_decision(live_signal, live_decision_artifact, audit_stage="execution_revalidated")
         return {"order": order, "signal": signal, "decision": decision, "refresh": refresh}
 
     def _append_rejected_trade_row(
@@ -1046,7 +1048,34 @@ class RunnerLiveExecutionAdapter:
         canonical_row = apply_execution_audit_contract(rejected_row)
         self.host.trade_history.append(canonical_row)
         self.host._log_trade(signal, None, decision, 0.0, canonical_row.get("entry_price") or canonical_row.get("market_price") or 0.0, audit_row=canonical_row)
+        self._safe_append_live_readonly_decision(signal, decision_artifact, audit_stage=f"blocked_{failure_stage}")
         return canonical_row
+
+    def _safe_append_live_readonly_decision(
+        self,
+        signal: dict,
+        decision_artifact: dict[str, Any] | None,
+        *,
+        audit_stage: str,
+    ) -> dict[str, Any] | None:
+        if not isinstance(decision_artifact, dict):
+            return None
+        is_live_mode = str((self.host.config.get("trading") or {}).get("mode", "paper")).strip().lower() == "live"
+        if not is_live_mode:
+            return None
+        try:
+            return append_live_readonly_decision_audit(
+                data_dir=getattr(self.host, "log_dir", "data/live"),
+                session_id="live-runner",
+                scan_count=int(getattr(self.host, "stats", {}).get("scans", 0) or 0) + 1,
+                signal=signal,
+                decision_artifact=decision_artifact,
+                config=self.host.config,
+                audit_stage=audit_stage,
+            )
+        except Exception as exc:
+            logger.warning("failed to append live read-only decision audit row: %s", exc)
+            return None
 
     @staticmethod
     def _blocked_execution_result(

@@ -14,6 +14,7 @@ from bot.config import ensure_mode_storage_dir, load_config
 from bot.decision_pipeline import build_pre_execution_decision_artifact
 from bot.exchanges.base import BaseExchange
 from bot.live_adapters import RunnerLiveReconciliationAdapter, RunnerLiveStateAdapter
+from bot.live_decision_audit import append_live_readonly_decision_audit
 from bot.live_execution import RunnerLiveExecutionAdapter
 from bot.live_sync import RunnerLiveSync
 from bot.market_router import DEFAULT_ALLOWED_MARKET_ROUTES, route_market
@@ -1327,6 +1328,7 @@ class PredictionBot:
         self._append_shadow_intent_if_any(decision_artifact, signal)
 
         if not decision.approved:
+            self._safe_append_live_readonly_decision(signal, decision_artifact, audit_stage="initial_decision")
             logger.info(f"🛑 Shared decision skipped: {decision.reason}")
             return {"blocked_reason": decision.reason_code, "decision": decision, "decision_artifact": decision_artifact}
 
@@ -1373,6 +1375,29 @@ class PredictionBot:
             runtime_mode="live" if self._is_live_mode() else "paper",
             recorded_at=observed_at,
         )
+
+    def _safe_append_live_readonly_decision(
+        self,
+        signal: dict,
+        decision_artifact: dict | None,
+        *,
+        audit_stage: str,
+    ) -> dict | None:
+        if not self._is_live_mode() or not isinstance(decision_artifact, dict):
+            return None
+        try:
+            return append_live_readonly_decision_audit(
+                data_dir=self.log_dir,
+                session_id="live-runner",
+                scan_count=int(self.stats.get("scans", 0) or 0) + 1,
+                signal=signal,
+                decision_artifact=decision_artifact,
+                config=self.config,
+                audit_stage=audit_stage,
+            )
+        except Exception as exc:
+            logger.warning("failed to append live read-only decision audit row: %s", exc)
+            return None
 
     def _market_route_enforcement_enabled(self) -> bool:
         """Market routing is stable route safety; policy flags do not disable it."""
