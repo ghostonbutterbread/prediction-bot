@@ -14,6 +14,7 @@ from bot.agent_decision_ledger import (
     validate_agent_decision_row_with_legacy_identity,
 )
 from bot.file_ops import append_jsonl, load_jsonl
+from bot.paper_wallets import build_paper_accounting_ref, resolve_paper_wallet_contract
 from bot.shared_market_feed import shared_candidate_id_from_row
 from bot.strategy_policy import strategy_policy_status
 
@@ -30,10 +31,12 @@ def append_paper_agent_run_once(
     session_id: str,
     config: dict[str, Any],
     started_at: str | datetime | None = None,
+    candidate_dataset_path: str | Path | None = None,
 ) -> dict[str, Any] | None:
     """Append one paper run sidecar row for a session when it does not exist."""
 
     data_path = Path(data_dir)
+    wallet_contract = resolve_paper_wallet_contract(config, session_id=session_id, data_dir=data_path)
     run_id = str(session_id or "unknown")
     agent_run_id = build_agent_run_id(agent_id=PAPER_AGENT_ID, run_id=run_id)
     path = data_path / "agent_runs.jsonl"
@@ -49,11 +52,22 @@ def append_paper_agent_run_once(
         started_at=started_at or datetime.now(timezone.utc),
         finished_at=None,
         status="running",
-        candidate_dataset_path=_paper_session_path(data_path, session_id),
+        candidate_dataset_path=candidate_dataset_path or _paper_session_path(data_path, session_id),
         decision_ledger_path=data_path / "agent_decisions.jsonl",
         accounting_namespace=data_path,
         mutates_accounting=True,
         notes="paper sidecar audit only; accounting remains owned by existing paper session/risk path",
+    )
+    row.update(
+        {
+            "wallet_id": wallet_contract.wallet_id,
+            "policy_id": wallet_contract.policy_id,
+            "wallet_namespace": wallet_contract.namespace,
+            "accounting_root": str(wallet_contract.root_dir),
+            "risk_state_path": str(wallet_contract.risk_state_path),
+            "session_path": str(wallet_contract.session_path) if wallet_contract.session_path is not None else None,
+            "places_live_orders": wallet_contract.places_live_orders,
+        }
     )
     append_jsonl(path, row)
     return row
@@ -75,6 +89,7 @@ def append_paper_decision_audit(
 
     data_path = Path(data_dir)
     config = config or {}
+    wallet_contract = resolve_paper_wallet_contract(config, session_id=session_id, data_dir=data_path)
     signal_row = dict(signal or {})
     shared_candidate_id = shared_candidate_id_from_row(signal_row) or shared_candidate_id_from_row(decision_artifact)
     market_id = _market_id(decision_artifact, signal_row)
@@ -142,13 +157,15 @@ def append_paper_decision_audit(
             "edge": _number(decision.get("edge"), signal_row.get("edge")),
             "model_probability": _number(decision.get("win_probability"), signal_row.get("model_probability")),
             "entry_price": _number(decision.get("entry_price"), signal_row.get("market_price")),
-            "accounting_ref": {
-                "namespace": str(data_path),
-                "ledger_path": str(_paper_session_path(data_path, session_id)),
-                "trade_id": result_trade_id or None,
-                "mutates_balance": bool(accounting_mutated),
-                "balance_model": "paper_balance",
-            },
+            "wallet_id": wallet_contract.wallet_id,
+            "policy_id": wallet_contract.policy_id,
+            "accounting_ref": build_paper_accounting_ref(
+                config,
+                session_id=run_id,
+                data_dir=data_path,
+                trade_id=result_trade_id or None,
+                mutates_accounting=bool(accounting_mutated),
+            ),
             "mutation_contract": {
                 "mutates_shared_candidate": False,
                 "mutates_accounting": bool(accounting_mutated),

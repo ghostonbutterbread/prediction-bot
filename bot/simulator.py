@@ -195,7 +195,7 @@ class Simulator:
         loaded = self._load_session(load_from)
         if not loaded:
             # Fresh session
-            self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             self.trades: list[SimTrade] = []
             logger.info(f"Simulator started — session {self.session_id}")
             logger.info(f"Starting balance: ${self.starting_balance:.2f}")
@@ -789,6 +789,26 @@ class Simulator:
             self.single_trade_completed = True
         return trade
 
+    def submit_paper_signal(self, signal: dict, blockers: Optional[Counter] = None, *, persist: bool = True) -> Optional[SimTrade]:
+        """Public paper execution seam for callers that submit one prepared signal.
+
+        This owns the simulator bookkeeping that used to be duplicated by
+        callers: decision/execution, appending accepted trades, refreshing the
+        traded market set, and optional persistence.
+        """
+        trade = self._create_trade(signal, blockers)
+        if trade is None:
+            if persist:
+                self._save_session()
+            return None
+        self.trades.append(trade)
+        market_id = str(signal.get("market_id") or getattr(trade, "market_id", "") or "")
+        if market_id:
+            self.traded_markets.add(market_id)
+        if persist:
+            self._save_session()
+        return trade
+
     def _trade_from_execution_result(self, result: ExecutionResult) -> SimTrade:
         metadata = dict(result.metadata or {})
         return SimTrade(
@@ -993,6 +1013,7 @@ class Simulator:
                 data_dir=self.data_dir,
                 session_id=self.session_id,
                 config=self.config,
+                candidate_dataset_path=self.config.get("paper_candidate_dataset_path"),
             )
         except Exception as exc:
             logger.warning("failed to append paper agent run audit row: %s", exc)

@@ -200,7 +200,7 @@ class SimulatorPaperSessionStore:
 
     def _resolve_session_file(self, session_id: str | None) -> Path | None:
         search_dirs = [self.host.data_dir]
-        if self.host.data_dir.name in {"paper", "live"}:
+        if self._allow_legacy_parent_session_lookup():
             search_dirs.append(self.host.data_dir.parent)
 
         if session_id:
@@ -215,6 +215,16 @@ class SimulatorPaperSessionStore:
             session_files.extend(directory.glob("sim_*.json"))
         session_files = sorted(session_files, key=lambda path: path.stat().st_mtime, reverse=True)
         return session_files[0] if session_files else None
+
+    def _allow_legacy_parent_session_lookup(self) -> bool:
+        if self.host.data_dir.name not in {"paper", "live"}:
+            return False
+        paper_wallets = getattr(self.host, "config", {}).get("paper_wallets") if isinstance(getattr(self.host, "config", {}), dict) else None
+        if not isinstance(paper_wallets, dict):
+            return True
+        if paper_wallets.get("allow_legacy_parent_session_lookup") is True:
+            return True
+        return False
 
 
 class SimulatorPaperStateAdapter:

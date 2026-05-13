@@ -12,7 +12,7 @@ from bot.prediction_lab_backfill import (
     run_prediction_lab_canonical_analysis,
     run_prediction_lab_backfill,
 )
-from bot.prediction_lab_replay import validate_prediction_lab_tables
+from bot.prediction_lab_replay import classify_replay_row_quality, classify_source_mode, validate_prediction_lab_tables
 
 
 def _weather_snapshot() -> dict:
@@ -133,6 +133,45 @@ def _nested_recoverable_row() -> dict:
     return row
 
 
+def _historical_signal_recoverable_row() -> dict:
+    row = _strict_row("KXHIGHNY-26APR29-T82")
+    artifact = row["decision_artifact"]
+    artifact["source_context"]["data"].pop("weather_source_snapshot")
+    artifact.pop("source_snapshots")
+    artifact["strategy_signal"] = {
+        "signal_details": {
+            "live": {
+                "signal_type": "weather",
+                "predicted_prob": 0.95,
+                "confidence": 0.98,
+                "source_timestamp": "2026-04-29T23:59:59+00:00",
+                "ttl_seconds": 0,
+                "question_side": "above",
+                "data": {
+                    "forecast_high": 86.0,
+                    "forecast_low": 67.0,
+                    "historical_high": 86.0,
+                    "historical_low": 67.0,
+                    "actual_temp_used": 86.0,
+                    "predicted_temp": 86.0,
+                    "threshold": 80.0,
+                    "sources": ["noaa_daily_summaries_station"],
+                    "source_quality": "settlement_station_official_daily",
+                    "historical_replay": True,
+                    "weather_date": "2026-04-29",
+                    "date_validation": {
+                        "ok": True,
+                        "reason": "matched",
+                        "market_date": "2026-04-29",
+                        "weather_date": "2026-04-29",
+                    },
+                },
+            }
+        }
+    }
+    return row
+
+
 class PredictionLabBackfillTests(unittest.TestCase):
     def test_inventory_only_reports_counts_without_writing_upgraded_ledger(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -184,6 +223,31 @@ class PredictionLabBackfillTests(unittest.TestCase):
                 recovered_fields,
                 {"weather_source_snapshot", "order_book_snapshot", "execution_snapshot"},
             )
+            self.assertTrue(validate_prediction_lab_tables([output_dir / "upgraded_market_snapshots.jsonl"]).ok)
+
+    def test_artifact_recovery_reconstructs_historical_weather_snapshot_as_post_facto(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            input_path = tmp / "market_snapshots.jsonl"
+            output_dir = tmp / "backfill"
+            append_jsonl(input_path, _historical_signal_recoverable_row())
+
+            result = run_prediction_lab_backfill(input_path, output_dir, artifact_recovery=True)
+            upgraded = load_jsonl(output_dir / "upgraded_market_snapshots.jsonl")[0]
+            artifact = upgraded["decision_artifact"]
+            weather_snapshot = artifact["source_context"]["data"]["weather_source_snapshot"]
+            quality = classify_replay_row_quality(artifact, upgraded)
+
+            self.assertEqual(result.report["tier_counts"][TIER_COVERAGE_ONLY], 1)
+            self.assertEqual(artifact["source_context"]["source_mode"], "historical_post_facto")
+            self.assertEqual(weather_snapshot["mode"], "historical_post_facto")
+            self.assertEqual(weather_snapshot["source_provenance"], "historical_post_facto_backfill")
+            self.assertEqual(artifact["source_snapshots"][0]["mode"], "historical_post_facto")
+            self.assertEqual(classify_source_mode(artifact, upgraded), "historical_post_facto")
+            self.assertEqual(quality.category, "historical_post_facto")
+            self.assertIn("source_mode_historical_post_facto", upgraded["provenance"]["reasons"])
+            self.assertNotIn("missing_weather_snapshot", upgraded["provenance"]["reasons"])
+            self.assertIn("weather_source_snapshot", {source["field"] for source in upgraded["provenance"]["sources"]})
             self.assertTrue(validate_prediction_lab_tables([output_dir / "upgraded_market_snapshots.jsonl"]).ok)
 
     def test_provenance_manifest_labels_original_and_artifact_backfilled_tiers(self):

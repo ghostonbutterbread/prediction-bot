@@ -163,7 +163,7 @@ def analyze(*, prune_logs: bool = True) -> dict:
 
     Set prune_logs=False for read-only report contexts.
     """
-    
+
     sessions = load_sessions()
     latest = sessions[-1] if sessions else {}
     trades = latest.get("trades", [])
@@ -190,7 +190,7 @@ def analyze(*, prune_logs: bool = True) -> dict:
     for trade in resolved:
         for issue in trade.get("integrity_errors", []) or []:
             integrity_issue_counts[issue] += 1
-    
+
     result = {
         "timestamp": datetime.now(PACIFIC).isoformat(),
         "summary": {
@@ -286,7 +286,7 @@ def analyze(*, prune_logs: bool = True) -> dict:
                 ),
                 "suggestion": "Prepare to prune older audit logs or raise configured log budget",
             })
-    
+
     if trusted_resolved:
         result["performance"] = _build_position_performance(trusted_resolved)
         result["event_performance"] = {
@@ -297,11 +297,11 @@ def analyze(*, prune_logs: bool = True) -> dict:
                 "top_concentrated_events": top_concentrated_events,
             },
         }
-    
+
     if trades:
         edges = [t.get("edge", 0) for t in trades]
         confs = [t.get("confidence", 0) for t in trades]
-        
+
         result["signal_quality"] = {
             "avg_edge": round(sum(edges) / len(edges) * 100, 2),
             "max_edge": round(max(edges) * 100, 2),
@@ -312,7 +312,7 @@ def analyze(*, prune_logs: bool = True) -> dict:
                 "4_to_6pct": sum(1 for e in edges if 0.04 <= e < 0.06),
             },
         }
-    
+
     # Strategy breakdown
     by_direction = defaultdict(int)
     by_type = defaultdict(int)
@@ -321,27 +321,27 @@ def analyze(*, prune_logs: bool = True) -> dict:
         sigs = t.get("signals", {})
         sig_type = sigs.get("type", "strategy") if isinstance(sigs, dict) else "strategy"
         by_type[sig_type] += 1
-    
+
     result["strategy_breakdown"] = {
         "by_direction": dict(by_direction),
         "by_type": dict(by_type),
     }
-    
+
     # === ISSUE DETECTION ===
     issues = detect_issues(trades, resolved, trusted_resolved, latest)
     result["issues"] = issues
-    
+
     # === ACTIONABLE RECOMMENDATIONS ===
     actions = generate_actions(issues, result)
     result["actions"] = actions
-    
+
     return result
 
 
 def detect_issues(trades: list, resolved: list, trusted_resolved: list, session: dict) -> list:
     """Detect issues programmatically."""
     issues = []
-    
+
     # 1. No resolution after many trades
     if len(trades) > 100 and len(resolved) == 0:
         issues.append({
@@ -350,7 +350,7 @@ def detect_issues(trades: list, resolved: list, trusted_resolved: list, session:
             "message": f"{len(trades)} trades, 0 resolved — markets too long-term",
             "suggestion": "Focus on shorter-term markets (sports, daily events)",
         })
-    
+
     # 2. Low edge
     if trades:
         avg_edge = sum(t.get("edge", 0) for t in trades) / len(trades)
@@ -361,7 +361,7 @@ def detect_issues(trades: list, resolved: list, trusted_resolved: list, session:
                 "message": f"Average edge {avg_edge*100:.1f}% is below 2%",
                 "suggestion": "Raise MIN_EDGE or improve signal generation",
             })
-    
+
     # 3. Direction bias
     if trades:
         buy_yes = sum(1 for t in trades if t.get("direction") == "BUY_YES")
@@ -373,7 +373,7 @@ def detect_issues(trades: list, resolved: list, trusted_resolved: list, session:
                 "message": f"BUY_YES ratio: {ratio:.0%} — extreme bias detected",
                 "suggestion": "Strategy may be missing NO opportunities or vice versa",
             })
-    
+
     # 4. Duplicate trades
     market_ids = [t.get("market_id", "") for t in trades]
     dupes = len(market_ids) - len(set(market_ids))
@@ -384,7 +384,7 @@ def detect_issues(trades: list, resolved: list, trusted_resolved: list, session:
             "message": f"{dupes} duplicate trades on same market",
             "suggestion": "Enable traded_markets dedup check",
         })
-    
+
     # 5. Position size concentration
     if trades:
         sizes = [t.get("position_size", 0) for t in trades]
@@ -397,7 +397,7 @@ def detect_issues(trades: list, resolved: list, trusted_resolved: list, session:
                 "message": f"Max position ${max_size:.2f} is {max_size/avg_size:.0f}x average",
                 "suggestion": "Check if Kelly sizing is calculating correctly",
             })
-    
+
     # 6. Win rate too low (if we have resolutions)
     if len(trusted_resolved) >= 10:
         wins = sum(
@@ -437,10 +437,10 @@ def detect_issues(trades: list, resolved: list, trusted_resolved: list, session:
 def generate_actions(issues: list, result: dict) -> list:
     """Generate specific actionable recommendations."""
     actions = []
-    
+
     for issue in issues:
         code = issue["code"]
-        
+
         if code == "NO_RESOLUTIONS":
             actions.append({
                 "priority": 1,
@@ -454,7 +454,7 @@ def generate_actions(issues: list, result: dict) -> list:
                 "file": "bot/simulator.py",
                 "line": "markets = exchange.get_markets(limit=100)",
             })
-        
+
         elif code == "LOW_EDGE":
             actions.append({
                 "priority": 1,
@@ -462,7 +462,7 @@ def generate_actions(issues: list, result: dict) -> list:
                 "file": ".env",
                 "line": "MIN_EDGE=0.025",
             })
-        
+
         elif code == "DIRECTION_BIAS":
             yes_count = result.get("strategy_breakdown", {}).get("by_direction", {}).get("BUY_YES", 0)
             no_count = result.get("strategy_breakdown", {}).get("by_direction", {}).get("BUY_NO", 0)
@@ -471,7 +471,7 @@ def generate_actions(issues: list, result: dict) -> list:
                 "action": f"Add more NO-side analysis — currently {yes_count} YES vs {no_count} NO",
                 "file": "bot/strategies/enhanced.py",
             })
-        
+
         elif code == "DUPLICATE_TRADES":
             actions.append({
                 "priority": 1,
@@ -486,7 +486,7 @@ def generate_actions(issues: list, result: dict) -> list:
                 "action": "Re-run resolution or clean malformed resolved rows before using paper P&L",
                 "file": "bot/resolver.py",
             })
-    
+
     # Always suggest focusing on short-term
     if result["summary"]["total_trades_ever"] > 500:
         actions.append({
@@ -494,118 +494,190 @@ def generate_actions(issues: list, result: dict) -> list:
             "action": "Prioritize sports/injury markets over long-term political markets",
             "file": "bot/simulator.py",
         })
-    
+
     return sorted(actions, key=lambda x: x["priority"])
 
 
+def _append_lower_detail(lines: list[str], detail_lines: list[str]) -> None:
+    compact = [
+        part.strip()
+        for line in detail_lines
+        for part in str(line).split(" | ")
+        if part.strip()
+    ]
+    if not compact:
+        return
+    lines.extend(["", "🔎 **Lower Detail**"])
+    lines.extend(f"• {line}" for line in compact)
+
+
+def _money(value, *, fallback: str = "unresolved") -> str:
+    try:
+        if value is None:
+            return fallback
+        return f"${float(value):+.2f}"
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _shadow_opportunities(shadow_delta: dict | None) -> int:
+    if not isinstance(shadow_delta, dict):
+        return 0
+    return int(shadow_delta.get("total_shadow_delta_opportunities") or shadow_delta.get("shadow_delta_opportunities") or 0)
+
+
+def _shadow_summary_cell(shadow_delta: dict | None) -> str:
+    opportunities = _shadow_opportunities(shadow_delta)
+    if not isinstance(shadow_delta, dict) or opportunities <= 0:
+        return "0 opp"
+    changed = int(shadow_delta.get("changed_rows") or 0)
+    action = int(shadow_delta.get("action_changed") or 0)
+    size = int(shadow_delta.get("size_changed") or 0)
+    lane = int(shadow_delta.get("lane_changed") or 0)
+    return f"{opportunities} opp, {changed} changed, action {action}, size {size}, lane {lane}"
+
+
+def _dashboard_row(metric: str, paper: str, shadow: str | None = None) -> str:
+    if shadow is None:
+        return f"• {metric}: {paper}"
+    return f"`{metric:<16} {paper:<24} {shadow}`"
+
+
+def _format_policy_features(policy_status: dict) -> str:
+    features = policy_status.get("enabled_features") if isinstance(policy_status.get("enabled_features"), dict) else {}
+    return ", ".join(sorted(name for name, enabled in features.items() if enabled is True)) or "none"
+
+
+def _format_status_line(issues: list[dict]) -> str:
+    if not issues:
+        return "ok"
+    highest = issues[0]
+    code = highest.get("code") or highest.get("severity") or "issue"
+    return f"{len(issues)} issue(s), first={code}"
+
+
+def _shadow_eval_rows(analysis: dict) -> int:
+    for key in ("strategy_lanes", "hidden_gem_evidence_cards"):
+        value = analysis.get(key)
+        if isinstance(value, dict) and int(value.get("rows_scanned") or 0) > 0:
+            return int(value.get("rows_scanned") or 0)
+    return _shadow_opportunities(analysis.get("shadow_delta"))
+
+
+def _short_shadow_cell(analysis: dict) -> str:
+    rows = _shadow_eval_rows(analysis)
+
+    if not rows:
+        rows = _shadow_opportunities(analysis.get("shadow_delta"))
+    parts = [f"{rows} eval" if rows else "on"]
+    hidden = analysis.get("hidden_gem_evidence_cards") if isinstance(analysis.get("hidden_gem_evidence_cards"), dict) else {}
+    lanes = analysis.get("strategy_lanes") if isinstance(analysis.get("strategy_lanes"), dict) else {}
+    if hidden:
+        parts.append(f"cards {int(hidden.get('card_rows') or 0)}/{int(hidden.get('rows_scanned') or 0)}")
+        beta_rejected = int(hidden.get("beta_rejected_cards") or 0)
+        if beta_rejected:
+            parts.append(f"beta reject {beta_rejected}")
+    if lanes:
+        shadow_sizing = int(lanes.get("lane_sizing_shadow_rows") or 0)
+        if shadow_sizing:
+            parts.append(f"shadow size {shadow_sizing}")
+    return "; ".join(parts)
+
+
 def format_report(analysis: dict) -> str:
-    """Format analysis into a concise report."""
+    """Format analysis into a compact Telegram dashboard."""
     s = analysis["summary"]
     p = analysis.get("performance", {})
-    ep = analysis.get("event_performance", {})
-    sq = analysis.get("signal_quality", {})
-    
+    policy_status = analysis.get("strategy_policy_status") or {}
+    shadow_running = policy_status.get("shadow") is True or _shadow_opportunities(analysis.get("shadow_delta")) > 0
+    current_trades = int(s.get("current_trades") or 0)
+    resolved_raw = int(s.get("resolved") or 0)
+    trusted_resolved = int(s.get("trusted_resolved_positions") or 0)
+    open_positions = max(0, current_trades - resolved_raw)
+    pnl = _money(p.get("total_pnl") if p else None)
+    policy_label = (
+        f"{policy_status.get('version', 'stable')}/{policy_status.get('mode', 'off')}"
+        if policy_status
+        else "unknown"
+    )
+    status_line = _format_status_line(analysis.get("issues") or [])
+
+    # The paper loop is the execution/logging path when paper trades exist.
+    # If no paper rows exist but shadow evidence does, mark shadow as active.
+    active_column = "shadow" if shadow_running and current_trades == 0 else "paper"
+    paper_marker = "▶ " if active_column == "paper" else ""
+    shadow_marker = "▶ " if active_column == "shadow" else ""
+
     lines = [
         f"📊 **Bot Report** — {analysis['timestamp'][:16]}",
         "",
-        (
-            f"Session: {s['current_session']} | Scans: {s['scans']} | Trades: {s['current_trades']} | "
-            f"Resolved: {s.get('resolved', 0)} raw / {s.get('trusted_resolved_positions', 0)} trusted / "
-            f"{s.get('resolved_events', 0)} events"
-        ),
+        "📋 **Paper / Shadow**" if shadow_running else "📋 **Paper**",
     ]
+    if shadow_running:
+        lines.extend(
+            [
+                "`Metric        Paper                 Shadow`",
+                _dashboard_row("Trading", f"{paper_marker}paper sim", f"{shadow_marker}{policy_label}"),
+                _dashboard_row("Trades", f"{paper_marker}{current_trades}", f"{shadow_marker}{_short_shadow_cell(analysis)}"),
+                _dashboard_row("Open/closed", f"{paper_marker}{open_positions} / {trusted_resolved} closed", f"{shadow_marker}eval / no close"),
+                _dashboard_row("PnL", f"{paper_marker}{pnl}", f"{shadow_marker}not executed"),
+                _dashboard_row("Status", status_line, "same"),
+                "• ▶ = actual execution/logging path",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                _dashboard_row("Trading", f"paper sim; {policy_label}"),
+                _dashboard_row("Trades", str(current_trades)),
+                _dashboard_row("Open positions", str(open_positions)),
+                _dashboard_row("Closed positions", f"{trusted_resolved} trusted / {resolved_raw} raw"),
+                _dashboard_row("PnL", pnl),
+                _dashboard_row("Status", status_line),
+            ]
+        )
+
+    lines.extend([
+        "",
+        "📌 **Snapshot**",
+        f"• Strategy policy: {policy_label}",
+        f"• active={policy_status.get('active') is True} shadow={policy_status.get('shadow') is True} enforce={policy_status.get('enforce') is True}",
+        f"• features={_format_policy_features(policy_status)}",
+        f"• Session: {s['current_session']}",
+        f"• Scans: {s['scans']}",
+        f"• Resolved: {resolved_raw} raw / {trusted_resolved} trusted / {s.get('resolved_events', 0)} events",
+    ])
     if s.get("current_session_file"):
-        lines.append(f"Source: {s['current_session_file']}")
-    policy_status = analysis.get("strategy_policy_status") or {}
-    if policy_status:
-        features = policy_status.get("enabled_features") if isinstance(policy_status.get("enabled_features"), dict) else {}
-        enabled = ", ".join(sorted(name for name, enabled in features.items() if enabled is True)) or "none"
-        active = policy_status.get("active") is True
-        shadow = policy_status.get("shadow") is True
-        enforce = policy_status.get("enforce") is True
-        lines.append(
-            f"Strategy policy: {policy_status.get('version', 'stable')}/{policy_status.get('mode', 'off')} | "
-            f"active={active} shadow={shadow} enforce={enforce} | features={enabled}"
-        )
-    if s.get("ignored_invalid_trades"):
-        lines.append(f"Ignored invalid trade rows: {s['ignored_invalid_trades']}")
-    if s.get("invalid_resolved_positions"):
-        lines.append(f"Untrusted resolved rows: {s['invalid_resolved_positions']}")
-    if s.get("total_equity") is not None:
-        lines.append(
-            f"Capital: equity ${s.get('total_equity', 0):.2f} | "
-            f"available ${s.get('available_cash', s.get('total_equity', 0)):.2f} | "
-            f"reserved ${s.get('reserved_capital', 0):.2f}"
-        )
-    
-    if p:
-        emoji = "🟢" if p.get("total_pnl", 0) > 0 else "🔴" if p.get("total_pnl", 0) < 0 else "⚪"
-        lines.append(
-            f"{emoji} Position Win Rate: {p.get('win_rate', 0)}% | "
-            f"P&L: ${p.get('total_pnl', 0):+.2f} | PF: {p.get('profit_factor', 0)}"
-        )
-    if ep:
-        lines.append(
-            f"📍 Event Win Rate: {ep.get('win_rate', 0)}% | "
-            f"Events: {ep.get('resolved_events', 0)} | Avg/Event: ${ep.get('avg_pnl_per_event', 0):+.2f} | "
-            f"Avg Pos/Event: {ep.get('avg_positions_per_resolved_event', 0)}"
-        )
-        if ep.get("retrade_count") is not None:
-            lines.append(f"🔁 Retrades: {ep.get('retrade_count', 0)} | Open Events: {s.get('open_event_count', 0)}")
-        top_events = (ep.get("open_event_concentration") or {}).get("top_concentrated_events") or []
-        if top_events:
-            top = top_events[0]
-            lines.append(
-                f"Top Open Event: {top.get('event_key')} | {top.get('open_positions')} positions | ${top.get('reserved_capital', 0):.2f} reserved"
-            )
-    
-    if sq:
-        lines.append(f"Edge: {sq.get('avg_edge', 0)}% avg, {sq.get('max_edge', 0)}% max | Conf: {sq.get('avg_confidence', 0)}%")
+        lines.append(f"• Source: {s['current_session_file']}")
 
     hidden_gem_line = format_hidden_gem_evidence_summary(analysis.get("hidden_gem_evidence_cards"))
-    if hidden_gem_line:
-        lines.append(hidden_gem_line)
     strategy_lane_line = format_strategy_lane_summary(analysis.get("strategy_lanes"))
-    if strategy_lane_line:
-        lines.append(strategy_lane_line)
-    shadow_delta_line = format_shadow_delta_summary(analysis.get("shadow_delta"))
-    if shadow_delta_line:
-        lines.append(shadow_delta_line)
     readiness_line = format_strategy_lane_rollout_readiness(analysis.get("strategy_lane_rollout_readiness"))
-    if readiness_line:
-        lines.append(readiness_line)
-    
-    storage = analysis.get("storage", {})
-    if storage:
-        lines.append(
-            f"Storage: {storage.get('log_audit_usage_gb', 0)} GB / {storage.get('log_audit_cap_gb', 0)} GB ({storage.get('usage_pct', 0)}%)"
-        )
-        if storage.get("largest_files"):
-            largest = storage["largest_files"][0]
-            lines.append(
-                f"Largest tracked log: {largest.get('path')} ({round(largest.get('bytes', 0) / (1024 ** 3), 2)} GB)"
-            )
-        prune_result = storage.get("prune_result")
-        if prune_result and prune_result.get("performed"):
-            lines.append(
-                f"Auto-pruned: reclaimed {round(prune_result.get('bytes_reclaimed', 0) / (1024 ** 3), 2)} GB from {len(prune_result.get('pruned_files', []))} files"
-            )
+    detail_lines = []
+    shadow_delta_line = format_shadow_delta_summary(analysis.get("shadow_delta"))
+    if analysis.get("event_performance"):
+        ep = analysis.get("event_performance") or {}
+        detail_lines.append(f"Event Win Rate: {ep.get('win_rate', 0)}%")
+    for line in (hidden_gem_line, strategy_lane_line, shadow_delta_line, readiness_line):
+        if line:
+            detail_lines.extend(part.strip() for part in str(line).split(" | ") if part.strip())
+    if detail_lines:
+        lines.extend(["", "🔎 **Detail**"])
+        lines.extend(f"• {line}" for line in detail_lines)
 
     if analysis["issues"]:
-        lines.append("")
-        lines.append("⚠️ **Issues:**")
+        lines.extend(["", "⚠️ **Issues:**"])
         for i in analysis["issues"]:
             emoji = {"critical": "🔴", "error": "🟠", "warning": "🟡", "info": "🔵"}.get(i["severity"], "⚪")
-            lines.append(f"  {emoji} {i['message']}")
-    
-    if analysis["actions"]:
-        lines.append("")
-        lines.append("🔧 **Actions:**")
-        for a in analysis["actions"][:3]:
-            lines.append(f"  [{a['priority']}] {a['action']} → {a.get('file', '?')}")
-    
-    return "\n".join(lines)
+            code = f" [{i['code']}]" if i.get("code") else ""
+            lines.append(f"• {emoji}{code} {i['message']}")
 
+    if analysis["actions"]:
+        lines.extend(["", "🔧 **Actions:**"])
+        for a in analysis["actions"][:3]:
+            lines.append(f"• [{a['priority']}] {a['action']} → {a.get('file', '?')}")
+
+    return "\n".join(lines)
 
 def _env_bool(name: str, default: bool = False) -> bool:
     raw = os.getenv(name)
@@ -708,7 +780,7 @@ def _iter_shadow_delta_jsonl_rows(path: Path):
 if __name__ == "__main__":
     import sys
     analysis = analyze()
-    
+
     if "--json" in sys.argv:
         print(json.dumps(analysis, indent=2))
     elif "--report" in sys.argv:
@@ -718,7 +790,7 @@ if __name__ == "__main__":
         print(json.dumps(analysis, indent=2))
         print("\n" + "="*60 + "\n")
         print(format_report(analysis))
-        
+
         # Save
         summary_dir = DATA_DIR / "summaries"
         summary_dir.mkdir(exist_ok=True)

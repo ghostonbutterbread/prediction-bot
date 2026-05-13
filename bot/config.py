@@ -14,6 +14,7 @@ from copy import deepcopy
 from typing import Any
 from pathlib import Path
 
+from bot.paper_wallets import build_paper_wallet_contracts
 from bot.strategy_policy import normalize_strategy_policy
 from bot.market_router import normalize_allowed_market_routes
 from bot.strategy_lanes import default_strategy_lane_config, normalize_strategy_lane_config
@@ -407,6 +408,12 @@ def _apply_runtime_paths(config: dict) -> dict:
     return config
 
 
+def _apply_paper_wallet_contract(config: dict) -> dict:
+    config = deepcopy(config)
+    config["paper_wallets"] = build_paper_wallet_contracts(config)
+    return config
+
+
 def load_config(config_path: str | Path | None = None) -> dict:
     """Load config from config.yaml with .env overrides."""
     if config_path is not None:
@@ -430,6 +437,7 @@ def load_config(config_path: str | Path | None = None) -> dict:
     config = _normalize_strategy_policy_config(config)
     config = _normalize_storage_config(config)
     config = _apply_runtime_paths(config)
+    config = _apply_paper_wallet_contract(config)
 
     return config
 

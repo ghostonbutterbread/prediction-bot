@@ -14,6 +14,7 @@ from bot.prediction_lab_replay import (
     ORDER_BOOK_MISSING,
     ORDER_BOOK_RECORDED,
     ORDER_BOOK_SIGNAL_PRICE_FALLBACK,
+    SOURCE_HISTORICAL_POST_FACTO,
     SOURCE_RECORDED_AS_OF,
     classify_execution_snapshot_mode,
     classify_order_book_mode,
@@ -443,19 +444,19 @@ def _recover_weather_snapshot(artifact: dict[str, Any]) -> list[FieldProvenance]
         data = {}
         source_context["data"] = data
     if isinstance(data.get("weather_source_snapshot"), dict) and data["weather_source_snapshot"]:
-        if not source_context.get("source_mode"):
-            source_context["source_mode"] = "recorded_as_of"
-        if not source_context.get("source"):
-            source_context["source"] = "provided"
+        _normalize_weather_snapshot_provenance(data["weather_source_snapshot"], source_context)
         return []
 
     candidate, path = _weather_snapshot_from_source_snapshots(artifact)
+    method = "nested_artifact_recovery"
+    if candidate is None:
+        candidate, path = _weather_snapshot_from_recorded_signal(artifact)
+        method = "recorded_signal_weather_snapshot_reconstruction"
     if candidate is None:
         return []
     data["weather_source_snapshot"] = copy.deepcopy(candidate)
-    source_context.setdefault("source", "provided")
-    source_context.setdefault("source_mode", "recorded_as_of")
-    return [FieldProvenance("weather_source_snapshot", "nested_artifact_recovery", path)]
+    _normalize_weather_snapshot_provenance(data["weather_source_snapshot"], source_context)
+    return [FieldProvenance("weather_source_snapshot", method, path)]
 
 
 def _recover_source_snapshots(artifact: dict[str, Any]) -> list[FieldProvenance]:
@@ -466,10 +467,13 @@ def _recover_source_snapshots(artifact: dict[str, Any]) -> list[FieldProvenance]
     data = source_context.get("data") if isinstance(source_context.get("data"), dict) else {}
     weather_snapshot = data.get("weather_source_snapshot") if isinstance(data.get("weather_source_snapshot"), dict) else None
     if weather_snapshot:
+        mode = _weather_snapshot_mode(weather_snapshot)
         artifact["source_snapshots"] = [
             {
-                "mode": str(weather_snapshot.get("mode") or source_context.get("source_mode") or "recorded_as_of"),
+                "mode": mode,
                 "source": "weather",
+                "source_provenance": weather_snapshot.get("source_provenance"),
+                "provenance": weather_snapshot.get("provenance"),
                 "method": "_live_data_signal",
                 "snapshot_ref": "source_context.data.weather_source_snapshot",
             }
@@ -534,6 +538,61 @@ def _recover_execution_snapshot(artifact: dict[str, Any]) -> list[FieldProvenanc
     ]
 
 
+def _normalize_weather_snapshot_provenance(snapshot: dict[str, Any], source_context: dict[str, Any]) -> None:
+    mode = _weather_snapshot_mode(snapshot)
+    snapshot["mode"] = mode
+    if mode == SOURCE_HISTORICAL_POST_FACTO:
+        snapshot.setdefault("source_provenance", "historical_post_facto_backfill")
+        snapshot.setdefault(
+            "provenance",
+            {
+                "source_mode": SOURCE_HISTORICAL_POST_FACTO,
+                "source_provenance": snapshot.get("source_provenance"),
+                "anti_hindsight": "post_facto_weather_not_recorded_as_of",
+            },
+        )
+        source_context["source"] = SOURCE_HISTORICAL_POST_FACTO
+        source_context["source_mode"] = SOURCE_HISTORICAL_POST_FACTO
+        source_context.setdefault("source_provenance", snapshot.get("source_provenance"))
+        source_context.setdefault("provenance", snapshot.get("provenance"))
+        return
+    if not source_context.get("source_mode"):
+        source_context["source_mode"] = SOURCE_RECORDED_AS_OF
+    if not source_context.get("source"):
+        source_context["source"] = "provided"
+
+
+def _weather_snapshot_mode(snapshot: dict[str, Any]) -> str:
+    values = [
+        snapshot.get("mode"),
+        snapshot.get("source_mode"),
+        snapshot.get("source_provenance"),
+        snapshot.get("provenance"),
+    ]
+    source_signal = snapshot.get("source_signal") if isinstance(snapshot.get("source_signal"), dict) else {}
+    source_data = source_signal.get("data") if isinstance(source_signal.get("data"), dict) else {}
+    values.extend(
+        (
+            source_signal.get("mode"),
+            source_signal.get("source_mode"),
+            source_signal.get("source_provenance"),
+            source_data.get("mode"),
+            source_data.get("source_mode"),
+            source_data.get("source_provenance"),
+        )
+    )
+    if snapshot.get("historical_replay") is True or source_signal.get("historical_replay") is True or source_data.get("historical_replay") is True:
+        return SOURCE_HISTORICAL_POST_FACTO
+    if any(_text_has_post_facto_token(value) for value in values):
+        return SOURCE_HISTORICAL_POST_FACTO
+    return SOURCE_RECORDED_AS_OF
+
+
+def _text_has_post_facto_token(value: Any) -> bool:
+    text = str(value or "").lower()
+    return any(token in text for token in ("historical_post_facto", "post_facto", "historical_replay"))
+
+
 def _weather_snapshot_from_source_snapshots(artifact: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
     snapshots = artifact.get("source_snapshots")
     if not isinstance(snapshots, list):
@@ -552,6 +611,139 @@ def _weather_snapshot_from_source_snapshots(artifact: dict[str, Any]) -> tuple[d
             path = snapshot.get("snapshot_ref") if resolved is not None else f"decision_artifact.source_snapshots[{index}]"
             return candidate, str(path)
     return None, ""
+
+
+def _weather_snapshot_from_recorded_signal(artifact: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
+    for path, signal in _recorded_weather_signal_candidates(artifact):
+        data = signal.get("data") if isinstance(signal.get("data"), dict) else {}
+        if not _looks_like_weather_signal(signal, data):
+            continue
+        mode = SOURCE_HISTORICAL_POST_FACTO if _recorded_signal_is_post_facto(signal, data) else SOURCE_RECORDED_AS_OF
+        source_timestamp = signal.get("source_timestamp") or data.get("as_of") or data.get("fetched_at") or artifact.get("as_of") or artifact.get("observed_at")
+        date_validation = data.get("date_validation") if isinstance(data.get("date_validation"), dict) else None
+        snapshot = {
+            "artifact_version": 1,
+            "mode": mode,
+            "source_name": "weather",
+            "signal_type": "weather",
+            "method": "_live_data_signal",
+            "as_of": source_timestamp,
+            "fetched_at": data.get("fetched_at") or source_timestamp,
+            "source_timestamp": signal.get("source_timestamp"),
+            "ttl_seconds": signal.get("ttl_seconds"),
+            "predicted_prob": signal.get("predicted_prob"),
+            "confidence": signal.get("confidence"),
+            "source_agreement_score": data.get("agreement"),
+            "settlement_source": data.get("settlement_source"),
+            "station_id": data.get("station_id"),
+            "station_cli": data.get("station_cli"),
+            "station_mapping": data.get("station_mapping"),
+            "station_resolution": data.get("station_resolution"),
+            "weather_date": data.get("weather_date"),
+            "forecast_date": data.get("forecast_date"),
+            "target_forecast_date": data.get("target_forecast_date"),
+            "date_validation": date_validation,
+            "forecast": {
+                "high": data.get("forecast_high"),
+                "low": data.get("forecast_low"),
+                "current": data.get("current_temp"),
+                "actual_temp_used": data.get("actual_temp_used"),
+                "predicted_temp": data.get("predicted_temp"),
+                "threshold": data.get("threshold"),
+                "question_side": signal.get("question_side"),
+            },
+            "sources": _weather_snapshot_sources_from_signal_data(data, source_timestamp),
+            "source_signal": {
+                "signal_type": "weather",
+                "predicted_prob": signal.get("predicted_prob"),
+                "confidence": signal.get("confidence"),
+                "source_timestamp": signal.get("source_timestamp"),
+                "ttl_seconds": signal.get("ttl_seconds"),
+                "question_side": signal.get("question_side"),
+                "edge": signal.get("edge"),
+                "data": copy.deepcopy(data),
+            },
+        }
+        if mode == SOURCE_HISTORICAL_POST_FACTO:
+            snapshot["source_provenance"] = "historical_post_facto_backfill"
+            snapshot["provenance"] = {
+                "source_mode": SOURCE_HISTORICAL_POST_FACTO,
+                "source_provenance": "historical_post_facto_backfill",
+                "anti_hindsight": "post_facto_weather_not_recorded_as_of",
+                "reconstructed_from": path,
+            }
+        return _drop_empty_values(snapshot), path
+    return None, ""
+
+
+def _recorded_weather_signal_candidates(artifact: dict[str, Any]) -> Iterable[tuple[str, dict[str, Any]]]:
+    strategy_signal = artifact.get("strategy_signal") if isinstance(artifact.get("strategy_signal"), dict) else {}
+    signal_details = strategy_signal.get("signal_details") if isinstance(strategy_signal.get("signal_details"), dict) else {}
+    for name, value in signal_details.items():
+        if isinstance(value, dict):
+            yield f"decision_artifact.strategy_signal.signal_details.{name}", value
+    if isinstance(strategy_signal, dict):
+        yield "decision_artifact.strategy_signal", strategy_signal
+    trace = artifact.get("strategy_trace") if isinstance(artifact.get("strategy_trace"), dict) else {}
+    for container_name in ("accepted_signals", "rejected_signals", "raw_signals"):
+        container = trace.get(container_name)
+        if not isinstance(container, dict):
+            continue
+        for name, value in container.items():
+            if isinstance(value, dict):
+                yield f"decision_artifact.strategy_trace.{container_name}.{name}", value
+
+
+def _looks_like_weather_signal(signal: dict[str, Any], data: dict[str, Any]) -> bool:
+    if str(signal.get("signal_type") or "").lower() == "weather":
+        return True
+    return any(key in data for key in ("forecast_high", "forecast_low", "current_temp", "actual_temp_used", "historical_high", "historical_low"))
+
+
+def _recorded_signal_is_post_facto(signal: dict[str, Any], data: dict[str, Any]) -> bool:
+    if signal.get("historical_replay") is True or data.get("historical_replay") is True:
+        return True
+    values = (
+        signal.get("mode"),
+        signal.get("source_mode"),
+        signal.get("source_provenance"),
+        data.get("mode"),
+        data.get("source_mode"),
+        data.get("source_provenance"),
+    )
+    return any(_text_has_post_facto_token(value) for value in values)
+
+
+def _weather_snapshot_sources_from_signal_data(data: dict[str, Any], as_of: Any) -> list[dict[str, Any]]:
+    source_details = data.get("source_details")
+    if isinstance(source_details, list) and source_details:
+        return [copy.deepcopy(item) for item in source_details if isinstance(item, dict)]
+    raw_sources = data.get("sources") or []
+    if not isinstance(raw_sources, list):
+        raw_sources = [raw_sources]
+    sources = []
+    for source in raw_sources:
+        if source in (None, ""):
+            continue
+        sources.append(
+            {
+                "source_name": str(source),
+                "fetched_at": data.get("fetched_at") or as_of,
+                "as_of": data.get("as_of") or data.get("fetched_at") or as_of,
+                "weather_date": data.get("weather_date"),
+                "station_id": data.get("station_id"),
+                "station_cli": data.get("station_cli"),
+            }
+        )
+    return sources
+
+
+def _drop_empty_values(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: cleaned for key, item in value.items() if (cleaned := _drop_empty_values(item)) not in (None, "", [], {})}
+    if isinstance(value, list):
+        return [cleaned for item in value if (cleaned := _drop_empty_values(item)) not in (None, "", [], {})]
+    return value
 
 
 def _resolve_snapshot_ref(artifact: dict[str, Any], snapshot: dict[str, Any]) -> dict[str, Any] | None:

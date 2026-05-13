@@ -34,6 +34,21 @@ class MarketRouterTests(unittest.TestCase):
         self.assertEqual(route.family, "daily_temperature")
         self.assertEqual(route.subcategory, "tail_high")
 
+    def test_legacy_archive_high_temperature_market_is_allowed(self):
+        route = route_market(
+            {
+                "market_id": "HIGHNY0-21JUL17-T90",
+                "question": "Will the high temperature in New York City be over 90° on Saturday?",
+                "category": "HIGHNY0-21JUL17",
+            },
+            {"scan": {"allowed_market_routes": ["weather.daily_temperature"]}},
+        )
+
+        self.assertTrue(route.allowed)
+        self.assertEqual(route.group, "weather")
+        self.assertEqual(route.family, "daily_temperature")
+        self.assertEqual(route.subcategory, "tail_high")
+
     def test_daily_temperature_bucket_market_is_allowed(self):
         route = route_market(
             {
@@ -53,6 +68,19 @@ class MarketRouterTests(unittest.TestCase):
                 "market_id": "KXHIGHGDP-260506-T5",
                 "question": "Will GDP growth exceed 5 percent?",
                 "category": "KXHIGHGDP",
+            },
+            {"scan": {"allowed_market_routes": ["weather.daily_temperature"]}},
+        )
+
+        self.assertFalse(route.allowed)
+        self.assertEqual(route.reason_code, "daily_temperature_semantics_missing")
+
+    def test_legacy_archive_high_prefix_without_temperature_semantics_is_rejected(self):
+        route = route_market(
+            {
+                "market_id": "HIGHNY0-21JUL17-T90",
+                "question": "Will a New York index close over 90?",
+                "category": "HIGHNY0-21JUL17",
             },
             {"scan": {"allowed_market_routes": ["weather.daily_temperature"]}},
         )
