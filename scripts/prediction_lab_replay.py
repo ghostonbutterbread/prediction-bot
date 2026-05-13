@@ -14,12 +14,26 @@ if str(ROOT) not in sys.path:
 
 from bot.config import load_config
 from bot.file_ops import atomic_write_json, rewrite_jsonl
-from bot.prediction_lab_replay import build_replay_series_grid, replay_from_paths, validate_prediction_lab_tables
+from bot.prediction_lab_replay import (
+    build_replay_series_grid,
+    explicit_prediction_lab_replay_window,
+    replay_from_paths,
+    select_prediction_lab_replay_window,
+    validate_prediction_lab_tables,
+)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Replay recorded Prediction Lab artifacts")
-    parser.add_argument("inputs", nargs="+", help="Prediction Lab predictions.jsonl or market_snapshots.jsonl files")
+    parser.add_argument("inputs", nargs="*", help="Prediction Lab predictions.jsonl or market_snapshots.jsonl files")
+    parser.add_argument("--input", action="append", default=[], help="Explicit Prediction Lab input path; may be repeated")
+    parser.add_argument("--months", default=None, help="Select newest N available monthly datasets, or 'all'. Defaults to prediction_lab.replay_default_months when no explicit input is provided.")
+    parser.add_argument(
+        "--data-root",
+        action="append",
+        default=[],
+        help="Dataset discovery root for --months; may be repeated. Defaults to config data_dir.",
+    )
     parser.add_argument("--config", default="config.yaml", help="Replay config path")
     parser.add_argument("--limit", type=int, default=None, help="Maximum artifact rows to replay")
     parser.add_argument("--bankroll-usd", type=float, default=100.0, help="Fixed replay opportunity bankroll")
@@ -61,16 +75,37 @@ def main() -> int:
     args = parser.parse_args()
 
     config = load_config(Path(args.config))
+    explicit_inputs = [*args.inputs, *args.input]
+    replay_window = None
+    replay_inputs = explicit_inputs
+    requested_months = args.months
+    if requested_months is None and not explicit_inputs:
+        requested_months = _default_replay_months(config)
+
+    if requested_months is not None:
+        discovery_roots = args.data_root or explicit_inputs or _default_replay_roots(config)
+        try:
+            replay_window = select_prediction_lab_replay_window(discovery_roots, months=requested_months)
+        except ValueError as exc:
+            parser.error(str(exc))
+        replay_inputs = list(replay_window.datasets)
+    elif explicit_inputs:
+        replay_window = explicit_prediction_lab_replay_window(explicit_inputs)
+    else:
+        parser.error("provide one or more inputs, --input, or --months N|all")
+
     if args.validate_only:
-        validation = validate_prediction_lab_tables(args.inputs, resolution_paths=args.resolution_input)
+        validation = validate_prediction_lab_tables(replay_inputs, resolution_paths=args.resolution_input)
         payload = validation.to_dict()
+        if replay_window is not None:
+            payload["replay_window"] = replay_window.to_dict()
         if args.validation_output:
             atomic_write_json(Path(args.validation_output), payload)
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 2 if args.fail_on_validation_errors and not validation.ok else 0
 
     result = replay_from_paths(
-        args.inputs,
+        replay_inputs,
         config=config,
         limit=args.limit,
         bankroll_usd=args.bankroll_usd,
@@ -79,6 +114,7 @@ def main() -> int:
         row_quality_policy=args.row_quality_policy,
         resolution_paths=args.resolution_input,
         decision_paths=args.decision_input,
+        replay_window=replay_window,
     )
 
     if args.output:
@@ -90,6 +126,33 @@ def main() -> int:
 
     print(json.dumps(result.summary, indent=2, sort_keys=True))
     return 0
+
+
+def _default_replay_months(config: dict) -> int | str:
+    lab_cfg = config.get("prediction_lab", {}) if isinstance(config.get("prediction_lab"), dict) else {}
+    configured = (
+        lab_cfg.get("replay_default_months")
+        or lab_cfg.get("monthly_audit_months")
+        or lab_cfg.get("default_audit_months")
+    )
+    return configured if configured not in (None, "") else 2
+
+
+def _default_replay_roots(config: dict) -> list[Path]:
+    lab_cfg = config.get("prediction_lab", {}) if isinstance(config.get("prediction_lab"), dict) else {}
+    configured = lab_cfg.get("replay_dataset_roots") or lab_cfg.get("replay_data_roots")
+    if isinstance(configured, list) and configured:
+        return [Path(value) for value in configured]
+    if isinstance(configured, str) and configured:
+        return [Path(configured)]
+
+    runtime_cfg = config.get("runtime", {}) if isinstance(config.get("runtime"), dict) else {}
+    base_dir = Path(runtime_cfg.get("base_dir") or config.get("data_dir", "data"))
+    lab_root = base_dir / "paper" / "prediction_lab"
+    monthly_root = lab_root / "monthly" / "market_snapshots"
+    if monthly_root.exists():
+        return [monthly_root]
+    return [lab_root / "market_snapshots.jsonl"]
 
 
 if __name__ == "__main__":

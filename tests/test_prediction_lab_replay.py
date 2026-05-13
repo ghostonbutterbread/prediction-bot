@@ -8,6 +8,8 @@ from bot.decision_pipeline import DecisionPipelineEvaluator
 from bot.file_ops import append_jsonl
 from bot.prediction_lab_replay import (
     LiveCurrentSourceForbiddenError,
+    ReplayArtifactInput,
+    _market_from_record,
     build_replay_series_grid,
     classify_order_book_mode,
     classify_replay_row_quality,
@@ -1775,6 +1777,38 @@ class PredictionLabReplayTests(unittest.TestCase):
         self.assertEqual(result.rows[0].execution_snapshot_mode, "signal_price_fallback")
         self.assertEqual(result.rows[0].replayed_artifact["execution_snapshot"]["market_price"], 0.42)
         self.assertEqual(result.rows[0].replayed_artifact["execution_snapshot_source"], "fallback")
+
+    def test_replay_market_prefers_embedded_shared_candidate_market_evidence(self):
+        row = {
+            "run_id": "run-1",
+            "market_id": "KX-LEGACY",
+            "shared_candidate": {
+                "schema_name": "shared_market_candidate",
+                "candidate_id": "candidate-1",
+                "market_id": "KX-SHARED",
+                "market": {
+                    "id": "KX-SHARED",
+                    "exchange": "kalshi",
+                    "question": "Will shared evidence be preferred?",
+                    "series": "KXSHARED",
+                    "group": "weather",
+                    "event_ticker": "KXSHARED-26MAY",
+                    "volume": 321,
+                },
+                "prices": {"yes_price": 0.37, "no_price": 0.63},
+            },
+        }
+        record = ReplayArtifactInput(row=row, artifact={"final_action": "SKIP"})
+
+        market = _market_from_record(record)
+
+        self.assertEqual(market.id, "KX-LEGACY")
+        self.assertEqual(market.question, "Will shared evidence be preferred?")
+        self.assertEqual(market.yes_price, 0.37)
+        self.assertEqual(market.no_price, 0.63)
+        self.assertEqual(market.volume, 321)
+        self.assertEqual(market.metadata["series"], "KXSHARED")
+        self.assertEqual(market.metadata["event_ticker"], "KXSHARED-26MAY")
 
 
 if __name__ == "__main__":
