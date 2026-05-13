@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import logging
+import gzip
+import json
+import re
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -27,6 +30,7 @@ from bot.hidden_gem_evidence import (
 )
 from bot.prediction_lab_shadow_delta import summarize_shadow_delta_rows
 from bot.shared_market_feed import (
+    shared_candidate_from_market_snapshot_row,
     shared_candidate_id_from_row,
     summarize_dual_policy_pnl_snapshot_rows,
     summarize_dual_policy_snapshot_rows,
@@ -214,13 +218,217 @@ class PredictionLabReplayResult:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class PredictionLabReplayDataset:
+    dataset_id: str
+    path: str
+    kind: str
+    min_observed_at: str | None
+    max_observed_at: str | None
+    months: tuple[str, ...]
+    row_count: int
+    quality: str
+    exclusion_reason: str | None = None
+    warnings: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "dataset_id": self.dataset_id,
+            "path": self.path,
+            "kind": self.kind,
+            "min_observed_at": self.min_observed_at,
+            "max_observed_at": self.max_observed_at,
+            "months": list(self.months),
+            "row_count": self.row_count,
+            "quality": self.quality,
+            "exclusion_reason": self.exclusion_reason,
+            "warnings": list(self.warnings),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class PredictionLabReplayWindow:
+    selection_mode: str
+    requested_months: int | str | None
+    selected_months: int
+    available_months: int
+    anchor_month: str | None
+    fallback_reason: str | None
+    datasets: tuple[str, ...]
+    warnings: tuple[str, ...] = ()
+    backfill_recommendation: str | None = None
+    selected_month_list: tuple[str, ...] = ()
+    dataset_details: tuple[PredictionLabReplayDataset, ...] = ()
+    available_dataset_details: tuple[PredictionLabReplayDataset, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = {
+            "selection_mode": self.selection_mode,
+            "requested_months": self.requested_months,
+            "selected_months": self.selected_months,
+            "available_months": self.available_months,
+            "anchor_month": self.anchor_month,
+            "fallback_reason": self.fallback_reason,
+            "datasets": list(self.datasets),
+            "warnings": list(self.warnings),
+        }
+        if self.backfill_recommendation:
+            payload["backfill_recommendation"] = self.backfill_recommendation
+        if self.selected_month_list:
+            payload["selected_month_list"] = list(self.selected_month_list)
+        if self.dataset_details:
+            payload["dataset_details"] = [dataset.to_dict() for dataset in self.dataset_details]
+        if self.available_dataset_details:
+            payload["available_dataset_details"] = [dataset.to_dict() for dataset in self.available_dataset_details]
+        return payload
+
+
+REPLAY_DATASET_FILENAMES = ("replay_rows.jsonl", "market_snapshots.jsonl", "predictions.jsonl")
+REPLAY_DATASET_STEMS = tuple(filename.removesuffix(".jsonl") for filename in REPLAY_DATASET_FILENAMES)
+
+
+def explicit_prediction_lab_replay_window(paths: Iterable[str | Path]) -> PredictionLabReplayWindow:
+    dataset_paths = tuple(str(Path(path)) for path in paths)
+    return PredictionLabReplayWindow(
+        selection_mode="explicit_path",
+        requested_months=None,
+        selected_months=0,
+        available_months=0,
+        anchor_month=None,
+        fallback_reason=None,
+        datasets=dataset_paths,
+    )
+
+
+def discover_prediction_lab_replay_datasets(roots: Iterable[str | Path]) -> list[PredictionLabReplayDataset]:
+    """Discover local Prediction Lab replay datasets and derive their covered months."""
+
+    candidates: list[PredictionLabReplayDataset] = []
+    seen: set[str] = set()
+    for root_value in roots:
+        root = Path(root_value)
+        for path in _iter_replay_dataset_paths(root):
+            key = str(path.expanduser().resolve(strict=False))
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(_inspect_replay_dataset(path))
+    return sorted(candidates, key=lambda dataset: (dataset.months[-1] if dataset.months else "", dataset.path))
+
+
+def select_prediction_lab_replay_window(
+    roots: Iterable[str | Path],
+    *,
+    months: int | str,
+) -> PredictionLabReplayWindow:
+    _normalize_requested_months(months)
+    datasets = discover_prediction_lab_replay_datasets(roots)
+    return select_prediction_lab_replay_window_from_datasets(datasets, months=months)
+
+
+def select_prediction_lab_replay_window_from_datasets(
+    datasets: Iterable[PredictionLabReplayDataset],
+    *,
+    months: int | str,
+) -> PredictionLabReplayWindow:
+    dataset_list = list(datasets)
+    requested = _normalize_requested_months(months)
+    mode = "months_all" if requested == "all" else "months"
+    warnings: list[str] = []
+    needs_backfill = False
+    selectable_by_month: dict[str, list[PredictionLabReplayDataset]] = {}
+
+    for dataset in dataset_list:
+        if dataset.warnings:
+            warnings.extend(f"{Path(dataset.path).name}: {warning}" for warning in dataset.warnings)
+        if dataset.quality in {"invalid", "partial"}:
+            needs_backfill = True
+        if dataset.exclusion_reason:
+            warnings.append(f"{Path(dataset.path).name}: {dataset.exclusion_reason}")
+        if dataset.quality == "invalid":
+            continue
+        for month in dataset.months:
+            selectable_by_month.setdefault(month, []).append(dataset)
+
+    available_months = sorted(selectable_by_month)
+    if not available_months:
+        raise ValueError("no valid replay datasets found")
+
+    anchor_month = available_months[-1]
+    fallback_reason = None
+    if requested == "all":
+        selected_months = available_months
+    else:
+        requested_count = int(requested)
+        if requested_count > len(available_months):
+            fallback_reason = "requested_window_exceeds_available_data"
+            selected_months = available_months
+        else:
+            selected_months = available_months[-requested_count:]
+
+    selected_datasets_by_path: dict[str, PredictionLabReplayDataset] = {}
+    for month in selected_months:
+        month_datasets = sorted(selectable_by_month[month], key=_dataset_selection_key, reverse=True)
+        if len(month_datasets) > 1:
+            warnings.append(
+                "overlapping_replay_datasets_for_month:"
+                f"{month}:"
+                f"{','.join(dataset.path for dataset in month_datasets)}"
+            )
+        selected = month_datasets[0]
+        selected_datasets_by_path.setdefault(selected.path, selected)
+        if selected.quality == "partial":
+            warnings.append(f"{Path(selected.path).name}: selected_partial_dataset")
+
+    selected_datasets = tuple(selected_datasets_by_path)
+    selected_details = tuple(selected_datasets_by_path.values())
+    return PredictionLabReplayWindow(
+        selection_mode=mode,
+        requested_months=requested,
+        selected_months=len(selected_months),
+        available_months=len(available_months),
+        anchor_month=anchor_month,
+        fallback_reason=fallback_reason,
+        datasets=selected_datasets,
+        warnings=tuple(dict.fromkeys(warnings)),
+        backfill_recommendation=(
+            "Run Prediction Lab backfill to populate missing replay-grade data before relying on coverage."
+            if needs_backfill
+            else None
+        ),
+        selected_month_list=tuple(selected_months),
+        dataset_details=selected_details,
+        available_dataset_details=tuple(dataset_list),
+    )
+
+
+def _iter_jsonl_dict_rows(path: Path) -> Iterable[tuple[int, dict[str, Any]]]:
+    if not path.exists():
+        return
+    opener = gzip.open if path.suffix == ".gz" else open
+    try:
+        with opener(path, "rt", encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, start=1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(row, dict):
+                    yield line_number, row
+    except OSError:
+        return
+
+
 def load_replay_artifacts(paths: Iterable[str | Path], *, limit: int | None = None) -> list[ReplayArtifactInput]:
     """Load collector prediction/snapshot JSONL rows that contain replayable artifacts."""
 
     records: list[ReplayArtifactInput] = []
     for path_value in paths:
         path = Path(path_value)
-        for index, row in enumerate(load_jsonl(path), start=1):
+        for index, row in _iter_jsonl_dict_rows(path):
             replay_row = _strip_inline_outcomes(row)
             artifact = row.get("decision_artifact")
             if not isinstance(artifact, dict):
@@ -407,9 +615,10 @@ def replay_from_paths(
     row_quality_policy: str = "annotate",
     resolution_paths: Iterable[str | Path] | None = None,
     decision_paths: Iterable[str | Path] | None = None,
+    replay_window: PredictionLabReplayWindow | dict[str, Any] | None = None,
 ) -> PredictionLabReplayResult:
     records = load_replay_artifacts(paths, limit=limit)
-    return replay_recorded_artifacts(
+    result = replay_recorded_artifacts(
         records,
         config=config,
         evaluator=evaluator,
@@ -420,6 +629,9 @@ def replay_from_paths(
         resolution_paths=resolution_paths,
         decision_paths=decision_paths,
     )
+    if replay_window is not None:
+        result.summary["replay_window"] = replay_window.to_dict() if hasattr(replay_window, "to_dict") else dict(replay_window)
+    return result
 
 
 def _replay_safe_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -690,14 +902,14 @@ def validate_prediction_lab_tables(
         if _validation_path_key(path) in resolution_path_set:
             continue
         checked_paths.append(str(path))
-        for line_number, row in enumerate(load_jsonl(path), start=1):
+        for line_number, row in _iter_jsonl_dict_rows(path):
             total_rows += 1
             _validate_replay_input_row(row, path=str(path), line_number=line_number, seen=seen_inputs, issues=issues)
 
     for path_value in resolution_paths or []:
         path = Path(path_value)
         checked_paths.append(str(path))
-        for line_number, row in enumerate(load_jsonl(path), start=1):
+        for line_number, row in _iter_jsonl_dict_rows(path):
             total_rows += 1
             _validate_resolution_row(row, path=str(path), line_number=line_number, seen=seen_resolutions, issues=issues)
 
@@ -936,24 +1148,30 @@ def _market_from_record(record: ReplayArtifactInput) -> Any:
     source_context = artifact.get("source_context") if isinstance(artifact.get("source_context"), dict) else {}
     source_data = source_context.get("data") if isinstance(source_context.get("data"), dict) else {}
     metadata = dict(source_data.get("market_metadata") or {}) if isinstance(source_data.get("market_metadata"), dict) else {}
+    shared_candidate = shared_candidate_from_market_snapshot_row(row) if isinstance(row, dict) else {}
+    shared_market = shared_candidate.get("market") if isinstance(shared_candidate.get("market"), dict) else {}
+    shared_prices = shared_candidate.get("prices") if isinstance(shared_candidate.get("prices"), dict) else {}
     for key, value in {
-        "market_group": row.get("group"),
-        "series": row.get("series"),
-        "event_ticker": row.get("event_ticker"),
+        "market_group": row.get("group") or shared_market.get("group"),
+        "series": row.get("series") or shared_market.get("series"),
+        "event_ticker": row.get("event_ticker") or shared_market.get("event_ticker"),
+        "series_ticker": shared_market.get("series_ticker"),
+        "market_route": shared_market.get("route"),
+        "market_family": shared_market.get("family"),
     }.items():
         if value is not None:
             metadata.setdefault(key, value)
 
     return SimpleNamespace(
-        id=str(artifact.get("market_id") or row.get("market_id") or signal.get("market_id") or ""),
-        exchange=str(signal.get("exchange") or row.get("exchange") or "kalshi"),
-        question=str(signal.get("question") or row.get("question") or ""),
-        yes_price=_first_number(signal.get("yes_market_price"), signal.get("yes_price"), row.get("yes_market_price"), row.get("yes_price"), row.get("market_price"), default=0.0),
-        no_price=_first_number(signal.get("no_market_price"), signal.get("no_price"), row.get("no_market_price"), row.get("no_price"), default=None),
-        volume=_first_number(row.get("volume"), signal.get("market_volume"), default=0.0),
-        category=str(metadata.get("series") or row.get("series") or row.get("group") or "unknown"),
+        id=str(artifact.get("market_id") or row.get("market_id") or shared_candidate.get("market_id") or shared_market.get("id") or signal.get("market_id") or ""),
+        exchange=str(signal.get("exchange") or row.get("exchange") or shared_market.get("exchange") or "kalshi"),
+        question=str(signal.get("question") or row.get("question") or shared_market.get("question") or ""),
+        yes_price=_first_number(signal.get("yes_market_price"), signal.get("yes_price"), row.get("yes_market_price"), row.get("yes_price"), row.get("market_price"), shared_prices.get("yes_price"), shared_prices.get("yes_market_price"), default=0.0),
+        no_price=_first_number(signal.get("no_market_price"), signal.get("no_price"), row.get("no_market_price"), row.get("no_price"), shared_prices.get("no_price"), shared_prices.get("no_market_price"), default=None),
+        volume=_first_number(row.get("volume"), signal.get("market_volume"), shared_market.get("volume"), default=0.0),
+        category=str(metadata.get("series") or shared_market.get("category") or row.get("series") or row.get("group") or "unknown"),
         metadata=metadata,
-        closes_at=None,
+        closes_at=shared_market.get("closes_at"),
     )
 
 
@@ -2209,6 +2427,311 @@ def _parse_dt(value: Any) -> datetime | None:
         return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except (TypeError, ValueError):
         return None
+
+
+def _iter_replay_dataset_paths(root: Path) -> Iterable[Path]:
+    if root.is_file():
+        if _is_replay_dataset_path(root):
+            yield root
+        return
+    if not root.exists():
+        yield root
+        return
+    for filename in REPLAY_DATASET_FILENAMES:
+        direct = root / filename
+        if direct.is_file():
+            yield direct
+    for pattern in ("*.jsonl", "*.jsonl.gz"):
+        for path in sorted(root.rglob(pattern)):
+            if _is_replay_dataset_path(path):
+                yield path
+
+
+def _is_replay_dataset_path(path: Path) -> bool:
+    if path.name in REPLAY_DATASET_FILENAMES:
+        return True
+    stem = _jsonl_stem(path)
+    if stem is None:
+        return False
+    for dataset_stem in REPLAY_DATASET_STEMS:
+        if stem == dataset_stem or stem.startswith(f"{dataset_stem}-"):
+            return True
+    return False
+
+
+def _jsonl_stem(path: Path) -> str | None:
+    name = path.name
+    if name.endswith(".jsonl.gz"):
+        return name.removesuffix(".jsonl.gz")
+    if name.endswith(".jsonl"):
+        return name.removesuffix(".jsonl")
+    return None
+
+
+def _inspect_replay_dataset(path: Path) -> PredictionLabReplayDataset:
+    kind = _dataset_kind(path)
+    resolved_path = str(path)
+    if not path.exists():
+        return PredictionLabReplayDataset(
+            dataset_id=resolved_path,
+            path=resolved_path,
+            kind=kind,
+            min_observed_at=None,
+            max_observed_at=None,
+            months=(),
+            row_count=0,
+            quality="invalid",
+            exclusion_reason="configured_root_or_dataset_missing",
+            warnings=("configured_root_or_dataset_missing",),
+        )
+
+    filename_month = _partitioned_month_from_path(path)
+    manifest = _dataset_partition_manifest(path)
+    if filename_month and manifest:
+        shard_counts = manifest.get("shard_counts") if isinstance(manifest.get("shard_counts"), dict) else {}
+        row_count = int(shard_counts.get(filename_month) or 0)
+        if row_count > 0:
+            return PredictionLabReplayDataset(
+                dataset_id=resolved_path,
+                path=resolved_path,
+                kind=kind,
+                min_observed_at=f"{filename_month}-01T00:00:00+00:00",
+                max_observed_at=f"{filename_month}-01T00:00:00+00:00",
+                months=(filename_month,),
+                row_count=row_count,
+                quality="valid",
+                warnings=(),
+            )
+
+    row_count = 0
+    invalid_json_lines = 0
+    missing_timestamp_rows = 0
+    min_observed: datetime | None = None
+    max_observed: datetime | None = None
+    observed_months: set[str] = set()
+    try:
+        opener = gzip.open if path.suffix == ".gz" else open
+        with opener(path, "rt", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    invalid_json_lines += 1
+                    continue
+                if not isinstance(row, dict):
+                    invalid_json_lines += 1
+                    continue
+                row_count += 1
+                observed_at = _row_observed_at(row)
+                if observed_at is None:
+                    missing_timestamp_rows += 1
+                    continue
+                min_observed = observed_at if min_observed is None else min(min_observed, observed_at)
+                max_observed = observed_at if max_observed is None else max(max_observed, observed_at)
+                month = _month_key(observed_at)
+                if month:
+                    observed_months.add(month)
+    except OSError as exc:
+        return PredictionLabReplayDataset(
+            dataset_id=resolved_path,
+            path=resolved_path,
+            kind=kind,
+            min_observed_at=None,
+            max_observed_at=None,
+            months=(),
+            row_count=0,
+            quality="invalid",
+            exclusion_reason=f"dataset_unreadable:{exc.__class__.__name__}",
+            warnings=(f"dataset_unreadable:{exc.__class__.__name__}",),
+        )
+
+    metadata_min, metadata_max = _dataset_metadata_range(path)
+    warnings: list[str] = []
+    if invalid_json_lines:
+        warnings.append("invalid_json_lines")
+    if missing_timestamp_rows:
+        warnings.append("rows_missing_observed_timestamp")
+
+    min_dt = metadata_min or min_observed
+    max_dt = metadata_max or max_observed
+    months = sorted(observed_months)
+    if not months and min_dt and max_dt:
+        months = sorted({_month_key(min_dt), _month_key(max_dt)} - {None})
+    if len(months) > 1:
+        warnings.append("dataset_spans_multiple_months")
+
+    quality = "valid"
+    exclusion_reason = None
+    if not row_count:
+        quality = "invalid"
+        exclusion_reason = "dataset_has_no_rows"
+        warnings.append("dataset_has_no_rows")
+    elif not months or min_dt is None or max_dt is None:
+        quality = "invalid"
+        exclusion_reason = "dataset_has_no_observed_month"
+        warnings.append("dataset_has_no_observed_month")
+    elif invalid_json_lines or missing_timestamp_rows:
+        quality = "partial"
+
+    return PredictionLabReplayDataset(
+        dataset_id=resolved_path,
+        path=resolved_path,
+        kind=kind,
+        min_observed_at=_dt_iso(min_dt),
+        max_observed_at=_dt_iso(max_dt),
+        months=tuple(months),
+        row_count=row_count,
+        quality=quality,
+        exclusion_reason=exclusion_reason,
+        warnings=tuple(dict.fromkeys(warnings)),
+    )
+
+
+def _partitioned_month_from_path(path: Path) -> str | None:
+    stem = _jsonl_stem(path)
+    if stem is None:
+        return None
+    for dataset_stem in REPLAY_DATASET_STEMS:
+        match = re.fullmatch(rf"{re.escape(dataset_stem)}-(\d{{4}}-\d{{2}})", stem)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _dataset_partition_manifest(path: Path) -> dict[str, Any] | None:
+    stem = _jsonl_stem(path)
+    if stem is None:
+        return None
+    source_stem = None
+    for dataset_stem in REPLAY_DATASET_STEMS:
+        if stem == dataset_stem or stem.startswith(f"{dataset_stem}-"):
+            source_stem = dataset_stem
+            break
+    if source_stem is None:
+        return None
+    manifest_path = path.parent / f"{source_stem}-partition-manifest.json"
+    if not manifest_path.exists():
+        return None
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _dataset_metadata_range(path: Path) -> tuple[datetime | None, datetime | None]:
+    partition_manifest = _dataset_partition_manifest(path)
+    if partition_manifest:
+        min_value = _first_nested_value(partition_manifest, ("min_observed_at", "min_timestamp", "start_observed_at", "start_at"))
+        max_value = _first_nested_value(partition_manifest, ("max_observed_at", "max_timestamp", "end_observed_at", "end_at"))
+        min_dt = _parse_dt(min_value)
+        max_dt = _parse_dt(max_value)
+        if min_dt or max_dt:
+            return min_dt, max_dt
+    for metadata_name in ("summary.json", "manifest.json", "metadata.json"):
+        metadata_path = path.parent / metadata_name
+        if not metadata_path.exists():
+            continue
+        try:
+            payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        min_value = _first_nested_value(payload, ("min_observed_at", "min_timestamp", "start_observed_at", "start_at"))
+        max_value = _first_nested_value(payload, ("max_observed_at", "max_timestamp", "end_observed_at", "end_at"))
+        min_dt = _parse_dt(min_value)
+        max_dt = _parse_dt(max_value)
+        if min_dt or max_dt:
+            return min_dt, max_dt
+    return None, None
+
+
+def _first_nested_value(payload: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    pending: list[Any] = [payload]
+    while pending:
+        value = pending.pop(0)
+        if not isinstance(value, dict):
+            continue
+        for key in keys:
+            if value.get(key) not in (None, ""):
+                return value.get(key)
+        pending.extend(item for item in value.values() if isinstance(item, dict))
+    return None
+
+
+def _row_observed_at(row: dict[str, Any]) -> datetime | None:
+    artifact = row.get("decision_artifact")
+    if not isinstance(artifact, dict):
+        artifact = row.get("original_artifact") if isinstance(row.get("original_artifact"), dict) else {}
+    candidates = (
+        row.get("observed_at"),
+        row.get("timestamp"),
+        row.get("recorded_at"),
+        row.get("created_at"),
+        row.get("collected_at"),
+        row.get("_fetched_at"),
+        row.get("as_of"),
+        row.get("decided_at"),
+        row.get("started_at"),
+        row.get("finished_at"),
+        artifact.get("observed_at") if isinstance(artifact, dict) else None,
+        artifact.get("as_of") if isinstance(artifact, dict) else None,
+        artifact.get("timestamp") if isinstance(artifact, dict) else None,
+        artifact.get("decided_at") if isinstance(artifact, dict) else None,
+        artifact.get("created_at") if isinstance(artifact, dict) else None,
+    )
+    for candidate in candidates:
+        parsed = _parse_dt(candidate)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _dataset_kind(path: Path) -> str:
+    stem = _jsonl_stem(path) or path.stem
+    if stem == "replay_rows" or stem.startswith("replay_rows-"):
+        return "replay_rows"
+    if stem == "market_snapshots" or stem.startswith("market_snapshots-"):
+        return "market_snapshots"
+    if stem == "predictions" or stem.startswith("predictions-"):
+        return "predictions"
+    return "unknown"
+
+
+def _month_key(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    return f"{value.year:04d}-{value.month:02d}"
+
+
+def _dt_iso(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    return value.isoformat()
+
+
+def _normalize_requested_months(months: int | str) -> int | str:
+    if isinstance(months, str):
+        text = months.strip().lower()
+        if text == "all":
+            return "all"
+        try:
+            months = int(text)
+        except ValueError as exc:
+            raise ValueError("--months must be a positive integer or 'all'") from exc
+    if isinstance(months, bool) or int(months) < 1:
+        raise ValueError("--months must be a positive integer or 'all'")
+    return int(months)
+
+
+def _dataset_selection_key(dataset: PredictionLabReplayDataset) -> tuple[int, int, int, str]:
+    quality_rank = {"valid": 2, "partial": 1, "invalid": 0}.get(dataset.quality, 0)
+    kind_rank = {"market_snapshots": 3, "replay_rows": 2, "predictions": 1, "unknown": 0}.get(dataset.kind, 0)
+    return (quality_rank, dataset.row_count, kind_rank, dataset.path)
 
 
 def _row_outcome(row: dict[str, Any]) -> str | None:

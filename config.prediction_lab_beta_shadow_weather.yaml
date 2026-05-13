@@ -72,6 +72,8 @@ prediction_lab:
   record_all_scored: true
   seed_daily_temp_first: true
   allow_non_weather: false
+  # Default audit/replay window: newest two available monthly shards.
+  replay_default_months: 2
 
   # Observer collection records replay-grade snapshots only by default.
   # Set score_only: false only for an intentional Prediction Lab prediction row run.
