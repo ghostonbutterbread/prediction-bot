@@ -123,6 +123,7 @@ def append_live_readonly_decision_audit(
         )
 
     decision = _decision_dict(decision_artifact)
+    shared_market_provenance = _shared_market_provenance(signal_row, decision_artifact)
     action = str(decision_artifact.get("final_action") or _action_from_decision(decision) or "SKIP")
     row = validate_agent_decision_row_with_legacy_identity(
         {
@@ -189,6 +190,7 @@ def append_live_readonly_decision_audit(
                 "scan_count": int(scan_count or 0),
                 "config_hash": decision_artifact.get("config_hash"),
                 "source_candidate_dataset_path": str(source_candidate_dataset_path) if source_candidate_dataset_path else None,
+                "shared_market": shared_market_provenance,
             },
         }
     )
@@ -231,6 +233,21 @@ def _live_policy(config: dict[str, Any]) -> str:
     if status.get("shadow"):
         return "stable_with_beta_shadow"
     return "stable"
+
+
+def _shared_market_provenance(signal: dict[str, Any], decision_artifact: dict[str, Any]) -> dict[str, Any] | None:
+    for value in (
+        signal.get("shared_market"),
+        signal.get("shared_market_provenance"),
+        (decision_artifact.get("strategy_signal") or {}).get("shared_market") if isinstance(decision_artifact.get("strategy_signal"), dict) else None,
+        (decision_artifact.get("strategy_signal") or {}).get("shared_market_provenance") if isinstance(decision_artifact.get("strategy_signal"), dict) else None,
+        ((decision_artifact.get("source_context") or {}).get("source") or {}).get("shared_market")
+        if isinstance((decision_artifact.get("source_context") or {}).get("source"), dict)
+        else None,
+    ):
+        if isinstance(value, dict):
+            return dict(value)
+    return None
 
 
 def _run_id(*, session_id: str, scan_count: int) -> str:

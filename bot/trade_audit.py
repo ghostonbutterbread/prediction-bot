@@ -44,6 +44,7 @@ def build_signal_snapshot(signal: dict, *, direction: object = None) -> dict:
         "best_yes_ask": signal.get("best_yes_ask"),
         "best_no_ask": signal.get("best_no_ask"),
         "source": signal_snapshot_source(signal, direction),
+        "shared_market": signal.get("shared_market") or signal.get("shared_market_provenance"),
     }
 
 

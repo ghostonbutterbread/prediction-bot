@@ -10,8 +10,10 @@ from bot.prediction_lab import PredictionLab
 from bot.shared_market_feed import (
     build_dual_policy_decision_metadata,
     build_shared_market_candidate_row,
+    normalize_shared_candidate_input,
     shared_candidate_id_from_row,
     shared_candidate_from_market_snapshot_row,
+    shared_candidate_market_from_row,
     summarize_dual_policy_pnl_snapshot_rows,
     summarize_dual_policy_snapshot_rows,
 )
@@ -140,6 +142,193 @@ class SharedMarketFeedTests(unittest.TestCase):
         self.assertEqual(shared["main_decision"]["runtime"], "prediction_lab")
         self.assertTrue(shared["main_decision"]["authoritative"])
         self.assertEqual(shared_candidate_id_from_row(row), shared["candidate_id"])
+
+    def test_normalize_shared_candidate_input_reconstructs_embedded_market_signal_and_provenance(self):
+        shared = build_shared_market_candidate_row(
+            run_id="run-1",
+            market=self._market(),
+            signal=self._signal(),
+            decision_artifact={
+                "final_action": "BUY_YES",
+                "final_reason_code": "approved",
+                "pre_logic_order_book_snapshot": {
+                    "data": {
+                        "best_yes_bid": 0.4,
+                        "best_yes_ask": 0.41,
+                        "best_no_bid": 0.58,
+                        "best_no_ask": 0.59,
+                    }
+                },
+            },
+            source_runtime="prediction_lab",
+            provenance="live_known_at_time",
+            observed_at="2026-05-06T12:00:01+00:00",
+            snapshot_as_of="2026-05-06T12:00:00+00:00",
+            snapshot_ttl_seconds=900,
+        )
+        row = {
+            "market_id": shared["market_id"],
+            "shared_candidate_id": shared["candidate_id"],
+            "shared_candidate": shared,
+            "shared_market": {
+                "source": "shared_reference",
+                "shared_snapshot_id": "collector-snapshot-1",
+                "shared_snapshot_observed_at": "2026-05-06T12:00:00+00:00",
+                "publisher_runtime": "collector",
+                "publisher_instance_id": "collector-1",
+                "freshness_status": "fresh",
+            },
+        }
+
+        result = normalize_shared_candidate_input(row)
+        market_result = shared_candidate_market_from_row(row)
+
+        self.assertTrue(result.ok)
+        self.assertTrue(result.reconstructable)
+        self.assertEqual(result.status, "reconstructable")
+        self.assertEqual(result.source_schema, "embedded_shared_candidate")
+        self.assertEqual(result.shared_candidate_id, shared["candidate_id"])
+        self.assertEqual(result.market.id, "KXHIGHNY-260506-T71")
+        self.assertEqual(result.market.yes_price, 0.41)
+        self.assertEqual(result.market.no_price, 0.59)
+        self.assertEqual(result.market.yes_bid, 0.4)
+        self.assertEqual(result.signal["direction"], "BUY_YES")
+        self.assertEqual(result.signal["candidate_feed_read_only"], True)
+        self.assertEqual(result.signal["shared_market"]["shared_snapshot_id"], "collector-snapshot-1")
+        self.assertEqual(result.provenance["publisher_runtime"], "collector")
+        self.assertTrue(result.provenance["read_only"])
+        self.assertTrue(market_result.ok)
+        self.assertEqual(market_result.market.metadata["shared_market"]["shared_candidate_id"], shared["candidate_id"])
+
+    def test_normalize_shared_candidate_input_converts_legacy_market_snapshot_row(self):
+        row = {
+            "run_id": "run-legacy",
+            "market_id": "KXRAINNY-260506",
+            "observed_at": "2026-05-06T12:00:01+00:00",
+            "source_runtime": "prediction_lab",
+            "provenance": "live_known_at_time",
+            "question": "Will it rain in New York?",
+            "exchange": "kalshi",
+            "series": "weather",
+            "group": "weather",
+            "yes_price": 0.32,
+            "no_price": 0.68,
+            "volume": 850,
+            "direction": "BUY_NO",
+            "confidence": 0.78,
+            "edge": 0.1,
+        }
+
+        expected_shared = shared_candidate_from_market_snapshot_row(row)
+        result = normalize_shared_candidate_input(row)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.status, "reconstructable")
+        self.assertEqual(result.source_schema, "legacy_market_snapshot")
+        self.assertEqual(result.shared_candidate_id, expected_shared["candidate_id"])
+        self.assertEqual(result.market.id, "KXRAINNY-260506")
+        self.assertEqual(result.market.category, "weather")
+        self.assertEqual(result.signal["direction"], "BUY_NO")
+        self.assertEqual(result.signal["market_price"], 0.68)
+        self.assertEqual(result.provenance["source_runtime"], "prediction_lab")
+
+    def test_normalize_shared_candidate_input_reports_missing_required_fields(self):
+        shared = build_shared_market_candidate_row(
+            run_id="run-1",
+            market=self._market(),
+            signal=self._signal(),
+            source_runtime="prediction_lab",
+            observed_at="2026-05-06T12:00:01+00:00",
+        )
+        shared["prices"].pop("yes_price", None)
+        shared["prices"].pop("yes_market_price", None)
+
+        result = normalize_shared_candidate_input(shared)
+
+        self.assertFalse(result.ok)
+        self.assertFalse(result.reconstructable)
+        self.assertEqual(result.status, "missing_required_fields")
+        self.assertEqual(result.reason_code, "invalid_price_fields")
+        self.assertIn("prices.yes_price", result.missing_fields)
+        self.assertIsNone(result.market)
+        self.assertEqual(result.shared_candidate_id, shared["candidate_id"])
+
+    def test_normalize_shared_candidate_input_reports_partial_signal_without_throwing(self):
+        shared = build_shared_market_candidate_row(
+            run_id="run-1",
+            market=self._market(),
+            signal={key: value for key, value in self._signal().items() if key != "direction"},
+            source_runtime="prediction_lab",
+            observed_at="2026-05-06T12:00:01+00:00",
+        )
+
+        result = normalize_shared_candidate_input(shared)
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "partial")
+        self.assertEqual(result.reason_code, "missing_signal_direction")
+        self.assertEqual(result.missing_fields, ("signal.direction",))
+        self.assertIsNotNone(result.market)
+
+    def test_normalize_shared_candidate_input_reports_unsupported_schema(self):
+        result = normalize_shared_candidate_input({"schema_name": "other_candidate", "market_id": "KX-1"})
+
+        self.assertFalse(result.ok)
+        self.assertFalse(result.reconstructable)
+        self.assertEqual(result.status, "unsupported_schema")
+        self.assertEqual(result.reason_code, "unsupported_shared_candidate_schema")
+        self.assertIsNone(result.market)
+        self.assertEqual(result.market_id, "KX-1")
+
+    def test_normalize_shared_candidate_input_rejects_unknown_direct_schema_version(self):
+        shared = build_shared_market_candidate_row(
+            run_id="run-1",
+            market=self._market(),
+            signal=self._signal(),
+            source_runtime="prediction_lab",
+            observed_at="2026-05-06T12:00:01+00:00",
+        )
+        shared["schema_version"] = 999
+
+        result = normalize_shared_candidate_input(shared)
+        market_result = shared_candidate_market_from_row(shared)
+
+        self.assertFalse(result.ok)
+        self.assertFalse(result.reconstructable)
+        self.assertEqual(result.status, "unsupported_schema")
+        self.assertEqual(result.reason_code, "unsupported_shared_candidate_schema")
+        self.assertIsNone(result.market)
+        self.assertEqual(result.source_schema, "shared_market_candidate:v999")
+        self.assertFalse(market_result.ok)
+        self.assertEqual(market_result.status, "unsupported_schema")
+
+    def test_normalize_shared_candidate_input_rejects_unknown_embedded_schema_version(self):
+        shared = build_shared_market_candidate_row(
+            run_id="run-1",
+            market=self._market(),
+            signal=self._signal(),
+            source_runtime="prediction_lab",
+            observed_at="2026-05-06T12:00:01+00:00",
+        )
+        shared["schema_version"] = 999
+        row = {
+            "market_id": shared["market_id"],
+            "shared_candidate_id": shared["candidate_id"],
+            "shared_candidate": shared,
+        }
+
+        result = normalize_shared_candidate_input(row)
+        market_result = shared_candidate_market_from_row(row)
+
+        self.assertFalse(result.ok)
+        self.assertFalse(result.reconstructable)
+        self.assertEqual(result.status, "unsupported_schema")
+        self.assertEqual(result.reason_code, "unsupported_shared_candidate_schema")
+        self.assertIsNone(result.market)
+        self.assertEqual(result.source_schema, "shared_market_candidate:v999")
+        self.assertEqual(result.market_id, shared["market_id"])
+        self.assertFalse(market_result.ok)
+        self.assertEqual(market_result.status, "unsupported_schema")
 
     def test_dual_policy_metadata_derives_normal_shadow_and_delta(self):
         artifact = {
