@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from bot.config import ensure_mode_storage_dir, load_config
 from bot.decision_pipeline import build_pre_execution_decision_artifact
@@ -23,6 +23,12 @@ from bot.prediction_lab_shadow_delta import build_shadow_delta
 from bot.risk import RiskManager
 from bot.telegram_notifier import TelegramNotifier
 from bot.shared_core import AccountState, TradeContext, append_hypothetical_shadow_intent_row, build_trade_decision
+from bot.shared_market_runtime import (
+    SharedMarketRuntimeManager,
+    build_shared_market_snapshot_metadata,
+    shared_snapshot_is_fresh,
+    snapshot_age_seconds,
+)
 from bot.parity_audit import normalize_parity_trade_row, summarize_normalized_rows
 from bot.status import build_snapshot, summarize_log_storage
 from bot.trade_audit import (
@@ -299,9 +305,12 @@ class PredictionBot:
         logger.info(f"Scan #{self.stats['scans'] + 1} at {datetime.now(timezone.utc).isoformat()}")
         logger.info(f"{'='*60}")
 
+        shared_market_context = self._begin_live_shared_market_runtime()
         all_signals = []
         blocked_reasons: dict[str, int] = {}
         markets_scanned = 0
+        direct_fetch_succeeded = False
+        fetched_exchange_names: list[str] = []
         scan_cfg = self.config.get("scan", {}) or {}
         markets_per_exchange = int(scan_cfg.get("markets_per_exchange", 30) or 30)
         summary_sample_per_exchange = int(scan_cfg.get("summary_sample_per_exchange", 5) or 5)
@@ -309,101 +318,126 @@ class PredictionBot:
         allowed_market_groups = [str(group).strip().lower() for group in (scan_cfg.get("allowed_market_groups") or []) if str(group).strip()]
         allowed_market_routes = [str(route).strip().lower() for route in (scan_cfg.get("allowed_market_routes") or []) if str(route).strip()]
 
-        for exchange_name, exchange in self.exchanges.items():
-            try:
-                setter = getattr(exchange, "set_allowed_market_groups", None)
-                if callable(setter):
-                    setter(allowed_market_groups)
-                route_setter = getattr(exchange, "set_allowed_market_routes", None)
-                if callable(route_setter):
-                    route_setter(allowed_market_routes)
-                markets = exchange.get_markets(limit=markets_per_exchange)
-                if not markets:
-                    continue
-
-                markets_scanned += len(markets)
-                logger.info(f"\n{exchange_name}: {len(markets)} markets")
-
-                for market in markets:
-                    try:
-                        order_book = exchange.get_order_book(market.id)
-                        signal = self.strategy.analyze_market(market, order_book)
-                        if signal:
-                            signal["exchange"] = exchange_name
-                            signal["question"] = getattr(market, "question", signal.get("question", ""))
-                            signal["yes_price"] = getattr(market, "yes_price", signal.get("market_price"))
-                            signal["no_price"] = getattr(market, "no_price", None)
-                            signal["market_group"] = (getattr(market, "metadata", {}) or {}).get("market_group", "unknown")
-                            signal["market_family"] = (getattr(market, "metadata", {}) or {}).get("market_family")
-                            signal["market_route"] = (getattr(market, "metadata", {}) or {}).get("market_route")
-                            all_signals.append(signal)
-                    except Exception as e:
-                        logger.debug(f"Error analyzing {market.id}: {e}")
+        try:
+            for exchange_name, exchange in self.exchanges.items():
+                try:
+                    setter = getattr(exchange, "set_allowed_market_groups", None)
+                    if callable(setter):
+                        setter(allowed_market_groups)
+                    route_setter = getattr(exchange, "set_allowed_market_routes", None)
+                    if callable(route_setter):
+                        route_setter(allowed_market_routes)
+                    markets = exchange.get_markets(limit=markets_per_exchange)
+                    direct_fetch_succeeded = True
+                    if exchange_name not in fetched_exchange_names:
+                        fetched_exchange_names.append(exchange_name)
+                    if not markets:
                         continue
-            except Exception as e:
-                logger.error(f"Error scanning {exchange_name}: {e}")
-                self.stats["errors"] += 1
 
-        all_signals.sort(key=lambda s: s.get("edge", 0), reverse=True)
+                    markets_scanned += len(markets)
+                    logger.info(f"\n{exchange_name}: {len(markets)} markets")
 
-        if all_signals:
-            logger.info("\n📊 Top Signals:")
-            for sig in all_signals[:5]:
-                logger.info(
-                    f"  {sig['direction']} | "
-                    f"Edge: {sig['edge']:.2%} | "
-                    f"Conf: {sig['confidence']:.2%} | "
-                    f"Price: ${sig['market_price']:.2f} | "
-                    f"[{sig['exchange']}]"
-                )
-        else:
-            logger.info("  No signals this cycle")
+                    for market in markets:
+                        try:
+                            order_book = exchange.get_order_book(market.id)
+                            signal = self.strategy.analyze_market(market, order_book)
+                            if signal:
+                                signal["exchange"] = exchange_name
+                                signal["question"] = getattr(market, "question", signal.get("question", ""))
+                                signal["yes_price"] = getattr(market, "yes_price", signal.get("market_price"))
+                                signal["no_price"] = getattr(market, "no_price", None)
+                                signal["market_group"] = (getattr(market, "metadata", {}) or {}).get("market_group", "unknown")
+                                signal["market_family"] = (getattr(market, "metadata", {}) or {}).get("market_family")
+                                signal["market_route"] = (getattr(market, "metadata", {}) or {}).get("market_route")
+                                all_signals.append(signal)
+                        except Exception as e:
+                            logger.debug(f"Error analyzing {market.id}: {e}")
+                            continue
+                except Exception as e:
+                    logger.error(f"Error scanning {exchange_name}: {e}")
+                    self.stats["errors"] += 1
 
-        max_candidates = 1 if self.single_trade_mode else 3
-        trades = 0
-        for sig in all_signals[:max_candidates]:
-            result = self._process_signal(sig)
-            if result is None:
-                continue
-            if result.get("blocked_reason"):
-                blocked_reasons[result["blocked_reason"]] = blocked_reasons.get(result["blocked_reason"], 0) + 1
-                self.stats["blocked"] += 1
-                self._log_risk_block_event(sig, result)
-            elif result.get("order"):
-                trades += 1
-                if self.single_trade_mode:
-                    self.single_trade_completed = True
-
-        self.stats["scans"] += 1
-        self.stats["signals"] += len(all_signals)
-        self.stats["trades"] += trades
-        self.last_block_reasons = blocked_reasons
-        self.lifecycle_counters["signals_considered"] += len(all_signals)
-        self.lifecycle_counters["trades_executed"] += trades
-        blocked_total = sum(blocked_reasons.values())
-        self.lifecycle_counters["blocked_total"] += blocked_total
-        for reason, count in blocked_reasons.items():
-            self.lifecycle_block_reasons[reason] = self.lifecycle_block_reasons.get(reason, 0) + count
-
-        self._sync_resolved_positions()
-        if self.single_trade_mode and self.single_trade_completed:
-            self._log_lifecycle_event(
-                "single_trade_completed",
-                {
-                    "open_positions": len(self.open_positions),
-                    "open_orders": len(self.open_orders),
-                    "behavior": "no_new_entries_continue_resolution_tracking",
-                },
+            published_metadata = self._record_live_shared_market_snapshot_metadata(
+                shared_market_context,
+                market_count=markets_scanned,
+                direct_fetch_succeeded=direct_fetch_succeeded,
+                source_exchanges=fetched_exchange_names,
             )
-        self._log_scan(all_signals, trades, blocked_reasons)
-        self._emit_hourly_summary_if_due()
+            for signal in all_signals:
+                self._annotate_live_signal_shared_market_provenance(
+                    signal,
+                    shared_market_context,
+                    publish_metadata=published_metadata,
+                )
 
-        return {
-            "markets_scanned": markets_scanned,
-            "signals": len(all_signals),
-            "trades": trades,
-            "blocked_reasons": blocked_reasons,
-        }
+            all_signals.sort(key=lambda s: s.get("edge", 0), reverse=True)
+
+            if all_signals:
+                logger.info("\n📊 Top Signals:")
+                for sig in all_signals[:5]:
+                    logger.info(
+                        f"  {sig['direction']} | "
+                        f"Edge: {sig['edge']:.2%} | "
+                        f"Conf: {sig['confidence']:.2%} | "
+                        f"Price: ${sig['market_price']:.2f} | "
+                        f"[{sig['exchange']}]"
+                    )
+            else:
+                logger.info("  No signals this cycle")
+
+            max_candidates = 1 if self.single_trade_mode else 3
+            trades = 0
+            for sig in all_signals[:max_candidates]:
+                result = self._process_signal(sig)
+                if result is None:
+                    continue
+                if result.get("blocked_reason"):
+                    blocked_reasons[result["blocked_reason"]] = blocked_reasons.get(result["blocked_reason"], 0) + 1
+                    self.stats["blocked"] += 1
+                    self._log_risk_block_event(sig, result)
+                elif result.get("order"):
+                    trades += 1
+                    if self.single_trade_mode:
+                        self.single_trade_completed = True
+
+            self.stats["scans"] += 1
+            self.stats["signals"] += len(all_signals)
+            self.stats["trades"] += trades
+            self.last_block_reasons = blocked_reasons
+            self.lifecycle_counters["signals_considered"] += len(all_signals)
+            self.lifecycle_counters["trades_executed"] += trades
+            blocked_total = sum(blocked_reasons.values())
+            self.lifecycle_counters["blocked_total"] += blocked_total
+            for reason, count in blocked_reasons.items():
+                self.lifecycle_block_reasons[reason] = self.lifecycle_block_reasons.get(reason, 0) + count
+
+            self._sync_resolved_positions()
+            if self.single_trade_mode and self.single_trade_completed:
+                self._log_lifecycle_event(
+                    "single_trade_completed",
+                    {
+                        "open_positions": len(self.open_positions),
+                        "open_orders": len(self.open_orders),
+                        "behavior": "no_new_entries_continue_resolution_tracking",
+                    },
+                )
+            self._log_scan(all_signals, trades, blocked_reasons)
+            self._emit_hourly_summary_if_due()
+
+            result = {
+                "markets_scanned": markets_scanned,
+                "signals": len(all_signals),
+                "trades": trades,
+                "blocked_reasons": blocked_reasons,
+            }
+            if shared_market_context:
+                result["shared_market"] = self._live_shared_market_provenance(
+                    shared_market_context,
+                    snapshot=published_metadata or shared_market_context.get("latest_snapshot"),
+                )
+            return result
+        finally:
+            self._finish_live_shared_market_runtime(shared_market_context)
 
     def run_loop(self, interval_seconds: int = 120, max_scans: int = None):
         self.running = True
@@ -593,6 +627,268 @@ class PredictionBot:
 
     def _is_live_mode(self) -> bool:
         return str((self.config.get("trading") or {}).get("mode", "paper")).strip().lower() == "live"
+
+    def _live_shared_market_enabled(self) -> bool:
+        if not self._is_live_mode():
+            return False
+        shared_market_cfg = self.config.get("shared_market", {}) or {}
+        live_cfg = shared_market_cfg.get("live", {}) if isinstance(shared_market_cfg.get("live"), dict) else {}
+        trading_cfg = self.config.get("trading", {}) or {}
+        runtime_gate = trading_cfg.get(
+            "shared_market_runtime_enabled",
+            trading_cfg.get("live_shared_market_runtime_enabled", False),
+        )
+        return bool(shared_market_cfg.get("enabled", True)) and bool(runtime_gate or live_cfg.get("enabled", False))
+
+    def _live_shared_market_instance_id(self) -> str:
+        shared_market_cfg = self.config.get("shared_market", {}) or {}
+        live_cfg = shared_market_cfg.get("live", {}) if isinstance(shared_market_cfg.get("live"), dict) else {}
+        trading_cfg = self.config.get("trading", {}) or {}
+        instance_id = (
+            trading_cfg.get("shared_market_runtime_instance_id")
+            or trading_cfg.get("live_shared_market_runtime_instance_id")
+            or live_cfg.get("instance_id")
+        )
+        if instance_id not in (None, ""):
+            return str(instance_id)
+        return f"live:{self.log_dir.resolve()}"
+
+    def _live_shared_market_max_snapshot_age_seconds(self) -> int:
+        shared_market_cfg = self.config.get("shared_market", {}) or {}
+        live_cfg = shared_market_cfg.get("live", {}) if isinstance(shared_market_cfg.get("live"), dict) else {}
+        return max(1, int(live_cfg.get("max_snapshot_age_seconds", 30) or 30))
+
+    def _live_shared_market_desired_interval_seconds(self) -> int:
+        shared_market_cfg = self.config.get("shared_market", {}) or {}
+        live_cfg = shared_market_cfg.get("live", {}) if isinstance(shared_market_cfg.get("live"), dict) else {}
+        value = live_cfg.get("desired_interval_seconds") or shared_market_cfg.get("default_interval_seconds") or 900
+        return max(1, int(value))
+
+    def _live_shared_market_allow_direct_bypass(self) -> bool:
+        shared_market_cfg = self.config.get("shared_market", {}) or {}
+        live_cfg = shared_market_cfg.get("live", {}) if isinstance(shared_market_cfg.get("live"), dict) else {}
+        return bool(live_cfg.get("allow_direct_bypass", True))
+
+    def _begin_live_shared_market_runtime(self) -> dict[str, Any] | None:
+        if not self._live_shared_market_enabled():
+            return None
+
+        manager = SharedMarketRuntimeManager(config=self.config)
+        instance_id = self._live_shared_market_instance_id()
+        max_snapshot_age_seconds = self._live_shared_market_max_snapshot_age_seconds()
+        desired_interval_seconds = self._live_shared_market_desired_interval_seconds()
+        now = datetime.now(timezone.utc)
+        attached = False
+        try:
+            manager.attach(
+                runtime_kind="live",
+                instance_id=instance_id,
+                can_publish=True,
+                can_consume=True,
+                desired_interval_seconds=desired_interval_seconds,
+                max_snapshot_age_seconds=max_snapshot_age_seconds,
+                latency_sensitive=True,
+                now=now,
+            )
+            attached = True
+            state = manager.acquire_publisher_lease(
+                runtime_kind="live",
+                instance_id=instance_id,
+                now=now,
+            )
+            publisher = state.get("publisher") if isinstance(state, dict) else None
+            latest_snapshot = state.get("latest_snapshot") if isinstance(state, dict) else None
+            owns_publisher = self._shared_market_publisher_is_self(
+                publisher,
+                runtime_kind="live",
+                instance_id=instance_id,
+            )
+            source = self._classify_live_shared_feed_source(
+                publisher=publisher if isinstance(publisher, dict) else None,
+                latest_snapshot=latest_snapshot if isinstance(latest_snapshot, dict) else None,
+                owns_publisher=owns_publisher,
+                max_snapshot_age_seconds=max_snapshot_age_seconds,
+                now=now,
+            )
+            fresh_shared_snapshot = source == "shared_reference"
+            return {
+                "enabled": True,
+                "manager": manager,
+                "instance_id": instance_id,
+                "state": state,
+                "publisher": dict(publisher) if isinstance(publisher, dict) else None,
+                "latest_snapshot": dict(latest_snapshot) if isinstance(latest_snapshot, dict) else None,
+                "owns_publisher": bool(owns_publisher),
+                "fresh_shared_snapshot": bool(fresh_shared_snapshot),
+                "source": source,
+                "max_snapshot_age_seconds": max_snapshot_age_seconds,
+                "desired_interval_seconds": desired_interval_seconds,
+                "allow_direct_bypass": self._live_shared_market_allow_direct_bypass(),
+                "observed_at": now.isoformat(),
+            }
+        except Exception:
+            if attached:
+                self._finish_live_shared_market_runtime(
+                    {
+                        "manager": manager,
+                        "instance_id": instance_id,
+                    }
+                )
+            raise
+
+    def _classify_live_shared_feed_source(
+        self,
+        *,
+        publisher: dict[str, Any] | None,
+        latest_snapshot: dict[str, Any] | None,
+        owns_publisher: bool,
+        max_snapshot_age_seconds: int,
+        now: datetime,
+    ) -> str:
+        if owns_publisher:
+            return "direct_publisher"
+        if not isinstance(latest_snapshot, dict):
+            return "direct_bypass_missing"
+        if not self._shared_market_snapshot_matches_publisher(latest_snapshot, publisher):
+            return "direct_bypass_mismatched"
+        if shared_snapshot_is_fresh(
+            latest_snapshot,
+            max_snapshot_age_seconds=max_snapshot_age_seconds,
+            now=now,
+        ):
+            return "shared_reference"
+        return "direct_bypass_stale"
+
+    @staticmethod
+    def _shared_market_publisher_is_self(
+        publisher: dict[str, Any] | None,
+        *,
+        runtime_kind: str,
+        instance_id: str,
+    ) -> bool:
+        if not isinstance(publisher, dict):
+            return False
+        return (
+            str(publisher.get("runtime_kind") or "") == runtime_kind
+            and str(publisher.get("instance_id") or "") == instance_id
+        )
+
+    @staticmethod
+    def _shared_market_snapshot_matches_publisher(
+        snapshot: dict[str, Any] | None,
+        publisher: dict[str, Any] | None,
+    ) -> bool:
+        if not isinstance(snapshot, dict) or not isinstance(publisher, dict):
+            return False
+        return (
+            str(snapshot.get("publisher_runtime") or "") == str(publisher.get("runtime_kind") or "")
+            and str(snapshot.get("publisher_instance_id") or "") == str(publisher.get("instance_id") or "")
+        )
+
+    def _record_live_shared_market_snapshot_metadata(
+        self,
+        context: dict[str, Any] | None,
+        *,
+        market_count: int,
+        direct_fetch_succeeded: bool,
+        source_exchanges: list[str],
+    ) -> dict[str, Any] | None:
+        if not context or not context.get("owns_publisher") or not direct_fetch_succeeded:
+            return None
+        manager = context.get("manager")
+        if not isinstance(manager, SharedMarketRuntimeManager):
+            return None
+        observed_at = datetime.now(timezone.utc)
+        metadata = build_shared_market_snapshot_metadata(
+            snapshot_id=f"live-runner:scan-{self.stats.get('scans', 0) + 1}:{int(observed_at.timestamp())}",
+            observed_at=observed_at,
+            published_at=observed_at,
+            publisher_runtime="live",
+            publisher_instance_id=str(context.get("instance_id") or ""),
+            candidate_count=max(0, int(market_count or 0)),
+            market_count=max(0, int(market_count or 0)),
+            ttl_seconds=int(manager.snapshot_ttl_seconds),
+            source_exchange=",".join(source_exchanges) if source_exchanges else None,
+        )
+        try:
+            manager.record_snapshot_metadata(metadata, now=observed_at)
+        except Exception as exc:
+            logger.warning("failed to record live shared market snapshot metadata: %s", exc)
+            return None
+        context["published_snapshot"] = metadata
+        context["latest_snapshot"] = metadata
+        context["source"] = "direct_publisher"
+        context["fresh_shared_snapshot"] = False
+        return metadata
+
+    def _annotate_live_signal_shared_market_provenance(
+        self,
+        signal: dict,
+        context: dict[str, Any] | None,
+        *,
+        publish_metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if not context:
+            return
+        provenance = self._live_shared_market_provenance(
+            context,
+            snapshot=publish_metadata or context.get("latest_snapshot"),
+        )
+        signal["shared_market"] = provenance
+        signal["shared_market_provenance"] = provenance
+
+    def _live_shared_market_provenance(
+        self,
+        context: dict[str, Any],
+        *,
+        snapshot: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        snapshot = dict(snapshot or {})
+        publisher = dict(context.get("publisher") or {})
+        now = datetime.now(timezone.utc)
+        age_seconds = snapshot_age_seconds(snapshot, now=now)
+        max_age = int(context.get("max_snapshot_age_seconds") or self._live_shared_market_max_snapshot_age_seconds())
+        fresh = shared_snapshot_is_fresh(
+            snapshot,
+            max_snapshot_age_seconds=max_age,
+            now=now,
+        )
+        source = str(context.get("source") or "direct_bypass_missing")
+        return {
+            "enabled": True,
+            "source": source,
+            "mode": source,
+            "shared_feed_mode": source,
+            "shared_feed_source": source,
+            "shared_snapshot_id": snapshot.get("snapshot_id"),
+            "snapshot_id": snapshot.get("snapshot_id"),
+            "shared_snapshot_observed_at": snapshot.get("observed_at"),
+            "shared_snapshot_as_of": snapshot.get("observed_at") or snapshot.get("published_at"),
+            "snapshot_as_of": snapshot.get("observed_at") or snapshot.get("published_at"),
+            "shared_feed_instance_id": snapshot.get("publisher_instance_id") or publisher.get("instance_id"),
+            "publisher_runtime": snapshot.get("publisher_runtime") or publisher.get("runtime_kind"),
+            "publisher_instance_id": snapshot.get("publisher_instance_id") or publisher.get("instance_id"),
+            "snapshot_age_seconds": age_seconds,
+            "max_snapshot_age_seconds": max_age,
+            "fresh_shared_snapshot": bool(fresh and source == "shared_reference"),
+            "freshness_status": "fresh" if fresh else "missing" if not snapshot else "stale",
+            "owns_publisher": bool(context.get("owns_publisher", False)),
+            "direct_fetch_required": True,
+            "direct_fetch_reason": "execution_safety_market_objects_not_reconstructable",
+            "allow_direct_bypass": bool(context.get("allow_direct_bypass", True)),
+        }
+
+    def _finish_live_shared_market_runtime(self, context: dict[str, Any] | None) -> None:
+        if not context or context.get("_detached"):
+            return
+        manager = context.get("manager")
+        instance_id = context.get("instance_id")
+        if isinstance(manager, SharedMarketRuntimeManager) and instance_id not in (None, ""):
+            try:
+                manager.detach(runtime_kind="live", instance_id=str(instance_id))
+            except Exception as exc:
+                logger.debug("live shared market detach failed: %s", exc)
+        context["_detached"] = True
 
     def _record_startup_reconciliation_status(
         self,

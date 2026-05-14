@@ -372,6 +372,9 @@ def _apply_env_overrides(config: dict) -> dict:
         config = _deep_merge(config, overrides)
 
     trading_cfg = config.get("trading", {}) or {}
+    trading_cfg["shared_market_runtime_enabled"] = bool(trading_cfg.get("shared_market_runtime_enabled", False))
+    trading_cfg["shared_market_runtime_instance_id"] = str(trading_cfg.get("shared_market_runtime_instance_id", "") or "")
+    config["trading"] = trading_cfg
     if "enabled" in trading_cfg:
         config["trading_enabled"] = bool(trading_cfg.get("enabled"))
     elif "trading_enabled" in trading_cfg:

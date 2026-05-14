@@ -2,11 +2,48 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from bot.exchanges.base import Market
+
 SCHEMA_NAME = "shared_market_candidate"
 SCHEMA_VERSION = 1
+
+SHARED_INPUT_STATUS_RECONSTRUCTABLE = "reconstructable"
+SHARED_INPUT_STATUS_PARTIAL = "partial"
+SHARED_INPUT_STATUS_MISSING_REQUIRED_FIELDS = "missing_required_fields"
+SHARED_INPUT_STATUS_UNSUPPORTED_SCHEMA = "unsupported_schema"
+
+
+@dataclass(frozen=True, slots=True)
+class SharedCandidateInput:
+    """Read-only analysis input reconstructed from a shared candidate row."""
+
+    ok: bool
+    reconstructable: bool
+    status: str
+    reason_code: str
+    shared_candidate_id: str | None
+    market_id: str | None
+    market: Market | None
+    signal: dict[str, Any]
+    provenance: dict[str, Any]
+    shared_candidate: dict[str, Any] | None
+    source_schema: str | None
+    missing_fields: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class SharedCandidateMarketResult:
+    """Structured result for conservative Market reconstruction."""
+
+    ok: bool
+    status: str
+    reason_code: str
+    market: Market | None
+    missing_fields: tuple[str, ...] = ()
 
 
 def build_shared_market_candidate_row(
@@ -167,6 +204,226 @@ def shared_candidate_id_from_row(row: dict[str, Any] | None) -> str | None:
         if candidate_id not in (None, ""):
             return str(candidate_id)
     return None
+
+
+def normalize_shared_candidate_input(row: Any) -> SharedCandidateInput:
+    """Normalize a shared candidate or legacy snapshot row into analysis inputs.
+
+    This helper is deliberately read-only. It reconstructs a Market and a compact
+    signal only when the row has enough already-recorded data; callers must treat
+    non-reconstructable results as provenance/reference rows.
+    """
+    shared_candidate, source_schema = _shared_candidate_for_normalization(row)
+    if shared_candidate is None:
+        return SharedCandidateInput(
+            ok=False,
+            reconstructable=False,
+            status=SHARED_INPUT_STATUS_UNSUPPORTED_SCHEMA,
+            reason_code="unsupported_shared_candidate_schema",
+            shared_candidate_id=shared_candidate_id_from_row(row) if isinstance(row, dict) else None,
+            market_id=_candidate_market_id_from_any(row),
+            market=None,
+            signal={},
+            provenance={},
+            shared_candidate=None,
+            source_schema=source_schema,
+        )
+
+    source_row = row if isinstance(row, dict) else {}
+    provenance = _shared_input_provenance(shared_candidate, source_row, source_schema=source_schema)
+    market_result = shared_candidate_market_from_row(row)
+    market_id = _optional_text(
+        shared_candidate.get("market_id")
+        or _mapping(shared_candidate.get("market")).get("id")
+        or source_row.get("market_id")
+        or source_row.get("snapshot_key")
+    )
+    signal = _shared_input_signal(shared_candidate, source_row, provenance=provenance)
+    if not market_result.ok:
+        signal["shared_candidate_reconstructable"] = False
+        signal["shared_candidate_input_status"] = market_result.status
+        signal["shared_candidate_input_reason_code"] = market_result.reason_code
+        return SharedCandidateInput(
+            ok=False,
+            reconstructable=False,
+            status=market_result.status,
+            reason_code=market_result.reason_code,
+            shared_candidate_id=_optional_text(shared_candidate.get("candidate_id")),
+            market_id=market_id,
+            market=None,
+            signal=signal,
+            provenance=provenance,
+            shared_candidate=dict(shared_candidate),
+            source_schema=source_schema,
+            missing_fields=market_result.missing_fields,
+        )
+
+    if _optional_text(signal.get("direction")) is None:
+        signal["shared_candidate_reconstructable"] = False
+        signal["shared_candidate_input_status"] = SHARED_INPUT_STATUS_PARTIAL
+        signal["shared_candidate_input_reason_code"] = "missing_signal_direction"
+        return SharedCandidateInput(
+            ok=False,
+            reconstructable=False,
+            status=SHARED_INPUT_STATUS_PARTIAL,
+            reason_code="missing_signal_direction",
+            shared_candidate_id=_optional_text(shared_candidate.get("candidate_id")),
+            market_id=market_id,
+            market=market_result.market,
+            signal=signal,
+            provenance=provenance,
+            shared_candidate=dict(shared_candidate),
+            source_schema=source_schema,
+            missing_fields=("signal.direction",),
+        )
+
+    signal["shared_candidate_reconstructable"] = True
+    signal["shared_candidate_input_status"] = SHARED_INPUT_STATUS_RECONSTRUCTABLE
+    signal["shared_candidate_input_reason_code"] = "reconstructable"
+    return SharedCandidateInput(
+        ok=True,
+        reconstructable=True,
+        status=SHARED_INPUT_STATUS_RECONSTRUCTABLE,
+        reason_code="reconstructable",
+        shared_candidate_id=_optional_text(shared_candidate.get("candidate_id")),
+        market_id=market_id,
+        market=market_result.market,
+        signal=signal,
+        provenance=provenance,
+        shared_candidate=dict(shared_candidate),
+        source_schema=source_schema,
+    )
+
+
+def shared_candidate_market_from_row(row: Any) -> SharedCandidateMarketResult:
+    """Build a Market from shared-row data only when required fields are sane."""
+    shared_candidate, source_schema = _shared_candidate_for_normalization(row)
+    if shared_candidate is None:
+        return SharedCandidateMarketResult(
+            ok=False,
+            status=SHARED_INPUT_STATUS_UNSUPPORTED_SCHEMA,
+            reason_code="unsupported_shared_candidate_schema",
+            market=None,
+        )
+
+    source_row = row if isinstance(row, dict) else {}
+    shared_market = _mapping(shared_candidate.get("market"))
+    prices = _mapping(shared_candidate.get("prices"))
+    source_signal = _mapping(source_row.get("signal"))
+    artifact = _mapping(source_row.get("decision_artifact"))
+    artifact_signal = _mapping(artifact.get("strategy_signal"))
+    route = _mapping(shared_market.get("route")) or _mapping(source_row.get("market_route"))
+    market_id = _optional_text(
+        shared_market.get("id")
+        or shared_candidate.get("market_id")
+        or source_row.get("market_id")
+        or source_row.get("snapshot_key")
+        or source_signal.get("market_id")
+        or artifact_signal.get("market_id")
+    )
+    exchange = _optional_text(
+        shared_market.get("exchange")
+        or source_row.get("exchange")
+        or source_signal.get("exchange")
+        or artifact_signal.get("exchange")
+        or "unknown"
+    )
+    question = _optional_text(
+        shared_market.get("question")
+        or source_row.get("question")
+        or source_signal.get("question")
+        or artifact_signal.get("question")
+    )
+    category = _optional_text(
+        shared_market.get("category")
+        or shared_market.get("series")
+        or source_row.get("series")
+        or source_row.get("group")
+        or source_signal.get("category")
+        or artifact_signal.get("category")
+    )
+    yes_price = _coerce_probability(
+        prices.get("yes_price"),
+        prices.get("yes_market_price"),
+        source_row.get("yes_price"),
+        source_row.get("yes_market_price"),
+        source_signal.get("yes_price"),
+        source_signal.get("yes_market_price"),
+        artifact_signal.get("yes_price"),
+        artifact_signal.get("yes_market_price"),
+    )
+    no_price = _coerce_probability(
+        prices.get("no_price"),
+        prices.get("no_market_price"),
+        source_row.get("no_price"),
+        source_row.get("no_market_price"),
+        source_signal.get("no_price"),
+        source_signal.get("no_market_price"),
+        artifact_signal.get("no_price"),
+        artifact_signal.get("no_market_price"),
+    )
+
+    missing_fields: list[str] = []
+    if market_id is None:
+        missing_fields.append("market.id")
+    if question is None:
+        missing_fields.append("market.question")
+    if category is None:
+        missing_fields.append("market.category")
+    if yes_price is None:
+        missing_fields.append("prices.yes_price")
+    if no_price is None:
+        missing_fields.append("prices.no_price")
+    if missing_fields:
+        price_fields = {"prices.yes_price", "prices.no_price"}
+        reason_code = "invalid_price_fields" if price_fields.intersection(missing_fields) else "missing_market_fields"
+        return SharedCandidateMarketResult(
+            ok=False,
+            status=SHARED_INPUT_STATUS_MISSING_REQUIRED_FIELDS,
+            reason_code=reason_code,
+            market=None,
+            missing_fields=tuple(missing_fields),
+        )
+
+    volume = _non_negative_number(shared_market.get("volume"), source_row.get("volume"), source_signal.get("market_volume"), default=0.0)
+    liquidity = _non_negative_number(
+        shared_market.get("liquidity"),
+        source_row.get("liquidity"),
+        source_signal.get("liquidity"),
+        volume,
+        default=volume,
+    )
+    provenance = _shared_input_provenance(shared_candidate, source_row, source_schema=source_schema)
+    metadata = {
+        "market_group": shared_market.get("group") or source_row.get("group"),
+        "market_family": shared_market.get("family") or route.get("family"),
+        "series": shared_market.get("series") or source_row.get("series"),
+        "series_ticker": shared_market.get("series_ticker"),
+        "event_ticker": shared_market.get("event_ticker") or source_row.get("event_ticker"),
+        "market_route": route or None,
+        "shared_market": provenance,
+    }
+    metadata = {key: value for key, value in metadata.items() if value is not None}
+
+    return SharedCandidateMarketResult(
+        ok=True,
+        status=SHARED_INPUT_STATUS_RECONSTRUCTABLE,
+        reason_code="reconstructable",
+        market=Market(
+            id=str(market_id),
+            exchange=str(exchange or "unknown"),
+            question=str(question),
+            yes_price=float(yes_price),
+            no_price=float(no_price),
+            volume=float(volume if volume is not None else 0.0),
+            liquidity=float(liquidity if liquidity is not None else 0.0),
+            closes_at=_coerce_optional_datetime(shared_market.get("closes_at") or source_row.get("closes_at")),
+            category=str(category),
+            metadata=metadata,
+            yes_bid=_coerce_probability(prices.get("best_yes_bid")),
+            no_bid=_coerce_probability(prices.get("best_no_bid")),
+        ),
+    )
 
 
 def summarize_dual_policy_snapshot_rows(rows: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -> dict[str, Any]:
@@ -350,6 +607,152 @@ class _LegacyMarket:
             "series": row.get("series"),
             "market_route": row.get("market_route"),
         }
+
+
+def _shared_candidate_for_normalization(row: Any) -> tuple[dict[str, Any] | None, str | None]:
+    if not isinstance(row, dict):
+        return None, "non_mapping"
+
+    schema_name = row.get("schema_name")
+    if schema_name not in (None, "", SCHEMA_NAME):
+        return None, str(schema_name)
+    if schema_name == SCHEMA_NAME:
+        if row.get("schema_version") != SCHEMA_VERSION:
+            return None, f"{SCHEMA_NAME}:v{row.get('schema_version')}"
+        return dict(row), "shared_candidate_row"
+
+    embedded = row.get("shared_candidate")
+    if isinstance(embedded, dict):
+        if embedded.get("schema_name") == SCHEMA_NAME:
+            if embedded.get("schema_version") != SCHEMA_VERSION:
+                return None, f"{SCHEMA_NAME}:v{embedded.get('schema_version')}"
+            return dict(embedded), "embedded_shared_candidate"
+        return None, str(embedded.get("schema_name") or "unsupported_embedded_shared_candidate")
+
+    if _looks_like_legacy_market_snapshot(row):
+        return shared_candidate_from_market_snapshot_row(row), "legacy_market_snapshot"
+    return None, "unknown"
+
+
+def _looks_like_legacy_market_snapshot(row: dict[str, Any]) -> bool:
+    market_id = _optional_text(row.get("market_id") or row.get("snapshot_key"))
+    observed_at = _optional_text(row.get("observed_at") or row.get("timestamp"))
+    has_market_payload = any(row.get(key) not in (None, "") for key in ("question", "yes_price", "no_price", "direction"))
+    return market_id is not None and observed_at is not None and has_market_payload
+
+
+def _candidate_market_id_from_any(row: Any) -> str | None:
+    if not isinstance(row, dict):
+        return None
+    shared = row.get("shared_candidate") if isinstance(row.get("shared_candidate"), dict) else {}
+    shared_market = shared.get("market") if isinstance(shared.get("market"), dict) else {}
+    return _optional_text(row.get("market_id") or row.get("snapshot_key") or shared.get("market_id") or shared_market.get("id"))
+
+
+def _shared_input_signal(
+    shared_candidate: dict[str, Any],
+    source_row: dict[str, Any],
+    *,
+    provenance: dict[str, Any],
+) -> dict[str, Any]:
+    shared_market = _mapping(shared_candidate.get("market"))
+    prices = _mapping(shared_candidate.get("prices"))
+    decision = _mapping(shared_candidate.get("decision"))
+    evidence = _mapping(shared_candidate.get("evidence"))
+    artifact = _mapping(source_row.get("decision_artifact"))
+    artifact_signal = _mapping(artifact.get("strategy_signal"))
+    route = _mapping(shared_market.get("route")) or _mapping(source_row.get("market_route"))
+    direction = _optional_text(
+        artifact_signal.get("direction")
+        or source_row.get("direction")
+        or decision.get("direction")
+        or _mapping(shared_candidate.get("main_decision")).get("action")
+        or _mapping(shared_candidate.get("normal_decision")).get("action")
+    )
+    signal = {
+        "shared_candidate_id": _optional_text(shared_candidate.get("candidate_id")),
+        "candidate_feed_read_only": True,
+        "candidate_source_runtime": _optional_text(shared_candidate.get("source_runtime")),
+        "candidate_provenance": _optional_text(shared_candidate.get("provenance")),
+        "candidate_observed_at": _optional_text(shared_candidate.get("observed_at")),
+        "snapshot_as_of": _optional_text(shared_candidate.get("snapshot_as_of")),
+        "snapshot_ttl_seconds": shared_candidate.get("snapshot_ttl_seconds"),
+        "market_id": _optional_text(shared_candidate.get("market_id") or shared_market.get("id") or source_row.get("market_id")),
+        "question": _optional_text(shared_market.get("question") or source_row.get("question") or artifact_signal.get("question")),
+        "exchange": _optional_text(shared_market.get("exchange") or source_row.get("exchange") or artifact_signal.get("exchange") or "unknown"),
+        "category": _optional_text(shared_market.get("category") or shared_market.get("series") or source_row.get("series") or source_row.get("group")),
+        "group": shared_market.get("group") or source_row.get("group"),
+        "series": shared_market.get("series") or source_row.get("series"),
+        "event_ticker": shared_market.get("event_ticker") or source_row.get("event_ticker"),
+        "series_ticker": shared_market.get("series_ticker"),
+        "market_route": route or None,
+        "market_family": shared_market.get("family") or route.get("family"),
+        "direction": direction,
+        "model_probability": source_row.get("model_probability") or decision.get("model_probability") or artifact_signal.get("model_probability"),
+        "market_price": source_row.get("market_price") or prices.get("market_price") or _market_price_for_direction(direction, prices),
+        "yes_market_price": source_row.get("yes_market_price") or prices.get("yes_market_price") or prices.get("yes_price"),
+        "no_market_price": source_row.get("no_market_price") or prices.get("no_market_price") or prices.get("no_price"),
+        "yes_price": prices.get("yes_price") or source_row.get("yes_price") or source_row.get("yes_market_price"),
+        "no_price": prices.get("no_price") or source_row.get("no_price") or source_row.get("no_market_price"),
+        "best_yes_bid": prices.get("best_yes_bid"),
+        "best_yes_ask": prices.get("best_yes_ask"),
+        "best_no_bid": prices.get("best_no_bid"),
+        "best_no_ask": prices.get("best_no_ask"),
+        "confidence": source_row.get("confidence") or decision.get("confidence") or artifact_signal.get("confidence"),
+        "edge": source_row.get("edge") or decision.get("edge") or artifact_signal.get("edge"),
+        "signals": source_row.get("signals") if isinstance(source_row.get("signals"), dict) else evidence.get("signals") or {},
+        "source_as_of": artifact_signal.get("source_as_of") or shared_candidate.get("snapshot_as_of"),
+        "source_mode": artifact_signal.get("source_mode") or evidence.get("source_mode"),
+        "station_id": artifact_signal.get("station_id") or evidence.get("station_id"),
+        "source_agreement_score": artifact_signal.get("source_agreement_score") or evidence.get("source_agreement_score"),
+        "weather_confidence_score": artifact_signal.get("weather_confidence_score") or evidence.get("weather_confidence_score"),
+        "distribution_probability": artifact_signal.get("distribution_probability") or evidence.get("distribution_probability"),
+        "shared_market": provenance,
+        "shared_market_provenance": provenance,
+    }
+    return {key: value for key, value in signal.items() if value is not None}
+
+
+def _shared_input_provenance(
+    shared_candidate: dict[str, Any],
+    source_row: dict[str, Any],
+    *,
+    source_schema: str | None,
+) -> dict[str, Any]:
+    shared_market = _first_mapping(
+        source_row.get("shared_market"),
+        source_row.get("shared_market_provenance"),
+        shared_candidate.get("shared_market"),
+        shared_candidate.get("shared_market_provenance"),
+    )
+    provenance = {
+        "schema_name": SCHEMA_NAME,
+        "schema_version": SCHEMA_VERSION,
+        "source_schema": source_schema,
+        "shared_candidate_id": _optional_text(shared_candidate.get("candidate_id") or source_row.get("shared_candidate_id")),
+        "market_id": _optional_text(shared_candidate.get("market_id") or source_row.get("market_id") or source_row.get("snapshot_key")),
+        "run_id": _optional_text(shared_candidate.get("run_id") or source_row.get("run_id")),
+        "source_runtime": _optional_text(shared_candidate.get("source_runtime") or source_row.get("source_runtime")),
+        "source_runtime_instance_id": _optional_text(
+            shared_market.get("publisher_instance_id")
+            or shared_market.get("shared_feed_instance_id")
+            or source_row.get("source_runtime_instance_id")
+        ),
+        "provenance": _optional_text(shared_candidate.get("provenance") or source_row.get("provenance")),
+        "observed_at": _optional_text(shared_candidate.get("observed_at") or source_row.get("observed_at") or source_row.get("timestamp")),
+        "snapshot_as_of": _optional_text(shared_candidate.get("snapshot_as_of") or shared_market.get("snapshot_as_of")),
+        "snapshot_ttl_seconds": shared_candidate.get("snapshot_ttl_seconds") or source_row.get("snapshot_ttl_seconds"),
+        "shared_snapshot_id": _optional_text(shared_market.get("shared_snapshot_id") or shared_market.get("snapshot_id") or source_row.get("shared_snapshot_id")),
+        "shared_snapshot_observed_at": _optional_text(shared_market.get("shared_snapshot_observed_at")),
+        "shared_snapshot_as_of": _optional_text(shared_market.get("shared_snapshot_as_of") or shared_market.get("snapshot_as_of")),
+        "shared_feed_source": _optional_text(shared_market.get("shared_feed_source") or shared_market.get("source")),
+        "shared_feed_mode": _optional_text(shared_market.get("shared_feed_mode") or shared_market.get("mode")),
+        "publisher_runtime": _optional_text(shared_market.get("publisher_runtime")),
+        "publisher_instance_id": _optional_text(shared_market.get("publisher_instance_id")),
+        "freshness_status": _optional_text(shared_market.get("freshness_status")),
+        "read_only": True,
+    }
+    return {key: _json_safe(value) for key, value in provenance.items() if value not in (None, "")}
 
 
 def _build_market_summary(market: Any, metadata: dict[str, Any]) -> dict[str, Any]:
@@ -592,6 +995,63 @@ def _coerce_number(value: Any) -> float | int | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _coerce_probability(*values: Any) -> float | None:
+    for value in values:
+        number = _coerce_number(value)
+        if number is None:
+            continue
+        price = float(number)
+        if 0.0 < price < 1.0:
+            return price
+    return None
+
+
+def _non_negative_number(*values: Any, default: float | int | None = None) -> float | int | None:
+    for value in values:
+        number = _coerce_number(value)
+        if number is not None and number >= 0:
+            return number
+    return default
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _first_mapping(*values: Any) -> dict[str, Any]:
+    for value in values:
+        if isinstance(value, dict):
+            return dict(value)
+    return {}
+
+
+def _optional_text(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    return str(value)
+
+
+def _market_price_for_direction(direction: Any, prices: dict[str, Any]) -> Any:
+    normalized = str(direction or "").upper()
+    if normalized == "BUY_NO":
+        return prices.get("no_market_price") or prices.get("no_price")
+    return prices.get("yes_market_price") or prices.get("yes_price")
+
+
+def _coerce_optional_datetime(value: Any) -> datetime | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        text = value.replace("Z", "+00:00")
+        try:
+            return datetime.fromisoformat(text)
+        except ValueError:
+            return None
+    return None
 
 
 def _decision_size(decision: dict[str, Any]) -> float | None:
