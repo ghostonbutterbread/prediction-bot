@@ -12,6 +12,7 @@ from typing import Any, Callable
 from bot.config import ensure_mode_storage_dir, get_runtime_mode, load_config
 from bot.prediction_lab import PredictionLab
 from bot.prediction_lab_support import build_prediction_lab_exchange
+from bot.shared_market_runtime import SharedMarketRuntimeManager, build_shared_market_snapshot_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +92,72 @@ class PredictionLabCollectorDaemon:
         return datetime.now(timezone.utc).isoformat()
 
     @staticmethod
+    def _shared_market_runtime_enabled(config: dict[str, Any]) -> bool:
+        lab_cfg = config.get("prediction_lab", {}) or {}
+        shared_market_cfg = config.get("shared_market", {}) or {}
+        return bool(lab_cfg.get("shared_market_runtime_enabled", False)) and bool(
+            shared_market_cfg.get("enabled", True)
+        )
+
+    def _shared_market_instance_id(self, config: dict[str, Any]) -> str:
+        lab_cfg = config.get("prediction_lab", {}) or {}
+        instance_id = lab_cfg.get("shared_market_runtime_instance_id")
+        if instance_id not in (None, ""):
+            return str(instance_id)
+        return f"collector:{self.config_path.resolve()}"
+
+    @staticmethod
+    def _shared_market_publisher_is_self(
+        state: dict[str, Any] | None,
+        *,
+        runtime_kind: str,
+        instance_id: str,
+    ) -> bool:
+        publisher = (state or {}).get("publisher")
+        if not isinstance(publisher, dict):
+            return False
+        return (
+            str(publisher.get("runtime_kind") or "") == runtime_kind
+            and str(publisher.get("instance_id") or "") == instance_id
+        )
+
+    @staticmethod
+    def _shared_market_source_exchange(exchange: Any) -> str:
+        for attr in ("name", "exchange_name", "exchange"):
+            value = getattr(exchange, attr, None)
+            if value not in (None, ""):
+                return str(value)
+        return "kalshi"
+
+    def _record_shared_market_snapshot_metadata(
+        self,
+        *,
+        manager: SharedMarketRuntimeManager,
+        instance_id: str,
+        lab: PredictionLab,
+        run_result,
+        exchange: Any,
+        config: dict[str, Any],
+    ) -> None:
+        lab_cfg = config.get("prediction_lab", {}) or {}
+        shared_market_cfg = config.get("shared_market", {}) or {}
+        observed_at = lab.state.get("last_collect_at") or self._iso_now()
+        published_at = self._iso_now()
+        ttl_seconds = shared_market_cfg.get("snapshot_ttl_seconds") or lab_cfg.get("collector_interval_seconds")
+        metadata = build_shared_market_snapshot_metadata(
+            snapshot_id=str(getattr(run_result, "run_id", "") or ""),
+            observed_at=observed_at,
+            published_at=published_at,
+            publisher_runtime="collector",
+            publisher_instance_id=instance_id,
+            candidate_count=int(getattr(run_result, "scanned_markets", 0) or 0),
+            market_count=int(getattr(run_result, "scanned_markets", 0) or 0),
+            ttl_seconds=int(ttl_seconds) if ttl_seconds not in (None, "") else None,
+            source_exchange=self._shared_market_source_exchange(exchange),
+        )
+        manager.record_snapshot_metadata(metadata)
+
+    @staticmethod
     def _parse_iso(value: Any) -> datetime | None:
         if not value:
             return None
@@ -134,6 +201,9 @@ class PredictionLabCollectorDaemon:
         exchange = None
         cycle = 0
         wall_now = datetime.now(timezone.utc)
+        shared_market_manager: SharedMarketRuntimeManager | None = None
+        shared_market_instance_id: str | None = None
+        shared_market_attached = False
 
         with self._owner_lock(lab) as owner:
             if owner is False:
@@ -181,9 +251,59 @@ class PredictionLabCollectorDaemon:
 
                     collect_interval = max(1, int(lab_cfg.get("collector_interval_seconds", 900) or 900))
                     resolve_interval = max(1, int(lab_cfg.get("resolve_interval_seconds", 1800) or 1800))
+                    shared_market_enabled = self._shared_market_runtime_enabled(config)
+                    shared_market_state = None
+                    shared_market_is_publisher = False
+                    collection_allowed = not paused and bool(lab_cfg.get("continue_collecting", False))
+                    if not shared_market_enabled and shared_market_attached and shared_market_manager is not None and shared_market_instance_id is not None:
+                        shared_market_manager.detach(
+                            runtime_kind="collector",
+                            instance_id=shared_market_instance_id,
+                            now=wall_now,
+                        )
+                        shared_market_attached = False
+                    if shared_market_enabled:
+                        if shared_market_manager is None:
+                            shared_market_manager = SharedMarketRuntimeManager(config=config)
+                        next_instance_id = self._shared_market_instance_id(config)
+                        if shared_market_attached and shared_market_instance_id not in (None, next_instance_id):
+                            shared_market_manager.detach(
+                                runtime_kind="collector",
+                                instance_id=shared_market_instance_id,
+                                now=wall_now,
+                            )
+                            shared_market_attached = False
+                        shared_market_instance_id = next_instance_id
+                        shared_market_manager.attach(
+                            runtime_kind="collector",
+                            instance_id=shared_market_instance_id,
+                            can_publish=collection_allowed,
+                            can_consume=True,
+                            desired_interval_seconds=collect_interval,
+                            now=wall_now,
+                        )
+                        if collection_allowed:
+                            shared_market_state = shared_market_manager.acquire_publisher_lease(
+                                runtime_kind="collector",
+                                instance_id=shared_market_instance_id,
+                                now=wall_now,
+                            )
+                        shared_market_attached = True
+                        shared_market_is_publisher = self._shared_market_publisher_is_self(
+                            shared_market_state,
+                            runtime_kind="collector",
+                            instance_id=shared_market_instance_id,
+                        )
                     last_collect_at = self._parse_iso(lab.state.get("last_collect_at"))
                     last_resolve_at = self._parse_iso(lab.state.get("last_resolve_at"))
-                    collect_due = last_collect_at is None or (wall_now - last_collect_at).total_seconds() >= collect_interval
+                    legacy_collect_due = last_collect_at is None or (wall_now - last_collect_at).total_seconds() >= collect_interval
+                    collect_due = legacy_collect_due
+                    if shared_market_enabled and shared_market_manager is not None and shared_market_instance_id is not None:
+                        collect_due = shared_market_manager.publisher_snapshot_due_for(
+                            runtime_kind="collector",
+                            instance_id=shared_market_instance_id,
+                            now=wall_now,
+                        )
                     resolve_due = last_resolve_at is None or (wall_now - last_resolve_at).total_seconds() >= resolve_interval
                     open_prediction_count = int(lab.state.get("open_prediction_count") or 0)
 
@@ -239,12 +359,35 @@ class PredictionLabCollectorDaemon:
                         if self.verbose:
                             logger.info('collector: collect skipped due to pause cycle=%s pause_reason=%s', cycle, pause_reason)
                         self.status.skipped_collects += 1
+                    elif (
+                        shared_market_enabled
+                        and not shared_market_is_publisher
+                        and legacy_collect_due
+                        and bool(lab_cfg.get("continue_collecting", False))
+                    ):
+                        if self.verbose:
+                            logger.info('collector: collect skipped; shared market publisher owned by another runtime cycle=%s', cycle)
+                        self.status.skipped_collects += 1
                     elif collect_due and bool(lab_cfg.get("continue_collecting", False)):
                         if self.verbose:
                             logger.info('collector: collect pass starting cycle=%s max_markets_per_run=%s', cycle, getattr(lab, 'max_markets_per_run', None))
                         lab.update_runtime_state(run_state="active_collect", paused=False, pause_reason="none")
                         run_result = lab.run(exchange)
                         self.status.collect_runs += 1
+                        if (
+                            shared_market_enabled
+                            and shared_market_manager is not None
+                            and shared_market_instance_id is not None
+                            and shared_market_is_publisher
+                        ):
+                            self._record_shared_market_snapshot_metadata(
+                                manager=shared_market_manager,
+                                instance_id=shared_market_instance_id,
+                                lab=lab,
+                                run_result=run_result,
+                                exchange=exchange,
+                                config=config,
+                            )
                         if self.verbose:
                             logger.info('collector: collect pass finished cycle=%s scanned=%s recorded=%s ledger=%s', cycle, run_result.scanned_markets, run_result.recorded_predictions, run_result.ledger_path)
                         storage = lab.storage_usage()
@@ -259,6 +402,18 @@ class PredictionLabCollectorDaemon:
                             warning_emitted=bool(warning_emitted or storage["warning_threshold_reached"]),
                             seed_complete=lab.mode == "seed_and_watch",
                         )
+                        if (
+                            post_pause_reason != "none"
+                            and shared_market_manager is not None
+                            and shared_market_attached
+                            and shared_market_instance_id is not None
+                        ):
+                            shared_market_manager.detach(
+                                runtime_kind="collector",
+                                instance_id=shared_market_instance_id,
+                                now=wall_now,
+                            )
+                            shared_market_attached = False
                         self.status.pause_reason = None if post_pause_reason == "none" else post_pause_reason
                     else:
                         if not bool(lab_cfg.get("continue_collecting", False)):
@@ -276,6 +431,11 @@ class PredictionLabCollectorDaemon:
                 lab.update_runtime_state(run_state="errored", last_error=str(exc))
                 raise
             finally:
+                if shared_market_manager is not None and shared_market_attached and shared_market_instance_id is not None:
+                    shared_market_manager.detach(
+                        runtime_kind="collector",
+                        instance_id=shared_market_instance_id,
+                    )
                 if bot is not None:
                     bot.close()
 

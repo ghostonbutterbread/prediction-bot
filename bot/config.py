@@ -91,12 +91,23 @@ def _default_prediction_lab_config() -> dict[str, Any]:
         "collector_fetch_mode": "direct_markets",
         "collector_direct_page_size": 200,
         "collector_max_pages": 10,
+        "shared_market_runtime_enabled": False,
+        "shared_market_runtime_instance_id": "",
         "collection_storage_cap_gb": 5,
         "collection_warning_threshold_pct": 90,
         "auto_pause_collection_on_storage_cap": True,
         "resolve_interval_seconds": 1800,
         "send_telegram_updates": True,
         "telegram_summary_on_pause": True,
+    }
+
+
+def _default_paper_config() -> dict[str, Any]:
+    return {
+        "shared_market_runtime_enabled": False,
+        "shared_market_runtime_instance_id": "",
+        "shared_market_max_snapshot_age_seconds": 1200,
+        "shared_market_desired_interval_seconds": 900,
     }
 
 
@@ -204,6 +215,10 @@ def _normalize_storage_config(config: dict) -> dict:
     prediction_lab["collector_fetch_mode"] = str(prediction_lab.get("collector_fetch_mode", "direct_markets") or "direct_markets").lower()
     prediction_lab["collector_direct_page_size"] = max(1, int(prediction_lab.get("collector_direct_page_size", 200) or 200))
     prediction_lab["collector_max_pages"] = max(1, int(prediction_lab.get("collector_max_pages", 10) or 10))
+    prediction_lab["shared_market_runtime_enabled"] = bool(prediction_lab.get("shared_market_runtime_enabled", False))
+    prediction_lab["shared_market_runtime_instance_id"] = str(
+        prediction_lab.get("shared_market_runtime_instance_id", "") or ""
+    )
     prediction_lab["collection_storage_cap_gb"] = float(prediction_lab.get("collection_storage_cap_gb", 5.0) or 5.0)
     prediction_lab["collection_warning_threshold_pct"] = float(prediction_lab.get("collection_warning_threshold_pct", 90) or 90)
     prediction_lab["auto_pause_collection_on_storage_cap"] = bool(prediction_lab.get("auto_pause_collection_on_storage_cap", True))
@@ -211,6 +226,20 @@ def _normalize_storage_config(config: dict) -> dict:
     prediction_lab["send_telegram_updates"] = bool(prediction_lab.get("send_telegram_updates", True))
     prediction_lab["telegram_summary_on_pause"] = bool(prediction_lab.get("telegram_summary_on_pause", True))
     config["prediction_lab"] = prediction_lab
+
+    raw_paper = config.get("paper", {}) or {}
+    paper = _deep_merge(_default_paper_config(), raw_paper)
+    paper["shared_market_runtime_enabled"] = bool(paper.get("shared_market_runtime_enabled", False))
+    paper["shared_market_runtime_instance_id"] = str(paper.get("shared_market_runtime_instance_id", "") or "")
+    paper["shared_market_max_snapshot_age_seconds"] = max(
+        1,
+        int(paper.get("shared_market_max_snapshot_age_seconds", 1200) or 1200),
+    )
+    paper["shared_market_desired_interval_seconds"] = max(
+        1,
+        int(paper.get("shared_market_desired_interval_seconds", 900) or 900),
+    )
+    config["paper"] = paper
     return config
 
 
@@ -472,6 +501,7 @@ def _default_config() -> dict:
             "base_dir": "data",
         },
         "storage": _default_storage_config(),
+        "paper": _default_paper_config(),
         "parity_mode": _default_parity_mode_config(),
         "strategy_lanes": default_strategy_lane_config(),
         "risk": {

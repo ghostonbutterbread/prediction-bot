@@ -17,6 +17,7 @@ from bot.prediction_lab import PredictionLab, PredictionLabRunResult
 from bot.prediction_lab_collect import PredictionLabCollectorDaemon
 from bot.prediction_lab_replay import classify_replay_row_quality
 from bot.risk import RiskDecision
+from bot.shared_market_runtime import SharedMarketRuntimeManager
 from bot.strategies.enhanced import StrategyTrace
 from scripts import prediction_lab_collect as prediction_lab_collect_script
 
@@ -462,6 +463,305 @@ class PredictionLabCollectorTests(unittest.TestCase):
             self.assertEqual(status.collect_runs, 1)
             self.assertEqual(state["paused_reason"], "manual_pause")
             self.assertTrue(state["paused"])
+
+    def test_collector_shared_runtime_publishes_when_elected(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            config_path = tmp_path / "config.yaml"
+            runtime_root = tmp_path / "shared-runtime"
+            self._write_config(config_path, data_dir=tmp_path, paused=False)
+            config_path.write_text(
+                config_path.read_text().replace(
+                    "strategy:",
+                    "\n".join(
+                        [
+                            "  shared_market_runtime_enabled: true",
+                            "  shared_market_runtime_instance_id: collector-test",
+                            "shared_market:",
+                            "  enabled: true",
+                            f"  runtime_root: {runtime_root}",
+                            "  snapshot_ttl_seconds: 777",
+                            "strategy:",
+                        ]
+                    ),
+                )
+            )
+            clock = _FakeClock()
+            run_calls = []
+
+            def fake_run(lab, exchange):
+                run_calls.append(True)
+                lab.update_runtime_state(last_collect_at="2026-05-14T12:00:00+00:00")
+                return PredictionLabRunResult("run-shared-1", 7, 3, {}, {}, str(lab.predictions_path))
+
+            exchange = SimpleNamespace(name="kalshi", get_markets=lambda limit=0: [])
+            with patch.object(PredictionLab, "run", new=fake_run), patch.object(
+                PredictionLab,
+                "resolve_open_predictions",
+                return_value={"resolved": 0},
+            ):
+                daemon = PredictionLabCollectorDaemon(
+                    config_path,
+                    config_loader=load_config,
+                    exchange_builder=lambda config, demo=False: (_FakeBot(), exchange),
+                    sleep_fn=clock.sleep,
+                    monotonic_fn=clock.monotonic,
+                )
+                status = daemon.run(max_cycles=1, idle_sleep_seconds=0)
+
+            state = json.loads((runtime_root / "runtime_state.json").read_text())
+            latest = json.loads((runtime_root / "latest_snapshot.json").read_text())
+            self.assertEqual(status.collect_runs, 1)
+            self.assertEqual(run_calls, [True])
+            self.assertEqual(latest["snapshot_id"], "run-shared-1")
+            self.assertEqual(latest["publisher_runtime"], "collector")
+            self.assertEqual(latest["publisher_instance_id"], "collector-test")
+            self.assertEqual(latest["candidate_count"], 7)
+            self.assertEqual(latest["market_count"], 7)
+            self.assertEqual(latest["ttl_seconds"], 777)
+            self.assertEqual(latest["source_exchange"], "kalshi")
+            self.assertEqual(state["latest_snapshot"], latest)
+            self.assertEqual(state["consumers"], {})
+            self.assertIsNone(state["publisher"])
+
+    def test_collector_shared_runtime_skips_collect_when_other_publisher_owns_feed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            config_path = tmp_path / "config.yaml"
+            runtime_root = tmp_path / "shared-runtime"
+            self._write_config(config_path, data_dir=tmp_path, paused=False)
+            config_path.write_text(
+                config_path.read_text().replace(
+                    "strategy:",
+                    "\n".join(
+                        [
+                            "  shared_market_runtime_enabled: true",
+                            "  shared_market_runtime_instance_id: collector-test",
+                            "shared_market:",
+                            "  enabled: true",
+                            f"  runtime_root: {runtime_root}",
+                            "strategy:",
+                        ]
+                    ),
+                )
+            )
+            manager = SharedMarketRuntimeManager(
+                runtime_root=runtime_root,
+                config={"shared_market": {"enabled": True, "runtime_root": str(runtime_root)}},
+            )
+            manager.attach(
+                runtime_kind="paper",
+                instance_id="paper-owner",
+                can_publish=True,
+                can_consume=True,
+                desired_interval_seconds=60,
+            )
+            clock = _FakeClock()
+
+            def fail_run(lab, exchange):
+                raise AssertionError("collector should not collect while another shared publisher owns the feed")
+
+            with patch.object(PredictionLab, "run", new=fail_run), patch.object(
+                PredictionLab,
+                "resolve_open_predictions",
+                return_value={"resolved": 0},
+            ):
+                daemon = PredictionLabCollectorDaemon(
+                    config_path,
+                    config_loader=load_config,
+                    exchange_builder=lambda config, demo=False: (_FakeBot(), SimpleNamespace(name="kalshi")),
+                    sleep_fn=clock.sleep,
+                    monotonic_fn=clock.monotonic,
+                )
+                status = daemon.run(max_cycles=1, idle_sleep_seconds=0)
+
+            state = json.loads((runtime_root / "runtime_state.json").read_text())
+            self.assertEqual(status.collect_runs, 0)
+            self.assertEqual(status.skipped_collects, 1)
+            self.assertEqual(state["publisher"]["runtime_kind"], "paper")
+            self.assertEqual(state["publisher"]["instance_id"], "paper-owner")
+            self.assertIn("paper:paper-owner", state["consumers"])
+            self.assertNotIn("collector:collector-test", state["consumers"])
+            self.assertFalse((runtime_root / "latest_snapshot.json").exists())
+
+    def test_collector_shared_runtime_paused_collector_does_not_publish(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            config_path = tmp_path / "config.yaml"
+            runtime_root = tmp_path / "shared-runtime"
+            self._write_config(config_path, data_dir=tmp_path, paused=True)
+            config_path.write_text(
+                config_path.read_text().replace(
+                    "strategy:",
+                    "\n".join(
+                        [
+                            "  shared_market_runtime_enabled: true",
+                            "  shared_market_runtime_instance_id: collector-test",
+                            "shared_market:",
+                            "  enabled: true",
+                            f"  runtime_root: {runtime_root}",
+                            "strategy:",
+                        ]
+                    ),
+                )
+            )
+            clock = _FakeClock()
+
+            def fail_run(lab, exchange):
+                raise AssertionError("paused collector should not collect")
+
+            with patch.object(PredictionLab, "run", new=fail_run), patch.object(
+                PredictionLab,
+                "resolve_open_predictions",
+                return_value={"resolved": 0},
+            ):
+                daemon = PredictionLabCollectorDaemon(
+                    config_path,
+                    config_loader=load_config,
+                    exchange_builder=lambda config, demo=False: (_FakeBot(), SimpleNamespace(name="kalshi")),
+                    sleep_fn=clock.sleep,
+                    monotonic_fn=clock.monotonic,
+                )
+                status = daemon.run(max_cycles=1, idle_sleep_seconds=0)
+
+            state = json.loads((runtime_root / "runtime_state.json").read_text())
+            self.assertEqual(status.collect_runs, 0)
+            self.assertEqual(status.skipped_collects, 1)
+            self.assertIsNone(state["publisher"])
+            self.assertNotIn("collector:collector-test", state["consumers"])
+            self.assertFalse((runtime_root / "latest_snapshot.json").exists())
+
+    def test_collector_shared_runtime_continue_collecting_false_does_not_publish(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            config_path = tmp_path / "config.yaml"
+            runtime_root = tmp_path / "shared-runtime"
+            self._write_config(config_path, data_dir=tmp_path, paused=False)
+            config_path.write_text(
+                config_path.read_text()
+                .replace("  continue_collecting: true", "  continue_collecting: false")
+                .replace(
+                    "strategy:",
+                    "\n".join(
+                        [
+                            "  shared_market_runtime_enabled: true",
+                            "  shared_market_runtime_instance_id: collector-test",
+                            "shared_market:",
+                            "  enabled: true",
+                            f"  runtime_root: {runtime_root}",
+                            "strategy:",
+                        ]
+                    ),
+                )
+            )
+            clock = _FakeClock()
+
+            def fail_run(lab, exchange):
+                raise AssertionError("collector should not collect when continue_collecting is false")
+
+            with patch.object(PredictionLab, "run", new=fail_run), patch.object(
+                PredictionLab,
+                "resolve_open_predictions",
+                return_value={"resolved": 0},
+            ):
+                daemon = PredictionLabCollectorDaemon(
+                    config_path,
+                    config_loader=load_config,
+                    exchange_builder=lambda config, demo=False: (_FakeBot(), SimpleNamespace(name="kalshi")),
+                    sleep_fn=clock.sleep,
+                    monotonic_fn=clock.monotonic,
+                )
+                status = daemon.run(max_cycles=1, idle_sleep_seconds=0)
+
+            state = json.loads((runtime_root / "runtime_state.json").read_text())
+            self.assertEqual(status.collect_runs, 0)
+            self.assertEqual(status.skipped_collects, 0)
+            self.assertIsNone(state["publisher"])
+            self.assertNotIn("collector:collector-test", state["consumers"])
+            self.assertFalse((runtime_root / "latest_snapshot.json").exists())
+
+    def test_collector_shared_runtime_detaches_after_post_collect_storage_pause(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            config_path = tmp_path / "config.yaml"
+            runtime_root = tmp_path / "shared-runtime"
+            self._write_config(config_path, data_dir=tmp_path, paused=False, cap_gb=0.000001)
+            config_path.write_text(
+                config_path.read_text().replace(
+                    "strategy:",
+                    "\n".join(
+                        [
+                            "  shared_market_runtime_enabled: true",
+                            "  shared_market_runtime_instance_id: collector-test",
+                            "shared_market:",
+                            "  enabled: true",
+                            f"  runtime_root: {runtime_root}",
+                            "strategy:",
+                        ]
+                    ),
+                )
+            )
+            clock = _FakeClock()
+
+            def fake_run(lab, exchange):
+                lab.update_runtime_state(last_collect_at="2026-05-14T12:00:00+00:00")
+                append_jsonl(lab.market_snapshots_path, {"x": "y" * 5000})
+                return PredictionLabRunResult("run-storage-pause", 1, 0, {}, {}, str(lab.predictions_path))
+
+            with patch.object(PredictionLab, "run", new=fake_run), patch.object(
+                PredictionLab,
+                "resolve_open_predictions",
+                return_value={"resolved": 0},
+            ):
+                daemon = PredictionLabCollectorDaemon(
+                    config_path,
+                    config_loader=load_config,
+                    exchange_builder=lambda config, demo=False: (_FakeBot(), SimpleNamespace(name="kalshi")),
+                    sleep_fn=clock.sleep,
+                    monotonic_fn=clock.monotonic,
+                )
+                status = daemon.run(max_cycles=1, idle_sleep_seconds=0)
+
+            runtime_state = json.loads((runtime_root / "runtime_state.json").read_text())
+            lab_state = json.loads((self._runtime_prediction_lab_dir(tmp_path) / "state.json").read_text())
+            self.assertEqual(status.collect_runs, 1)
+            self.assertEqual(status.pause_reason, "storage_cap")
+            self.assertEqual(lab_state["paused_reason"], "storage_cap")
+            self.assertIsNone(runtime_state["publisher"])
+            self.assertNotIn("collector:collector-test", runtime_state["consumers"])
+            self.assertTrue((runtime_root / "latest_snapshot.json").exists())
+
+    def test_collector_shared_runtime_disabled_keeps_legacy_collect_behavior(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            config_path = tmp_path / "config.yaml"
+            runtime_root = tmp_path / "shared-runtime"
+            self._write_config(config_path, data_dir=tmp_path, paused=False)
+            clock = _FakeClock()
+            run_calls = []
+
+            def fake_run(lab, exchange):
+                run_calls.append(True)
+                lab.update_runtime_state(last_collect_at="2026-05-14T12:00:00+00:00")
+                return PredictionLabRunResult("run-legacy-1", 2, 1, {}, {}, str(lab.predictions_path))
+
+            with patch.object(PredictionLab, "run", new=fake_run), patch.object(
+                PredictionLab,
+                "resolve_open_predictions",
+                return_value={"resolved": 0},
+            ):
+                daemon = PredictionLabCollectorDaemon(
+                    config_path,
+                    config_loader=load_config,
+                    exchange_builder=lambda config, demo=False: (_FakeBot(), SimpleNamespace(name="kalshi")),
+                    sleep_fn=clock.sleep,
+                    monotonic_fn=clock.monotonic,
+                )
+                status = daemon.run(max_cycles=1, idle_sleep_seconds=0)
+
+            self.assertEqual(status.collect_runs, 1)
+            self.assertEqual(run_calls, [True])
+            self.assertFalse(runtime_root.exists())
 
     def test_collector_auto_pauses_when_storage_cap_reached(self):
         with tempfile.TemporaryDirectory() as tmpdir:
