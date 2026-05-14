@@ -5,7 +5,7 @@ from collections import Counter
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from dataclasses import dataclass, asdict, field
-from typing import Optional
+from typing import Any, Optional
 
 from bot.config import ensure_mode_storage_dir
 from bot.decision_pipeline import build_pre_execution_decision_artifact
@@ -37,6 +37,11 @@ from bot.strategy_lanes import select_strategy_lane
 from bot.strategies.enhanced import EnhancedStrategyEngine, KellySizer, strategy_config_with_policy
 from bot.parity_audit import normalize_parity_trade_row, summarize_normalized_rows
 from bot.paper_decision_audit import append_paper_agent_run_once, append_paper_decision_audit
+from bot.shared_market_runtime import (
+    SharedMarketRuntimeManager,
+    build_shared_market_snapshot_metadata,
+    shared_snapshot_is_fresh,
+)
 from bot.trade_audit import (
     enrich_trade_audit_fields,
     summarize_event_performance,
@@ -368,11 +373,30 @@ class Simulator:
                 },
             }
 
+        shared_market_context = self._begin_paper_shared_market_runtime()
+        if shared_market_context and shared_market_context.get("skip_direct_fetch"):
+            return self._paper_shared_market_skip_result(shared_market_context)
+
         scan_cfg = self.config.get("scan", {}) or {}
         markets_per_exchange = int(scan_cfg.get("markets_per_exchange", 100) or 100)
-        markets = exchange.get_markets(limit=markets_per_exchange)
+        try:
+            markets = exchange.get_markets(limit=markets_per_exchange)
+        except Exception:
+            self._finish_paper_shared_market_runtime(shared_market_context)
+            raise
+        shared_market_publish_metadata = self._record_paper_shared_market_snapshot_metadata(
+            shared_market_context,
+            markets=markets,
+            exchange=exchange,
+        )
+        self._finish_paper_shared_market_runtime(shared_market_context)
         if not markets:
-            return {"markets": 0, "signals": 0, "trades": 0}
+            result = {"markets": 0, "signals": 0, "trades": 0}
+            return self._finish_paper_shared_market_result(
+                result,
+                shared_market_context,
+                publish_metadata=shared_market_publish_metadata,
+            )
         blockers = Counter()
         
         # === SPORTS MODE: Analyze sports markets + injury sniper ===
@@ -465,6 +489,11 @@ class Simulator:
                 if signal:
                     signal["market_id"] = market.id
                     signal["question"] = market.question
+                    self._annotate_signal_shared_market_provenance(
+                        signal,
+                        shared_market_context,
+                        publish_metadata=shared_market_publish_metadata,
+                    )
                     signals_found.append(signal)
 
                     gate_reason = self._trade_gate_reason(signal)
@@ -626,7 +655,7 @@ class Simulator:
         self.risk.record_blocked_scan(dict(blockers), trades_taken=len(trades_taken))
         self._save_session()
 
-        return {
+        result = {
             "markets": len(markets),
             "signals": len(signals_found),
             "trades": len(trades_taken),
@@ -639,6 +668,273 @@ class Simulator:
                 "blocked_scan_count": self.risk.state.standby_blocked_scan_count,
             },
         }
+        return self._finish_paper_shared_market_result(
+            result,
+            shared_market_context,
+            publish_metadata=shared_market_publish_metadata,
+        )
+
+    def _paper_shared_market_config(self) -> dict[str, Any]:
+        paper_cfg = dict(self.config.get("paper", {}) or {})
+        paper_runtime_cfg = self.config.get("paper_runtime")
+        if isinstance(paper_runtime_cfg, dict):
+            paper_cfg.update(paper_runtime_cfg)
+        return paper_cfg
+
+    def _paper_shared_market_enabled(self) -> bool:
+        if self.runtime_mode != "paper":
+            return False
+        paper_cfg = self._paper_shared_market_config()
+        shared_market_cfg = self.config.get("shared_market", {}) or {}
+        return bool(paper_cfg.get("shared_market_runtime_enabled", False)) and bool(
+            shared_market_cfg.get("enabled", True)
+        )
+
+    def _paper_shared_market_instance_id(self) -> str:
+        paper_cfg = self._paper_shared_market_config()
+        instance_id = paper_cfg.get("shared_market_runtime_instance_id")
+        if instance_id not in (None, ""):
+            return str(instance_id)
+        return f"paper:{self.data_dir.resolve()}"
+
+    def _paper_shared_market_max_snapshot_age_seconds(self) -> int:
+        paper_cfg = self._paper_shared_market_config()
+        shared_market_cfg = self.config.get("shared_market", {}) or {}
+        value = (
+            paper_cfg.get("shared_market_max_snapshot_age_seconds")
+            or shared_market_cfg.get("snapshot_ttl_seconds")
+            or 1200
+        )
+        return max(1, int(value))
+
+    def _paper_shared_market_desired_interval_seconds(self) -> int:
+        paper_cfg = self._paper_shared_market_config()
+        shared_market_cfg = self.config.get("shared_market", {}) or {}
+        value = (
+            paper_cfg.get("shared_market_desired_interval_seconds")
+            or shared_market_cfg.get("default_interval_seconds")
+            or 900
+        )
+        return max(1, int(value))
+
+    def _begin_paper_shared_market_runtime(self) -> dict[str, Any] | None:
+        if not self._paper_shared_market_enabled():
+            return None
+
+        manager = SharedMarketRuntimeManager(config=self.config)
+        instance_id = self._paper_shared_market_instance_id()
+        max_snapshot_age_seconds = self._paper_shared_market_max_snapshot_age_seconds()
+        desired_interval_seconds = self._paper_shared_market_desired_interval_seconds()
+        now = datetime.now(timezone.utc)
+        manager.attach(
+            runtime_kind="paper",
+            instance_id=instance_id,
+            can_publish=True,
+            can_consume=True,
+            desired_interval_seconds=desired_interval_seconds,
+            max_snapshot_age_seconds=max_snapshot_age_seconds,
+            now=now,
+        )
+        state = manager.acquire_publisher_lease(
+            runtime_kind="paper",
+            instance_id=instance_id,
+            now=now,
+        )
+        publisher = state.get("publisher") if isinstance(state, dict) else None
+        latest_snapshot = state.get("latest_snapshot") if isinstance(state, dict) else None
+        owns_publisher = self._shared_market_publisher_is_self(
+            publisher,
+            runtime_kind="paper",
+            instance_id=instance_id,
+        )
+        other_publisher = isinstance(publisher, dict) and not owns_publisher
+        fresh_shared_snapshot = (
+            other_publisher
+            and self._shared_market_snapshot_matches_publisher(latest_snapshot, publisher)
+            and shared_snapshot_is_fresh(
+                latest_snapshot,
+                max_snapshot_age_seconds=max_snapshot_age_seconds,
+                now=now,
+            )
+        )
+        # Paper can only skip its direct upstream fetch when the current shared
+        # publisher has a fresh snapshot that matches the active lease. Missing,
+        # stale, or mismatched snapshots must fall back to the legacy direct
+        # paper scan path so paper does not silently stop observing markets.
+        skip_direct_fetch = bool(fresh_shared_snapshot)
+        if fresh_shared_snapshot:
+            provenance = "shared"
+            skip_reason = "fresh_shared_snapshot_owned_by_other_publisher"
+        elif owns_publisher:
+            provenance = "direct_publisher"
+            skip_reason = None
+        else:
+            provenance = "direct_bypass"
+            skip_reason = None
+
+        return {
+            "enabled": True,
+            "manager": manager,
+            "instance_id": instance_id,
+            "state": state,
+            "publisher": dict(publisher) if isinstance(publisher, dict) else None,
+            "latest_snapshot": dict(latest_snapshot) if isinstance(latest_snapshot, dict) else None,
+            "owns_publisher": owns_publisher,
+            "fresh_shared_snapshot": bool(fresh_shared_snapshot),
+            "skip_direct_fetch": skip_direct_fetch,
+            "skip_reason": skip_reason,
+            "provenance": provenance,
+            "max_snapshot_age_seconds": max_snapshot_age_seconds,
+            "desired_interval_seconds": desired_interval_seconds,
+        }
+
+    @staticmethod
+    def _shared_market_publisher_is_self(
+        publisher: dict[str, Any] | None,
+        *,
+        runtime_kind: str,
+        instance_id: str,
+    ) -> bool:
+        if not isinstance(publisher, dict):
+            return False
+        return (
+            str(publisher.get("runtime_kind") or "") == runtime_kind
+            and str(publisher.get("instance_id") or "") == instance_id
+        )
+
+    @staticmethod
+    def _shared_market_snapshot_matches_publisher(
+        snapshot: dict[str, Any] | None,
+        publisher: dict[str, Any] | None,
+    ) -> bool:
+        if not isinstance(snapshot, dict) or not isinstance(publisher, dict):
+            return False
+        return (
+            str(snapshot.get("publisher_runtime") or "") == str(publisher.get("runtime_kind") or "")
+            and str(snapshot.get("publisher_instance_id") or "") == str(publisher.get("instance_id") or "")
+        )
+
+    def _paper_shared_market_skip_result(self, context: dict[str, Any]) -> dict:
+        snapshot = dict(context.get("latest_snapshot") or {})
+        logger.info(
+            "Skipping paper direct market fetch because shared market feed is owned by %s:%s",
+            snapshot.get("publisher_runtime") or (context.get("publisher") or {}).get("runtime_kind"),
+            snapshot.get("publisher_instance_id") or (context.get("publisher") or {}).get("instance_id"),
+        )
+        self.risk.record_blocked_scan({}, trades_taken=0)
+        self._save_session()
+        result = {
+            "markets": int(snapshot.get("market_count") or snapshot.get("candidate_count") or 0),
+            "signals": 0,
+            "trades": 0,
+            "balance": self.balance,
+            "total_trades": len(self._effective_trades()),
+            "blocked_reasons": {},
+            "standby": {
+                "active": bool(self.risk.state.standby_active),
+                "reason_codes": list(self.risk.state.standby_reason_codes),
+                "blocked_scan_count": self.risk.state.standby_blocked_scan_count,
+            },
+        }
+        return self._finish_paper_shared_market_result(result, context)
+
+    def _record_paper_shared_market_snapshot_metadata(
+        self,
+        context: dict[str, Any] | None,
+        *,
+        markets: list[Any] | tuple[Any, ...] | None,
+        exchange: Any,
+    ) -> dict[str, Any] | None:
+        if not context or not context.get("owns_publisher"):
+            return None
+        manager = context.get("manager")
+        if not isinstance(manager, SharedMarketRuntimeManager):
+            return None
+        observed_at = datetime.now(timezone.utc)
+        metadata = build_shared_market_snapshot_metadata(
+            snapshot_id=f"{self.session_id}:scan-{self.scan_count}",
+            observed_at=observed_at,
+            published_at=observed_at,
+            publisher_runtime="paper",
+            publisher_instance_id=str(context.get("instance_id") or ""),
+            candidate_count=len(markets or []),
+            market_count=len(markets or []),
+            ttl_seconds=int(manager.snapshot_ttl_seconds),
+            source_exchange=self._shared_market_source_exchange(exchange),
+        )
+        try:
+            manager.record_snapshot_metadata(metadata, now=observed_at)
+        except Exception as exc:
+            logger.warning("failed to record paper shared market snapshot metadata: %s", exc)
+            return None
+        context["published_snapshot"] = metadata
+        return metadata
+
+    @staticmethod
+    def _shared_market_source_exchange(exchange: Any) -> str:
+        for attr in ("name", "exchange_name", "exchange"):
+            value = getattr(exchange, attr, None)
+            if value not in (None, ""):
+                return str(value)
+        return "kalshi"
+
+    def _annotate_signal_shared_market_provenance(
+        self,
+        signal: dict,
+        context: dict[str, Any] | None,
+        *,
+        publish_metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if not context:
+            return
+        snapshot = publish_metadata or context.get("latest_snapshot") or {}
+        signal["shared_market_provenance"] = self._paper_shared_market_provenance(context, snapshot=snapshot)
+
+    def _paper_shared_market_provenance(
+        self,
+        context: dict[str, Any],
+        *,
+        snapshot: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        snapshot = dict(snapshot or {})
+        publisher = dict(context.get("publisher") or {})
+        return {
+            "enabled": True,
+            "source": str(context.get("provenance") or "direct_bypass"),
+            "skip_reason": context.get("skip_reason"),
+            "snapshot_id": snapshot.get("snapshot_id"),
+            "snapshot_as_of": snapshot.get("observed_at") or snapshot.get("published_at"),
+            "publisher_runtime": snapshot.get("publisher_runtime") or publisher.get("runtime_kind"),
+            "publisher_instance_id": snapshot.get("publisher_instance_id") or publisher.get("instance_id"),
+            "fresh_shared_snapshot": bool(context.get("fresh_shared_snapshot", False)),
+            "owns_publisher": bool(context.get("owns_publisher", False)),
+        }
+
+    def _finish_paper_shared_market_result(
+        self,
+        result: dict,
+        context: dict[str, Any] | None,
+        *,
+        publish_metadata: dict[str, Any] | None = None,
+    ) -> dict:
+        if context:
+            snapshot = publish_metadata or context.get("latest_snapshot") or {}
+            result = dict(result)
+            result["shared_market"] = self._paper_shared_market_provenance(context, snapshot=snapshot)
+        self._finish_paper_shared_market_runtime(context)
+        return result
+
+    def _finish_paper_shared_market_runtime(self, context: dict[str, Any] | None) -> None:
+        if not context or context.get("_detached"):
+            return
+        manager = context.get("manager")
+        instance_id = context.get("instance_id")
+        if isinstance(manager, SharedMarketRuntimeManager) and instance_id not in (None, ""):
+            try:
+                manager.detach(runtime_kind="paper", instance_id=str(instance_id))
+            except Exception as exc:
+                logger.debug("paper shared market detach failed: %s", exc)
+        context["_detached"] = True
 
     def _should_trade(self, signal: dict) -> bool:
         return self._trade_gate_reason(signal) is None
@@ -730,6 +1026,8 @@ class Simulator:
             execution_revalidation_outcome = "approved" if decision.approved else "rejected"
 
         decision.reasoning = dict(decision.reasoning or {})
+        if isinstance(signal.get("shared_market_provenance"), dict):
+            decision.reasoning["shared_market"] = dict(signal["shared_market_provenance"])
         decision.reasoning["parity_mode"] = {
             "enabled": bool(self.parity_mode.get("enabled")),
             "execution_revalidated": bool(self.parity_mode.get("enabled")),
