@@ -24,6 +24,7 @@ class StrategyPolicyConfigTests(unittest.TestCase):
         self.assertFalse(policy.feature_enabled("weather_hidden_gem_evidence_card"))
         self.assertFalse(policy.feature_enabled("bucket_distribution_scoring"))
         self.assertFalse(policy.feature_enabled("hidden_gem_lane_gates"))
+        self.assertFalse(policy.feature_enabled("confidence_slow_profit"))
         self.assertFalse(policy.feature_enabled("lane_sizing_caps"))
 
     def test_beta_shadow_parses_correctly(self):
@@ -206,6 +207,7 @@ prediction_lab:
             self.assertTrue(policy.feature_enabled("weather_hidden_gem_evidence_card"))
             self.assertTrue(policy.feature_enabled("bucket_distribution_scoring"))
             self.assertTrue(policy.feature_enabled("hidden_gem_lane_gates"))
+            self.assertTrue(policy.feature_enabled("confidence_slow_profit"))
             self.assertTrue(policy.feature_enabled("lane_sizing_caps"))
             self.assertTrue(config["strategy_lanes"]["enabled"])
             self.assertIn("confidence_slow_profit", config["strategy_lanes"]["enabled_lanes"])

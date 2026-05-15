@@ -349,10 +349,11 @@ Supported lane IDs:
   multiple gates still live in shared core.
 - `confidence_slow_profit` — optional high-confidence, lower-edge lane. It is
   inert unless `strategy_lanes.enabled: true`,
-  `strategy_lanes.confidence_slow_profit.enabled: true`, and explicit lane
-  thresholds are configured. Config normalization treats that explicit sub-lane
-  enablement as allowlist inclusion for `confidence_slow_profit`; defaults still
-  omit it from `enabled_lanes`.
+  `strategy_lanes.confidence_slow_profit.enabled: true`, explicit lane
+  thresholds are configured, and the beta feature flag
+  `strategy_policy.beta.features.confidence_slow_profit` is active. Config
+  normalization treats explicit sub-lane enablement as allowlist inclusion for
+  `confidence_slow_profit`; defaults still omit it from `enabled_lanes`.
 
 Default config keeps lanes as metadata only:
 
@@ -401,6 +402,7 @@ strategy_policy:
       weather_hidden_gem_evidence_card: true
       bucket_distribution_scoring: true
       hidden_gem_lane_gates: true
+      confidence_slow_profit: true
       lane_sizing_caps: true
 ```
 
@@ -408,7 +410,7 @@ Recommended implementation order:
 
 1. Add policy helpers/adapters near the decision pipeline so callers can ask whether beta lane logic is `off`, `shadow`, or `enforce`.
 2. Preserve a stable decision artifact and add a beta/shadow decision artifact for comparison.
-3. Gate hidden-gem evidence-card rejection, bucket distribution rejection, tail bridge rejection, exceptional hidden-gem rejection, weather sizing caps/multipliers, and `confidence_slow_profit` admission behind beta policy checks before they become behavior-changing defaults.
+3. Gate hidden-gem evidence-card rejection, bucket distribution rejection, tail bridge rejection, exceptional hidden-gem rejection, weather sizing caps/multipliers, and `confidence_slow_profit` admission behind beta policy checks before they become behavior-changing defaults. `confidence_slow_profit` uses its own feature flag so confidence-lane shadowing can be reviewed independently from hidden-gem lane gates.
 4. Make Prediction Lab emit stable-vs-beta deltas before paper uses `enforce`.
 5. Add tests proving stable/off preserves old behavior, shadow records beta differences without changing final action, and enforce can change paper decisions only when the relevant feature flag is enabled.
 
@@ -484,8 +486,8 @@ Phase 3I implementation note, 2026-05-07:
 
 Phase 3J implementation note, 2026-05-07:
 
-- `confidence_slow_profit` remains inert by default and still requires explicit `strategy_lanes.enabled`, `strategy_lanes.confidence_slow_profit.enabled`, lane thresholds, and beta/enforce `hidden_gem_lane_gates` before it can change final admission thresholds
-- explicit slow-profit config records `strategy_lane.evidence.beta_lane_gate` would-select metadata in stable/off and beta/shadow without changing the final selected lane or final action
+- `confidence_slow_profit` remains inert by default and still requires explicit `strategy_lanes.enabled`, `strategy_lanes.confidence_slow_profit.enabled`, lane thresholds, and beta/enforce `confidence_slow_profit` before it can change final admission thresholds
+- explicit slow-profit config plus beta/shadow `confidence_slow_profit` records `strategy_lane.evidence.beta_lane_gate` would-select metadata without changing the final selected lane or final action
 - `bot.strategy_lane_reporting`, `scripts/analyze.py`, and Prediction Lab replay summaries report selected lanes, would-select lanes, lane-selection deltas, and how often slow-profit would differ from the final stable action
 - this slice is observability/reporting-focused except for preserving the already beta/enforce-gated slow-profit admission path
 

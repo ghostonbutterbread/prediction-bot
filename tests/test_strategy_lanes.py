@@ -368,7 +368,7 @@ class StrategyLaneTests(unittest.TestCase):
         kelly_sizer.calculate.assert_not_called()
         risk_policy.check_trade.assert_not_called()
 
-    def test_stable_slow_profit_records_would_select_delta_without_admission(self):
+    def test_stable_slow_profit_config_preserves_base_lane_without_shadow_feature(self):
         context = self._context(
             market_price=0.50,
             model_probability=0.53,
@@ -409,8 +409,10 @@ class StrategyLaneTests(unittest.TestCase):
         self.assertFalse(beta_gate["beta_behavior_enforced"])
         self.assertTrue(beta_gate["confidence_slow_profit_configured_enabled"])
         self.assertFalse(beta_gate["confidence_slow_profit_enabled"])
-        self.assertEqual(beta_gate["lane_id"], CONFIDENCE_SLOW_PROFIT_LANE)
-        self.assertTrue(beta_gate["differs_from_final"])
+        self.assertEqual(beta_gate["lane_id"], EDGE_LANE)
+        self.assertFalse(beta_gate["confidence_slow_profit_beta_behavior_enabled"])
+        self.assertFalse(beta_gate["confidence_slow_profit_beta_behavior_enforced"])
+        self.assertFalse(beta_gate["differs_from_final"])
         kelly_sizer.calculate.assert_not_called()
         risk_policy.check_trade.assert_not_called()
 
@@ -430,7 +432,7 @@ class StrategyLaneTests(unittest.TestCase):
                         "min_confidence": 0.90,
                     },
                 },
-                "strategy_policy": self._beta_policy("enforce", hidden_gem_lane_gates=True),
+                "strategy_policy": self._beta_policy("enforce", hidden_gem_lane_gates=True, confidence_slow_profit=True),
             },
         )
         kelly_sizer, risk_policy = self._approving_dependencies(size=4.0)
@@ -489,10 +491,10 @@ class StrategyLaneTests(unittest.TestCase):
         self.assertEqual(lane["lane_id"], EDGE_LANE)
         self.assertFalse(lane["behavior_enabled"])
         beta_gate = lane["evidence"]["beta_lane_gate"]
-        self.assertEqual(beta_gate["lane_id"], CONFIDENCE_SLOW_PROFIT_LANE)
-        self.assertFalse(beta_gate["beta_behavior_enabled"])
-        self.assertFalse(beta_gate["beta_behavior_enforced"])
-        self.assertTrue(beta_gate["differs_from_final"])
+        self.assertEqual(beta_gate["lane_id"], EDGE_LANE)
+        self.assertFalse(beta_gate["confidence_slow_profit_beta_behavior_enabled"])
+        self.assertFalse(beta_gate["confidence_slow_profit_beta_behavior_enforced"])
+        self.assertFalse(beta_gate["differs_from_final"])
         kelly_sizer.calculate.assert_not_called()
         risk_policy.check_trade.assert_not_called()
 
@@ -512,7 +514,7 @@ class StrategyLaneTests(unittest.TestCase):
                         "min_confidence": 0.90,
                     },
                 },
-                "strategy_policy": self._beta_policy("shadow", hidden_gem_lane_gates=True),
+                "strategy_policy": self._beta_policy("shadow", hidden_gem_lane_gates=True, confidence_slow_profit=True),
             },
         )
         kelly_sizer = Mock()
@@ -550,7 +552,7 @@ class StrategyLaneTests(unittest.TestCase):
                     "enabled": True,
                     "enabled_lanes": ["edge"],
                 },
-                "strategy_policy": self._beta_policy("enforce", hidden_gem_lane_gates=True),
+                "strategy_policy": self._beta_policy("enforce", hidden_gem_lane_gates=True, confidence_slow_profit=True),
             },
         )
         kelly_sizer = Mock()
@@ -570,6 +572,48 @@ class StrategyLaneTests(unittest.TestCase):
         self.assertEqual(decision.reasoning["strategy_lane"]["lane_id"], HIDDEN_GEM_LANE)
         kelly_sizer.calculate.assert_not_called()
         risk_policy.check_trade.assert_not_called()
+
+    def test_confidence_feature_does_not_enforce_hidden_gem_allowlist(self):
+        context = self._context(
+            market_price=0.03,
+            model_probability=0.12,
+            edge=0.09,
+            confidence=0.90,
+            metadata={
+                "strategy_lanes": {
+                    "enabled": True,
+                    "enabled_lanes": ["edge"],
+                    "confidence_slow_profit": {
+                        "enabled": True,
+                        "min_edge": 0.02,
+                        "min_confidence": 0.75,
+                    },
+                },
+                "strategy_policy": self._beta_policy("enforce", confidence_slow_profit=True),
+            },
+        )
+        kelly_sizer, risk_policy = self._approving_dependencies(size=2.0)
+
+        decision = build_trade_decision(
+            context,
+            kelly_sizer=kelly_sizer,
+            risk_policy=risk_policy,
+            min_edge=0.05,
+            min_confidence=0.50,
+            max_entry_price=0.70,
+        )
+
+        self.assertTrue(decision.approved)
+        lane = decision.reasoning["strategy_lane"]
+        self.assertEqual(lane["lane_id"], HIDDEN_GEM_LANE)
+        self.assertFalse(lane["behavior_enabled"])
+        beta_gate = lane["evidence"]["beta_lane_gate"]
+        self.assertFalse(beta_gate["beta_behavior_enabled"])
+        self.assertTrue(beta_gate["confidence_slow_profit_beta_behavior_enabled"])
+        self.assertTrue(beta_gate["allowed"])
+        self.assertFalse(beta_gate["differs_from_final"])
+        kelly_sizer.calculate.assert_called_once()
+        risk_policy.check_trade.assert_called_once()
 
     def test_config_normalization_keeps_slow_profit_off_by_default(self):
         config = normalize_strategy_lane_config(
@@ -657,7 +701,7 @@ class StrategyLaneTests(unittest.TestCase):
                             "min_confidence": 0.90,
                         },
                     },
-                    "strategy_policy": self._beta_policy("enforce", hidden_gem_lane_gates=True),
+                    "strategy_policy": self._beta_policy("enforce", hidden_gem_lane_gates=True, confidence_slow_profit=True),
                 }
             )
             signal = self._slow_profit_signal()
@@ -771,6 +815,7 @@ class StrategyLaneTests(unittest.TestCase):
         weather_hidden_gem_evidence_card: bool = False,
         bucket_distribution_scoring: bool = False,
         hidden_gem_lane_gates: bool = False,
+        confidence_slow_profit: bool = False,
         lane_sizing_caps: bool = False,
     ) -> dict:
         return {
@@ -781,6 +826,7 @@ class StrategyLaneTests(unittest.TestCase):
                     "weather_hidden_gem_evidence_card": weather_hidden_gem_evidence_card,
                     "bucket_distribution_scoring": bucket_distribution_scoring,
                     "hidden_gem_lane_gates": hidden_gem_lane_gates,
+                    "confidence_slow_profit": confidence_slow_profit,
                     "lane_sizing_caps": lane_sizing_caps,
                 },
             },

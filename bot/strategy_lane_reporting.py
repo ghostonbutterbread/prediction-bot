@@ -221,6 +221,11 @@ def build_strategy_lane_rollout_readiness(
         "hidden_gem_lane_gates is not active",
     )
     add_check(
+        "confidence_slow_profit_feature",
+        "confidence_slow_profit" in enabled_features,
+        "confidence_slow_profit is not active",
+    )
+    add_check(
         "lane_sizing_caps_feature",
         "lane_sizing_caps" in enabled_features,
         "lane_sizing_caps is not active",

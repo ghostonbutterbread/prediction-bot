@@ -63,6 +63,7 @@ def _shadow_policy_status(**features):
         "weather_hidden_gem_evidence_card": False,
         "bucket_distribution_scoring": False,
         "hidden_gem_lane_gates": False,
+        "confidence_slow_profit": False,
         "lane_sizing_caps": False,
     }
     enabled.update(features)
@@ -241,6 +242,7 @@ class StrategyLaneReportingTests(unittest.TestCase):
             policy_status=_shadow_policy_status(
                 weather_hidden_gem_evidence_card=True,
                 hidden_gem_lane_gates=True,
+                confidence_slow_profit=True,
                 lane_sizing_caps=True,
             ),
             strategy_lane_summary=summarize_strategy_lanes(rows),
@@ -349,6 +351,7 @@ class StrategyLaneReportingTests(unittest.TestCase):
             policy_status=_shadow_policy_status(
                 weather_hidden_gem_evidence_card=True,
                 hidden_gem_lane_gates=True,
+                confidence_slow_profit=True,
                 lane_sizing_caps=True,
             ),
             strategy_lane_summary={
@@ -497,6 +500,7 @@ class StrategyLaneReportingTests(unittest.TestCase):
                     policy_status=_shadow_policy_status(
                         weather_hidden_gem_evidence_card=True,
                         hidden_gem_lane_gates=True,
+                        confidence_slow_profit=True,
                         lane_sizing_caps=True,
                     ),
                     strategy_lane_summary=strategy_lane_summary,

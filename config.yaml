@@ -170,7 +170,8 @@ strategy_lanes:
     - edge
     - hidden_gem
   confidence_slow_profit:
-    # Explicitly enable this plus strategy_lanes.enabled to admit high-confidence,
+    # Explicitly enable this plus strategy_lanes.enabled and beta/enforce
+    # strategy_policy.beta.features.confidence_slow_profit to admit high-confidence,
     # lower-edge slow-profit trades with the thresholds below. When enabled,
     # normalization includes this lane in enabled_lanes.
     enabled: false
