@@ -215,6 +215,12 @@ trade. A handler that persists it should use a dedicated file such as
 
 - Build a compact review export that feeds only rows with meaningful shadow deltas to the replay/review agent.
 - Keep normal replay input as source-of-truth and shadow deltas as comparison metadata only.
+- The compact review export reads explicit `predictions.jsonl` and
+  `market_snapshots.jsonl` paths, dedupes by the same `shadow_delta.dedupe_key`
+  preference rules as summaries, and writes a separate JSONL review file.
+- Review rows preserve compact stable/shadow comparison fields plus provenance
+  metadata. They must not be fed back as Prediction Lab predictions, trades, or
+  replay-source rows.
 
 ### Phase 3a — Shared hypothetical intent helper
 

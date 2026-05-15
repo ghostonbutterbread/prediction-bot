@@ -462,6 +462,29 @@ class PredictionLabReplayTests(unittest.TestCase):
         self.assertFalse(result.rows[0].action_changed)
         self.assertEqual(result.rows[0].source_path, str(path))
 
+
+    def test_replay_loader_rejects_shadow_delta_compact_review_export_rows(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "shadow_review.jsonl"
+            append_jsonl(
+                path,
+                {
+                    "schema_version": 1,
+                    "row_type": "prediction_lab_shadow_delta_compact_review",
+                    "market_id": "KXHIGHNY-26APR29-T80",
+                    "observed_at": "2026-04-29T12:00:00+00:00",
+                    "shadow_delta": {"changed": True},
+                },
+            )
+
+            with self.assertRaises(ValueError):
+                load_replay_artifacts([path])
+
+            validation = validate_prediction_lab_tables([path])
+
+        self.assertFalse(validation.ok)
+        self.assertEqual(validation.issues[0].code, "shadow_delta_review_not_replay_input")
+
     def test_replay_summary_counts_shadow_delta_once_without_adding_replay_rows(self):
         shadow_delta = {
             "schema_version": 1,
