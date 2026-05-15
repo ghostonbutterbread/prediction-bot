@@ -4,6 +4,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import yaml
+
 from bot.agent_decision_ledger import summarize_agent_decision_coverage, summarize_agent_decision_reporting
 from bot.config import load_config
 from bot.file_ops import append_jsonl, load_jsonl
@@ -42,11 +44,17 @@ paper_shadow_lanes:
         )
         return load_config(config_path)
 
-    def _market(self, market_id: str):
+    def _market(
+        self,
+        market_id: str,
+        *,
+        question: str = "Will the high temperature in New York exceed 71 degrees?",
+        series_ticker: str = "KXHIGHNY",
+    ):
         return SimpleNamespace(
             id=market_id,
             exchange="kalshi",
-            question="Will the high temperature in New York exceed 71 degrees?",
+            question=question,
             category="weather",
             yes_price=0.41,
             no_price=0.59,
@@ -55,13 +63,13 @@ paper_shadow_lanes:
                 "market_group": "weather",
                 "market_family": "daily_temperature",
                 "series": "daily_temperature",
-                "series_ticker": "KXHIGHNY",
+                "series_ticker": series_ticker,
                 "event_ticker": market_id,
                 "market_route": {"group": "weather", "family": "daily_temperature", "allowed": True},
             },
         )
 
-    def _signal(self, *, confidence: float):
+    def _signal(self, *, confidence: float, station_id: str = "KNYC"):
         return {
             "direction": "BUY_YES",
             "model_probability": 0.67,
@@ -70,12 +78,21 @@ paper_shadow_lanes:
             "no_market_price": 0.59,
             "edge": 0.26,
             "confidence": confidence,
-            "station_id": "KNYC",
+            "station_id": station_id,
             "source_as_of": "2026-05-13T12:00:00+00:00",
             "signals": {"unit": 0.67},
         }
 
-    def _snapshot_row(self, *, market_id: str, confidence: float, observed_at: str):
+    def _snapshot_row(
+        self,
+        *,
+        market_id: str,
+        confidence: float,
+        observed_at: str,
+        question: str = "Will the high temperature in New York exceed 71 degrees?",
+        series_ticker: str = "KXHIGHNY",
+        station_id: str = "KNYC",
+    ):
         lab = PredictionLab(
             {
                 "data_dir": "/tmp/prediction-lab-fixture",
@@ -83,10 +100,10 @@ paper_shadow_lanes:
                 "strategy": {"enable_news": False, "enable_social": False, "enable_ai": False},
             }
         )
-        signal = self._signal(confidence=confidence)
+        signal = self._signal(confidence=confidence, station_id=station_id)
         return lab._build_market_snapshot_row(
             f"run-{market_id}",
-            self._market(market_id),
+            self._market(market_id, question=question, series_ticker=series_ticker),
             signal,
             decision_type="buy_yes",
             prediction_recorded=True,
@@ -147,6 +164,17 @@ parameters:
 """
         )
         return lanes_dir
+
+    def _production_lanes_dir(self) -> Path:
+        return Path(__file__).resolve().parents[1] / "lanes"
+
+    def _production_lane_ids(self) -> tuple[str, ...]:
+        lane_ids: list[str] = []
+        for path in sorted(self._production_lanes_dir().glob("*.yaml")):
+            with path.open() as handle:
+                loaded = yaml.safe_load(handle) or {}
+            lane_ids.append(str(loaded.get("id") or path.stem))
+        return tuple(lane_ids)
 
     def test_shadow_lanes_write_multiple_non_mutating_decisions_per_shared_candidate(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -227,6 +255,85 @@ parameters:
         self.assertEqual(result.paper_lane_ids, ("control_stable", "shadow_confidence_floor"))
         self.assertEqual(result.paper_lane_decision_count, 2)
         self.assertEqual({row["policy"] for row in lane_rows}, {"control_stable", "shadow_confidence_floor"})
+
+    def test_all_folder_backed_yaml_lanes_execute_with_premium_city_allowlist(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._config(tmpdir)
+            lane_ids = self._production_lane_ids()
+            config["paper_shadow_lanes"].update(
+                {
+                    "definitions_dir": str(self._production_lanes_dir()),
+                    "enabled_lanes": list(lane_ids),
+                    "shadow_premium_city": {
+                        "enabled": True,
+                        "parameters": {"allowlist": ["new_york_ny"]},
+                    },
+                }
+            )
+            dataset_path = Path(tmpdir) / "shared" / "prediction_lab" / "market_snapshots.jsonl"
+            new_york_row = self._snapshot_row(
+                market_id="KXHIGHNY-260513-T71",
+                confidence=0.91,
+                observed_at="2026-05-13T12:00:01+00:00",
+                question="Will the high temperature in New York exceed 71 degrees?",
+                series_ticker="KXHIGHNY",
+                station_id="KNYC",
+            )
+            miami_row = self._snapshot_row(
+                market_id="KXHIGHMIA-260513-T83",
+                confidence=0.91,
+                observed_at="2026-05-13T12:00:02+00:00",
+                question="Will the high temperature in Miami exceed 83 degrees?",
+                series_ticker="KXHIGHMIA",
+                station_id="KMIA",
+            )
+            append_jsonl(dataset_path, new_york_row)
+            append_jsonl(dataset_path, miami_row)
+
+            with patch("bot.simulator.KellySizer.calculate", return_value=10.0):
+                result = run_shared_candidate_paper_evaluation(dataset_path, config=config)
+
+            lane_rows = load_jsonl(Path(result.paper_lane_decision_path))
+            report = summarize_paper_shadow_lane_report(
+                lane_rows=lane_rows,
+                config=config,
+                shared_candidate_ids=result.shared_candidate_ids,
+                candidate_dataset_path=result.candidate_dataset_path,
+            )
+
+        self.assertTrue(
+            {"control_stable", "shadow_confidence_floor", "shadow_current_beta", "shadow_premium_city"}.issubset(
+                set(lane_ids)
+            )
+        )
+        self.assertEqual(result.paper_lane_ids, lane_ids)
+        self.assertEqual(result.paper_lane_decision_count, len(lane_ids) * 2)
+        self.assertEqual(len(lane_rows), len(lane_ids) * 2)
+        self.assertEqual({row["policy"] for row in lane_rows}, set(lane_ids))
+        self.assertTrue(
+            all(Path(row["lane_definition_path"]).parent == self._production_lanes_dir() for row in lane_rows)
+        )
+        self.assertTrue(
+            all(row["provenance"]["lane_definition_path"] == row["lane_definition_path"] for row in lane_rows)
+        )
+
+        premium_rows = {
+            row["shared_candidate_id"]: row
+            for row in lane_rows
+            if row["policy"] == "shadow_premium_city"
+        }
+        self.assertEqual(premium_rows[new_york_row["shared_candidate_id"]]["action"], "BUY_YES")
+        self.assertEqual(premium_rows[new_york_row["shared_candidate_id"]]["reason_code"], "approved_premium_city")
+        self.assertEqual(premium_rows[miami_row["shared_candidate_id"]]["action"], "SKIP")
+        self.assertEqual(premium_rows[miami_row["shared_candidate_id"]]["reason_code"], "premium_city_not_allowlisted")
+        self.assertEqual(premium_rows[miami_row["shared_candidate_id"]]["approved_position_size_usd"], 0.0)
+
+        self.assertEqual(report["enabled_lane_ids"], lane_ids)
+        self.assertEqual(report["rows_written"], len(lane_ids) * 2)
+        self.assertEqual(report["candidate_count"], 2)
+        self.assertEqual(report["lane_row_counts"], {lane_id: 2 for lane_id in sorted(lane_ids)})
+        self.assertEqual(report["buy_counts"]["shadow_premium_city"], 1)
+        self.assertEqual(report["skip_counts"]["shadow_premium_city"], 1)
 
     def test_confidence_floor_lane_records_explicit_description_and_file_provenance(self):
         with tempfile.TemporaryDirectory() as tmpdir:

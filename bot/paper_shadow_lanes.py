@@ -361,9 +361,8 @@ def _premium_city_decision(
         signal,
         source_row,
     )
-    allowlist = {str(value).strip().lower() for value in lane.parameters.get("allowlist", []) if str(value).strip()}
-    city = _candidate_city(signal)
-    if allowlist and city in allowlist:
+    allowlist = _city_token_set(lane.parameters.get("allowlist", []))
+    if allowlist and _candidate_city_tokens(signal) & allowlist:
         baseline["reason_code"] = "approved_premium_city"
         return baseline
     baseline.update(
@@ -974,12 +973,38 @@ def _confidence_floor(lane: _LaneDefinition) -> float:
     return DEFAULT_CONFIDENCE_FLOOR
 
 
-def _candidate_city(signal: Mapping[str, Any]) -> str:
-    for key in ("city", "weather_city", "station_city"):
-        value = signal.get(key)
-        if value not in (None, ""):
-            return str(value).strip().lower()
-    return ""
+def _candidate_city_tokens(signal: Mapping[str, Any]) -> set[str]:
+    tokens: set[str] = set()
+    for key in ("city", "weather_city", "station_city", "city_id", "weather_city_id"):
+        tokens.update(_city_token_set([signal.get(key)]))
+    for nested_key in ("weather_context", "weather_market_context", "weather", "metadata"):
+        nested = signal.get(nested_key)
+        if not isinstance(nested, Mapping):
+            continue
+        for key in ("city", "weather_city", "station_city", "city_id", "weather_city_id"):
+            tokens.update(_city_token_set([nested.get(key)]))
+
+    try:
+        from bot.weather.station_mapping import resolve_weather_station
+    except Exception:  # pragma: no cover - optional enrichment only.
+        return tokens
+
+    resolved = resolve_weather_station(signal)
+    tokens.update(_city_token_set([resolved.city_id, resolved.city]))
+    return tokens
+
+
+def _city_token_set(values: Iterable[Any]) -> set[str]:
+    tokens: set[str] = set()
+    for value in values or ():
+        text = str(value or "").strip().lower()
+        if not text:
+            continue
+        tokens.add(text)
+        normalized = " ".join(text.replace("_", " ").replace("-", " ").split())
+        if normalized:
+            tokens.add(normalized)
+    return tokens
 
 
 def _side_from_action(action: str) -> str | None:
