@@ -126,7 +126,13 @@ class ShadowIntentRuntimePathTests(unittest.TestCase):
                     },
                     "strategy_policy": {
                         "version": "beta",
-                        "beta": {"mode": "shadow", "features": {"hidden_gem_lane_gates": True}},
+                        "beta": {
+                            "mode": "shadow",
+                            "features": {
+                                "hidden_gem_lane_gates": True,
+                                "confidence_slow_profit": True,
+                            },
+                        },
                     },
                     "strategy_lanes": {
                         "enabled": True,

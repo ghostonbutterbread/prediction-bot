@@ -17,6 +17,7 @@ DEFAULT_FEATURES = {
     "weather_hidden_gem_evidence_card": False,
     "bucket_distribution_scoring": False,
     "hidden_gem_lane_gates": False,
+    "confidence_slow_profit": False,
     "lane_sizing_caps": False,
 }
 

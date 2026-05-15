@@ -33,6 +33,7 @@ strategy_policy:
       weather_hidden_gem_evidence_card: true
       bucket_distribution_scoring: true
       hidden_gem_lane_gates: true
+      confidence_slow_profit: true
       lane_sizing_caps: true
 
 strategy_lanes:

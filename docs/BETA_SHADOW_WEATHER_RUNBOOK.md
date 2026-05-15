@@ -27,7 +27,8 @@ strategy_lanes:
 ```
 
 with `weather_hidden_gem_evidence_card`, `bucket_distribution_scoring`,
-`hidden_gem_lane_gates`, and `lane_sizing_caps` set to `true`. Lane sizing caps
+`hidden_gem_lane_gates`, `confidence_slow_profit`, and `lane_sizing_caps` set to
+`true`. Lane sizing caps
 are configured for shadow comparison only; they do not alter final paper/live
 actions unless beta mode is explicitly promoted to `enforce`.
 
