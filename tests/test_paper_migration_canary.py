@@ -1,9 +1,11 @@
 import io
 import json
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 from bot.config import load_config
 from bot.file_ops import append_jsonl
@@ -65,6 +67,10 @@ strategy:
             plan = build_paper_migration_canary_plan(config)
             detected = plan["candidate_datasets_under_wallet_roots"]
             self.assertEqual(len(detected), 3)
+            self.assertEqual(plan["scan_mode"]["row_counting"], "disabled_stat_only")
+            self.assertTrue(all(item["row_count"] is None for item in detected))
+            self.assertTrue(all(item["row_count_status"] == "not_counted_stat_only" for item in detected))
+            self.assertTrue(all(item["size_bytes"] > 0 for item in detected))
             recommended_paths = {item["recommended_shared_path"] for item in detected}
             shared_root = Path(plan["shared_candidates_root"])
             self.assertIn(
@@ -87,6 +93,38 @@ strategy:
             self.assertTrue(stable_market_snapshots.exists())
             self.assertTrue(beta_market_snapshots.exists())
             self.assertTrue(beta_predictions.exists())
+
+    def test_canary_plan_default_mode_does_not_count_jsonl_rows(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._config(tmpdir)
+            dataset_path = Path(tmpdir) / "wallet_data" / "paper" / "prediction_lab" / "market_snapshots.jsonl"
+            append_jsonl(dataset_path, {"shared_candidate_id": "stable-1", "market_id": "S-1"})
+
+            with patch(
+                "bot.paper_migration_canary._count_nonempty_lines",
+                side_effect=AssertionError("default canary mode must be stat-only"),
+            ):
+                plan = build_paper_migration_canary_plan(config)
+
+        [detected] = plan["candidate_datasets_under_wallet_roots"]
+        self.assertEqual(detected["source_path"], str(dataset_path))
+        self.assertEqual(detected["row_count"], None)
+        self.assertEqual(detected["row_count_status"], "not_counted_stat_only")
+        self.assertGreater(detected["size_bytes"], 0)
+
+    def test_canary_plan_deep_scan_counts_jsonl_rows(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._config(tmpdir)
+            dataset_path = Path(tmpdir) / "wallet_data" / "paper" / "prediction_lab" / "market_snapshots.jsonl"
+            append_jsonl(dataset_path, {"shared_candidate_id": "stable-1", "market_id": "S-1"})
+            append_jsonl(dataset_path, {"shared_candidate_id": "stable-2", "market_id": "S-2"})
+
+            plan = build_paper_migration_canary_plan(config, deep_scan=True)
+
+        [detected] = plan["candidate_datasets_under_wallet_roots"]
+        self.assertEqual(plan["scan_mode"]["row_counting"], "enabled")
+        self.assertEqual(detected["row_count"], 2)
+        self.assertEqual(detected["row_count_status"], "counted")
 
     def test_canary_plan_flags_non_isolated_wallet_roots_without_mutating_state(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -132,8 +170,54 @@ trading:
         payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["mode"], "read_only_migration_canary")
         self.assertEqual(payload["status"], "ready")
+        self.assertEqual(payload["scan_mode"]["row_counting"], "disabled_stat_only")
         self.assertEqual(len(payload["copy_plan"]), 1)
         self.assertEqual(payload["copy_plan"][0]["wallet_id"], "beta_paper")
+
+    def test_cli_deep_scan_json_mode_counts_rows(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.yaml"
+            config_path.write_text(
+                f"""
+runtime:
+  base_dir: {Path(tmpdir) / "wallet_data"}
+trading:
+  mode: paper
+"""
+            )
+            append_jsonl(
+                Path(tmpdir) / "wallet_data" / "beta_shadow" / "paper" / "prediction_lab" / "market_snapshots.jsonl",
+                {"shared_candidate_id": "beta-1", "market_id": "B-1"},
+            )
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                exit_code = canary_main(["--config", str(config_path), "--deep-scan", "--json"])
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["scan_mode"]["row_counting"], "enabled")
+        self.assertEqual(payload["candidate_datasets_under_wallet_roots"][0]["row_count"], 1)
+
+    def test_wallet_state_latest_session_uses_newest_mtime(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._config(tmpdir)
+            stable_root = Path(tmpdir) / "wallet_data" / "paper"
+            stable_root.mkdir(parents=True, exist_ok=True)
+            lexically_newer = stable_root / "sim_99999999_999999.json"
+            mtime_newer = stable_root / "sim_20260513_010203.json"
+            lexically_newer.write_text('{"session_id":"lexical"}')
+            mtime_newer.write_text('{"session_id":"mtime"}')
+            lexically_newer.touch()
+            mtime_newer.touch()
+            old_time = 1_700_000_000
+            new_time = 1_800_000_000
+
+            os.utime(lexically_newer, (old_time, old_time))
+            os.utime(mtime_newer, (new_time, new_time))
+
+            plan = build_paper_migration_canary_plan(config)
+
+        self.assertEqual(plan["wallet_state"]["stable_paper"]["latest_session_path"], str(mtime_newer))
 
 
 if __name__ == "__main__":

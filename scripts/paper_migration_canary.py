@@ -28,6 +28,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Optional explicit shared-candidate destination root for copy/backfill previews",
     )
+    parser.add_argument(
+        "--deep-scan",
+        action="store_true",
+        help="Count JSONL rows in detected candidate datasets; default is stat-only and does not read dataset contents",
+    )
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of text")
     return parser.parse_args(argv)
 
@@ -39,6 +44,7 @@ def main(argv: list[str] | None = None) -> int:
         config,
         data_dir=args.data_dir,
         shared_candidates_root=args.shared_candidates_root,
+        deep_scan=args.deep_scan,
     )
     if args.json:
         print(json.dumps(plan, indent=2, sort_keys=True))

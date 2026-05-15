@@ -28,6 +28,7 @@ def build_paper_migration_canary_plan(
     *,
     data_dir: str | Path | None = None,
     shared_candidates_root: str | Path | None = None,
+    deep_scan: bool = False,
 ) -> dict[str, Any]:
     """Return a read-only migration/canary plan for current paper state."""
 
@@ -53,6 +54,7 @@ def build_paper_migration_canary_plan(
         stable.root_dir,
         beta.root_dir,
         shared_candidates_root=shared_root,
+        deep_scan=deep_scan,
     )
     copy_plan = _build_copy_plan(datasets)
     backfill_plan = _build_backfill_plan(copy_plan, shared_root=shared_root)
@@ -62,6 +64,10 @@ def build_paper_migration_canary_plan(
     return {
         "status": status,
         "mode": "read_only_migration_canary",
+        "scan_mode": {
+            "deep_scan": bool(deep_scan),
+            "row_counting": "enabled" if deep_scan else "disabled_stat_only",
+        },
         "compatibility_mapping": {
             "strategy": "preserve_existing_wallet_roots",
             "summary": (
@@ -99,12 +105,14 @@ def format_paper_migration_canary_plan(plan: Mapping[str, Any]) -> str:
     compatibility = _mapping(plan.get("compatibility_mapping"))
     isolation = _mapping(plan.get("wallet_isolation"))
     wallet_state = _mapping(plan.get("wallet_state"))
+    scan_mode = _mapping(plan.get("scan_mode"))
     datasets = list(plan.get("candidate_datasets_under_wallet_roots") or ())
     copy_plan = list(plan.get("copy_plan") or ())
     backfill_plan = list(plan.get("backfill_plan") or ())
     lines = [
         f"Status: {plan.get('status', 'unknown')}",
         "Mode: read-only migration/canary preview",
+        f"Scan mode: {scan_mode.get('row_counting', 'unknown')}",
         "Compatibility mapping:",
         f"  stable_paper -> {compatibility.get('stable_paper_root')}",
         f"  beta_paper -> {compatibility.get('beta_paper_root')}",
@@ -137,10 +145,12 @@ def format_paper_migration_canary_plan(plan: Mapping[str, Any]) -> str:
     else:
         lines.append("Candidate datasets under wallet roots:")
         for item in datasets:
+            row_count = item.get("row_count")
+            rows = str(row_count) if row_count is not None else "not_counted"
             lines.append(
                 "  - "
                 f"{item['wallet_id']}: {item['source_path']} "
-                f"[{item['dataset_kind']}, rows={item['row_count']}]"
+                f"[{item['dataset_kind']}, rows={rows}, size_bytes={item['size_bytes']}]"
             )
 
     if not copy_plan:
@@ -212,7 +222,7 @@ def _wallet_isolation_report(
 
 def _wallet_state_inventory(root_dir: Path) -> dict[str, Any]:
     resolved_root = root_dir.resolve(strict=False)
-    session_files = sorted(root_dir.glob("sim_*.json"))
+    session_files = sorted(root_dir.glob("sim_*.json"), key=_mtime_sort_key)
     accounting_files = [
         str(path.name)
         for path in sorted(root_dir.glob("*.jsonl"))
@@ -235,6 +245,7 @@ def _detect_prediction_lab_datasets(
     beta_root: Path,
     *,
     shared_candidates_root: Path,
+    deep_scan: bool,
 ) -> list[dict[str, Any]]:
     detected: list[dict[str, Any]] = []
     for wallet_id, root_dir in (
@@ -243,11 +254,15 @@ def _detect_prediction_lab_datasets(
     ):
         if not root_dir.exists():
             continue
-        for path in sorted(root_dir.rglob("*.jsonl")):
+        prediction_lab_root = root_dir / "prediction_lab"
+        if not prediction_lab_root.exists():
+            continue
+        for path in sorted(prediction_lab_root.rglob("*.jsonl")):
             dataset_kind = _classify_prediction_lab_dataset(path.relative_to(root_dir))
             if dataset_kind is None:
                 continue
             relative_prediction_lab_path = path.relative_to(root_dir / "prediction_lab")
+            size_bytes = path.stat().st_size
             detected.append(
                 {
                     "wallet_id": wallet_id,
@@ -255,8 +270,9 @@ def _detect_prediction_lab_datasets(
                     "source_path": str(path),
                     "relative_wallet_path": str(path.relative_to(root_dir)),
                     "dataset_kind": dataset_kind,
-                    "row_count": _count_nonempty_lines(path),
-                    "size_bytes": path.stat().st_size,
+                    "row_count": _count_nonempty_lines(path) if deep_scan else None,
+                    "row_count_status": "counted" if deep_scan else "not_counted_stat_only",
+                    "size_bytes": size_bytes,
                     "recommended_shared_path": str(
                         shared_candidates_root / "prediction_lab" / wallet_id / relative_prediction_lab_path
                     ),
@@ -401,6 +417,14 @@ def _count_nonempty_lines(path: Path) -> int:
             if line.strip():
                 count += 1
     return count
+
+
+def _mtime_sort_key(path: Path) -> tuple[float, str]:
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    return (mtime, path.name)
 
 
 def _mapping(value: Any) -> dict[str, Any]:

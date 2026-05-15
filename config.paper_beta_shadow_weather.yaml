@@ -23,6 +23,12 @@ trading:
   mode: paper
   enabled: true
 
+paper:
+  shared_market_runtime_enabled: true
+  shared_market_runtime_instance_id: paper-beta-shadow-weather
+  shared_market_max_snapshot_age_seconds: 1200
+  shared_market_desired_interval_seconds: 900
+
 strategy_policy:
   version: beta
   beta:
@@ -68,4 +74,14 @@ strategy:
   enable_news: false
   enable_social: false
   enable_ai: false
+
+shared_market:
+  enabled: true
+  runtime_root: data/beta_shadow/shared_market_runtime
+  default_interval_seconds: 900
+  min_interval_seconds: 300
+  publisher_lease_timeout_seconds: 300
+  consumer_timeout_seconds: 300
+  snapshot_ttl_seconds: 1200
+  stop_when_idle: true
 

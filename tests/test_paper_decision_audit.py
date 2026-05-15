@@ -74,7 +74,7 @@ class PaperDecisionAuditTests(unittest.TestCase):
         self.assertEqual(row["shared_candidate_id"], "candidate-1")
         self.assertNotIn("legacy_candidate_identity", row)
         self.assertEqual(row["candidate_dataset_path"], str(dataset_path))
-        self.assertEqual(row["decision_role"], "paper")
+        self.assertEqual(row["decision_role"], "paper_shadow")
         self.assertEqual(row["wallet_id"], "stable_paper")
         self.assertEqual(row["policy_id"], "stable")
         self.assertEqual(row["accounting_ref"]["wallet_id"], "stable_paper")

@@ -6,13 +6,41 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from bot.config import load_config
+from bot.decision_pipeline import DecisionPipelineEvaluator
 from bot.file_ops import append_jsonl, load_jsonl
 from bot.paper_wallet_runner import (
     build_paper_wallet_runner_config,
     run_shared_candidate_paper_evaluation,
 )
 from bot.prediction_lab import PredictionLab
+from bot.prediction_lab_replay import replay_from_paths
+from bot.risk import RiskDecision
 from bot.simulator import Simulator
+from bot.strategies.enhanced import StrategyTrace
+
+
+class FixedReplayStrategy:
+    def __init__(self, signal: dict | None):
+        self.signal = signal
+
+    def analyze_market_with_trace(self, market, order_book=None):
+        trace = StrategyTrace(
+            raw_signals={"unit": {"provided": self.signal is not None}},
+            accepted_signals={"unit": dict(self.signal)} if self.signal else {},
+            rejected_signals={},
+            ensemble_signal=dict(self.signal) if self.signal else None,
+        )
+        return (dict(self.signal) if self.signal else None), trace
+
+
+class AllowReplayRisk:
+    def check_trade(self, signal: dict, position_size: float, *, available_cash: float | None = None):
+        return RiskDecision(
+            approved=True,
+            reason="Approved",
+            adjusted_size=position_size,
+            original_size=position_size,
+        )
 
 
 class PaperWalletRunnerTests(unittest.TestCase):
@@ -203,6 +231,60 @@ strategy:
         self.assertEqual(beta_risk["available_cash"], 90.0)
         self.assertEqual(stable_risk["reserved_capital"], 10.0)
         self.assertEqual(beta_risk["reserved_capital"], 10.0)
+
+    def test_paper_evaluation_decision_rows_replay_by_shared_candidate_id_with_paper_shadow_role(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._config(tmpdir)
+            dataset_path = Path(tmpdir) / "shared" / "prediction_lab" / "market_snapshots.jsonl"
+            row = self._snapshot_row()
+            append_jsonl(dataset_path, row)
+
+            with patch("bot.simulator.KellySizer.calculate", return_value=10.0):
+                result = run_shared_candidate_paper_evaluation(dataset_path, config=config)
+
+            shared_candidate_id = row["shared_candidate_id"]
+            stable = result.wallet_runs["stable_paper"]
+            beta = result.wallet_runs["beta_paper"]
+            stable_decisions = load_jsonl(Path(stable.agent_decision_path))
+            beta_decisions = load_jsonl(Path(beta.agent_decision_path))
+            resolution_path = Path(tmpdir) / "shared" / "prediction_lab" / "resolutions.jsonl"
+            append_jsonl(
+                resolution_path,
+                {
+                    "shared_candidate_id": shared_candidate_id,
+                    "market_id": row["market_id"],
+                    "run_id": row["run_id"],
+                    "outcome": "YES",
+                },
+            )
+
+            replay = replay_from_paths(
+                [dataset_path],
+                config=config,
+                evaluator=DecisionPipelineEvaluator(
+                    strategy=FixedReplayStrategy(self._signal()),
+                    risk_policy=AllowReplayRisk(),
+                ),
+                decision_paths=[stable.agent_decision_path, beta.agent_decision_path],
+                resolution_paths=[resolution_path],
+            )
+
+        self.assertEqual(stable_decisions[0]["decision_role"], "paper_shadow")
+        self.assertEqual(beta_decisions[0]["decision_role"], "paper_shadow")
+        self.assertEqual(stable_decisions[0]["shared_candidate_id"], shared_candidate_id)
+        self.assertEqual(beta_decisions[0]["shared_candidate_id"], shared_candidate_id)
+        self.assertEqual(stable_decisions[0]["candidate_dataset_path"], str(dataset_path))
+        self.assertEqual(beta_decisions[0]["candidate_dataset_path"], str(dataset_path))
+        coverage = replay.summary["agent_decision_coverage"]
+        self.assertEqual(coverage["requested_shared_candidate_ids"], 1)
+        self.assertEqual(coverage["matched_shared_candidate_ids"], 1)
+        self.assertEqual(coverage["unmatched_input_rows"], 0)
+        self.assertEqual(coverage["by_agent_id"], {"paper": 2})
+        self.assertEqual(coverage["by_runtime"], {"paper": 2})
+        self.assertEqual(coverage["by_decision_role"], {"paper_shadow": 2})
+        outcomes = replay.summary["agent_decision_report"]["outcomes"]
+        self.assertEqual(outcomes["joined_rows"], 2)
+        self.assertEqual(outcomes["unresolved_rows"], 0)
 
 
 if __name__ == "__main__":
