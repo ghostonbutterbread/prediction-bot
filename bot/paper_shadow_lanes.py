@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -21,6 +21,14 @@ PAPER_LANE_DECISION_ROLE = "paper_lane"
 PAPER_LANE_SCHEMA_VERSION = 1
 DEFAULT_CONFIDENCE_FLOOR = 0.58
 DEFAULT_LANE_IDS = ("control_stable", "shadow_current_beta", "shadow_confidence_floor")
+PREMIUM_CITY_LANE_ID = "shadow_premium_city"
+KNOWN_LANE_IDS = (*DEFAULT_LANE_IDS, PREMIUM_CITY_LANE_ID)
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+try:
+    import yaml
+except ImportError:  # pragma: no cover - requirements include PyYAML.
+    yaml = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,7 +41,12 @@ class PaperShadowLaneWriteResult:
 @dataclass(frozen=True, slots=True)
 class _LaneDefinition:
     lane_id: str
+    lane_type: str = "passthrough"
     source_wallet_id: str | None = None
+    description: str | None = None
+    enabled: bool = True
+    parameters: Mapping[str, Any] = field(default_factory=dict)
+    definition_path: str | None = None
 
 
 def paper_shadow_lanes_enabled(config: Mapping[str, Any] | None) -> bool:
@@ -111,12 +124,13 @@ def _build_lane_row(
     source_rows: Mapping[str, dict[str, Any] | None],
     decision_path: Path,
 ) -> dict[str, Any]:
-    if lane.lane_id == "shadow_confidence_floor":
-        decision = _confidence_floor_decision(config, signal, source_rows.get(STABLE_PAPER_WALLET_ID))
-    elif lane.lane_id == "shadow_premium_city":
-        decision = _premium_city_decision(config, signal, source_rows.get(STABLE_PAPER_WALLET_ID))
+    source_wallet_id = lane.source_wallet_id or STABLE_PAPER_WALLET_ID
+    if lane.lane_type == "confidence_floor" or lane.lane_id == "shadow_confidence_floor":
+        decision = _confidence_floor_decision(lane, signal, source_rows.get(source_wallet_id))
+    elif lane.lane_type == "premium_city" or lane.lane_id == PREMIUM_CITY_LANE_ID:
+        decision = _premium_city_decision(lane, signal, source_rows.get(source_wallet_id))
     else:
-        decision = _passthrough_decision(lane, signal, source_rows.get(lane.source_wallet_id or ""))
+        decision = _passthrough_decision(lane, signal, source_rows.get(source_wallet_id))
 
     observed_at = _observed_at(decision.get("source_row"), signal)
     market_id = _text(
@@ -161,6 +175,7 @@ def _build_lane_row(
         "reason_code": decision.get("reason_code"),
         "reason": decision.get("reason"),
         "selected_lane": lane.lane_id,
+        "lane_description": lane.description,
         "confidence": confidence_after,
         "edge": _number((source_row or {}).get("edge"), signal.get("edge")),
         "model_probability": _number((source_row or {}).get("model_probability"), signal.get("model_probability")),
@@ -188,6 +203,7 @@ def _build_lane_row(
             "known_at_time": True,
             "source": "paper_shadow_lanes",
             "lane_id": lane.lane_id,
+            "lane_description": lane.description,
             "lane_version": PAPER_LANE_SCHEMA_VERSION,
             "confidence_before": confidence_before,
             "confidence_after": confidence_after,
@@ -198,6 +214,9 @@ def _build_lane_row(
             "decision_only": True,
         },
     }
+    if lane.definition_path:
+        row["lane_definition_path"] = lane.definition_path
+        row["provenance"]["lane_definition_path"] = lane.definition_path
     return validate_agent_decision_row(row)
 
 
@@ -228,17 +247,17 @@ def _passthrough_decision(
 
 
 def _confidence_floor_decision(
-    config: Mapping[str, Any],
+    lane: _LaneDefinition,
     signal: Mapping[str, Any],
     source_row: dict[str, Any] | None,
 ) -> dict[str, Any]:
     baseline = _passthrough_decision(
-        _LaneDefinition("control_stable", source_wallet_id=STABLE_PAPER_WALLET_ID),
+        _LaneDefinition("control_stable", source_wallet_id=lane.source_wallet_id or STABLE_PAPER_WALLET_ID),
         signal,
         source_row,
     )
     confidence = _number((source_row or {}).get("confidence"), signal.get("confidence"))
-    floor = _confidence_floor(config)
+    floor = _confidence_floor(lane)
     action = str(baseline.get("action") or "SKIP").upper()
     if action not in {"BUY_YES", "BUY_NO"}:
         baseline.update(
@@ -255,7 +274,7 @@ def _confidence_floor_decision(
             {
                 "action": "SKIP",
                 "reason_code": "confidence_below_floor",
-                "reason": f"Confidence below paper lane floor {floor:.2f}",
+                "reason": f"Stable paper buy requires confidence >= configured floor {floor:.2f}",
                 "approved_position_size_usd": 0.0,
             }
         )
@@ -263,24 +282,23 @@ def _confidence_floor_decision(
     baseline.update(
         {
             "reason_code": "approved_confidence_floor",
-            "reason": f"Confidence meets paper lane floor {floor:.2f}",
+            "reason": f"Stable paper buy meets configured confidence floor {floor:.2f}",
         }
     )
     return baseline
 
 
 def _premium_city_decision(
-    config: Mapping[str, Any],
+    lane: _LaneDefinition,
     signal: Mapping[str, Any],
     source_row: dict[str, Any] | None,
 ) -> dict[str, Any]:
     baseline = _passthrough_decision(
-        _LaneDefinition("control_stable", source_wallet_id=STABLE_PAPER_WALLET_ID),
+        _LaneDefinition("control_stable", source_wallet_id=lane.source_wallet_id or STABLE_PAPER_WALLET_ID),
         signal,
         source_row,
     )
-    premium_cfg = _mapping(config.get("shadow_premium_city"))
-    allowlist = {str(value).strip().lower() for value in premium_cfg.get("allowlist", []) if str(value).strip()}
+    allowlist = {str(value).strip().lower() for value in lane.parameters.get("allowlist", []) if str(value).strip()}
     city = _candidate_city(signal)
     if allowlist and city in allowlist:
         baseline["reason_code"] = "approved_premium_city"
@@ -297,28 +315,196 @@ def _premium_city_decision(
 
 
 def _lane_definitions(config: Mapping[str, Any]) -> tuple[_LaneDefinition, ...]:
-    requested = config.get("lanes")
+    definitions_by_id = _configured_lane_definition_map(config)
+    requested = config.get("enabled_lanes")
     if requested in (None, ""):
-        lane_ids = list(DEFAULT_LANE_IDS)
-        premium_cfg = _mapping(config.get("shadow_premium_city"))
-        if premium_cfg.get("enabled"):
-            lane_ids.append("shadow_premium_city")
-    elif isinstance(requested, Mapping):
-        lane_ids = [str(lane_id) for lane_id, lane_cfg in requested.items() if _mapping(lane_cfg).get("enabled", True)]
+        requested = config.get("lanes")
+
+    if requested in (None, ""):
+        lane_ids = [lane_id for lane_id in DEFAULT_LANE_IDS if definitions_by_id[lane_id].enabled]
+        if definitions_by_id[PREMIUM_CITY_LANE_ID].enabled:
+            lane_ids.append(PREMIUM_CITY_LANE_ID)
     else:
-        lane_ids = [str(lane_id) for lane_id in requested]
+        lane_ids = _requested_lane_ids(requested)
 
     definitions: list[_LaneDefinition] = []
     for lane_id in lane_ids:
-        if lane_id == "control_stable":
-            definitions.append(_LaneDefinition(lane_id, source_wallet_id=STABLE_PAPER_WALLET_ID))
-        elif lane_id == "shadow_current_beta":
-            definitions.append(_LaneDefinition(lane_id, source_wallet_id=BETA_PAPER_WALLET_ID))
-        elif lane_id in {"shadow_confidence_floor", "shadow_premium_city"}:
-            definitions.append(_LaneDefinition(lane_id))
-        else:
+        if lane_id not in definitions_by_id:
             raise ValueError(f"unknown paper shadow lane: {lane_id}")
+        definitions.append(definitions_by_id[lane_id])
     return tuple(definitions)
+
+
+def _configured_lane_definition_map(config: Mapping[str, Any]) -> dict[str, _LaneDefinition]:
+    raw_by_id = _built_in_lane_definition_map()
+    for lane_id, file_definition in _load_lane_definition_files(config).items():
+        raw_by_id[lane_id] = _deep_merge(raw_by_id.get(lane_id, {"id": lane_id}), file_definition)
+
+    for lane_id in KNOWN_LANE_IDS:
+        inline = _mapping(config.get(lane_id))
+        if inline:
+            raw_by_id[lane_id] = _deep_merge(raw_by_id.get(lane_id, {"id": lane_id}), inline)
+
+    lanes_cfg = config.get("lanes")
+    if isinstance(lanes_cfg, Mapping):
+        for lane_id, lane_cfg in lanes_cfg.items():
+            raw_by_id[str(lane_id)] = _deep_merge(
+                raw_by_id.get(str(lane_id), {"id": str(lane_id)}),
+                _mapping(lane_cfg),
+            )
+
+    enabled_lanes_cfg = config.get("enabled_lanes")
+    if isinstance(enabled_lanes_cfg, Mapping):
+        for lane_id, lane_cfg in enabled_lanes_cfg.items():
+            raw_by_id[str(lane_id)] = _deep_merge(
+                raw_by_id.get(str(lane_id), {"id": str(lane_id)}),
+                _mapping(lane_cfg),
+            )
+
+    if config.get("confidence_floor") not in (None, "") or config.get("min_confidence") not in (None, ""):
+        confidence_cfg = raw_by_id.get("shadow_confidence_floor", {"id": "shadow_confidence_floor"})
+        parameters = _mapping(confidence_cfg.get("parameters"))
+        if config.get("confidence_floor") not in (None, ""):
+            parameters["confidence_floor"] = config.get("confidence_floor")
+        if config.get("min_confidence") not in (None, ""):
+            parameters["min_confidence"] = config.get("min_confidence")
+        confidence_cfg["parameters"] = parameters
+        raw_by_id["shadow_confidence_floor"] = confidence_cfg
+
+    return {
+        lane_id: _lane_definition_from_raw(lane_id, raw)
+        for lane_id, raw in raw_by_id.items()
+        if lane_id in KNOWN_LANE_IDS
+    }
+
+
+def _built_in_lane_definition_map() -> dict[str, dict[str, Any]]:
+    return {
+        "control_stable": {
+            "id": "control_stable",
+            "type": "passthrough",
+            "source_wallet": STABLE_PAPER_WALLET_ID,
+            "enabled": True,
+            "description": "Control lane that mirrors the stable paper wallet decision.",
+        },
+        "shadow_current_beta": {
+            "id": "shadow_current_beta",
+            "type": "passthrough",
+            "source_wallet": BETA_PAPER_WALLET_ID,
+            "enabled": True,
+            "description": "Shadow lane that mirrors the current beta paper wallet decision.",
+        },
+        "shadow_confidence_floor": {
+            "id": "shadow_confidence_floor",
+            "type": "confidence_floor",
+            "source_wallet": STABLE_PAPER_WALLET_ID,
+            "enabled": True,
+            "description": "Stable paper decision, but require confidence >= configured floor before it would buy.",
+            "parameters": {"confidence_floor": DEFAULT_CONFIDENCE_FLOOR},
+        },
+        PREMIUM_CITY_LANE_ID: {
+            "id": PREMIUM_CITY_LANE_ID,
+            "type": "premium_city",
+            "source_wallet": STABLE_PAPER_WALLET_ID,
+            "enabled": False,
+            "description": "Stable paper decision, but only allow buys for configured premium cities.",
+            "parameters": {"allowlist": []},
+        },
+    }
+
+
+def _load_lane_definition_files(config: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    definitions_dir = config.get("definitions_dir") or config.get("definition_dir")
+    if definitions_dir in (None, ""):
+        return {}
+    path = _resolve_definition_dir(definitions_dir)
+    if not path.exists():
+        return {}
+    if yaml is None:
+        raise RuntimeError("PyYAML is required to load paper shadow lane definitions")
+
+    definitions: dict[str, dict[str, Any]] = {}
+    for definition_path in sorted([*path.glob("*.yaml"), *path.glob("*.yml")]):
+        with definition_path.open() as handle:
+            loaded = yaml.safe_load(handle) or {}
+        if not isinstance(loaded, Mapping):
+            raise ValueError(f"paper shadow lane definition must be a mapping: {definition_path}")
+        lane_id = str(loaded.get("id") or definition_path.stem)
+        raw = dict(loaded)
+        raw["id"] = lane_id
+        raw["definition_path"] = str(definition_path)
+        definitions[lane_id] = raw
+    return definitions
+
+
+def _resolve_definition_dir(path_value: Any) -> Path:
+    path = Path(str(path_value))
+    if path.is_absolute():
+        return path
+    cwd_path = Path.cwd() / path
+    if cwd_path.exists():
+        return cwd_path
+    return REPO_ROOT / path
+
+
+def _lane_definition_from_raw(lane_id: str, raw: Mapping[str, Any]) -> _LaneDefinition:
+    if lane_id not in KNOWN_LANE_IDS:
+        raise ValueError(f"unknown paper shadow lane: {lane_id}")
+    parameters = _mapping(raw.get("parameters"))
+    for key in ("confidence_floor", "min_confidence", "allowlist"):
+        if key in raw:
+            parameters[key] = raw.get(key)
+    return _LaneDefinition(
+        lane_id=lane_id,
+        lane_type=str(raw.get("type") or raw.get("lane_type") or "passthrough"),
+        source_wallet_id=_source_wallet_id(
+            raw.get("source_wallet_id") or raw.get("source_wallet") or raw.get("source")
+        ),
+        description=str(raw.get("description") or "") or None,
+        enabled=_truthy(raw.get("enabled", True)),
+        parameters=parameters,
+        definition_path=str(raw.get("definition_path")) if raw.get("definition_path") not in (None, "") else None,
+    )
+
+
+def _requested_lane_ids(value: Any) -> list[str]:
+    if isinstance(value, Mapping):
+        return [str(lane_id) for lane_id, lane_cfg in value.items() if _lane_mapping_enabled(lane_cfg)]
+    if isinstance(value, str):
+        return [part.strip() for part in value.split(",") if part.strip()]
+    return [str(lane_id) for lane_id in (value or []) if str(lane_id).strip()]
+
+
+def _lane_mapping_enabled(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    lane_cfg = _mapping(value)
+    if "enabled" not in lane_cfg:
+        return True
+    enabled = lane_cfg.get("enabled")
+    return enabled if isinstance(enabled, bool) else _truthy(enabled)
+
+
+def _source_wallet_id(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    normalized = text.lower().replace("-", "_")
+    if normalized in {"stable", "stable_paper"}:
+        return STABLE_PAPER_WALLET_ID
+    if normalized in {"beta", "current_beta", "beta_paper"}:
+        return BETA_PAPER_WALLET_ID
+    return text
+
+
+def _deep_merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
+    result = dict(base or {})
+    for key, value in dict(override or {}).items():
+        if isinstance(result.get(key), Mapping) and isinstance(value, Mapping):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
 
 
 def _lane_config(config: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -394,13 +580,8 @@ def _observed_at(source_row: dict[str, Any] | None, signal: Mapping[str, Any]) -
     return datetime.now(timezone.utc).isoformat()
 
 
-def _confidence_floor(config: Mapping[str, Any]) -> float:
-    for value in (config.get("confidence_floor"), config.get("min_confidence")):
-        number = _number(value)
-        if number is not None:
-            return float(number)
-    floor_cfg = _mapping(config.get("shadow_confidence_floor"))
-    number = _number(floor_cfg.get("confidence_floor"), floor_cfg.get("min_confidence"))
+def _confidence_floor(lane: _LaneDefinition) -> float:
+    number = _number(lane.parameters.get("confidence_floor"), lane.parameters.get("min_confidence"))
     return float(number if number is not None else DEFAULT_CONFIDENCE_FLOOR)
 
 

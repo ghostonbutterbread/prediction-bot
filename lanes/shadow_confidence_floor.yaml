@@ -1,0 +1,7 @@
+id: shadow_confidence_floor
+type: confidence_floor
+source_wallet: stable_paper
+enabled: true
+description: Stable paper decision, but require confidence >= configured floor before it would buy.
+parameters:
+  confidence_floor: 0.58

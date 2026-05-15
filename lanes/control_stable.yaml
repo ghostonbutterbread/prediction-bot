@@ -1,0 +1,5 @@
+id: control_stable
+type: passthrough
+source_wallet: stable_paper
+enabled: true
+description: Control lane that mirrors the stable paper wallet decision.

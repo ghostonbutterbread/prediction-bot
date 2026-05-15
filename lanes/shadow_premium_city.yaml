@@ -1,0 +1,7 @@
+id: shadow_premium_city
+type: premium_city
+source_wallet: stable_paper
+enabled: false
+description: Stable paper decision, but only allow buys for configured premium cities.
+parameters:
+  allowlist: []
