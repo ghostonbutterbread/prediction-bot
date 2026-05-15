@@ -1,5 +1,8 @@
 id: control_stable
 type: passthrough
 source_wallet: stable_paper
+source_role: baseline
+input_source: shared_candidate_dataset
+input_market_source: shared_market
 enabled: true
-description: Control lane that mirrors the stable paper wallet decision.
+description: Shared-candidate-fed control lane that mirrors the stable paper wallet decision as baseline provenance.

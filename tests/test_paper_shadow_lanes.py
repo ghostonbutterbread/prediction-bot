@@ -7,7 +7,12 @@ from unittest.mock import patch
 from bot.agent_decision_ledger import summarize_agent_decision_coverage, summarize_agent_decision_reporting
 from bot.config import load_config
 from bot.file_ops import append_jsonl, load_jsonl
-from bot.paper_shadow_lanes import PAPER_LANE_DECISION_ROLE, paper_shadow_lanes_enabled, write_paper_shadow_lane_decisions
+from bot.paper_shadow_lanes import (
+    PAPER_LANE_DECISION_ROLE,
+    paper_shadow_lanes_enabled,
+    summarize_paper_shadow_lane_report,
+    write_paper_shadow_lane_decisions,
+)
 from bot.paper_wallet_runner import run_shared_candidate_paper_evaluation
 from bot.prediction_lab import PredictionLab
 
@@ -172,6 +177,11 @@ parameters:
         self.assertEqual({row["runtime"] for row in lane_rows}, {"paper"})
         self.assertEqual({row["agent_id"] for row in lane_rows}, {"paper"})
         self.assertEqual({row["shared_candidate_id"] for row in lane_rows}, set(result.shared_candidate_ids))
+        self.assertEqual({row["input_source"] for row in lane_rows}, {"shared_candidate_dataset"})
+        self.assertEqual({row["input_market_source"] for row in lane_rows}, {"shared_market"})
+        self.assertTrue(all(row["shared_candidate"]["input_source"] == "shared_candidate_dataset" for row in lane_rows))
+        self.assertTrue(all(row["provenance"]["input_source"] == "shared_candidate_dataset" for row in lane_rows))
+        self.assertTrue(all(row["provenance"]["input_market_source"] == "shared_market" for row in lane_rows))
         self.assertTrue(all(row["mutation_contract"]["mutates_accounting"] is False for row in lane_rows))
         self.assertTrue(all(row["accounting_ref"]["mutates_accounting"] is False for row in lane_rows))
 
@@ -320,10 +330,23 @@ parameters:
                 "action": "BUY_YES",
                 "reason_code": "approved",
                 "reason": "stable approved",
-                "confidence": 0.80,
+                "confidence": 0.95,
                 "requested_position_size_usd": 10.0,
                 "approved_position_size_usd": 10.0,
             }
+            beta_decision = dict(stable_decision)
+            beta_decision.update(
+                {
+                    "wallet_id": "beta_paper",
+                    "run_id": "beta-run",
+                    "decision_id": "beta-source-decision",
+                    "policy": "beta_enforce",
+                    "action": "SKIP",
+                    "reason_code": "beta_skip",
+                    "confidence": 0.70,
+                    "approved_position_size_usd": 0.0,
+                }
+            )
 
             result = write_paper_shadow_lane_decisions(
                 config={
@@ -337,23 +360,303 @@ parameters:
                 candidate_dataset_path=dataset_path,
                 inputs_by_shared_candidate_id={
                     candidate_id: {
-                        "stable": SimpleNamespace(signal={"market_id": "KXHIGHNY-260513-T71", "confidence": 0.80}),
+                        "stable": SimpleNamespace(
+                            signal={
+                                "shared_candidate_id": candidate_id,
+                                "market_id": "KXHIGHNY-260513-T71",
+                                "confidence": 0.80,
+                                "candidate_source_runtime": "prediction_lab",
+                                "candidate_provenance": "live_known_at_time",
+                                "candidate_observed_at": "2026-05-13T12:00:01+00:00",
+                                "snapshot_as_of": "2026-05-13T12:00:01+00:00",
+                            },
+                            shared_candidate={
+                                "candidate_id": candidate_id,
+                                "market_id": "KXHIGHNY-260513-T71",
+                                "source_runtime": "prediction_lab",
+                                "provenance": "live_known_at_time",
+                                "observed_at": "2026-05-13T12:00:01+00:00",
+                                "snapshot_as_of": "2026-05-13T12:00:01+00:00",
+                            },
+                        ),
                     }
                 },
-                wallet_decision_rows={"stable_paper": [stable_decision]},
-                wallet_runs={"stable_paper": SimpleNamespace(session_id="stable-run")},
+                wallet_decision_rows={"stable_paper": [stable_decision], "beta_paper": [beta_decision]},
+                wallet_runs={"stable_paper": SimpleNamespace(session_id="stable-run"), "beta_paper": SimpleNamespace(session_id="beta-run")},
                 ledger_root=tmpdir,
             )
             lane_row = load_jsonl(Path(result.decision_path))[0]
 
         self.assertEqual(lane_row["policy"], "shadow_confidence_floor")
+        self.assertEqual(lane_row["input_source"], "shared_candidate_dataset")
+        self.assertEqual(lane_row["input_market_source"], "shared_market")
+        self.assertEqual(lane_row["shared_candidate"]["candidate_id"], candidate_id)
+        self.assertEqual(lane_row["shared_candidate"]["source_runtime"], "prediction_lab")
+        self.assertEqual(lane_row["shared_candidate_provenance"], "live_known_at_time")
         self.assertEqual(lane_row["provenance"]["source_wallet_id"], "stable_paper")
         self.assertEqual(lane_row["provenance"]["source_decision_id"], "stable-source-decision")
         self.assertEqual(lane_row["provenance"]["source_policy"], "normal")
+        self.assertEqual(lane_row["provenance"]["baseline_wallet_id"], "stable_paper")
+        self.assertEqual(lane_row["provenance"]["baseline_decision_id"], "stable-source-decision")
+        self.assertEqual(lane_row["provenance"]["comparison_wallet_id"], "beta_paper")
+        self.assertEqual(lane_row["provenance"]["comparison_decision_id"], "beta-source-decision")
+        self.assertEqual(lane_row["provenance"]["input_confidence"], 0.80)
+        self.assertEqual(lane_row["provenance"]["source_confidence"], 0.95)
+        self.assertEqual(lane_row["provenance"]["baseline_confidence"], 0.95)
+        self.assertEqual(lane_row["provenance"]["comparison_confidence"], 0.70)
+        self.assertEqual(lane_row["confidence"], 0.80)
         self.assertEqual(lane_row["requested_position_size_usd"], 10.0)
         self.assertEqual(lane_row["action"], "SKIP")
         self.assertEqual(lane_row["reason_code"], "confidence_below_floor")
         self.assertEqual(lane_row["approved_position_size_usd"], 0.0)
+
+    def test_paper_shadow_lane_report_counts_rows_actions_and_reference_drift(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dataset_path = Path(tmpdir) / "shared" / "prediction_lab" / "market_snapshots.jsonl"
+            decision_path = Path(tmpdir) / "lanes.jsonl"
+            candidate_id = "candidate-1"
+            stable_decision = {
+                "shared_candidate_id": candidate_id,
+                "wallet_id": "stable_paper",
+                "run_id": "stable-run",
+                "candidate_dataset_path": str(dataset_path),
+                "decision_role": "paper_shadow",
+                "decision_id": "stable-source-decision",
+                "policy": "normal",
+                "market_id": "KXHIGHNY-260513-T71",
+                "observed_at": "2026-05-13T12:00:01+00:00",
+                "action": "BUY_YES",
+                "reason_code": "approved",
+                "confidence": 0.95,
+                "requested_position_size_usd": 10.0,
+                "approved_position_size_usd": 10.0,
+            }
+            beta_decision = dict(stable_decision)
+            beta_decision.update(
+                {
+                    "wallet_id": "beta_paper",
+                    "run_id": "beta-run",
+                    "decision_id": "beta-source-decision",
+                    "policy": "beta_enforce",
+                    "action": "SKIP",
+                    "reason_code": "beta_skip",
+                    "confidence": 0.70,
+                    "approved_position_size_usd": 0.0,
+                }
+            )
+            config = {
+                "paper_shadow_lanes": {
+                    "enabled": True,
+                    "decision_ledger_path": str(decision_path),
+                    "confidence_floor": 0.90,
+                }
+            }
+
+            result = write_paper_shadow_lane_decisions(
+                config=config,
+                candidate_dataset_path=dataset_path,
+                inputs_by_shared_candidate_id={
+                    candidate_id: {
+                        "stable": SimpleNamespace(
+                            signal={
+                                "shared_candidate_id": candidate_id,
+                                "market_id": "KXHIGHNY-260513-T71",
+                                "confidence": 0.80,
+                            },
+                            shared_candidate={"candidate_id": candidate_id, "market_id": "KXHIGHNY-260513-T71"},
+                        ),
+                    }
+                },
+                wallet_decision_rows={"stable_paper": [stable_decision], "beta_paper": [beta_decision]},
+                wallet_runs={"stable_paper": SimpleNamespace(session_id="stable-run"), "beta_paper": SimpleNamespace(session_id="beta-run")},
+                ledger_root=tmpdir,
+            )
+
+            report = summarize_paper_shadow_lane_report(
+                lane_decision_path=result.decision_path,
+                config=config,
+                shared_candidate_ids=[candidate_id],
+                baseline_rows=[stable_decision],
+                comparison_rows=[beta_decision],
+            )
+
+        self.assertEqual(report["enabled_lane_ids"], ("control_stable", "shadow_current_beta", "shadow_confidence_floor"))
+        self.assertEqual(report["candidate_count"], 1)
+        self.assertEqual(report["rows_written"], 3)
+        self.assertEqual(
+            report["lane_row_counts"],
+            {"control_stable": 1, "shadow_confidence_floor": 1, "shadow_current_beta": 1},
+        )
+        self.assertEqual(report["buy_counts"], {"control_stable": 1})
+        self.assertEqual(report["skip_counts"], {"shadow_confidence_floor": 1, "shadow_current_beta": 1})
+        self.assertEqual(report["drift"]["vs_baseline"]["candidate_count_with_action_drift"], 1)
+        self.assertEqual(
+            report["drift"]["vs_baseline"]["by_lane"],
+            {"shadow_confidence_floor": 1, "shadow_current_beta": 1},
+        )
+        self.assertEqual(report["drift"]["vs_comparison"]["candidate_count_with_action_drift"], 1)
+        self.assertEqual(report["drift"]["vs_comparison"]["by_lane"], {"control_stable": 1})
+
+    def test_paper_shadow_lane_report_filters_rows_to_requested_candidates(self):
+        lane_rows = [
+            {
+                "policy": "control_stable",
+                "shared_candidate_id": "candidate-1",
+                "action": "BUY_YES",
+                "provenance": {"baseline_action": "BUY_YES", "comparison_action": "SKIP"},
+            },
+            {
+                "policy": "control_stable",
+                "shared_candidate_id": "candidate-2",
+                "action": "SKIP",
+                "provenance": {"baseline_action": "SKIP", "comparison_action": "SKIP"},
+            },
+        ]
+
+        report = summarize_paper_shadow_lane_report(lane_rows=lane_rows, shared_candidate_ids=["candidate-1"])
+
+        self.assertEqual(report["candidate_count"], 1)
+        self.assertEqual(report["rows_written"], 1)
+        self.assertEqual(report["lane_row_counts"], {"control_stable": 1})
+        self.assertEqual(report["buy_counts"], {"control_stable": 1})
+        self.assertEqual(report["skip_counts"], {})
+        self.assertEqual(report["drift"]["vs_comparison"]["reference_candidate_count"], 1)
+        self.assertEqual(report["drift"]["vs_comparison"]["by_shared_candidate_id"], {"candidate-1": 1})
+
+    def test_paper_shadow_lane_report_scopes_to_current_run_dataset_and_enabled_lanes(self):
+        lane_rows = [
+            {
+                "policy": "control_stable",
+                "shared_candidate_id": "candidate-1",
+                "candidate_dataset_path": "/tmp/current.jsonl",
+                "run_id": "stable-run:paper_lanes",
+                "action": "BUY_YES",
+                "provenance": {"baseline_action": "BUY_YES", "comparison_action": "SKIP"},
+            },
+            {
+                "policy": "shadow_premium_city",
+                "shared_candidate_id": "candidate-1",
+                "candidate_dataset_path": "/tmp/current.jsonl",
+                "run_id": "stable-run:paper_lanes",
+                "action": "SKIP",
+                "provenance": {"baseline_action": "BUY_YES", "comparison_action": "SKIP"},
+            },
+            {
+                "policy": "control_stable",
+                "shared_candidate_id": "candidate-1",
+                "candidate_dataset_path": "/tmp/current.jsonl",
+                "run_id": "old-run:paper_lanes",
+                "action": "SKIP",
+                "provenance": {"baseline_action": "SKIP", "comparison_action": "SKIP"},
+            },
+            {
+                "policy": "control_stable",
+                "shared_candidate_id": "candidate-1",
+                "candidate_dataset_path": "/tmp/old.jsonl",
+                "run_id": "stable-run:paper_lanes",
+                "action": "SKIP",
+                "provenance": {"baseline_action": "SKIP", "comparison_action": "SKIP"},
+            },
+        ]
+        baseline_rows = [
+            {
+                "shared_candidate_id": "candidate-1",
+                "candidate_dataset_path": "/tmp/current.jsonl",
+                "run_id": "stable-run",
+                "action": "BUY_YES",
+            }
+        ]
+        config = {"paper_shadow_lanes": {"enabled": True, "enabled_lanes": ["control_stable"]}}
+
+        report = summarize_paper_shadow_lane_report(
+            lane_rows=lane_rows,
+            config=config,
+            shared_candidate_ids=["candidate-1", "candidate-missing"],
+            baseline_rows=baseline_rows,
+        )
+
+        self.assertEqual(report["requested_candidate_count"], 2)
+        self.assertEqual(report["observed_candidate_count"], 1)
+        self.assertEqual(report["candidate_count"], 1)
+        self.assertEqual(report["rows_loaded"], 4)
+        self.assertEqual(report["rows_written"], 1)
+        self.assertEqual(report["lane_row_counts"], {"control_stable": 1})
+        self.assertEqual(report["run_id"], "stable-run:paper_lanes")
+        self.assertEqual(report["candidate_dataset_path"], "/tmp/current.jsonl")
+
+    def test_paper_shadow_lanes_reject_non_shared_input_sources(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "paper_shadow_lanes": {
+                    "enabled": True,
+                    "enabled_lanes": ["control_stable"],
+                    "control_stable": {"input_source": "stable_paper"},
+                }
+            }
+
+            with self.assertRaisesRegex(ValueError, "input_source=shared_candidate_dataset"):
+                write_paper_shadow_lane_decisions(
+                    config=config,
+                    candidate_dataset_path=Path(tmpdir) / "candidates.jsonl",
+                    inputs_by_shared_candidate_id={},
+                    wallet_decision_rows={"stable_paper": [], "beta_paper": []},
+                    wallet_runs={},
+                    ledger_root=tmpdir,
+                )
+
+    def test_paper_shadow_lanes_reject_invalid_confidence_floor(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "paper_shadow_lanes": {
+                    "enabled": True,
+                    "enabled_lanes": ["shadow_confidence_floor"],
+                    "confidence_floor": "strict",
+                }
+            }
+
+            with self.assertRaisesRegex(ValueError, "invalid confidence_floor"):
+                write_paper_shadow_lane_decisions(
+                    config=config,
+                    candidate_dataset_path=Path(tmpdir) / "candidates.jsonl",
+                    inputs_by_shared_candidate_id={
+                        "candidate-1": {
+                            "stable_paper": SimpleNamespace(
+                                signal={"shared_candidate_id": "candidate-1", "confidence": 0.9},
+                                shared_candidate={"candidate_id": "candidate-1"},
+                            )
+                        }
+                    },
+                    wallet_decision_rows={"stable_paper": [], "beta_paper": []},
+                    wallet_runs={},
+                    ledger_root=tmpdir,
+                )
+
+    def test_paper_shadow_lanes_reject_unknown_lane_types(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "paper_shadow_lanes": {
+                    "enabled": True,
+                    "enabled_lanes": ["control_stable"],
+                    "control_stable": {"type": "mystery"},
+                }
+            }
+
+            with self.assertRaisesRegex(ValueError, "unknown paper shadow lane type"):
+                write_paper_shadow_lane_decisions(
+                    config=config,
+                    candidate_dataset_path=Path(tmpdir) / "candidates.jsonl",
+                    inputs_by_shared_candidate_id={
+                        "candidate-1": {
+                            "stable_paper": SimpleNamespace(
+                                signal={"shared_candidate_id": "candidate-1", "confidence": 0.9},
+                                shared_candidate={"candidate_id": "candidate-1"},
+                            )
+                        }
+                    },
+                    wallet_decision_rows={"stable_paper": [], "beta_paper": []},
+                    wallet_runs={},
+                    ledger_root=tmpdir,
+                )
 
     def test_shadow_lane_rows_are_accepted_by_agent_decision_reporting(self):
         with tempfile.TemporaryDirectory() as tmpdir:

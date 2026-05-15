@@ -1,7 +1,10 @@
 id: shadow_confidence_floor
 type: confidence_floor
 source_wallet: stable_paper
+source_role: baseline
+input_source: shared_candidate_dataset
+input_market_source: shared_market
 enabled: true
-description: Stable paper decision, but require confidence >= configured floor before it would buy.
+description: Shared-candidate-fed lane that starts from the stable baseline decision and only overrides the shared signal confidence floor outcome.
 parameters:
   confidence_floor: 0.58

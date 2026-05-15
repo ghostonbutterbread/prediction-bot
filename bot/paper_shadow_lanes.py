@@ -5,14 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from bot.agent_decision_ledger import (
     build_agent_decision_id,
     build_agent_run_id,
     validate_agent_decision_row,
 )
-from bot.file_ops import append_jsonl
+from bot.file_ops import append_jsonl, load_jsonl
 from bot.paper_wallets import BETA_PAPER_WALLET_ID, STABLE_PAPER_WALLET_ID
 
 PAPER_LANE_AGENT_ID = "paper"
@@ -43,6 +43,9 @@ class _LaneDefinition:
     lane_id: str
     lane_type: str = "passthrough"
     source_wallet_id: str | None = None
+    source_role: str = "baseline"
+    input_source: str = "shared_candidate_dataset"
+    input_market_source: str = "shared_market"
     description: str | None = None
     enabled: bool = True
     parameters: Mapping[str, Any] = field(default_factory=dict)
@@ -84,6 +87,7 @@ def write_paper_shadow_lane_decisions(
     for shared_candidate_id, wallet_inputs in inputs_by_shared_candidate_id.items():
         candidate_input = _candidate_input(wallet_inputs)
         signal = _candidate_signal(candidate_input)
+        shared_candidate = _shared_candidate(candidate_input)
         stable_decision = indexed_decisions.get(STABLE_PAPER_WALLET_ID, {}).get(shared_candidate_id)
         beta_decision = indexed_decisions.get(BETA_PAPER_WALLET_ID, {}).get(shared_candidate_id)
         source_rows = {
@@ -99,6 +103,7 @@ def write_paper_shadow_lane_decisions(
                 candidate_dataset_path=candidate_dataset_path,
                 shared_candidate_id=shared_candidate_id,
                 signal=signal,
+                shared_candidate=shared_candidate,
                 source_rows=source_rows,
                 decision_path=decision_path,
             )
@@ -121,27 +126,34 @@ def _build_lane_row(
     candidate_dataset_path: str | Path,
     shared_candidate_id: str,
     signal: Mapping[str, Any],
+    shared_candidate: Mapping[str, Any],
     source_rows: Mapping[str, dict[str, Any] | None],
     decision_path: Path,
 ) -> dict[str, Any]:
-    source_wallet_id = lane.source_wallet_id or STABLE_PAPER_WALLET_ID
-    if lane.lane_type == "confidence_floor" or lane.lane_id == "shadow_confidence_floor":
-        decision = _confidence_floor_decision(lane, signal, source_rows.get(source_wallet_id))
-    elif lane.lane_type == "premium_city" or lane.lane_id == PREMIUM_CITY_LANE_ID:
-        decision = _premium_city_decision(lane, signal, source_rows.get(source_wallet_id))
-    else:
-        decision = _passthrough_decision(lane, signal, source_rows.get(source_wallet_id))
+    decision = _evaluate_lane_decision(lane, signal, source_rows)
 
     observed_at = _observed_at(decision.get("source_row"), signal)
     market_id = _text(
-        (decision.get("source_row") or {}).get("market_id") if isinstance(decision.get("source_row"), dict) else None,
         signal.get("market_id"),
+        (decision.get("source_row") or {}).get("market_id") if isinstance(decision.get("source_row"), dict) else None,
     )
     policy = lane.lane_id
     source_row = decision.get("source_row") if isinstance(decision.get("source_row"), dict) else None
-    confidence_before = _number((source_row or {}).get("confidence"), signal.get("confidence"))
+    baseline_row = source_rows.get(STABLE_PAPER_WALLET_ID)
+    comparison_row = source_rows.get(BETA_PAPER_WALLET_ID)
+    input_confidence = _number(signal.get("confidence"))
+    source_confidence = _number((source_row or {}).get("confidence"))
+    baseline_confidence = _number((baseline_row or {}).get("confidence"))
+    comparison_confidence = _number((comparison_row or {}).get("confidence"))
+    confidence_before = _number(input_confidence, source_confidence)
     confidence_after = _number(decision.get("confidence_after"), confidence_before)
     action = str(decision.get("action") or "SKIP")
+    shared_candidate_ref = _shared_candidate_ref(
+        shared_candidate,
+        signal=signal,
+        shared_candidate_id=shared_candidate_id,
+        candidate_dataset_path=candidate_dataset_path,
+    )
     row = {
         "schema_name": "agent_decision",
         "schema_version": 1,
@@ -163,7 +175,14 @@ def _build_lane_row(
         "decision_role": PAPER_LANE_DECISION_ROLE,
         "shared_candidate_id": shared_candidate_id,
         "candidate_dataset_path": str(candidate_dataset_path),
-        "candidate_dataset_identity": "shared_candidate_dataset",
+        "candidate_dataset_identity": lane.input_source,
+        "input_source": lane.input_source,
+        "input_market_source": lane.input_market_source,
+        "shared_candidate": shared_candidate_ref,
+        "shared_candidate_source_runtime": shared_candidate_ref.get("source_runtime"),
+        "shared_candidate_provenance": shared_candidate_ref.get("provenance"),
+        "shared_candidate_observed_at": shared_candidate_ref.get("observed_at"),
+        "shared_candidate_snapshot_as_of": shared_candidate_ref.get("snapshot_as_of"),
         "run_id": run_id,
         "market_id": market_id,
         "observed_at": observed_at,
@@ -177,10 +196,10 @@ def _build_lane_row(
         "selected_lane": lane.lane_id,
         "lane_description": lane.description,
         "confidence": confidence_after,
-        "edge": _number((source_row or {}).get("edge"), signal.get("edge")),
-        "model_probability": _number((source_row or {}).get("model_probability"), signal.get("model_probability")),
-        "entry_price": _number((source_row or {}).get("entry_price"), signal.get("market_price")),
-        "price": _number((source_row or {}).get("price"), (source_row or {}).get("entry_price"), signal.get("market_price")),
+        "edge": _number(signal.get("edge"), (source_row or {}).get("edge")),
+        "model_probability": _number(signal.get("model_probability"), (source_row or {}).get("model_probability")),
+        "entry_price": _number(signal.get("market_price"), (source_row or {}).get("entry_price")),
+        "price": _number(signal.get("market_price"), (source_row or {}).get("price"), (source_row or {}).get("entry_price")),
         "accounting_ref": {
             "wallet_id": "paper_shadow_lanes",
             "policy_id": policy,
@@ -205,12 +224,33 @@ def _build_lane_row(
             "lane_id": lane.lane_id,
             "lane_description": lane.description,
             "lane_version": PAPER_LANE_SCHEMA_VERSION,
+            "input_source": lane.input_source,
+            "input_market_source": lane.input_market_source,
+            "shared_candidate": shared_candidate_ref,
+            "shared_candidate_id": shared_candidate_id,
+            "candidate_dataset_path": str(candidate_dataset_path),
+            "input_confidence": input_confidence,
+            "source_confidence": source_confidence,
+            "baseline_confidence": baseline_confidence,
+            "comparison_confidence": comparison_confidence,
             "confidence_before": confidence_before,
             "confidence_after": confidence_after,
+            "baseline_decision_id": (baseline_row or {}).get("decision_id"),
+            "baseline_policy": (baseline_row or {}).get("policy"),
+            "baseline_decision_role": (baseline_row or {}).get("decision_role"),
+            "baseline_wallet_id": (baseline_row or {}).get("wallet_id"),
+            "baseline_action": (baseline_row or {}).get("action"),
+            "comparison_decision_id": (comparison_row or {}).get("decision_id"),
+            "comparison_policy": (comparison_row or {}).get("policy"),
+            "comparison_decision_role": (comparison_row or {}).get("decision_role"),
+            "comparison_wallet_id": (comparison_row or {}).get("wallet_id"),
+            "comparison_action": (comparison_row or {}).get("action"),
             "source_decision_id": (source_row or {}).get("decision_id"),
             "source_policy": (source_row or {}).get("policy"),
             "source_decision_role": (source_row or {}).get("decision_role"),
             "source_wallet_id": (source_row or {}).get("wallet_id"),
+            "source_role": lane.source_role,
+            "source_action": (source_row or {}).get("action"),
             "decision_only": True,
         },
     }
@@ -218,6 +258,28 @@ def _build_lane_row(
         row["lane_definition_path"] = lane.definition_path
         row["provenance"]["lane_definition_path"] = lane.definition_path
     return validate_agent_decision_row(row)
+
+
+def _evaluate_lane_decision(
+    lane: _LaneDefinition,
+    signal: Mapping[str, Any],
+    source_rows: Mapping[str, dict[str, Any] | None],
+) -> dict[str, Any]:
+    source_wallet_id = lane.source_wallet_id or STABLE_PAPER_WALLET_ID
+    evaluator = _lane_evaluator(lane)
+    return evaluator(lane, signal, source_rows.get(source_wallet_id))
+
+
+def _lane_evaluator(lane: _LaneDefinition):
+    lane_type = str(lane.lane_type or "").strip()
+    if lane.lane_id == "shadow_confidence_floor":
+        lane_type = "confidence_floor"
+    elif lane.lane_id == PREMIUM_CITY_LANE_ID:
+        lane_type = "premium_city"
+    evaluator = LANE_EVALUATORS.get(lane_type)
+    if evaluator is None:
+        raise ValueError(f"unknown paper shadow lane type for {lane.lane_id}: {lane_type}")
+    return evaluator
 
 
 def _passthrough_decision(
@@ -240,7 +302,7 @@ def _passthrough_decision(
         "action": source_row.get("action") or "SKIP",
         "reason_code": source_row.get("reason_code") or "source_decision",
         "reason": source_row.get("reason"),
-        "confidence_after": _number(source_row.get("confidence"), signal.get("confidence")),
+        "confidence_after": _number(signal.get("confidence"), source_row.get("confidence")),
         "requested_position_size_usd": _number(source_row.get("requested_position_size_usd")),
         "approved_position_size_usd": _number(source_row.get("approved_position_size_usd")),
     }
@@ -256,8 +318,9 @@ def _confidence_floor_decision(
         signal,
         source_row,
     )
-    confidence = _number((source_row or {}).get("confidence"), signal.get("confidence"))
+    confidence = _number(signal.get("confidence"), (source_row or {}).get("confidence"))
     floor = _confidence_floor(lane)
+    baseline["confidence_after"] = confidence
     action = str(baseline.get("action") or "SKIP").upper()
     if action not in {"BUY_YES", "BUY_NO"}:
         baseline.update(
@@ -314,6 +377,13 @@ def _premium_city_decision(
     return baseline
 
 
+LANE_EVALUATORS = {
+    "passthrough": _passthrough_decision,
+    "confidence_floor": _confidence_floor_decision,
+    "premium_city": _premium_city_decision,
+}
+
+
 def _lane_definitions(config: Mapping[str, Any]) -> tuple[_LaneDefinition, ...]:
     definitions_by_id = _configured_lane_definition_map(config)
     requested = config.get("enabled_lanes")
@@ -333,6 +403,76 @@ def _lane_definitions(config: Mapping[str, Any]) -> tuple[_LaneDefinition, ...]:
             raise ValueError(f"unknown paper shadow lane: {lane_id}")
         definitions.append(definitions_by_id[lane_id])
     return tuple(definitions)
+
+
+def summarize_paper_shadow_lane_report(
+    lane_rows: Iterable[Mapping[str, Any]] | None = None,
+    *,
+    lane_decision_path: str | Path | None = None,
+    config: Mapping[str, Any] | None = None,
+    shared_candidate_ids: Iterable[str] | None = None,
+    candidate_dataset_path: str | Path | None = None,
+    run_id: str | None = None,
+    agent_run_id: str | None = None,
+    baseline_rows: Iterable[Mapping[str, Any]] | None = None,
+    comparison_rows: Iterable[Mapping[str, Any]] | None = None,
+    sample_limit: int = 10,
+) -> dict[str, Any]:
+    """Build a read-only smoke report for paper shadow lane rows."""
+
+    all_rows = _report_lane_rows(lane_rows, lane_decision_path=lane_decision_path)
+    enabled_lane_ids = _report_enabled_lane_ids(config, all_rows)
+    requested_candidate_ids = {str(value) for value in (shared_candidate_ids or []) if str(value)}
+    scoped_candidate_dataset_path = _report_candidate_dataset_path(candidate_dataset_path, baseline_rows, comparison_rows)
+    scoped_run_id = _report_run_id(run_id, baseline_rows, comparison_rows)
+    rows = _filter_report_rows(
+        all_rows,
+        requested_candidate_ids=requested_candidate_ids,
+        candidate_dataset_path=scoped_candidate_dataset_path,
+        run_id=scoped_run_id,
+        agent_run_id=agent_run_id,
+        enabled_lane_ids=set(enabled_lane_ids) if config is not None else None,
+    )
+    observed_candidate_ids = {
+        candidate_id for candidate_id in (_row_shared_candidate_id(row) for row in rows) if candidate_id
+    }
+    baseline_by_candidate = _reference_rows_by_candidate(baseline_rows)
+    comparison_by_candidate = _reference_rows_by_candidate(comparison_rows)
+
+    lane_row_counts = _counts_sorted(_lane_id_for_row(row) for row in rows)
+    buy_counts = _counts_sorted(_lane_id_for_row(row) for row in rows if _is_buy_action(row.get("action")))
+    skip_counts = _counts_sorted(_lane_id_for_row(row) for row in rows if _is_skip_action(row.get("action")))
+    action_counts = _counts_sorted(_action_label(row.get("action")) for row in rows)
+    return {
+        "schema_version": PAPER_LANE_SCHEMA_VERSION,
+        "enabled_lane_ids": enabled_lane_ids,
+        "candidate_count": len(observed_candidate_ids),
+        "observed_candidate_count": len(observed_candidate_ids),
+        "requested_candidate_count": len(requested_candidate_ids) if shared_candidate_ids is not None else None,
+        "rows_loaded": len(all_rows),
+        "rows_written": len(rows),
+        "candidate_dataset_path": scoped_candidate_dataset_path,
+        "run_id": scoped_run_id,
+        "agent_run_id": agent_run_id,
+        "lane_row_counts": lane_row_counts,
+        "buy_counts": buy_counts,
+        "skip_counts": skip_counts,
+        "action_counts": action_counts,
+        "drift": {
+            "vs_baseline": _summarize_reference_drift(
+                rows,
+                baseline_by_candidate,
+                provenance_action_key="baseline_action",
+                sample_limit=sample_limit,
+            ),
+            "vs_comparison": _summarize_reference_drift(
+                rows,
+                comparison_by_candidate,
+                provenance_action_key="comparison_action",
+                sample_limit=sample_limit,
+            ),
+        },
+    }
 
 
 def _configured_lane_definition_map(config: Mapping[str, Any]) -> dict[str, _LaneDefinition]:
@@ -384,30 +524,42 @@ def _built_in_lane_definition_map() -> dict[str, dict[str, Any]]:
             "id": "control_stable",
             "type": "passthrough",
             "source_wallet": STABLE_PAPER_WALLET_ID,
+            "source_role": "baseline",
+            "input_source": "shared_candidate_dataset",
+            "input_market_source": "shared_market",
             "enabled": True,
-            "description": "Control lane that mirrors the stable paper wallet decision.",
+            "description": "Shared-candidate-fed control lane that mirrors the stable paper wallet decision as baseline provenance.",
         },
         "shadow_current_beta": {
             "id": "shadow_current_beta",
             "type": "passthrough",
             "source_wallet": BETA_PAPER_WALLET_ID,
+            "source_role": "comparison",
+            "input_source": "shared_candidate_dataset",
+            "input_market_source": "shared_market",
             "enabled": True,
-            "description": "Shadow lane that mirrors the current beta paper wallet decision.",
+            "description": "Shared-candidate-fed shadow lane that mirrors the current beta paper wallet decision as comparison provenance.",
         },
         "shadow_confidence_floor": {
             "id": "shadow_confidence_floor",
             "type": "confidence_floor",
             "source_wallet": STABLE_PAPER_WALLET_ID,
+            "source_role": "baseline",
+            "input_source": "shared_candidate_dataset",
+            "input_market_source": "shared_market",
             "enabled": True,
-            "description": "Stable paper decision, but require confidence >= configured floor before it would buy.",
+            "description": "Shared-candidate-fed lane that starts from the stable baseline decision and only overrides the shared signal confidence floor outcome.",
             "parameters": {"confidence_floor": DEFAULT_CONFIDENCE_FLOOR},
         },
         PREMIUM_CITY_LANE_ID: {
             "id": PREMIUM_CITY_LANE_ID,
             "type": "premium_city",
             "source_wallet": STABLE_PAPER_WALLET_ID,
+            "source_role": "baseline",
+            "input_source": "shared_candidate_dataset",
+            "input_market_source": "shared_market",
             "enabled": False,
-            "description": "Stable paper decision, but only allow buys for configured premium cities.",
+            "description": "Shared-candidate-fed lane that starts from the stable baseline decision and only allows configured premium cities.",
             "parameters": {"allowlist": []},
         },
     }
@@ -454,12 +606,21 @@ def _lane_definition_from_raw(lane_id: str, raw: Mapping[str, Any]) -> _LaneDefi
     for key in ("confidence_floor", "min_confidence", "allowlist"):
         if key in raw:
             parameters[key] = raw.get(key)
+    input_source = str(raw.get("input_source") or "shared_candidate_dataset")
+    input_market_source = str(raw.get("input_market_source") or "shared_market")
+    if input_source != "shared_candidate_dataset":
+        raise ValueError(f"paper shadow lane {lane_id} must use input_source=shared_candidate_dataset")
+    if input_market_source != "shared_market":
+        raise ValueError(f"paper shadow lane {lane_id} must use input_market_source=shared_market")
     return _LaneDefinition(
         lane_id=lane_id,
         lane_type=str(raw.get("type") or raw.get("lane_type") or "passthrough"),
         source_wallet_id=_source_wallet_id(
             raw.get("source_wallet_id") or raw.get("source_wallet") or raw.get("source")
         ),
+        source_role=str(raw.get("source_role") or raw.get("source_wallet_role") or "baseline"),
+        input_source=input_source,
+        input_market_source=input_market_source,
         description=str(raw.get("description") or "") or None,
         enabled=_truthy(raw.get("enabled", True)),
         parameters=parameters,
@@ -573,16 +734,244 @@ def _candidate_signal(candidate_input: Any) -> dict[str, Any]:
     return dict(signal) if isinstance(signal, dict) else {}
 
 
+def _report_lane_rows(
+    lane_rows: Iterable[Mapping[str, Any]] | None,
+    *,
+    lane_decision_path: str | Path | None,
+) -> list[dict[str, Any]]:
+    if lane_rows is None and lane_decision_path not in (None, ""):
+        lane_rows = load_jsonl(Path(lane_decision_path))
+    return [dict(row) for row in (lane_rows or []) if isinstance(row, Mapping)]
+
+
+def _filter_report_rows(
+    rows: list[dict[str, Any]],
+    *,
+    requested_candidate_ids: set[str],
+    candidate_dataset_path: str | None,
+    run_id: str | None,
+    agent_run_id: str | None,
+    enabled_lane_ids: set[str] | None,
+) -> list[dict[str, Any]]:
+    filtered: list[dict[str, Any]] = []
+    for row in rows:
+        if requested_candidate_ids and _row_shared_candidate_id(row) not in requested_candidate_ids:
+            continue
+        if candidate_dataset_path is not None and str(row.get("candidate_dataset_path") or "") != candidate_dataset_path:
+            continue
+        if run_id is not None and str(row.get("run_id") or "") != run_id:
+            continue
+        if agent_run_id is not None and str(row.get("agent_run_id") or "") != agent_run_id:
+            continue
+        if enabled_lane_ids is not None and _lane_id_for_row(row) not in enabled_lane_ids:
+            continue
+        filtered.append(row)
+    return filtered
+
+
+def _report_candidate_dataset_path(
+    candidate_dataset_path: str | Path | None,
+    baseline_rows: Iterable[Mapping[str, Any]] | None,
+    comparison_rows: Iterable[Mapping[str, Any]] | None,
+) -> str | None:
+    if candidate_dataset_path not in (None, ""):
+        return str(candidate_dataset_path)
+    return _first_row_value("candidate_dataset_path", baseline_rows, comparison_rows)
+
+
+def _report_run_id(
+    run_id: str | None,
+    baseline_rows: Iterable[Mapping[str, Any]] | None,
+    comparison_rows: Iterable[Mapping[str, Any]] | None,
+) -> str | None:
+    if run_id not in (None, ""):
+        return str(run_id)
+    source_run_id = _first_row_value("run_id", baseline_rows, comparison_rows)
+    if source_run_id in (None, ""):
+        return None
+    text = str(source_run_id)
+    return text if text.endswith(":paper_lanes") else f"{text}:paper_lanes"
+
+
+def _first_row_value(key: str, *row_groups: Iterable[Mapping[str, Any]] | None) -> str | None:
+    for rows in row_groups:
+        for row in rows or []:
+            if not isinstance(row, Mapping):
+                continue
+            value = row.get(key)
+            if value not in (None, ""):
+                return str(value)
+    return None
+
+
+def _report_enabled_lane_ids(config: Mapping[str, Any] | None, rows: list[dict[str, Any]]) -> tuple[str, ...]:
+    if config is not None:
+        if not paper_shadow_lanes_enabled(config):
+            return ()
+        return tuple(lane.lane_id for lane in _lane_definitions(_lane_config(config)))
+    lane_ids: list[str] = []
+    for row in rows:
+        lane_id = _lane_id_for_row(row)
+        if lane_id and lane_id not in lane_ids:
+            lane_ids.append(lane_id)
+    return tuple(lane_ids)
+
+
+def _reference_rows_by_candidate(rows: Iterable[Mapping[str, Any]] | None) -> dict[str, dict[str, Any]]:
+    indexed: dict[str, dict[str, Any]] = {}
+    for row in rows or []:
+        if not isinstance(row, Mapping):
+            continue
+        candidate_id = _row_shared_candidate_id(row)
+        if candidate_id:
+            indexed[candidate_id] = dict(row)
+    return indexed
+
+
+def _summarize_reference_drift(
+    rows: list[dict[str, Any]],
+    reference_by_candidate: Mapping[str, Mapping[str, Any]],
+    *,
+    provenance_action_key: str,
+    sample_limit: int,
+) -> dict[str, Any]:
+    by_lane: dict[str, int] = {}
+    by_candidate: dict[str, int] = {}
+    samples: list[dict[str, Any]] = []
+    reference_candidate_ids: set[str] = set()
+    for row in rows:
+        candidate_id = _row_shared_candidate_id(row)
+        if not candidate_id:
+            continue
+        lane_id = _lane_id_for_row(row)
+        reference_action = _reference_action(row, reference_by_candidate.get(candidate_id), provenance_action_key)
+        if reference_action is None:
+            continue
+        reference_candidate_ids.add(candidate_id)
+        lane_action = _action_label(row.get("action"))
+        if lane_action == reference_action:
+            continue
+        by_lane[lane_id] = by_lane.get(lane_id, 0) + 1
+        by_candidate[candidate_id] = by_candidate.get(candidate_id, 0) + 1
+        if len(samples) < sample_limit:
+            samples.append(
+                {
+                    "shared_candidate_id": candidate_id,
+                    "lane_id": lane_id,
+                    "lane_action": lane_action,
+                    "reference_action": reference_action,
+                }
+            )
+    return {
+        "reference_candidate_count": len(reference_candidate_ids),
+        "candidate_count_with_action_drift": len(by_candidate),
+        "row_count_with_action_drift": sum(by_lane.values()),
+        "by_lane": _sorted_count_dict(by_lane),
+        "by_shared_candidate_id": _sorted_count_dict(by_candidate),
+        "samples": samples,
+    }
+
+
+def _reference_action(
+    lane_row: Mapping[str, Any],
+    reference_row: Mapping[str, Any] | None,
+    provenance_action_key: str,
+) -> str | None:
+    if reference_row is not None:
+        return _optional_action_label(reference_row.get("action"))
+    provenance = _mapping(lane_row.get("provenance"))
+    return _optional_action_label(provenance.get(provenance_action_key))
+
+
+def _lane_id_for_row(row: Mapping[str, Any]) -> str:
+    return _text(row.get("policy"), row.get("selected_lane"), _mapping(row.get("provenance")).get("lane_id"), "unknown")
+
+
+def _row_shared_candidate_id(row: Mapping[str, Any]) -> str | None:
+    value = row.get("shared_candidate_id")
+    if value not in (None, ""):
+        return str(value)
+    shared_candidate = _mapping(row.get("shared_candidate"))
+    value = shared_candidate.get("candidate_id") or shared_candidate.get("shared_candidate_id")
+    if value not in (None, ""):
+        return str(value)
+    return None
+
+
+def _is_buy_action(value: Any) -> bool:
+    return _action_label(value) in {"BUY_YES", "BUY_NO"}
+
+
+def _is_skip_action(value: Any) -> bool:
+    return _action_label(value) == "SKIP"
+
+
+def _action_label(value: Any) -> str:
+    return str(value or "unknown").upper()
+
+
+def _optional_action_label(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    return _action_label(value)
+
+
+def _counts_sorted(values: Iterable[str]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for value in values:
+        counts[str(value)] = counts.get(str(value), 0) + 1
+    return _sorted_count_dict(counts)
+
+
+def _sorted_count_dict(counts: Mapping[str, int]) -> dict[str, int]:
+    return {key: int(counts[key]) for key in sorted(counts)}
+
+
+def _shared_candidate(candidate_input: Any) -> dict[str, Any]:
+    shared_candidate = getattr(candidate_input, "shared_candidate", None)
+    return dict(shared_candidate) if isinstance(shared_candidate, dict) else {}
+
+
+def _shared_candidate_ref(
+    shared_candidate: Mapping[str, Any],
+    *,
+    signal: Mapping[str, Any],
+    shared_candidate_id: str,
+    candidate_dataset_path: str | Path,
+) -> dict[str, Any]:
+    market = _mapping(shared_candidate.get("market"))
+    return {
+        "input_source": "shared_candidate_dataset",
+        "market_source": "shared_market",
+        "candidate_id": _text(shared_candidate.get("candidate_id"), signal.get("shared_candidate_id"), shared_candidate_id),
+        "shared_candidate_id": _text(shared_candidate.get("candidate_id"), signal.get("shared_candidate_id"), shared_candidate_id),
+        "candidate_dataset_path": str(candidate_dataset_path),
+        "market_id": _text(shared_candidate.get("market_id"), market.get("id"), signal.get("market_id")),
+        "source_runtime": _optional_text(shared_candidate.get("source_runtime"), signal.get("candidate_source_runtime")),
+        "provenance": _optional_text(shared_candidate.get("provenance"), signal.get("candidate_provenance")),
+        "observed_at": _optional_text(shared_candidate.get("observed_at"), signal.get("candidate_observed_at"), signal.get("observed_at")),
+        "snapshot_as_of": _optional_text(shared_candidate.get("snapshot_as_of"), signal.get("snapshot_as_of"), signal.get("source_as_of")),
+        "snapshot_ttl_seconds": _first_present(shared_candidate.get("snapshot_ttl_seconds"), signal.get("snapshot_ttl_seconds")),
+    }
+
+
 def _observed_at(source_row: dict[str, Any] | None, signal: Mapping[str, Any]) -> str:
-    value = (source_row or {}).get("observed_at") or signal.get("candidate_observed_at") or signal.get("observed_at")
+    value = signal.get("candidate_observed_at") or signal.get("observed_at") or (source_row or {}).get("observed_at")
     if value not in (None, ""):
         return str(value)
     return datetime.now(timezone.utc).isoformat()
 
 
 def _confidence_floor(lane: _LaneDefinition) -> float:
-    number = _number(lane.parameters.get("confidence_floor"), lane.parameters.get("min_confidence"))
-    return float(number if number is not None else DEFAULT_CONFIDENCE_FLOOR)
+    for key in ("confidence_floor", "min_confidence"):
+        if key not in lane.parameters or lane.parameters.get(key) in (None, ""):
+            continue
+        value = lane.parameters.get(key)
+        number = _number(value)
+        if number is None:
+            raise ValueError(f"paper shadow lane {lane.lane_id} has invalid {key}: {value!r}")
+        return float(number)
+    return DEFAULT_CONFIDENCE_FLOOR
 
 
 def _candidate_city(signal: Mapping[str, Any]) -> str:
@@ -622,6 +1011,18 @@ def _text(*values: Any) -> str:
     return ""
 
 
+def _optional_text(*values: Any) -> str | None:
+    value = _text(*values)
+    return value or None
+
+
+def _first_present(*values: Any) -> Any:
+    for value in values:
+        if value not in (None, ""):
+            return value
+    return None
+
+
 def _mapping(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
 
@@ -641,5 +1042,6 @@ __all__ = [
     "PAPER_LANE_DECISION_ROLE",
     "PaperShadowLaneWriteResult",
     "paper_shadow_lanes_enabled",
+    "summarize_paper_shadow_lane_report",
     "write_paper_shadow_lane_decisions",
 ]

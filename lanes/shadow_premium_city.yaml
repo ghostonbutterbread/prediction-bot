@@ -1,7 +1,10 @@
 id: shadow_premium_city
 type: premium_city
 source_wallet: stable_paper
+source_role: baseline
+input_source: shared_candidate_dataset
+input_market_source: shared_market
 enabled: false
-description: Stable paper decision, but only allow buys for configured premium cities.
+description: Shared-candidate-fed lane that starts from the stable baseline decision and only allows configured premium cities.
 parameters:
   allowlist: []
