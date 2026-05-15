@@ -1,5 +1,8 @@
 id: shadow_current_beta
 type: passthrough
 source_wallet: beta_paper
+source_role: comparison
+input_source: shared_candidate_dataset
+input_market_source: shared_market
 enabled: true
-description: Shadow lane that mirrors the current beta paper wallet decision.
+description: Shared-candidate-fed shadow lane that mirrors the current beta paper wallet decision as comparison provenance.
