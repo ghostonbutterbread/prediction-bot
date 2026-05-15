@@ -43,8 +43,17 @@ The helper is read-only by default and reports:
   session paths are isolated
 - what current paper state exists under each wallet root
 - whether any Prediction Lab candidate datasets were written under a wallet root
+  with path and `size_bytes` metadata
 - what would later be copied to `shared_candidates/`
 - what canonical backfill command would later be used after copy
+
+By default, the canary is bounded/stat-only: it detects candidate dataset files
+and calls `stat()`, but it does not open JSONL files to count rows. Use the
+explicit deep-scan mode only when row counts are worth the extra IO:
+
+```bash
+python3 scripts/paper_migration_canary.py --deep-scan --json
+```
 
 ## What counts as accidental candidate data under wallet roots
 

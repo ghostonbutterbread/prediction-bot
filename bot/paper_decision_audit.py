@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 PAPER_AGENT_ID = "paper"
 PAPER_RUNTIME = "paper"
-PAPER_DECISION_ROLE = "paper"
+PAPER_DECISION_ROLE = "paper_shadow"
 
 
 def append_paper_agent_run_once(

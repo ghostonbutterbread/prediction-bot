@@ -76,7 +76,7 @@ def test_reporting_policy_drift_ignores_same_policy_role_action_variance():
     report = summarize_agent_decision_reporting(
         [
             _decision(decision_id="d1", policy="normal", decision_role="main", action="BUY_YES", reason_code="approved"),
-            _decision(decision_id="d2", policy="normal", decision_role="paper", action="SKIP", reason_code="paper_skip"),
+            _decision(decision_id="d2", policy="normal", decision_role="paper_shadow", action="SKIP", reason_code="paper_skip"),
         ]
     )
 
@@ -91,7 +91,7 @@ def test_reporting_overlap_detects_multiple_agents_policies_and_duplicate_action
     report = summarize_agent_decision_reporting(
         [
             _decision(decision_id="d1", agent_id="prediction_lab", policy="normal", decision_role="normal", action="BUY_YES"),
-            _decision(decision_id="d2", agent_id="paper", runtime="paper", policy="normal", decision_role="paper", action="BUY_YES"),
+            _decision(decision_id="d2", agent_id="paper", runtime="paper", policy="normal", decision_role="paper_shadow", action="BUY_YES"),
             _decision(decision_id="d3", agent_id="shadow", policy="shadow", decision_role="shadow", action="SKIP"),
         ]
     )
