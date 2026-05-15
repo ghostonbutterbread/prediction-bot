@@ -302,6 +302,59 @@ parameters:
         self.assertEqual(len(lane_rows), 1)
         self.assertEqual(lane_rows[0]["policy"], "control_stable")
 
+    def test_confidence_floor_reuses_stable_decision_then_overrides_lane_fields(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dataset_path = Path(tmpdir) / "shared" / "prediction_lab" / "market_snapshots.jsonl"
+            decision_path = Path(tmpdir) / "lanes.jsonl"
+            candidate_id = "candidate-1"
+            stable_decision = {
+                "shared_candidate_id": candidate_id,
+                "wallet_id": "stable_paper",
+                "run_id": "stable-run",
+                "candidate_dataset_path": str(dataset_path),
+                "decision_role": "paper_shadow",
+                "decision_id": "stable-source-decision",
+                "policy": "normal",
+                "market_id": "KXHIGHNY-260513-T71",
+                "observed_at": "2026-05-13T12:00:01+00:00",
+                "action": "BUY_YES",
+                "reason_code": "approved",
+                "reason": "stable approved",
+                "confidence": 0.80,
+                "requested_position_size_usd": 10.0,
+                "approved_position_size_usd": 10.0,
+            }
+
+            result = write_paper_shadow_lane_decisions(
+                config={
+                    "paper_shadow_lanes": {
+                        "enabled": True,
+                        "decision_ledger_path": str(decision_path),
+                        "enabled_lanes": ["shadow_confidence_floor"],
+                        "shadow_confidence_floor": {"confidence_floor": 0.90},
+                    }
+                },
+                candidate_dataset_path=dataset_path,
+                inputs_by_shared_candidate_id={
+                    candidate_id: {
+                        "stable": SimpleNamespace(signal={"market_id": "KXHIGHNY-260513-T71", "confidence": 0.80}),
+                    }
+                },
+                wallet_decision_rows={"stable_paper": [stable_decision]},
+                wallet_runs={"stable_paper": SimpleNamespace(session_id="stable-run")},
+                ledger_root=tmpdir,
+            )
+            lane_row = load_jsonl(Path(result.decision_path))[0]
+
+        self.assertEqual(lane_row["policy"], "shadow_confidence_floor")
+        self.assertEqual(lane_row["provenance"]["source_wallet_id"], "stable_paper")
+        self.assertEqual(lane_row["provenance"]["source_decision_id"], "stable-source-decision")
+        self.assertEqual(lane_row["provenance"]["source_policy"], "normal")
+        self.assertEqual(lane_row["requested_position_size_usd"], 10.0)
+        self.assertEqual(lane_row["action"], "SKIP")
+        self.assertEqual(lane_row["reason_code"], "confidence_below_floor")
+        self.assertEqual(lane_row["approved_position_size_usd"], 0.0)
+
     def test_shadow_lane_rows_are_accepted_by_agent_decision_reporting(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = self._config(tmpdir)

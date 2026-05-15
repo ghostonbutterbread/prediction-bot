@@ -4,6 +4,8 @@ This directory contains paper-only lane definitions used by `paper_shadow_lanes`
 
 Lanes are decision overlays: they write compact `paper_lane` decision rows for shared candidates, but they do not mutate paper wallet balances, accounting ledgers, shared candidate rows, or live orders.
 
+A lane must not duplicate stable strategy logic. It should point at a source wallet decision, usually `source_wallet: stable_paper`, reuse that already-computed baseline decision row, and then override only the lane-specific values such as action, reason, confidence floor, allowlist, or size hint.
+
 Enable them from config with an explicit allowlist:
 
 ```yaml
