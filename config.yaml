@@ -176,6 +176,19 @@ strategy_lanes:
     enabled: false
     min_edge:
     min_confidence:
+
+paper_shadow_lanes:
+  # Paper-only decision overlays. These do not mutate wallet balances,
+  # accounting ledgers, shared candidates, or live orders.
+  enabled: false
+  definitions_dir: lanes
+  enabled_lanes:
+    - control_stable
+    - shadow_confidence_floor
+  shadow_confidence_floor:
+    # Stable paper decision, but require confidence >= this floor before the
+    # lane would buy. The stable/control wallet itself is unchanged.
+    confidence_floor: 0.58
 runtime:
   base_dir: data
 

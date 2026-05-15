@@ -98,6 +98,51 @@ paper_shadow_lanes:
             observed_at=observed_at,
         )
 
+    def _write_lane_definition_dir(self, tmpdir: str, *, confidence_floor: float = 0.58) -> Path:
+        lanes_dir = Path(tmpdir) / "lanes"
+        lanes_dir.mkdir(parents=True, exist_ok=True)
+        (lanes_dir / "control_stable.yaml").write_text(
+            """
+id: control_stable
+type: passthrough
+source_wallet: stable_paper
+enabled: true
+description: Control lane that mirrors the stable paper wallet decision.
+"""
+        )
+        (lanes_dir / "shadow_current_beta.yaml").write_text(
+            """
+id: shadow_current_beta
+type: passthrough
+source_wallet: beta_paper
+enabled: true
+description: Shadow lane that mirrors the current beta paper wallet decision.
+"""
+        )
+        (lanes_dir / "shadow_confidence_floor.yaml").write_text(
+            f"""
+id: shadow_confidence_floor
+type: confidence_floor
+source_wallet: stable_paper
+enabled: true
+description: Stable paper decision, but require confidence >= configured floor before it would buy.
+parameters:
+  confidence_floor: {confidence_floor}
+"""
+        )
+        (lanes_dir / "shadow_premium_city.yaml").write_text(
+            """
+id: shadow_premium_city
+type: premium_city
+source_wallet: stable_paper
+enabled: false
+description: Stable paper decision, but only allow buys for configured premium cities.
+parameters:
+  allowlist: []
+"""
+        )
+        return lanes_dir
+
     def test_shadow_lanes_write_multiple_non_mutating_decisions_per_shared_candidate(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = self._config(tmpdir)
@@ -145,6 +190,117 @@ paper_shadow_lanes:
         self.assertEqual(confidence_floor_rows[high_row["shared_candidate_id"]]["action"], "BUY_YES")
         self.assertEqual(confidence_floor_rows[high_row["shared_candidate_id"]]["reason_code"], "approved_confidence_floor")
         self.assertEqual(confidence_floor_rows[high_row["shared_candidate_id"]]["side"], "YES")
+
+    def test_enabled_lanes_loads_only_selected_lanes_from_definition_dir(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._config(tmpdir)
+            lanes_dir = self._write_lane_definition_dir(tmpdir)
+            config["paper_shadow_lanes"].update(
+                {
+                    "definitions_dir": str(lanes_dir),
+                    "enabled_lanes": ["control_stable", "shadow_confidence_floor"],
+                }
+            )
+            dataset_path = Path(tmpdir) / "shared" / "prediction_lab" / "market_snapshots.jsonl"
+            row = self._snapshot_row(
+                market_id="KXHIGHNY-260513-T71",
+                confidence=0.91,
+                observed_at="2026-05-13T12:00:01+00:00",
+            )
+            append_jsonl(dataset_path, row)
+
+            with patch("bot.simulator.KellySizer.calculate", return_value=10.0):
+                result = run_shared_candidate_paper_evaluation(dataset_path, config=config)
+
+            lane_rows = load_jsonl(Path(result.paper_lane_decision_path))
+
+        self.assertEqual(result.paper_lane_ids, ("control_stable", "shadow_confidence_floor"))
+        self.assertEqual(result.paper_lane_decision_count, 2)
+        self.assertEqual({row["policy"] for row in lane_rows}, {"control_stable", "shadow_confidence_floor"})
+
+    def test_confidence_floor_lane_records_explicit_description_and_file_provenance(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._config(tmpdir)
+            lanes_dir = self._write_lane_definition_dir(tmpdir)
+            config["paper_shadow_lanes"].update(
+                {
+                    "definitions_dir": str(lanes_dir),
+                    "enabled_lanes": ["shadow_confidence_floor"],
+                }
+            )
+            dataset_path = Path(tmpdir) / "shared" / "prediction_lab" / "market_snapshots.jsonl"
+            row = self._snapshot_row(
+                market_id="KXHIGHNY-260513-T71",
+                confidence=0.91,
+                observed_at="2026-05-13T12:00:01+00:00",
+            )
+            append_jsonl(dataset_path, row)
+
+            with patch("bot.simulator.KellySizer.calculate", return_value=10.0):
+                result = run_shared_candidate_paper_evaluation(dataset_path, config=config)
+
+            lane_row = load_jsonl(Path(result.paper_lane_decision_path))[0]
+
+        self.assertEqual(lane_row["policy"], "shadow_confidence_floor")
+        self.assertIn("stable paper decision", lane_row["lane_description"].lower())
+        self.assertIn("confidence >= configured floor", lane_row["lane_description"])
+        self.assertTrue(lane_row["lane_definition_path"].endswith("shadow_confidence_floor.yaml"))
+        self.assertEqual(lane_row["provenance"]["lane_description"], lane_row["lane_description"])
+        self.assertEqual(lane_row["provenance"]["lane_definition_path"], lane_row["lane_definition_path"])
+
+    def test_inline_config_override_can_change_confidence_floor_definition(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._config(tmpdir)
+            lanes_dir = self._write_lane_definition_dir(tmpdir, confidence_floor=0.50)
+            config["paper_shadow_lanes"].pop("confidence_floor", None)
+            config["paper_shadow_lanes"].update(
+                {
+                    "definitions_dir": str(lanes_dir),
+                    "enabled_lanes": ["shadow_confidence_floor"],
+                    "shadow_confidence_floor": {"confidence_floor": 0.90},
+                }
+            )
+            dataset_path = Path(tmpdir) / "shared" / "prediction_lab" / "market_snapshots.jsonl"
+            row = self._snapshot_row(
+                market_id="KXHIGHNY-260513-T71",
+                confidence=0.80,
+                observed_at="2026-05-13T12:00:01+00:00",
+            )
+            append_jsonl(dataset_path, row)
+
+            with patch("bot.simulator.KellySizer.calculate", return_value=10.0):
+                result = run_shared_candidate_paper_evaluation(dataset_path, config=config)
+
+            lane_row = load_jsonl(Path(result.paper_lane_decision_path))[0]
+
+        self.assertEqual(lane_row["action"], "SKIP")
+        self.assertEqual(lane_row["reason_code"], "confidence_below_floor")
+        self.assertIn("0.90", lane_row["reason"])
+
+    def test_existing_lanes_mapping_compatibility_still_selects_enabled_lanes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._config(tmpdir)
+            config["paper_shadow_lanes"]["lanes"] = {
+                "control_stable": {"enabled": True},
+                "shadow_current_beta": {"enabled": False},
+                "shadow_confidence_floor": {"enabled": False},
+            }
+            dataset_path = Path(tmpdir) / "shared" / "prediction_lab" / "market_snapshots.jsonl"
+            row = self._snapshot_row(
+                market_id="KXHIGHNY-260513-T71",
+                confidence=0.91,
+                observed_at="2026-05-13T12:00:01+00:00",
+            )
+            append_jsonl(dataset_path, row)
+
+            with patch("bot.simulator.KellySizer.calculate", return_value=10.0):
+                result = run_shared_candidate_paper_evaluation(dataset_path, config=config)
+
+            lane_rows = load_jsonl(Path(result.paper_lane_decision_path))
+
+        self.assertEqual(result.paper_lane_ids, ("control_stable",))
+        self.assertEqual(len(lane_rows), 1)
+        self.assertEqual(lane_rows[0]["policy"], "control_stable")
 
     def test_shadow_lane_rows_are_accepted_by_agent_decision_reporting(self):
         with tempfile.TemporaryDirectory() as tmpdir:

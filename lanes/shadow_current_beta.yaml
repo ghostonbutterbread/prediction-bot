@@ -1,0 +1,5 @@
+id: shadow_current_beta
+type: passthrough
+source_wallet: beta_paper
+enabled: true
+description: Shadow lane that mirrors the current beta paper wallet decision.
