@@ -11,6 +11,8 @@ from bot.paper_evaluator_input import (
     SharedCandidatePaperInputLoadResult,
     load_shared_candidate_paper_inputs,
 )
+from bot.file_ops import load_jsonl
+from bot.paper_shadow_lanes import paper_shadow_lanes_enabled, write_paper_shadow_lane_decisions
 from bot.paper_wallets import (
     BETA_PAPER_WALLET_ID,
     STABLE_PAPER_WALLET_ID,
@@ -49,6 +51,9 @@ class DualPaperWalletEvaluationResult:
     accepted_candidate_count: int
     wallet_runs: dict[str, PaperWalletEvaluationRun]
     shared_candidate_ids: tuple[str, ...]
+    paper_lane_decision_path: str | None = None
+    paper_lane_decision_count: int = 0
+    paper_lane_ids: tuple[str, ...] = ()
 
 
 def build_paper_wallet_runner_config(
@@ -178,12 +183,30 @@ def run_shared_candidate_paper_evaluation(
             reserved_capital=round(float(simulator.reserved_capital), 2),
         )
 
+    lane_write_result = None
+    if paper_shadow_lanes_enabled(config):
+        ledger_root = _paper_lane_ledger_root(wallet_runs)
+        lane_write_result = write_paper_shadow_lane_decisions(
+            config=config,
+            candidate_dataset_path=load_result.candidate_dataset_path,
+            inputs_by_shared_candidate_id=load_result.inputs_by_shared_candidate_id,
+            wallet_decision_rows={
+                wallet_id: load_jsonl(Path(run.agent_decision_path))
+                for wallet_id, run in wallet_runs.items()
+            },
+            wallet_runs=wallet_runs,
+            ledger_root=ledger_root,
+        )
+
     return DualPaperWalletEvaluationResult(
         candidate_dataset_path=load_result.candidate_dataset_path,
         loaded_row_count=load_result.loaded_row_count,
         accepted_candidate_count=load_result.accepted_candidate_count,
         wallet_runs=wallet_runs,
         shared_candidate_ids=tuple(load_result.inputs_by_shared_candidate_id.keys()),
+        paper_lane_decision_path=lane_write_result.decision_path if lane_write_result is not None else None,
+        paper_lane_decision_count=lane_write_result.rows_written if lane_write_result is not None else 0,
+        paper_lane_ids=lane_write_result.lane_ids if lane_write_result is not None else (),
     )
 
 
@@ -212,6 +235,15 @@ def _wallet_policy_label(config: Mapping[str, Any]) -> str:
     if policy.is_enforce:
         return "beta_enforce"
     return "normal"
+
+
+def _paper_lane_ledger_root(wallet_runs: Mapping[str, PaperWalletEvaluationRun]) -> Path:
+    stable = wallet_runs.get(STABLE_PAPER_WALLET_ID)
+    if stable is not None:
+        return Path(stable.root_dir)
+    for run in wallet_runs.values():
+        return Path(run.root_dir)
+    return Path("data") / "paper"
 
 
 def _normalize_wallet_ids(wallet_ids: tuple[str, ...] | list[str] | None) -> tuple[str, ...]:
