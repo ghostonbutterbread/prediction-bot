@@ -1,6 +1,21 @@
+import copy
+import json
+import subprocess
+import sys
+import tempfile
 import unittest
+from pathlib import Path
 
-from bot.prediction_lab_shadow_delta import build_shadow_delta, summarize_shadow_delta_rows
+from bot.file_ops import append_jsonl, load_jsonl
+from bot.prediction_lab_shadow_delta import (
+    build_shadow_delta,
+    build_shadow_delta_compact_review,
+    summarize_shadow_delta_rows,
+    write_shadow_delta_compact_review_jsonl,
+)
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _beta_shadow_policy(*features: str) -> dict:
@@ -56,6 +71,92 @@ def _summary_delta(
         }.items()
         if value is not None or key not in {"dedupe_key"}
     }
+
+
+def _review_artifact() -> dict:
+    return {
+        "mode": "prediction_lab",
+        "market_id": "m-review",
+        "observed_at": "2026-05-15T10:00:00+00:00",
+        "final_action": "BUY_YES",
+        "final_reason_code": "approved",
+        "market_route": {"route_id": "weather.daily_temperature", "group": "weather"},
+        "source_context": {
+            "source": "provided",
+            "source_mode": "recorded_as_of",
+            "as_of": "2026-05-15T10:00:00+00:00",
+            "data": {
+                "market_metadata": {
+                    "market_group": "weather",
+                    "series": "daily_temperature",
+                    "event_ticker": "KXTEST-26MAY15",
+                    "market_route": {"route_id": "weather.daily_temperature"},
+                },
+                "weather_source_snapshot": {
+                    "mode": "recorded_as_of",
+                    "source_name": "weather",
+                    "as_of": "2026-05-15T10:00:00+00:00",
+                    "weather_date": "2026-05-15",
+                    "station_id": "KNYC",
+                    "date_validation": {
+                        "ok": True,
+                        "reason": "matched",
+                        "market_date": "2026-05-15",
+                        "weather_date": "2026-05-15",
+                    },
+                },
+            },
+        },
+        "source_snapshots": [
+            {
+                "mode": "recorded_as_of",
+                "source": "weather",
+                "method": "_live_data_signal",
+                "snapshot_ref": "source_context.data.weather_source_snapshot",
+            }
+        ],
+        "execution_snapshot_source": "book",
+        "order_book_snapshot": {"source": "book", "data": {"best_yes_ask": 0.42}},
+        "pre_logic_order_book_snapshot": {"source": "book", "data": {"best_yes_ask": 0.42}},
+        "post_logic_order_book_snapshot": {"source": "book", "data": {"best_yes_ask": 0.42}},
+    }
+
+
+def _review_row(
+    *,
+    market_id: str = "m-review",
+    run_id: str = "r-review",
+    prediction_id: str | None = None,
+    recorded_prediction: bool | None = None,
+    shadow_delta: dict | None = None,
+    decision_artifact: dict | None = None,
+    patch: dict | None = None,
+) -> dict:
+    row = {
+        "timestamp": "2026-05-15T10:00:00+00:00",
+        "observed_at": "2026-05-15T10:00:00+00:00",
+        "market_id": market_id,
+        "run_id": run_id,
+        "group": "weather",
+        "series": "daily_temperature",
+        "event_ticker": "KXTEST-26MAY15",
+        "market_route": {"route_id": "weather.daily_temperature"},
+        "snapshot_key": market_id,
+        "direction": "BUY_YES",
+        "decision_type": "buy_yes",
+        "weather_risk": {"status": "ok"},
+    }
+    if prediction_id is not None:
+        row["prediction_id"] = prediction_id
+    if recorded_prediction is not None:
+        row["recorded_prediction"] = recorded_prediction
+    if shadow_delta is not None:
+        row["shadow_delta"] = shadow_delta
+    if decision_artifact is not None:
+        row["decision_artifact"] = decision_artifact
+    if patch:
+        row.update(patch)
+    return row
 
 
 class PredictionLabShadowDeltaTests(unittest.TestCase):
@@ -307,6 +408,270 @@ class PredictionLabShadowDeltaTests(unittest.TestCase):
         self.assertEqual(summary["lane_changed"], 1)
         self.assertEqual(summary["action_changed"], 0)
         self.assertEqual(summary["action_unchanged"], 0)
+
+    def test_compact_review_excludes_unchanged_and_no_shadow_rows(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            predictions = Path(tmpdir) / "predictions.jsonl"
+            snapshots = Path(tmpdir) / "market_snapshots.jsonl"
+            append_jsonl(predictions, _review_row(prediction_id="p-no-shadow", recorded_prediction=True))
+            append_jsonl(
+                snapshots,
+                _review_row(
+                    shadow_delta=_summary_delta(
+                        dedupe_key="m-review|r-review|beta-shadow",
+                        changed=False,
+                        action_changed=False,
+                    ),
+                    recorded_prediction=False,
+                ),
+            )
+
+            result = build_shadow_delta_compact_review(
+                predictions_path=predictions,
+                market_snapshots_path=snapshots,
+            )
+
+        self.assertEqual(result["total_input_rows"], 2)
+        self.assertEqual(result["total_shadow_delta_rows"], 1)
+        self.assertEqual(result["exported_rows"], 0)
+        self.assertEqual(result["rows"], [])
+
+    def test_compact_review_dedupes_prediction_snapshot_pair_and_prefers_prediction_row(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            predictions = Path(tmpdir) / "predictions.jsonl"
+            snapshots = Path(tmpdir) / "market_snapshots.jsonl"
+            append_jsonl(
+                snapshots,
+                _review_row(
+                    recorded_prediction=False,
+                    shadow_delta=_summary_delta(
+                        dedupe_key="m-review|r-review|beta-shadow",
+                        changed=True,
+                        action_changed=True,
+                    ),
+                ),
+            )
+            append_jsonl(
+                predictions,
+                _review_row(
+                    prediction_id="p-review",
+                    recorded_prediction=True,
+                    shadow_delta=_summary_delta(
+                        dedupe_key="m-review|r-review|beta-shadow",
+                        changed=True,
+                        action_changed=True,
+                        evidence_sources=["prediction_row_source"],
+                    ),
+                ),
+            )
+
+            result = build_shadow_delta_compact_review(
+                predictions_path=predictions,
+                market_snapshots_path=snapshots,
+            )
+
+        self.assertEqual(result["total_shadow_delta_rows"], 2)
+        self.assertEqual(result["deduped_duplicate_rows"], 1)
+        self.assertEqual(result["exported_rows"], 1)
+        row = result["rows"][0]
+        self.assertEqual(row["source_kind"], "prediction")
+        self.assertEqual(row["prediction_id"], "p-review")
+        self.assertTrue(row["prediction_row_available"])
+        self.assertTrue(row["market_snapshot_row_available"])
+        self.assertEqual(row["shadow_delta"]["evidence_sources"], ["prediction_row_source"])
+
+    def test_compact_review_keeps_partial_beta_evidence_and_action_unavailable_rows(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            predictions = Path(tmpdir) / "predictions.jsonl"
+            snapshots = Path(tmpdir) / "market_snapshots.jsonl"
+            append_jsonl(
+                predictions,
+                _review_row(
+                    market_id="m-partial",
+                    run_id="r-partial",
+                    prediction_id="p-partial",
+                    recorded_prediction=True,
+                    shadow_delta=_summary_delta(
+                        dedupe_key="m-partial|r-partial|beta-shadow",
+                        status="partial_beta_evidence",
+                        changed=False,
+                        action_changed=None,
+                        lane_changed=False,
+                    ),
+                ),
+            )
+            append_jsonl(
+                snapshots,
+                _review_row(
+                    market_id="m-unavailable",
+                    run_id="r-unavailable",
+                    recorded_prediction=False,
+                    shadow_delta=_summary_delta(
+                        dedupe_key="m-unavailable|r-unavailable|beta-shadow",
+                        status="complete",
+                        changed=None,
+                        action_changed=None,
+                        lane_changed=False,
+                    ),
+                ),
+            )
+
+            result = build_shadow_delta_compact_review(
+                predictions_path=predictions,
+                market_snapshots_path=snapshots,
+            )
+
+        self.assertEqual(result["exported_rows"], 2)
+        statuses = {row["market_id"]: row["shadow_delta"]["status"] for row in result["rows"]}
+        self.assertEqual(statuses["m-partial"], "partial_beta_evidence")
+        self.assertEqual(statuses["m-unavailable"], "complete")
+        for row in result["rows"]:
+            self.assertFalse(row["shadow_delta"]["action_comparison_available"])
+
+    def test_compact_review_includes_metadata_without_mutating_or_synthesizing_replay_rows(self):
+        source_row = _review_row(
+            prediction_id="p-review",
+            recorded_prediction=True,
+            shadow_delta=_summary_delta(dedupe_key="m-review|r-review|beta-shadow", changed=True, action_changed=True),
+            decision_artifact=_review_artifact(),
+        )
+        original = copy.deepcopy(source_row)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            predictions = Path(tmpdir) / "predictions.jsonl"
+            snapshots = Path(tmpdir) / "market_snapshots.jsonl"
+            append_jsonl(predictions, source_row)
+            snapshots.write_text("", encoding="utf-8")
+
+            result = build_shadow_delta_compact_review(
+                predictions_path=predictions,
+                market_snapshots_path=snapshots,
+            )
+            stored_rows = load_jsonl(predictions)
+
+        self.assertEqual(source_row, original)
+        self.assertEqual(stored_rows, [original])
+        row = result["rows"][0]
+        self.assertEqual(row["decision_artifact_pointer"], "decision_artifact")
+        self.assertTrue(row["decision_artifact_available"])
+        self.assertEqual(row["route_metadata"]["market_route"]["route_id"], "weather.daily_temperature")
+        self.assertTrue(row["weather_metadata"]["weather_source_snapshot_available"])
+        self.assertEqual(row["weather_metadata"]["station_id"], "KNYC")
+        self.assertEqual(row["source_metadata"]["source_snapshots"][0]["snapshot_ref"], "source_context.data.weather_source_snapshot")
+        self.assertTrue(row["order_book_metadata"]["order_book_snapshot_available"])
+        self.assertNotIn("decision_artifact", row)
+        self.assertNotIn("original_action", row)
+        self.assertNotIn("replayed_action", row)
+
+
+    def test_compact_review_rejects_missing_explicit_inputs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            predictions = Path(tmpdir) / "missing_predictions.jsonl"
+            snapshots = Path(tmpdir) / "market_snapshots.jsonl"
+            snapshots.write_text("", encoding="utf-8")
+
+            with self.assertRaises(FileNotFoundError):
+                build_shadow_delta_compact_review(
+                    predictions_path=predictions,
+                    market_snapshots_path=snapshots,
+                )
+
+    def test_compact_review_writer_rejects_output_alias_without_mutating_input(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            predictions = Path(tmpdir) / "predictions.jsonl"
+            snapshots = Path(tmpdir) / "market_snapshots.jsonl"
+            append_jsonl(
+                predictions,
+                _review_row(
+                    prediction_id="p-review",
+                    recorded_prediction=True,
+                    shadow_delta=_summary_delta(dedupe_key="m-review|r-review|beta-shadow", changed=True, action_changed=True),
+                ),
+            )
+            snapshots.write_text("", encoding="utf-8")
+            before = predictions.read_text(encoding="utf-8")
+
+            with self.assertRaises(ValueError):
+                write_shadow_delta_compact_review_jsonl(
+                    predictions,
+                    predictions_path=predictions,
+                    market_snapshots_path=snapshots,
+                )
+
+            self.assertEqual(predictions.read_text(encoding="utf-8"), before)
+
+    def test_compact_review_cli_writes_jsonl(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            predictions = Path(tmpdir) / "predictions.jsonl"
+            snapshots = Path(tmpdir) / "market_snapshots.jsonl"
+            output = Path(tmpdir) / "shadow_review.jsonl"
+            append_jsonl(
+                predictions,
+                _review_row(
+                    prediction_id="p-review",
+                    recorded_prediction=True,
+                    shadow_delta=_summary_delta(dedupe_key="m-review|r-review|beta-shadow", changed=True, action_changed=True),
+                ),
+            )
+            snapshots.write_text("", encoding="utf-8")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/prediction_lab_shadow_delta_review.py",
+                    "--predictions",
+                    str(predictions),
+                    "--market-snapshots",
+                    str(snapshots),
+                    "--output",
+                    str(output),
+                ],
+                cwd=ROOT,
+                check=False,
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["row_type"], "prediction_lab_shadow_delta_compact_review")
+        self.assertEqual(rows[0]["source_kind"], "prediction")
+
+    def test_compact_review_cli_rejects_output_input_alias(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            predictions = Path(tmpdir) / "predictions.jsonl"
+            snapshots = Path(tmpdir) / "market_snapshots.jsonl"
+            append_jsonl(
+                predictions,
+                _review_row(
+                    prediction_id="p-review",
+                    recorded_prediction=True,
+                    shadow_delta=_summary_delta(dedupe_key="m-review|r-review|beta-shadow", changed=True, action_changed=True),
+                ),
+            )
+            snapshots.write_text("", encoding="utf-8")
+            before = predictions.read_text(encoding="utf-8")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/prediction_lab_shadow_delta_review.py",
+                    "--predictions",
+                    str(predictions),
+                    "--market-snapshots",
+                    str(snapshots),
+                    "--output",
+                    str(predictions),
+                ],
+                cwd=ROOT,
+                check=False,
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertEqual(predictions.read_text(encoding="utf-8"), before)
 
 
 if __name__ == "__main__":

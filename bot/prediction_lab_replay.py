@@ -62,6 +62,8 @@ QUALITY_SYNTHETIC_SOURCE = "synthetic_source"
 QUALITY_HISTORICAL_POST_FACTO = "historical_post_facto"
 QUALITY_MISSING_SOURCE = "missing_source"
 
+SHADOW_DELTA_COMPACT_REVIEW_ROW_TYPE = "prediction_lab_shadow_delta_compact_review"
+
 LIVE_CURRENT_SOURCE_METHODS = (
     "_live_data_signal",
     "_news_signal",
@@ -429,6 +431,8 @@ def load_replay_artifacts(paths: Iterable[str | Path], *, limit: int | None = No
     for path_value in paths:
         path = Path(path_value)
         for index, row in _iter_jsonl_dict_rows(path):
+            if _is_shadow_delta_compact_review_row(row):
+                raise ValueError(f"compact shadow-delta review rows are not replay inputs: {path}:{index}")
             replay_row = _strip_inline_outcomes(row)
             artifact = row.get("decision_artifact")
             if not isinstance(artifact, dict):
@@ -924,11 +928,17 @@ def _coerce_record(value: ReplayArtifactInput | dict[str, Any]) -> ReplayArtifac
     if isinstance(value, ReplayArtifactInput):
         row = _strip_inline_outcomes(value.row)
         return ReplayArtifactInput(row=row, artifact=_strip_artifact_outcomes(value.artifact), source_path=value.source_path, line_number=value.line_number)
+    if _is_shadow_delta_compact_review_row(value):
+        raise ValueError("compact shadow-delta review rows are not replay inputs")
     row = _strip_inline_outcomes(value)
     artifact = row.get("decision_artifact")
     if not isinstance(artifact, dict):
         artifact = _legacy_artifact_from_row(row)
     return ReplayArtifactInput(row=row, artifact=_strip_artifact_outcomes(artifact))
+
+
+def _is_shadow_delta_compact_review_row(row: dict[str, Any]) -> bool:
+    return row.get("row_type") == SHADOW_DELTA_COMPACT_REVIEW_ROW_TYPE
 
 
 def _validate_replay_input_row(
@@ -940,6 +950,17 @@ def _validate_replay_input_row(
     issues: list[PredictionLabValidationIssue],
 ) -> None:
     market_id = str(row.get("market_id") or "")
+    if _is_shadow_delta_compact_review_row(row):
+        _add_validation_issue(
+            issues,
+            "error",
+            "shadow_delta_review_not_replay_input",
+            "compact shadow-delta review rows are not valid replay input",
+            path,
+            line_number,
+            market_id,
+        )
+        return
     for key in ("market_id", "decision_type"):
         if row.get(key) in (None, ""):
             _add_validation_issue(issues, "error", "schema_missing_field", f"missing required field {key}", path, line_number, market_id)

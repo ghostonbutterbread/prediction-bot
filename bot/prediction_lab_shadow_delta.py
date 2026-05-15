@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import json
 from pathlib import Path
 from math import isfinite
 from typing import Any, Iterable
@@ -259,9 +260,376 @@ def format_shadow_delta_summary(summary: dict[str, Any] | None) -> str | None:
     )
 
 
+def build_shadow_delta_compact_review(
+    *,
+    predictions_path: str | Path,
+    market_snapshots_path: str | Path,
+) -> dict[str, Any]:
+    """Build deduped compact review rows for meaningful Prediction Lab shadow deltas.
+
+    The export is a read-only comparison view. It intentionally does not create
+    prediction, replay, or trade-shaped rows.
+    """
+    predictions = _require_jsonl_input_path(predictions_path, label="predictions_path")
+    market_snapshots = _require_jsonl_input_path(market_snapshots_path, label="market_snapshots_path")
+    inputs = [
+        ("prediction", predictions),
+        ("market_snapshot", market_snapshots),
+    ]
+    total_input_rows = 0
+    total_shadow_delta_rows = 0
+    keyed: dict[str, dict[str, Any]] = {}
+    keyed_availability: dict[str, dict[str, bool]] = {}
+    unkeyed: list[dict[str, Any]] = []
+
+    for source_kind, path in inputs:
+        for line_number, raw_row in _iter_jsonl_dict_rows(path):
+            total_input_rows += 1
+            shadow_delta = raw_row.get("shadow_delta")
+            if not isinstance(shadow_delta, dict) or not shadow_delta:
+                continue
+            total_shadow_delta_rows += 1
+            row = dict(raw_row)
+            row["_source_path"] = str(path)
+            row["_source_kind"] = source_kind
+            row["_source_line_number"] = line_number
+            key = _shadow_delta_summary_key(row, shadow_delta, prediction_lab_rows=True)
+            if key is None:
+                unkeyed.append(
+                    {
+                        "row": row,
+                        "source_kind": source_kind,
+                        "source_path": str(path),
+                        "line_number": line_number,
+                        "availability": _review_source_availability(source_kind),
+                    }
+                )
+                continue
+
+            availability = keyed_availability.setdefault(
+                key,
+                {"prediction_row_available": False, "market_snapshot_row_available": False},
+            )
+            if source_kind == "prediction":
+                availability["prediction_row_available"] = True
+            elif source_kind == "market_snapshot":
+                availability["market_snapshot_row_available"] = True
+
+            existing = keyed.get(key)
+            candidate = {
+                "row": row,
+                "source_kind": source_kind,
+                "source_path": str(path),
+                "line_number": line_number,
+                "dedupe_key": key,
+            }
+            if existing is None or _prefer_shadow_delta_summary_row(row, existing["row"]):
+                keyed[key] = candidate
+
+    opportunity_items: list[dict[str, Any]] = []
+    for key, item in keyed.items():
+        opportunity_items.append({**item, "availability": dict(keyed_availability.get(key) or {})})
+    opportunity_items.extend(unkeyed)
+
+    exported_rows = [
+        _build_shadow_delta_review_row(item)
+        for item in opportunity_items
+        if _meaningful_shadow_delta(_shadow_delta(item["row"]))
+    ]
+    exported_rows.sort(key=_shadow_delta_review_sort_key)
+
+    return {
+        "schema_version": 1,
+        "basis": "prediction_lab_shadow_delta_compact_review",
+        "inputs": {
+            "predictions_path": str(Path(predictions_path)),
+            "market_snapshots_path": str(Path(market_snapshots_path)),
+        },
+        "total_input_rows": total_input_rows,
+        "total_shadow_delta_rows": total_shadow_delta_rows,
+        "total_shadow_delta_opportunities": len(opportunity_items),
+        "deduped_duplicate_rows": total_shadow_delta_rows - len(opportunity_items),
+        "exported_rows": len(exported_rows),
+        "excluded_unmeaningful_rows": len(opportunity_items) - len(exported_rows),
+        "rows": exported_rows,
+    }
+
+
+def write_shadow_delta_compact_review_jsonl(
+    output_path: str | Path,
+    *,
+    predictions_path: str | Path,
+    market_snapshots_path: str | Path,
+) -> dict[str, Any]:
+    """Write compact review rows as JSONL and return the export summary."""
+    path = Path(output_path)
+    _reject_output_input_alias(path, [predictions_path, market_snapshots_path])
+    result = build_shadow_delta_compact_review(
+        predictions_path=predictions_path,
+        market_snapshots_path=market_snapshots_path,
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as fh:
+        for row in result["rows"]:
+            fh.write(json.dumps(row, sort_keys=True) + "\n")
+    return {key: value for key, value in result.items() if key != "rows"}
+
+
 def _shadow_delta(row: dict[str, Any]) -> dict[str, Any]:
     shadow_delta = row.get("shadow_delta")
     return shadow_delta if isinstance(shadow_delta, dict) else {}
+
+
+def _require_jsonl_input_path(path_value: str | Path, *, label: str) -> Path:
+    path = Path(path_value)
+    if not path.exists():
+        raise FileNotFoundError(f"{label} does not exist: {path}")
+    if not path.is_file():
+        raise ValueError(f"{label} is not a file: {path}")
+    return path
+
+
+def _reject_output_input_alias(output_path: str | Path, input_paths: Iterable[str | Path]) -> None:
+    output_key = _path_alias_key(output_path)
+    for input_path in input_paths:
+        if output_key == _path_alias_key(input_path):
+            raise ValueError("shadow-delta review output must be separate from predictions.jsonl and market_snapshots.jsonl inputs")
+
+
+def _path_alias_key(path_value: str | Path) -> Path:
+    return Path(path_value).expanduser().resolve(strict=False)
+
+
+def _iter_jsonl_dict_rows(path: Path):
+    with path.open("r", encoding="utf-8") as fh:
+        for line_number, line in enumerate(fh, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(row, dict):
+                yield line_number, row
+
+
+def _review_source_availability(source_kind: str) -> dict[str, bool]:
+    return {
+        "prediction_row_available": source_kind == "prediction",
+        "market_snapshot_row_available": source_kind == "market_snapshot",
+    }
+
+
+def _meaningful_shadow_delta(shadow_delta: dict[str, Any]) -> bool:
+    if not isinstance(shadow_delta, dict) or not shadow_delta:
+        return False
+    if shadow_delta.get("changed") is True:
+        return True
+    if shadow_delta.get("status") == "partial_beta_evidence":
+        return True
+    if shadow_delta.get("action_comparison_available") is False:
+        return True
+    return any(
+        shadow_delta.get(key) is True
+        for key in (
+            "action_changed",
+            "side_changed",
+            "buy_decision_changed",
+            "reason_changed",
+            "size_changed",
+            "lane_changed",
+        )
+    )
+
+
+def _build_shadow_delta_review_row(item: dict[str, Any]) -> dict[str, Any]:
+    row = item["row"]
+    shadow_delta = _compact_shadow_delta(_shadow_delta(row))
+    artifact = row.get("decision_artifact") if isinstance(row.get("decision_artifact"), dict) else {}
+    source_kind = str(item.get("source_kind") or row.get("_source_kind") or "unknown")
+    source_path = str(item.get("source_path") or row.get("_source_path") or "")
+    availability = dict(item.get("availability") or _review_source_availability(source_kind))
+    review_row = {
+        "schema_version": 1,
+        "row_type": "prediction_lab_shadow_delta_compact_review",
+        "market_id": row.get("market_id") or artifact.get("market_id"),
+        "run_id": row.get("run_id"),
+        "prediction_id": row.get("prediction_id"),
+        "observed_at": row.get("observed_at") or artifact.get("observed_at") or row.get("timestamp"),
+        "snapshot_key": row.get("snapshot_key"),
+        "recorded_prediction": row.get("recorded_prediction"),
+        "source_kind": source_kind,
+        "source_path": source_path,
+        "source_line_number": item.get("line_number") or row.get("_source_line_number"),
+        "prediction_row_available": availability.get("prediction_row_available") is True,
+        "market_snapshot_row_available": availability.get("market_snapshot_row_available") is True,
+        "decision_artifact_available": bool(artifact),
+        "decision_artifact_pointer": "decision_artifact" if artifact else None,
+        "decision_artifact_mode": artifact.get("mode") if artifact else None,
+        "decision_artifact_final_action": artifact.get("final_action") if artifact else None,
+        "decision_artifact_final_reason_code": artifact.get("final_reason_code") if artifact else None,
+        "shadow_delta": shadow_delta,
+    }
+    for field_name, value in (
+        ("route_metadata", _compact_route_metadata(row, artifact)),
+        ("weather_metadata", _compact_weather_metadata(row, artifact)),
+        ("source_metadata", _compact_source_metadata(artifact)),
+        ("order_book_metadata", _compact_order_book_metadata(artifact)),
+    ):
+        if value:
+            review_row[field_name] = value
+    return review_row
+
+
+def _compact_shadow_delta(shadow_delta: dict[str, Any]) -> dict[str, Any]:
+    keys = (
+        "schema_version",
+        "mode",
+        "status",
+        "comparison_complete",
+        "action_comparison_available",
+        "policy",
+        "stable",
+        "shadow",
+        "changed",
+        "action_changed",
+        "side_changed",
+        "buy_decision_changed",
+        "reason_changed",
+        "size_changed",
+        "lane_changed",
+        "dedupe_key",
+        "evidence_sources",
+    )
+    return {key: shadow_delta.get(key) for key in keys if key in shadow_delta}
+
+
+def _compact_route_metadata(row: dict[str, Any], artifact: dict[str, Any]) -> dict[str, Any]:
+    source_data = _artifact_source_data(artifact)
+    market_metadata = source_data.get("market_metadata") if isinstance(source_data.get("market_metadata"), dict) else {}
+    route = row.get("market_route") or artifact.get("market_route") or market_metadata.get("market_route")
+    compact = {
+        "market_route": route,
+        "group": row.get("group") or market_metadata.get("market_group"),
+        "series": row.get("series") or market_metadata.get("series"),
+        "event_ticker": row.get("event_ticker") or market_metadata.get("event_ticker"),
+    }
+    return _drop_empty(compact)
+
+
+def _compact_weather_metadata(row: dict[str, Any], artifact: dict[str, Any]) -> dict[str, Any]:
+    source_data = _artifact_source_data(artifact)
+    weather_snapshot = (
+        source_data.get("weather_source_snapshot")
+        if isinstance(source_data.get("weather_source_snapshot"), dict)
+        else {}
+    )
+    weather_risk = row.get("weather_risk") if isinstance(row.get("weather_risk"), dict) else {}
+    date_validation = (
+        weather_snapshot.get("date_validation")
+        if isinstance(weather_snapshot.get("date_validation"), dict)
+        else {}
+    )
+    compact = {
+        "weather_source_snapshot_available": bool(weather_snapshot),
+        "weather_risk_available": bool(weather_risk),
+        "source_name": weather_snapshot.get("source_name"),
+        "source_mode": weather_snapshot.get("mode") or weather_snapshot.get("source_mode"),
+        "as_of": weather_snapshot.get("as_of") or weather_snapshot.get("source_as_of"),
+        "weather_date": weather_snapshot.get("weather_date") or date_validation.get("weather_date"),
+        "date_validation": date_validation or None,
+        "station_id": weather_snapshot.get("station_id"),
+        "station_cli": weather_snapshot.get("station_cli"),
+    }
+    return _drop_empty(compact, keep_false_keys={"weather_source_snapshot_available", "weather_risk_available"})
+
+
+def _compact_source_metadata(artifact: dict[str, Any]) -> dict[str, Any]:
+    source_context = artifact.get("source_context") if isinstance(artifact.get("source_context"), dict) else {}
+    snapshots = artifact.get("source_snapshots") if isinstance(artifact.get("source_snapshots"), list) else []
+    compact_snapshots = []
+    for snapshot in snapshots:
+        if not isinstance(snapshot, dict):
+            continue
+        compact_snapshots.append(
+            _drop_empty(
+                {
+                    "mode": snapshot.get("mode"),
+                    "source": snapshot.get("source") or snapshot.get("source_name"),
+                    "method": snapshot.get("method"),
+                    "snapshot_ref": snapshot.get("snapshot_ref"),
+                }
+            )
+        )
+    compact = {
+        "source_context_available": bool(source_context),
+        "source": source_context.get("source"),
+        "source_mode": source_context.get("source_mode") or source_context.get("mode"),
+        "as_of": source_context.get("as_of"),
+        "source_snapshots": [snapshot for snapshot in compact_snapshots if snapshot],
+    }
+    return _drop_empty(compact, keep_false_keys={"source_context_available"})
+
+
+def _compact_order_book_metadata(artifact: dict[str, Any]) -> dict[str, Any]:
+    compact = {
+        "execution_snapshot_source": artifact.get("execution_snapshot_source"),
+        "order_book_snapshot_source": _snapshot_envelope_source(artifact, "order_book_snapshot"),
+        "order_book_snapshot_available": _snapshot_envelope_available(artifact, "order_book_snapshot"),
+        "pre_logic_order_book_snapshot_source": _snapshot_envelope_source(artifact, "pre_logic_order_book_snapshot"),
+        "pre_logic_order_book_snapshot_available": _snapshot_envelope_available(artifact, "pre_logic_order_book_snapshot"),
+        "post_logic_order_book_snapshot_source": _snapshot_envelope_source(artifact, "post_logic_order_book_snapshot"),
+        "post_logic_order_book_snapshot_available": _snapshot_envelope_available(artifact, "post_logic_order_book_snapshot"),
+    }
+    return _drop_empty(
+        compact,
+        keep_false_keys={
+            "order_book_snapshot_available",
+            "pre_logic_order_book_snapshot_available",
+            "post_logic_order_book_snapshot_available",
+        },
+    )
+
+
+def _artifact_source_data(artifact: dict[str, Any]) -> dict[str, Any]:
+    source_context = artifact.get("source_context") if isinstance(artifact.get("source_context"), dict) else {}
+    data = source_context.get("data") if isinstance(source_context.get("data"), dict) else {}
+    return data
+
+
+def _snapshot_envelope_source(artifact: dict[str, Any], key: str) -> Any:
+    envelope = artifact.get(key) if isinstance(artifact.get(key), dict) else {}
+    return envelope.get("source") or envelope.get("mode")
+
+
+def _snapshot_envelope_available(artifact: dict[str, Any], key: str) -> bool:
+    envelope = artifact.get(key) if isinstance(artifact.get(key), dict) else {}
+    data = envelope.get("data")
+    return isinstance(data, dict) and bool(data)
+
+
+def _drop_empty(value: dict[str, Any], *, keep_false_keys: set[str] | None = None) -> dict[str, Any]:
+    keep_false_keys = keep_false_keys or set()
+    return {
+        key: item
+        for key, item in value.items()
+        if item not in (None, "", [])
+        and (item is not False or key in keep_false_keys)
+        and (item != {} or key in keep_false_keys)
+    }
+
+
+def _shadow_delta_review_sort_key(row: dict[str, Any]) -> tuple[str, str, str, str, str, str, int]:
+    return (
+        str(row.get("observed_at") or ""),
+        str(row.get("market_id") or ""),
+        str(row.get("run_id") or ""),
+        str(row.get("prediction_id") or ""),
+        str(row.get("source_kind") or ""),
+        str(row.get("source_path") or ""),
+        int(row.get("source_line_number") or 0),
+    )
 
 
 def _shadow_delta_summary_key(
@@ -489,4 +857,10 @@ def _coerce_finite_number(value: Any) -> float | None:
     return round(numeric, 4)
 
 
-__all__ = ["build_shadow_delta", "format_shadow_delta_summary", "summarize_shadow_delta_rows"]
+__all__ = [
+    "build_shadow_delta",
+    "build_shadow_delta_compact_review",
+    "format_shadow_delta_summary",
+    "summarize_shadow_delta_rows",
+    "write_shadow_delta_compact_review_jsonl",
+]
