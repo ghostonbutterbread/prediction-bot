@@ -15,7 +15,15 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from bot.weather.source_reliability import build_source_outcome_ledger_rows  # noqa: E402
-from bot.weather.source_scoreboard import build_source_scoreboard, load_jsonl_rows  # noqa: E402
+from bot.weather.source_scoreboard import (  # noqa: E402
+    build_missing_data_notes,
+    build_scoreboard_report,
+    build_source_scoreboard,
+    load_jsonl_rows,
+    render_leaderboard_markdown,
+    render_scoreboard_report_markdown,
+    render_slices_markdown,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -46,6 +54,12 @@ def parse_args_from(argv: list[str]) -> argparse.Namespace:
         default=None,
         help="Optional JSONL path where source-outcome ledger rows will be written.",
     )
+    parser.add_argument(
+        "--report-limit",
+        type=int,
+        default=25,
+        help="Number of rows to include in each ranked markdown/report section.",
+    )
     return parser.parse_args(argv)
 
 
@@ -53,6 +67,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args() if argv is None else parse_args_from(argv)
     if args.limit is not None and args.limit < 0:
         raise SystemExit("--limit must be non-negative")
+    if args.report_limit < 0:
+        raise SystemExit("--report-limit must be non-negative")
 
     input_paths = [_resolve_path(path) for path in args.input]
     output_dir = _resolve_path(args.output_dir)
@@ -84,17 +100,59 @@ def main(argv: list[str] | None = None) -> int:
     if ledger_output is not None:
         metadata["ledger_output"] = str(ledger_output)
         metadata["ledger_rows"] = len(ledger_rows) if ledger_rows is not None else 0
+    metadata["missing_data_notes"] = build_missing_data_notes(scoreboard)
+    metadata["report_limit"] = args.report_limit
+
+    report = build_scoreboard_report(scoreboard, run_metadata=metadata, limit=args.report_limit)
+    best_rows = report["best_slices"]
+    worst_rows = report["worst_slices"]
+    leaderboards = report["leaderboards"]
 
     _write_json(output_dir / "source_scoreboard.json", scoreboard)
     _write_jsonl(output_dir / "source_scoreboard_by_slice.jsonl", scoreboard["slices"])
+    _write_json(output_dir / "source_scoreboard_report.json", report)
+    (output_dir / "source_scoreboard_report.md").write_text(
+        render_scoreboard_report_markdown(report),
+        encoding="utf-8",
+    )
+    _write_jsonl(output_dir / "best_slices.jsonl", best_rows)
+    _write_jsonl(output_dir / "worst_slices.jsonl", worst_rows)
     (output_dir / "best_slices.md").write_text(
-        _render_slices_markdown("Best Slices", _best_slices(scoreboard["slices"])),
+        render_slices_markdown("Best Slices", best_rows),
         encoding="utf-8",
     )
     (output_dir / "worst_slices.md").write_text(
-        _render_slices_markdown("Worst Slices", _worst_slices(scoreboard["slices"])),
+        render_slices_markdown("Worst Slices", worst_rows),
         encoding="utf-8",
     )
+    for leaderboard_name, file_stem, title in (
+        ("sources", "source", "Source Leaderboard"),
+        ("cities", "city", "City Leaderboard"),
+        ("types", "type", "Type Leaderboard"),
+    ):
+        rows_for_leaderboard = list(leaderboards.get(leaderboard_name) or [])
+        _write_jsonl(output_dir / f"{file_stem}_leaderboard.jsonl", rows_for_leaderboard)
+        (output_dir / f"{file_stem}_leaderboard.md").write_text(
+            render_leaderboard_markdown(title, rows_for_leaderboard),
+            encoding="utf-8",
+        )
+    metadata["artifacts"] = [
+        "source_scoreboard.json",
+        "source_scoreboard_by_slice.jsonl",
+        "source_scoreboard_report.json",
+        "source_scoreboard_report.md",
+        "best_slices.jsonl",
+        "best_slices.md",
+        "worst_slices.jsonl",
+        "worst_slices.md",
+        "source_leaderboard.jsonl",
+        "source_leaderboard.md",
+        "city_leaderboard.jsonl",
+        "city_leaderboard.md",
+        "type_leaderboard.jsonl",
+        "type_leaderboard.md",
+        "run_metadata.json",
+    ]
     _write_json(output_dir / "run_metadata.json", metadata)
 
     summary_parts = [
@@ -128,71 +186,6 @@ def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     with path.open("w", encoding="utf-8") as fh:
         for row in rows:
             fh.write(json.dumps(row, sort_keys=True) + "\n")
-
-
-def _best_slices(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return sorted(
-        rows,
-        key=lambda row: (
-            row.get("threshold_direction_accuracy") is not None,
-            row.get("threshold_direction_accuracy") or -1,
-            row.get("within_3f_rate") or -1,
-            -(row.get("mae") or 999999),
-            row.get("sample_count") or 0,
-        ),
-        reverse=True,
-    )[:25]
-
-
-def _worst_slices(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    scored = [row for row in rows if row.get("sample_count")]
-    return sorted(
-        scored,
-        key=lambda row: (
-            row.get("threshold_direction_accuracy") is None,
-            row.get("threshold_direction_accuracy") if row.get("threshold_direction_accuracy") is not None else 2,
-            -(row.get("mae") or 0),
-            -(row.get("sample_count") or 0),
-        ),
-    )[:25]
-
-
-def _render_slices_markdown(title: str, rows: list[dict[str, Any]]) -> str:
-    lines = [
-        f"# {title}",
-        "",
-        "| source | city | kind | shape | samples | mae | bias | dir_acc | within_3f |",
-        "|---|---|---|---:|---:|---:|---:|---:|---:|",
-    ]
-    if not rows:
-        lines.append("| none | none | none | none | 0 | n/a | n/a | n/a | n/a |")
-    for row in rows:
-        lines.append(
-            "| "
-            f"{_cell(row.get('source_name'))} | "
-            f"{_cell(row.get('city_id'))} | "
-            f"{_cell(row.get('market_kind'))} | "
-            f"{_cell(row.get('contract_shape'))} | "
-            f"{row.get('sample_count') or 0} | "
-            f"{_metric(row.get('mae'))} | "
-            f"{_metric(row.get('mean_bias'))} | "
-            f"{_metric(row.get('threshold_direction_accuracy'))} | "
-            f"{_metric(row.get('within_3f_rate'))} |"
-        )
-    lines.append("")
-    return "\n".join(lines)
-
-
-def _cell(value: Any) -> str:
-    return str(value if value not in (None, "") else "unknown").replace("|", "/")
-
-
-def _metric(value: Any) -> str:
-    if value is None:
-        return "n/a"
-    if isinstance(value, float):
-        return f"{value:.4f}".rstrip("0").rstrip(".")
-    return str(value)
 
 
 if __name__ == "__main__":

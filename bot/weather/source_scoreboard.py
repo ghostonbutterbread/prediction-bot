@@ -25,7 +25,9 @@ from bot.weather.thresholds import (
 
 
 SCHEMA_VERSION = 1
+REPORT_SCHEMA_VERSION = 1
 WITHIN_BUCKETS_F = (1, 2, 3, 5)
+DEFAULT_REPORT_LIMIT = 25
 
 
 @dataclass(frozen=True)
@@ -205,6 +207,249 @@ def build_source_scoreboard(
         "slice_count": len(slice_rows),
     }
     return {"schema_version": SCHEMA_VERSION, "summary": summary, "slices": slice_rows}
+
+
+def build_scoreboard_report(
+    scoreboard: dict[str, Any],
+    *,
+    run_metadata: dict[str, Any] | None = None,
+    limit: int = DEFAULT_REPORT_LIMIT,
+) -> dict[str, Any]:
+    """Build repeatable offline report slices and leaderboards from a scoreboard."""
+
+    slices = [row for row in scoreboard.get("slices", []) if isinstance(row, dict)]
+    report_limit = max(0, limit)
+    leaderboards = {
+        "sources": _leaderboard(slices, ("source_id", "source_name"), "source"),
+        "cities": _leaderboard(slices, ("city_id", "city_name"), "city"),
+        "types": _leaderboard(slices, ("market_kind", "contract_shape"), "type"),
+    }
+    notes = build_missing_data_notes(scoreboard)
+    generated_at = None
+    if isinstance(run_metadata, dict):
+        generated_at = _string_or_none(run_metadata.get("generated_at"))
+    generated_at = generated_at or datetime.now(timezone.utc).isoformat()
+    return {
+        "schema_version": REPORT_SCHEMA_VERSION,
+        "scoreboard_schema_version": scoreboard.get("schema_version", SCHEMA_VERSION),
+        "generated_at": generated_at,
+        "report_limit": report_limit,
+        "summary": dict(scoreboard.get("summary", {})),
+        "run_metadata": dict(run_metadata or {}),
+        "missing_data_notes": notes,
+        "best_slices": best_slices(slices, limit=report_limit),
+        "worst_slices": worst_slices(slices, limit=report_limit),
+        "leaderboards": {
+            name: rows[:report_limit] if report_limit else []
+            for name, rows in leaderboards.items()
+        },
+        "leaderboard_totals": {
+            name: len(rows)
+            for name, rows in leaderboards.items()
+        },
+    }
+
+
+def build_missing_data_notes(scoreboard: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return conservative notes explaining data gaps that affect scoring."""
+
+    summary = scoreboard.get("summary", {}) if isinstance(scoreboard.get("summary"), dict) else {}
+    slices = [row for row in scoreboard.get("slices", []) if isinstance(row, dict)]
+    notes: list[dict[str, Any]] = []
+
+    def add(code: str, message: str, count: int | None = None) -> None:
+        note: dict[str, Any] = {"code": code, "severity": "info", "message": message}
+        if count is not None:
+            note["count"] = count
+        notes.append(note)
+
+    rows_without_observations = int(summary.get("rows_without_observations") or 0)
+    missing_forecast = int(summary.get("observations_missing_forecast") or 0)
+    missing_actual = int(summary.get("observations_missing_actual") or 0)
+    observations_scored = int(summary.get("observations_scored") or 0)
+    observations_extracted = int(summary.get("observations_extracted") or 0)
+    if rows_without_observations:
+        add(
+            "rows_without_source_observations",
+            "Some input rows did not expose source forecast observations and are excluded from slice scoring.",
+            rows_without_observations,
+        )
+    if missing_forecast:
+        add(
+            "missing_forecast_temperatures",
+            "Some source observations named a source but did not include a usable forecast temperature.",
+            missing_forecast,
+        )
+    if missing_actual:
+        add(
+            "missing_actual_temperatures",
+            "Some source observations lacked a usable actual or resolved temperature, so error metrics omit them.",
+            missing_actual,
+        )
+    if observations_extracted and observations_scored == 0:
+        add(
+            "no_scored_observations",
+            "No observations had both forecast and actual temperatures; rankings are coverage-only placeholders.",
+            observations_extracted,
+        )
+
+    missing_threshold = _sum_missing(slices, "missing_threshold")
+    threshold_ties = _sum_missing(slices, "threshold_tie")
+    if missing_threshold:
+        add(
+            "missing_thresholds",
+            "Some scored observations could not be used for threshold direction accuracy because no threshold was available.",
+            missing_threshold,
+        )
+    if threshold_ties:
+        add(
+            "threshold_ties",
+            "Some scored observations landed exactly on the threshold and are omitted from direction accuracy.",
+            threshold_ties,
+        )
+
+    date_validation_failures = sum(
+        count
+        for row in slices
+        for reason, count in (row.get("missing") or {}).items()
+        if str(reason).startswith("date_validation_failed:")
+    )
+    if date_validation_failures:
+        add(
+            "date_validation_failures",
+            "Some observations failed market/weather date validation and are treated as missing actual temperatures.",
+            int(date_validation_failures),
+        )
+    if not notes:
+        add(
+            "no_missing_data_flags",
+            "No missing-data flags were emitted by the offline scorer for this run.",
+            0,
+        )
+    return notes
+
+
+def best_slices(rows: list[dict[str, Any]], *, limit: int = DEFAULT_REPORT_LIMIT) -> list[dict[str, Any]]:
+    return sorted(rows, key=_quality_sort_key, reverse=True)[: max(0, limit)]
+
+
+def worst_slices(rows: list[dict[str, Any]], *, limit: int = DEFAULT_REPORT_LIMIT) -> list[dict[str, Any]]:
+    scored = [row for row in rows if row.get("sample_count")]
+    return sorted(scored, key=_risk_sort_key)[: max(0, limit)]
+
+
+def render_slices_markdown(title: str, rows: list[dict[str, Any]]) -> str:
+    lines = [
+        f"# {title}",
+        "",
+        "| source | city | kind | shape | obs | scored | mae | bias | dir_acc | within_3f | missing |",
+        "|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    if not rows:
+        lines.append("| none | none | none | none | 0 | 0 | n/a | n/a | n/a | n/a | 0 |")
+    for row in rows:
+        lines.append(
+            "| "
+            f"{_markdown_cell(row.get('source_name'))} | "
+            f"{_markdown_cell(row.get('city_id'))} | "
+            f"{_markdown_cell(row.get('market_kind'))} | "
+            f"{_markdown_cell(row.get('contract_shape'))} | "
+            f"{row.get('total_observations') or 0} | "
+            f"{row.get('sample_count') or 0} | "
+            f"{_format_metric(row.get('mae'))} | "
+            f"{_format_metric(row.get('mean_bias'))} | "
+            f"{_format_metric(row.get('threshold_direction_accuracy'))} | "
+            f"{_format_metric(row.get('within_3f_rate'))} | "
+            f"{sum((row.get('missing') or {}).values())} |"
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def render_leaderboard_markdown(title: str, rows: list[dict[str, Any]]) -> str:
+    lines = [
+        f"# {title}",
+        "",
+        "| rank | label | slices | obs | scored | coverage | mae | bias | dir_acc | within_3f | missing |",
+        "|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    if not rows:
+        lines.append("| 0 | none | 0 | 0 | 0 | n/a | n/a | n/a | n/a | n/a | 0 |")
+    for row in rows:
+        lines.append(
+            "| "
+            f"{row.get('rank') or 0} | "
+            f"{_markdown_cell(row.get('label'))} | "
+            f"{row.get('slice_count') or 0} | "
+            f"{row.get('total_observations') or 0} | "
+            f"{row.get('sample_count') or 0} | "
+            f"{_format_metric(row.get('coverage_rate'))} | "
+            f"{_format_metric(row.get('mae'))} | "
+            f"{_format_metric(row.get('mean_bias'))} | "
+            f"{_format_metric(row.get('threshold_direction_accuracy'))} | "
+            f"{_format_metric(row.get('within_3f_rate'))} | "
+            f"{sum((row.get('missing') or {}).values())} |"
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def render_scoreboard_report_markdown(report: dict[str, Any]) -> str:
+    summary = report.get("summary", {}) if isinstance(report.get("summary"), dict) else {}
+    run_metadata = report.get("run_metadata", {}) if isinstance(report.get("run_metadata"), dict) else {}
+    leaderboards = report.get("leaderboards", {}) if isinstance(report.get("leaderboards"), dict) else {}
+    notes = report.get("missing_data_notes") if isinstance(report.get("missing_data_notes"), list) else []
+
+    lines = [
+        "# Weather Source Scoreboard Report",
+        "",
+        "## Run Metadata",
+        "",
+        f"- generated_at: {_markdown_cell(report.get('generated_at'))}",
+        f"- mode: {_markdown_cell(run_metadata.get('mode'))}",
+        f"- network_access: {_markdown_cell(run_metadata.get('network_access'))}",
+        f"- inputs: {len(run_metadata.get('inputs') or [])}",
+        f"- limit: {_markdown_cell(run_metadata.get('limit'))}",
+        "",
+        "## Summary",
+        "",
+        "| rows | observations | scored | slices | missing_actual | missing_forecast |",
+        "|---:|---:|---:|---:|---:|---:|",
+        "| "
+        f"{summary.get('input_rows') or 0} | "
+        f"{summary.get('observations_extracted') or 0} | "
+        f"{summary.get('observations_scored') or 0} | "
+        f"{summary.get('slice_count') or 0} | "
+        f"{summary.get('observations_missing_actual') or 0} | "
+        f"{summary.get('observations_missing_forecast') or 0} |",
+        "",
+        "## Missing Data Notes",
+        "",
+    ]
+    for note in notes:
+        if not isinstance(note, dict):
+            continue
+        count = note.get("count")
+        suffix = f" ({count})" if count is not None else ""
+        lines.append(f"- {note.get('code', 'note')}: {note.get('message', '')}{suffix}")
+    if not notes:
+        lines.append("- none")
+    lines.extend(
+        [
+            "",
+            render_leaderboard_markdown("Source Leaderboard", list(leaderboards.get("sources") or [])).rstrip(),
+            "",
+            render_leaderboard_markdown("City Leaderboard", list(leaderboards.get("cities") or [])).rstrip(),
+            "",
+            render_leaderboard_markdown("Type Leaderboard", list(leaderboards.get("types") or [])).rstrip(),
+            "",
+            render_slices_markdown("Best Slices", list(report.get("best_slices") or [])).rstrip(),
+            "",
+            render_slices_markdown("Worst Slices", list(report.get("worst_slices") or [])).rstrip(),
+            "",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def extract_source_forecast_observations(
@@ -745,3 +990,135 @@ def _slice_sort_key(row: dict[str, Any]) -> tuple[Any, ...]:
         row["market_kind"],
         row["contract_shape"],
     )
+
+
+def _leaderboard(
+    slices: list[dict[str, Any]],
+    group_fields: tuple[str, ...],
+    group_kind: str,
+) -> list[dict[str, Any]]:
+    groups: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for row in slices:
+        key = tuple(row.get(field) or "unknown" for field in group_fields)
+        group = groups.setdefault(
+            key,
+            {
+                "kind": group_kind,
+                "key": {field: key[index] for index, field in enumerate(group_fields)},
+                "label": _leaderboard_label(group_fields, key),
+                "slice_count": 0,
+                "total_observations": 0,
+                "sample_count": 0,
+                "absolute_error_sum": 0.0,
+                "bias_sum": 0.0,
+                "threshold_sample_count": 0,
+                "threshold_correct_count": 0,
+                "within_sums": {bucket: 0.0 for bucket in WITHIN_BUCKETS_F},
+                "missing": Counter(),
+            },
+        )
+        sample_count = int(row.get("sample_count") or 0)
+        total_observations = int(row.get("total_observations") or 0)
+        group["slice_count"] += 1
+        group["total_observations"] += total_observations
+        group["sample_count"] += sample_count
+        if row.get("mae") is not None:
+            group["absolute_error_sum"] += float(row["mae"]) * sample_count
+        if row.get("mean_bias") is not None:
+            group["bias_sum"] += float(row["mean_bias"]) * sample_count
+        group["threshold_sample_count"] += int(row.get("threshold_sample_count") or 0)
+        group["threshold_correct_count"] += int(row.get("threshold_correct_count") or 0)
+        for bucket in WITHIN_BUCKETS_F:
+            rate = row.get(f"within_{bucket}f_rate")
+            if rate is not None:
+                group["within_sums"][bucket] += float(rate) * sample_count
+        missing = row.get("missing") or {}
+        if isinstance(missing, dict):
+            group["missing"].update({str(reason): int(count or 0) for reason, count in missing.items()})
+
+    rows: list[dict[str, Any]] = []
+    for group in groups.values():
+        sample_count = int(group["sample_count"])
+        total_observations = int(group["total_observations"])
+        threshold_count = int(group["threshold_sample_count"])
+        output = {
+            "kind": group["kind"],
+            "key": group["key"],
+            **group["key"],
+            "label": group["label"],
+            "slice_count": group["slice_count"],
+            "total_observations": total_observations,
+            "sample_count": sample_count,
+            "coverage_rate": _rate(sample_count, total_observations),
+            "mae": _round_metric(group["absolute_error_sum"] / sample_count) if sample_count else None,
+            "mean_bias": _round_metric(group["bias_sum"] / sample_count) if sample_count else None,
+            "threshold_sample_count": threshold_count,
+            "threshold_correct_count": group["threshold_correct_count"],
+            "threshold_direction_accuracy": _rate(group["threshold_correct_count"], threshold_count),
+            "within_1f_rate": _weighted_rate(group["within_sums"][1], sample_count),
+            "within_2f_rate": _weighted_rate(group["within_sums"][2], sample_count),
+            "within_3f_rate": _weighted_rate(group["within_sums"][3], sample_count),
+            "within_5f_rate": _weighted_rate(group["within_sums"][5], sample_count),
+            "missing": dict(sorted(group["missing"].items())),
+        }
+        rows.append(output)
+
+    ranked = sorted(rows, key=_quality_sort_key, reverse=True)
+    for rank, row in enumerate(ranked, start=1):
+        row["rank"] = rank
+    return ranked
+
+
+def _leaderboard_label(group_fields: tuple[str, ...], key: tuple[Any, ...]) -> str:
+    values = [str(value if value not in (None, "") else "unknown") for value in key]
+    if group_fields == ("source_id", "source_name"):
+        return values[1] if values[1] != "unknown" else values[0]
+    if group_fields == ("city_id", "city_name"):
+        return values[1] if values[1] != "unknown" else values[0]
+    if group_fields == ("market_kind", "contract_shape"):
+        return " / ".join(values)
+    return " / ".join(values)
+
+
+def _weighted_rate(numerator: float, denominator: int) -> float | None:
+    if not denominator:
+        return None
+    return _round_metric(numerator / denominator)
+
+
+def _quality_sort_key(row: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        row.get("threshold_direction_accuracy") is not None,
+        row.get("threshold_direction_accuracy") or -1,
+        row.get("within_3f_rate") or -1,
+        -(row.get("mae") if row.get("mae") is not None else 999999),
+        row.get("sample_count") or 0,
+        row.get("total_observations") or 0,
+        str(row.get("label") or row.get("source_name") or row.get("city_id") or ""),
+    )
+
+
+def _risk_sort_key(row: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        row.get("threshold_direction_accuracy") is None,
+        row.get("threshold_direction_accuracy") if row.get("threshold_direction_accuracy") is not None else 2,
+        -(row.get("mae") or 0),
+        row.get("within_3f_rate") if row.get("within_3f_rate") is not None else 2,
+        -(row.get("sample_count") or 0),
+    )
+
+
+def _sum_missing(rows: list[dict[str, Any]], reason: str) -> int:
+    return sum(int((row.get("missing") or {}).get(reason) or 0) for row in rows)
+
+
+def _markdown_cell(value: Any) -> str:
+    return str(value if value not in (None, "") else "unknown").replace("|", "/")
+
+
+def _format_metric(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    if isinstance(value, float):
+        return f"{value:.4f}".rstrip("0").rstrip(".")
+    return str(value)
