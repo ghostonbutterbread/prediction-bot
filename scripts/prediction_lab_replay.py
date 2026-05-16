@@ -58,6 +58,21 @@ def main() -> int:
     parser.add_argument("--summary-output", default=None, help="Optional JSON path for summary")
     parser.add_argument("--grid-output", default=None, help="Optional JSON path for replay series coverage grid")
     parser.add_argument(
+        "--source-reliability-scoreboard",
+        default=None,
+        help="Optional source_scoreboard.json or source_scoreboard_by_slice.jsonl for shadow-only reliability evaluation",
+    )
+    parser.add_argument(
+        "--source-reliability-ledger",
+        default=None,
+        help="Optional source-outcome ledger JSONL/JSON for rolling as-of shadow-only reliability evaluation",
+    )
+    parser.add_argument(
+        "--source-reliability-shadow-output",
+        default=None,
+        help="Optional JSONL path for compact source reliability shadow rows",
+    )
+    parser.add_argument(
         "--resolution-input",
         action="append",
         default=[],
@@ -73,6 +88,8 @@ def main() -> int:
     parser.add_argument("--validation-output", default=None, help="Optional JSON path for validation result")
     parser.add_argument("--fail-on-validation-errors", action="store_true", help="Exit nonzero if validation reports errors")
     args = parser.parse_args()
+    if args.source_reliability_scoreboard and args.source_reliability_ledger:
+        parser.error("provide either --source-reliability-scoreboard or --source-reliability-ledger, not both")
 
     config = load_config(Path(args.config))
     explicit_inputs = [*args.inputs, *args.input]
@@ -115,6 +132,8 @@ def main() -> int:
         resolution_paths=args.resolution_input,
         decision_paths=args.decision_input,
         replay_window=replay_window,
+        source_reliability_scoreboard=args.source_reliability_scoreboard,
+        source_reliability_ledger=args.source_reliability_ledger,
     )
 
     if args.output:
@@ -123,6 +142,8 @@ def main() -> int:
         atomic_write_json(Path(args.summary_output), result.summary)
     if args.grid_output:
         atomic_write_json(Path(args.grid_output), build_replay_series_grid(result))
+    if args.source_reliability_shadow_output:
+        rewrite_jsonl(Path(args.source_reliability_shadow_output), result.source_reliability_shadow_rows)
 
     print(json.dumps(result.summary, indent=2, sort_keys=True))
     return 0

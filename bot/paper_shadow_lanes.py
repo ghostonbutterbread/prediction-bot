@@ -22,7 +22,8 @@ PAPER_LANE_SCHEMA_VERSION = 1
 DEFAULT_CONFIDENCE_FLOOR = 0.58
 DEFAULT_LANE_IDS = ("control_stable", "shadow_current_beta", "shadow_confidence_floor")
 PREMIUM_CITY_LANE_ID = "shadow_premium_city"
-KNOWN_LANE_IDS = (*DEFAULT_LANE_IDS, PREMIUM_CITY_LANE_ID)
+SOURCE_RELIABILITY_LANE_ID = "shadow_source_reliability"
+KNOWN_LANE_IDS = (*DEFAULT_LANE_IDS, PREMIUM_CITY_LANE_ID, SOURCE_RELIABILITY_LANE_ID)
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 try:
@@ -130,7 +131,7 @@ def _build_lane_row(
     source_rows: Mapping[str, dict[str, Any] | None],
     decision_path: Path,
 ) -> dict[str, Any]:
-    decision = _evaluate_lane_decision(lane, signal, source_rows)
+    decision = _evaluate_lane_decision(lane, signal, shared_candidate, source_rows)
 
     observed_at = _observed_at(decision.get("source_row"), signal)
     market_id = _text(
@@ -254,6 +255,8 @@ def _build_lane_row(
             "decision_only": True,
         },
     }
+    if isinstance(decision.get("source_reliability"), Mapping):
+        row["provenance"]["source_reliability"] = dict(decision["source_reliability"])
     if lane.definition_path:
         row["lane_definition_path"] = lane.definition_path
         row["provenance"]["lane_definition_path"] = lane.definition_path
@@ -263,11 +266,12 @@ def _build_lane_row(
 def _evaluate_lane_decision(
     lane: _LaneDefinition,
     signal: Mapping[str, Any],
+    shared_candidate: Mapping[str, Any],
     source_rows: Mapping[str, dict[str, Any] | None],
 ) -> dict[str, Any]:
     source_wallet_id = lane.source_wallet_id or STABLE_PAPER_WALLET_ID
     evaluator = _lane_evaluator(lane)
-    return evaluator(lane, signal, source_rows.get(source_wallet_id))
+    return evaluator(lane, signal, source_rows.get(source_wallet_id), shared_candidate)
 
 
 def _lane_evaluator(lane: _LaneDefinition):
@@ -276,6 +280,8 @@ def _lane_evaluator(lane: _LaneDefinition):
         lane_type = "confidence_floor"
     elif lane.lane_id == PREMIUM_CITY_LANE_ID:
         lane_type = "premium_city"
+    elif lane.lane_id == SOURCE_RELIABILITY_LANE_ID:
+        lane_type = "source_reliability"
     evaluator = LANE_EVALUATORS.get(lane_type)
     if evaluator is None:
         raise ValueError(f"unknown paper shadow lane type for {lane.lane_id}: {lane_type}")
@@ -286,6 +292,7 @@ def _passthrough_decision(
     lane: _LaneDefinition,
     signal: Mapping[str, Any],
     source_row: dict[str, Any] | None,
+    shared_candidate: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not source_row:
         return {
@@ -312,11 +319,13 @@ def _confidence_floor_decision(
     lane: _LaneDefinition,
     signal: Mapping[str, Any],
     source_row: dict[str, Any] | None,
+    shared_candidate: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     baseline = _passthrough_decision(
         _LaneDefinition("control_stable", source_wallet_id=lane.source_wallet_id or STABLE_PAPER_WALLET_ID),
         signal,
         source_row,
+        shared_candidate,
     )
     confidence = _number(signal.get("confidence"), (source_row or {}).get("confidence"))
     floor = _confidence_floor(lane)
@@ -355,11 +364,13 @@ def _premium_city_decision(
     lane: _LaneDefinition,
     signal: Mapping[str, Any],
     source_row: dict[str, Any] | None,
+    shared_candidate: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     baseline = _passthrough_decision(
         _LaneDefinition("control_stable", source_wallet_id=lane.source_wallet_id or STABLE_PAPER_WALLET_ID),
         signal,
         source_row,
+        shared_candidate,
     )
     allowlist = _city_token_set(lane.parameters.get("allowlist", []))
     if allowlist and _candidate_city_tokens(signal) & allowlist:
@@ -376,10 +387,59 @@ def _premium_city_decision(
     return baseline
 
 
+def _source_reliability_decision(
+    lane: _LaneDefinition,
+    signal: Mapping[str, Any],
+    source_row: dict[str, Any] | None,
+    shared_candidate: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    baseline = _passthrough_decision(
+        _LaneDefinition("control_stable", source_wallet_id=lane.source_wallet_id or STABLE_PAPER_WALLET_ID),
+        signal,
+        source_row,
+        shared_candidate,
+    )
+    scoreboard_path = _source_reliability_scoreboard_path(lane)
+    if not scoreboard_path:
+        baseline["source_reliability"] = {
+            "available": False,
+            "reason_code": "source_reliability_unavailable",
+            "recommended_action": "SKIP",
+            "effect": "unavailable",
+            "reason": "Source reliability scoreboard is not configured for this shadow lane",
+        }
+        return baseline
+
+    from bot.weather.source_reliability import (
+        SourceReliabilityTable,
+        apply_source_reliability_confidence,
+        build_reliability_candidate_row,
+        evaluate_source_reliability_candidate,
+    )
+
+    table = SourceReliabilityTable.from_path(scoreboard_path)
+    candidate_row = build_reliability_candidate_row(signal, shared_candidate)
+    evaluation = evaluate_source_reliability_candidate(
+        candidate_row,
+        table,
+        action=str(baseline.get("action") or "SKIP"),
+    )
+    metadata = evaluation.to_dict()
+    metadata["scoreboard_path"] = scoreboard_path
+    metadata["available"] = True
+    confidence_before = _number(signal.get("confidence"), baseline.get("confidence_after"))
+    metadata["confidence_before"] = confidence_before
+    metadata["confidence_after"] = apply_source_reliability_confidence(confidence_before, evaluation)
+    metadata["decision_contract"] = "recommendation_only_top_level_lane_action_unchanged"
+    baseline["source_reliability"] = metadata
+    return baseline
+
+
 LANE_EVALUATORS = {
     "passthrough": _passthrough_decision,
     "confidence_floor": _confidence_floor_decision,
     "premium_city": _premium_city_decision,
+    "source_reliability": _source_reliability_decision,
 }
 
 
@@ -510,6 +570,16 @@ def _configured_lane_definition_map(config: Mapping[str, Any]) -> dict[str, _Lan
         confidence_cfg["parameters"] = parameters
         raw_by_id["shadow_confidence_floor"] = confidence_cfg
 
+    for key in ("source_reliability_scoreboard", "source_reliability_scoreboard_path", "source_scoreboard_path"):
+        if config.get(key) in (None, ""):
+            continue
+        reliability_cfg = raw_by_id.get(SOURCE_RELIABILITY_LANE_ID, {"id": SOURCE_RELIABILITY_LANE_ID})
+        parameters = _mapping(reliability_cfg.get("parameters"))
+        parameters["scoreboard_path"] = config.get(key)
+        reliability_cfg["parameters"] = parameters
+        raw_by_id[SOURCE_RELIABILITY_LANE_ID] = reliability_cfg
+        break
+
     return {
         lane_id: _lane_definition_from_raw(lane_id, raw)
         for lane_id, raw in raw_by_id.items()
@@ -561,6 +631,17 @@ def _built_in_lane_definition_map() -> dict[str, dict[str, Any]]:
             "description": "Shared-candidate-fed lane that starts from the stable baseline decision and only allows configured premium cities.",
             "parameters": {"allowlist": []},
         },
+        SOURCE_RELIABILITY_LANE_ID: {
+            "id": SOURCE_RELIABILITY_LANE_ID,
+            "type": "source_reliability",
+            "source_wallet": STABLE_PAPER_WALLET_ID,
+            "source_role": "baseline",
+            "input_source": "shared_candidate_dataset",
+            "input_market_source": "shared_market",
+            "enabled": False,
+            "description": "Shared-candidate-fed lane that starts from stable baseline and applies source reliability metadata only.",
+            "parameters": {},
+        },
     }
 
 
@@ -602,7 +683,15 @@ def _lane_definition_from_raw(lane_id: str, raw: Mapping[str, Any]) -> _LaneDefi
     if lane_id not in KNOWN_LANE_IDS:
         raise ValueError(f"unknown paper shadow lane: {lane_id}")
     parameters = _mapping(raw.get("parameters"))
-    for key in ("confidence_floor", "min_confidence", "allowlist"):
+    for key in (
+        "confidence_floor",
+        "min_confidence",
+        "allowlist",
+        "scoreboard_path",
+        "source_reliability_scoreboard",
+        "source_reliability_scoreboard_path",
+        "source_scoreboard_path",
+    ):
         if key in raw:
             parameters[key] = raw.get(key)
     input_source = str(raw.get("input_source") or "shared_candidate_dataset")
@@ -971,6 +1060,19 @@ def _confidence_floor(lane: _LaneDefinition) -> float:
             raise ValueError(f"paper shadow lane {lane.lane_id} has invalid {key}: {value!r}")
         return float(number)
     return DEFAULT_CONFIDENCE_FLOOR
+
+
+def _source_reliability_scoreboard_path(lane: _LaneDefinition) -> str | None:
+    for key in (
+        "scoreboard_path",
+        "source_reliability_scoreboard",
+        "source_reliability_scoreboard_path",
+        "source_scoreboard_path",
+    ):
+        value = lane.parameters.get(key)
+        if value not in (None, ""):
+            return str(value)
+    return None
 
 
 def _candidate_city_tokens(signal: Mapping[str, Any]) -> set[str]:
