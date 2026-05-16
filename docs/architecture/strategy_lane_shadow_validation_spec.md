@@ -74,3 +74,23 @@ Full PnL remains blocked until frozen rows contain:
 - Existing stable/off configs remain unchanged by default.
 - Targeted tests for strategy-lane config, shadow intents, replay/reporting, and
   paper runtime paths pass.
+
+## Status after config/profile composition
+
+The beta-shadow runtime profiles now compose from stable `config.yaml` instead
+of maintaining full copied config files. This satisfies the config-side
+acceptance goal more safely: shadow profiles inherit stable defaults, add the
+shared beta-shadow observability overlay, then add only runtime-specific output
+isolation and observer/paper flags.
+
+The original strategy-lane work should still be treated as **pre-enforce**:
+
+- stable/off behavior remains the default and must remain unchanged;
+- beta/shadow may compute and record would-have decisions only;
+- beta/enforce remains a future paper-only promotion decision after review;
+- live remains stable until explicit promotion.
+
+Nothing in this spec is sufficient by itself to promote enforce. Full PnL and
+promotion review remain blocked until the frozen/replay rows include aligned
+stable and beta artifacts, order-book/execution-feasibility snapshots,
+weather/source snapshots, and resolutions for the same opportunities.

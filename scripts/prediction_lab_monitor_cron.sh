@@ -27,10 +27,13 @@ STATE_FILE="data/paper/prediction_lab/monitor_state.json"
 LOCK="data/paper/prediction_lab/monitor.lock"
 LOG="data/paper/prediction_lab/logs/monitor_cron.log"
 
-# If the beta-shadow collector is intentionally active, monitor that isolated
-# project instead of alerting on the normal active-project/config.yaml runtime.
-if pgrep -af '^python3 scripts/prediction_lab_collect.py --config config.prediction_lab_beta_shadow_weather.yaml --observer' >/dev/null 2>&1 \
-  && [[ -f "$REPO/config.prediction_lab_beta_shadow_weather.yaml" ]]; then
+# If the beta-shadow collector is intentionally active or has an existing
+# shadow state/pid file, monitor that isolated project. This keeps an exited
+# beta-shadow collector from falling back to stale normal-runtime alerts.
+if [[ -f "$REPO/config.prediction_lab_beta_shadow_weather.yaml" ]] \
+  && { pgrep -af '^python3 scripts/prediction_lab_collect.py --config config.prediction_lab_beta_shadow_weather.yaml --observer' >/dev/null 2>&1 \
+    || [[ -f "$REPO/data/beta_shadow/paper/prediction_lab/state.json" ]] \
+    || [[ -f "$REPO/data/beta_shadow/paper/prediction_lab/collector.pid" ]]; }; then
   CONFIG_PATH="config.prediction_lab_beta_shadow_weather.yaml"
   STATE_FILE="data/beta_shadow/paper/prediction_lab/monitor_state.json"
   LOCK="data/beta_shadow/paper/prediction_lab/monitor.lock"
@@ -54,13 +57,18 @@ fi
 
 {
   echo "--- $(date -Is) prediction_lab_monitor start config=$CONFIG_PATH ---"
-  PYTHONPATH=. python3 scripts/prediction_lab_monitor.py \
-    --config "$CONFIG_PATH" \
-    --state-file "$STATE_FILE" \
-    --notify \
-    --target -1003763915138 \
-    --thread-id 8 \
-    --repair-cron-job-id c4dc2e07-df12-4cc2-8150-1b82f96acef7
+  monitor_args=(
+    --config "$CONFIG_PATH"
+    --state-file "$STATE_FILE"
+    --notify
+    --target -1003763915138
+    --thread-id 8
+  )
+  if [[ -n "${PREDICTION_LAB_REPAIR_CRON_JOB_ID:-}" ]]; then
+    monitor_args+=(--repair-cron-job-id "$PREDICTION_LAB_REPAIR_CRON_JOB_ID")
+  fi
+
+  PYTHONPATH=. python3 scripts/prediction_lab_monitor.py "${monitor_args[@]}"
   status=$?
   echo "--- $(date -Is) prediction_lab_monitor exit=$status ---"
   exit "$status"

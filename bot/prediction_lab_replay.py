@@ -8,7 +8,7 @@ import json
 import re
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Iterable
@@ -36,6 +36,14 @@ from bot.shared_market_feed import (
     summarize_dual_policy_snapshot_rows,
 )
 from bot.strategy_lane_reporting import summarize_strategy_lanes
+from bot.weather.source_reliability import (
+    SourceReliabilityTable,
+    build_rolling_source_reliability_table,
+    build_source_reliability_shadow_row,
+    evaluate_source_reliability_candidate,
+    load_source_outcome_ledger_rows,
+    summarize_source_reliability_shadow_rows,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -210,6 +218,7 @@ class PredictionLabReplayResult:
     rows: list[ReplayComparisonRow]
     summary: dict[str, Any]
     all_rows: list[ReplayComparisonRow] = field(default_factory=list)
+    source_reliability_shadow_rows: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         coverage_rows = self.all_rows or self.rows
@@ -217,6 +226,7 @@ class PredictionLabReplayResult:
             "summary": dict(self.summary),
             "rows": [row.to_dict() for row in self.rows],
             "all_rows": [row.to_dict() for row in coverage_rows],
+            "source_reliability_shadow_rows": list(self.source_reliability_shadow_rows),
         }
 
 
@@ -463,6 +473,8 @@ def replay_recorded_artifacts(
     resolution_paths: Iterable[str | Path] | None = None,
     decision_records: Iterable[dict[str, Any]] | None = None,
     decision_paths: Iterable[str | Path] | None = None,
+    source_reliability_scoreboard: str | Path | None = None,
+    source_reliability_ledger: str | Path | None = None,
 ) -> PredictionLabReplayResult:
     """Replay recorded artifacts and compare original vs replayed decisions.
 
@@ -483,6 +495,19 @@ def replay_recorded_artifacts(
     all_rows: list[ReplayComparisonRow] = []
     shadow_delta_rows: list[dict[str, Any]] = []
     dual_policy_rows: list[dict[str, Any]] = []
+    source_reliability_shadow_rows: list[dict[str, Any]] = []
+    if source_reliability_scoreboard not in (None, "") and source_reliability_ledger not in (None, ""):
+        raise ValueError("provide either source_reliability_scoreboard or source_reliability_ledger, not both")
+    source_reliability_table = (
+        SourceReliabilityTable.from_path(source_reliability_scoreboard)
+        if source_reliability_scoreboard not in (None, "")
+        else None
+    )
+    source_reliability_ledger_rows = (
+        load_source_outcome_ledger_rows(source_reliability_ledger)
+        if source_reliability_ledger not in (None, "")
+        else None
+    )
     policy = str(live_source_policy or "fail").lower()
     if policy not in {"fail", "warn_skip", "allow"}:
         raise ValueError("live_source_policy must be one of: fail, warn_skip, allow")
@@ -586,6 +611,33 @@ def replay_recorded_artifacts(
             outcome=None,
         )
         all_rows.append(row)
+        if source_reliability_ledger_rows is not None:
+            source_reliability_shadow_rows.append(
+                _build_rolling_source_reliability_shadow_row(
+                    record,
+                    original_artifact=original_artifact,
+                    stable_action=original_action,
+                    replayed_action=replayed_action,
+                    ledger_rows=source_reliability_ledger_rows,
+                )
+            )
+        elif source_reliability_table is not None:
+            reliability_input = dict(record.row)
+            reliability_input["decision_artifact"] = original_artifact
+            reliability_input["replayed_action"] = replayed_action
+            evaluation = evaluate_source_reliability_candidate(
+                reliability_input,
+                source_reliability_table,
+                action=replayed_action,
+            )
+            source_reliability_shadow_rows.append(
+                build_source_reliability_shadow_row(
+                    reliability_input,
+                    evaluation,
+                    stable_action=original_action,
+                    replayed_action=replayed_action,
+                )
+            )
         if quality_policy in {"strict", "drop_incomplete", "strict_only"} and not row.include_in_strict:
             continue
         rows.append(row)
@@ -602,8 +654,10 @@ def replay_recorded_artifacts(
             shadow_delta_rows=shadow_delta_rows,
             dual_policy_rows=dual_policy_rows,
             agent_decision_rows=loaded_decisions,
+            source_reliability_shadow_rows=source_reliability_shadow_rows,
         ),
         all_rows=all_rows,
+        source_reliability_shadow_rows=source_reliability_shadow_rows,
     )
 
 
@@ -620,6 +674,8 @@ def replay_from_paths(
     resolution_paths: Iterable[str | Path] | None = None,
     decision_paths: Iterable[str | Path] | None = None,
     replay_window: PredictionLabReplayWindow | dict[str, Any] | None = None,
+    source_reliability_scoreboard: str | Path | None = None,
+    source_reliability_ledger: str | Path | None = None,
 ) -> PredictionLabReplayResult:
     records = load_replay_artifacts(paths, limit=limit)
     result = replay_recorded_artifacts(
@@ -632,10 +688,116 @@ def replay_from_paths(
         row_quality_policy=row_quality_policy,
         resolution_paths=resolution_paths,
         decision_paths=decision_paths,
+        source_reliability_scoreboard=source_reliability_scoreboard,
+        source_reliability_ledger=source_reliability_ledger,
     )
     if replay_window is not None:
         result.summary["replay_window"] = replay_window.to_dict() if hasattr(replay_window, "to_dict") else dict(replay_window)
     return result
+
+
+def _build_rolling_source_reliability_shadow_row(
+    record: ReplayArtifactInput,
+    *,
+    original_artifact: dict[str, Any],
+    stable_action: str,
+    replayed_action: str,
+    ledger_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    reliability_input = dict(record.row)
+    reliability_input["decision_artifact"] = original_artifact
+    reliability_input["replayed_action"] = replayed_action
+    as_of = _source_reliability_candidate_as_of(record)
+    total_rows = len(ledger_rows)
+    eligible_rows = sum(1 for row in ledger_rows if isinstance(row, dict) and row.get("eligible_for_reliability") is True)
+    base_metadata = {
+        "reliability_mode": "rolling_as_of",
+        "as_of": _dt_iso_utc(as_of),
+        "ledger_total_rows": total_rows,
+        "ledger_eligible_rows": eligible_rows,
+    }
+    if as_of is None:
+        market_id = reliability_input.get("market_id") or reliability_input.get("snapshot_key") or original_artifact.get("market_id")
+        return {
+            "row_type": "source_reliability_shadow",
+            "schema_version": 1,
+            "market_id": str(market_id or ""),
+            "shared_candidate_id": reliability_input.get("shared_candidate_id"),
+            "stable_action": stable_action,
+            "replayed_action": replayed_action,
+            "reliability_recommended_action": "SKIP",
+            "reliability_effect": "unavailable",
+            "reason_code": "missing_candidate_observed_at",
+            "trusted_support_count": 0,
+            "excluded_dissent_count": 0,
+            "weighted_support": 0.0,
+            "weighted_dissent": 0.0,
+            "tier_counts": {},
+            "source_votes": [],
+            "ledger_considered_rows": 0,
+            **base_metadata,
+        }
+
+    table = build_rolling_source_reliability_table(ledger_rows, as_of=as_of)
+    evaluation = evaluate_source_reliability_candidate(
+        reliability_input,
+        table,
+        action=replayed_action,
+    )
+    shadow_row = build_source_reliability_shadow_row(
+        reliability_input,
+        evaluation,
+        stable_action=stable_action,
+        replayed_action=replayed_action,
+    )
+    shadow_row.update(base_metadata)
+    shadow_row["ledger_considered_rows"] = _count_source_reliability_ledger_rows_known_before(ledger_rows, as_of)
+    shadow_row["source_votes"] = list(evaluation.source_votes)
+    return shadow_row
+
+
+def _source_reliability_candidate_as_of(record: ReplayArtifactInput) -> datetime | None:
+    artifact = record.artifact if isinstance(record.artifact, dict) else {}
+    candidates = (
+        record.row.get("observed_at"),
+        record.row.get("timestamp"),
+        artifact.get("observed_at"),
+        artifact.get("timestamp"),
+    )
+    for value in candidates:
+        parsed = _parse_dt_utc(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _count_source_reliability_ledger_rows_known_before(
+    ledger_rows: Iterable[dict[str, Any]],
+    as_of: datetime,
+) -> int:
+    count = 0
+    for row in ledger_rows:
+        if not isinstance(row, dict) or row.get("eligible_for_reliability") is not True:
+            continue
+        known_after = _parse_dt_utc(row.get("known_after"))
+        if known_after is not None and known_after < as_of:
+            count += 1
+    return count
+
+
+def _parse_dt_utc(value: Any) -> datetime | None:
+    parsed = _parse_dt(value)
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _dt_iso_utc(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    return _parse_dt_utc(value).isoformat() if _parse_dt_utc(value) is not None else None
 
 
 def _replay_safe_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -1907,6 +2069,7 @@ def _summarize(
     shadow_delta_rows: Iterable[dict[str, Any]] | None = None,
     dual_policy_rows: Iterable[dict[str, Any]] | None = None,
     agent_decision_rows: list[dict[str, Any]] | None = None,
+    source_reliability_shadow_rows: Iterable[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     all_rows = all_rows or rows
     strict_rows = [row for row in all_rows if row.include_in_strict]
@@ -1935,6 +2098,7 @@ def _summarize(
         "weather_hidden_gem_comparison": _weather_hidden_gem_replay_comparison(all_rows),
         "dual_policy_replay_comparison": _summarize_dual_policy_replay_rows(dual_policy_rows or ()),
         "shadow_delta": summarize_shadow_delta_rows(shadow_delta_rows or ()),
+        "source_reliability_shadow": summarize_source_reliability_shadow_rows(source_reliability_shadow_rows or ()),
         "warning_count": sum(len(row.warnings) for row in rows),
     }
     if agent_decision_rows is not None:

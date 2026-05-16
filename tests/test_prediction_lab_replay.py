@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -375,6 +376,41 @@ def _weather_row(*, artifact_patch: dict | None = None, row_patch: dict | None =
     return row
 
 
+def _source_reliability_ledger_row(
+    index: int,
+    *,
+    known_after: str,
+    correct: bool = True,
+    source_id: str = "nws",
+) -> dict:
+    return {
+        "schema_version": 1,
+        "observation_id": f"ledger-{index}",
+        "market_id": f"KXHIGHNY-26APR{index:02d}-T80",
+        "shared_candidate_id": f"ledger-candidate-{index}",
+        "source_id": source_id,
+        "source_name": source_id,
+        "city_id": "unknown",
+        "market_kind": "high",
+        "contract_shape": "tail",
+        "observed_at": "2026-04-01T12:00:00+00:00",
+        "market_date": "2026-04-01",
+        "resolved_at": known_after,
+        "known_after": known_after,
+        "forecast_temp_f": 84.0 if correct else 76.0,
+        "threshold": 80.0,
+        "question_side": "above",
+        "actual_temp_f": 85.0,
+        "predicted_outcome": "YES" if correct else "NO",
+        "actual_outcome": "YES",
+        "direction_correct": correct,
+        "absolute_error_f": 1.0 if correct else 9.0,
+        "bias_f": -1.0 if correct else -9.0,
+        "eligible_for_reliability": True,
+        "exclusion_reason": None,
+    }
+
+
 def _hidden_gem_card(
     *,
     market_id: str = "KXHIGHNY-26APR29-T80",
@@ -462,6 +498,155 @@ class PredictionLabReplayTests(unittest.TestCase):
         self.assertFalse(result.rows[0].action_changed)
         self.assertEqual(result.rows[0].source_path, str(path))
 
+    def test_replay_summary_includes_source_reliability_shadow_without_changing_actions(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "predictions.jsonl"
+            scoreboard_path = Path(tmpdir) / "source_scoreboard_by_slice.jsonl"
+            row = _weather_row()
+            row["decision_artifact"]["source_context"]["data"]["weather_source_snapshot"]["sources"] = [
+                {"source_name": "nws", "forecast_high": 84.0}
+            ]
+            append_jsonl(path, row)
+            append_jsonl(
+                scoreboard_path,
+                {
+                    "source_id": "nws",
+                    "source_name": "nws",
+                    "city_id": "unknown",
+                    "market_kind": "high",
+                    "contract_shape": "tail",
+                    "sample_count": 100,
+                    "threshold_direction_accuracy": 0.95,
+                },
+            )
+
+            result = replay_from_paths(
+                [path],
+                evaluator=self._evaluator(FixedSignalStrategy(_signal())),
+                source_reliability_scoreboard=scoreboard_path,
+            )
+
+        self.assertEqual(result.rows[0].original_action, "BUY_YES")
+        self.assertEqual(result.rows[0].replayed_action, "BUY_YES")
+        self.assertFalse(result.rows[0].action_changed)
+        summary = result.summary["source_reliability_shadow"]
+        self.assertEqual(summary["evaluated_rows"], 1)
+        self.assertEqual(summary["trusted_support_rows"], 1)
+        self.assertEqual(summary["unchanged_rows"], 1)
+        self.assertEqual(summary["action_counts"], {"BUY_YES": 1})
+        self.assertEqual(result.source_reliability_shadow_rows[0]["replayed_action"], "BUY_YES")
+
+    def test_rolling_source_reliability_ledger_is_as_of_per_candidate(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "predictions.jsonl"
+            ledger_path = Path(tmpdir) / "source_outcome_ledger.json"
+            early_row = _weather_row(
+                row_patch={
+                    "observed_at": "2026-04-29T12:00:00+00:00",
+                    "timestamp": "2026-04-29T12:00:00+00:00",
+                },
+                artifact_patch={"observed_at": "2026-04-29T12:00:00+00:00"},
+            )
+            late_row = _weather_row(
+                row_patch={
+                    "observed_at": "2026-05-01T12:00:00+00:00",
+                    "timestamp": "2026-05-01T12:00:00+00:00",
+                },
+                artifact_patch={"observed_at": "2026-05-01T12:00:00+00:00"},
+            )
+            for row in (early_row, late_row):
+                row["decision_artifact"]["source_context"]["data"]["weather_source_snapshot"]["sources"] = [
+                    {"source_name": "nws", "forecast_high": 84.0}
+                ]
+                append_jsonl(path, row)
+
+            ledger_rows = [
+                _source_reliability_ledger_row(
+                    index,
+                    known_after=f"2026-04-28T{index // 60:02d}:{index % 60:02d}:00+00:00",
+                )
+                for index in range(99)
+            ]
+            ledger_rows.append(
+                _source_reliability_ledger_row(
+                    99,
+                    known_after="2026-04-30T00:00:00+00:00",
+                )
+            )
+            ledger_path.write_text(json.dumps(ledger_rows), encoding="utf-8")
+
+            result = replay_from_paths(
+                [path],
+                evaluator=self._evaluator(FixedSignalStrategy(_signal())),
+                source_reliability_ledger=ledger_path,
+            )
+
+        self.assertEqual([row.replayed_action for row in result.rows], ["BUY_YES", "BUY_YES"])
+        shadow_rows = result.source_reliability_shadow_rows
+        self.assertEqual(len(shadow_rows), 2)
+        self.assertEqual(shadow_rows[0]["reliability_mode"], "rolling_as_of")
+        self.assertEqual(shadow_rows[0]["as_of"], "2026-04-29T12:00:00+00:00")
+        self.assertEqual(shadow_rows[0]["ledger_considered_rows"], 99)
+        self.assertEqual(shadow_rows[0]["source_votes"][0]["reliability"]["sample_count"], 99)
+        self.assertEqual(shadow_rows[0]["reliability_recommended_action"], "SKIP")
+        self.assertEqual(shadow_rows[0]["reason_code"], "no_trusted_support")
+        self.assertEqual(shadow_rows[1]["as_of"], "2026-05-01T12:00:00+00:00")
+        self.assertEqual(shadow_rows[1]["ledger_considered_rows"], 100)
+        self.assertEqual(shadow_rows[1]["source_votes"][0]["reliability"]["sample_count"], 100)
+        self.assertEqual(shadow_rows[1]["reliability_recommended_action"], "BUY_YES")
+        self.assertEqual(shadow_rows[1]["reason_code"], "trusted_support")
+
+    def test_rolling_source_reliability_missing_candidate_timestamp_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "predictions.jsonl"
+            ledger_path = Path(tmpdir) / "source_outcome_ledger.jsonl"
+            row = _weather_row(
+                row_patch={"observed_at": None, "timestamp": None},
+                artifact_patch={"observed_at": None, "timestamp": None},
+            )
+            row["decision_artifact"]["source_context"]["data"]["weather_source_snapshot"]["sources"] = [
+                {"source_name": "nws", "forecast_high": 84.0}
+            ]
+            append_jsonl(path, row)
+            append_jsonl(
+                ledger_path,
+                _source_reliability_ledger_row(0, known_after="2026-04-28T00:00:00+00:00"),
+            )
+
+            result = replay_from_paths(
+                [path],
+                evaluator=self._evaluator(FixedSignalStrategy(_signal())),
+                source_reliability_ledger=ledger_path,
+            )
+
+        shadow_row = result.source_reliability_shadow_rows[0]
+        self.assertEqual(result.rows[0].replayed_action, "BUY_YES")
+        self.assertEqual(shadow_row["reliability_mode"], "rolling_as_of")
+        self.assertIsNone(shadow_row["as_of"])
+        self.assertEqual(shadow_row["reliability_effect"], "unavailable")
+        self.assertEqual(shadow_row["reason_code"], "missing_candidate_observed_at")
+        self.assertEqual(shadow_row["ledger_considered_rows"], 0)
+        self.assertEqual(shadow_row["replayed_action"], "BUY_YES")
+
+    def test_source_reliability_scoreboard_and_ledger_are_mutually_exclusive(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "predictions.jsonl"
+            scoreboard_path = Path(tmpdir) / "source_scoreboard_by_slice.jsonl"
+            ledger_path = Path(tmpdir) / "source_outcome_ledger.jsonl"
+            append_jsonl(path, _weather_row())
+            append_jsonl(scoreboard_path, {"source_id": "nws", "sample_count": 100})
+            append_jsonl(
+                ledger_path,
+                _source_reliability_ledger_row(0, known_after="2026-04-28T00:00:00+00:00"),
+            )
+
+            with self.assertRaisesRegex(ValueError, "either source_reliability_scoreboard or source_reliability_ledger"):
+                replay_from_paths(
+                    [path],
+                    evaluator=self._evaluator(FixedSignalStrategy(_signal())),
+                    source_reliability_scoreboard=scoreboard_path,
+                    source_reliability_ledger=ledger_path,
+                )
 
     def test_replay_loader_rejects_shadow_delta_compact_review_export_rows(self):
         with tempfile.TemporaryDirectory() as tmpdir:

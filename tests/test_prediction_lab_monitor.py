@@ -36,30 +36,45 @@ class PredictionLabMonitorTests(unittest.TestCase):
         )
         return config_path
 
-    def _write_state(self, lab_dir: Path, *, now: datetime):
+    def _write_state(
+        self,
+        lab_dir: Path,
+        *,
+        now: datetime,
+        last_collect_delta: timedelta = timedelta(minutes=5),
+        last_storage_check_delta: timedelta | None = None,
+        write_collector_log: bool = True,
+        write_market_snapshots: bool = True,
+    ):
         lab_dir.mkdir(parents=True, exist_ok=True)
+        state = {
+            "mode": "collector",
+            "run_state": "idle_watch",
+            "paused": False,
+            "pause_reason": "none",
+            "last_collect_at": (now - last_collect_delta).isoformat(),
+            "last_error": None,
+            "storage_usage_gb": 0.1,
+            "observer_mode": True,
+            "trading_enabled": False,
+            "order_execution_enabled": False,
+        }
+        if last_storage_check_delta is not None:
+            state["last_storage_check_at"] = (now - last_storage_check_delta).isoformat()
         (lab_dir / "state.json").write_text(
-            json.dumps(
-                {
-                    "mode": "collector",
-                    "run_state": "idle_watch",
-                    "paused": False,
-                    "pause_reason": "none",
-                    "last_collect_at": (now - timedelta(minutes=5)).isoformat(),
-                    "last_error": None,
-                    "storage_usage_gb": 0.1,
-                    "observer_mode": True,
-                    "trading_enabled": False,
-                    "order_execution_enabled": False,
-                }
-            )
+            json.dumps(state)
         )
-        log_dir = lab_dir / "logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        log = log_dir / "collector_test.log"
-        log.write_text("ok\n")
         ts = now.timestamp()
-        os.utime(log, (ts, ts))
+        if write_collector_log:
+            log_dir = lab_dir / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log = log_dir / "collector_test.log"
+            log.write_text("ok\n")
+            os.utime(log, (ts, ts))
+        if write_market_snapshots:
+            snapshots = lab_dir / "market_snapshots.jsonl"
+            snapshots.write_text(json.dumps({"market_id": "KXTEST", "observed_at": now.isoformat()}) + "\n")
+            os.utime(snapshots, (ts, ts))
 
     def test_collector_process_match_is_exact_and_avoids_shell_false_positive(self):
         self.assertTrue(
@@ -229,6 +244,82 @@ class PredictionLabMonitorTests(unittest.TestCase):
             self.assertTrue(result.healthy, result.summary())
             self.assertNotIn("missing_log", [issue.code for issue in result.issues])
             self.assertEqual(result.details["latest_log_status"], "missing_but_state_heartbeat_fresh")
+
+    def test_evaluate_health_accepts_fresh_supervisor_log(self):
+        now = datetime(2026, 4, 28, 18, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = self._write_config(root)
+            lab_dir = root / "data" / "paper" / "prediction_lab"
+            self._write_state(lab_dir, now=now, write_collector_log=False)
+            supervisor_log = lab_dir / "collector.supervisor.log"
+            supervisor_log.write_text("collector alive\n")
+            ts = now.timestamp()
+            os.utime(supervisor_log, (ts, ts))
+
+            result = monitor.evaluate_health(
+                config_path,
+                now=now,
+                cmdlines=[
+                    (
+                        123,
+                        [
+                            "python3",
+                            "scripts/prediction_lab_collect.py",
+                            "--config",
+                            str(config_path),
+                        ],
+                    )
+                ],
+            )
+
+            issue_codes = [issue.code for issue in result.issues]
+            self.assertTrue(result.healthy, result.summary())
+            self.assertEqual(result.details["latest_log"], str(supervisor_log))
+            self.assertNotIn("missing_log", issue_codes)
+            market_snapshots = result.details["replay_inputs"]["market_snapshots"]
+            self.assertEqual(market_snapshots["path"], str(lab_dir / "market_snapshots.jsonl"))
+            self.assertTrue(market_snapshots["exists"])
+            self.assertGreater(market_snapshots["size_bytes"], 0)
+            self.assertEqual(market_snapshots["age_seconds"], 0.0)
+
+    def test_evaluate_health_downgrades_stale_collect_when_liveness_is_fresh(self):
+        now = datetime(2026, 4, 28, 18, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = self._write_config(root)
+            lab_dir = root / "data" / "paper" / "prediction_lab"
+            self._write_state(
+                lab_dir,
+                now=now,
+                last_collect_delta=timedelta(hours=2),
+                last_storage_check_delta=timedelta(seconds=30),
+                write_collector_log=False,
+            )
+
+            result = monitor.evaluate_health(
+                config_path,
+                now=now,
+                cmdlines=[
+                    (
+                        123,
+                        [
+                            "python3",
+                            "scripts/prediction_lab_collect.py",
+                            "--config",
+                            str(config_path),
+                        ],
+                    )
+                ],
+                stale_log_seconds=1800,
+            )
+
+            stale_collect = [issue for issue in result.issues if issue.code == "stale_collect"]
+            self.assertTrue(result.healthy, result.summary())
+            self.assertEqual(len(stale_collect), 1)
+            self.assertEqual(stale_collect[0].severity, "warning")
+            self.assertTrue(result.details["liveness_fresh"])
+            self.assertTrue(result.details["replay_inputs"]["market_snapshots"]["exists"])
 
     def test_evaluate_health_uses_nested_prediction_lab_config(self):
         now = datetime(2026, 4, 28, 18, 0, tzinfo=timezone.utc)

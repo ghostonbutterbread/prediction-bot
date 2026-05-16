@@ -155,6 +155,33 @@ def file_age_seconds(path: Path, *, now: datetime) -> float | None:
     return max(0.0, (now - mtime).total_seconds())
 
 
+def file_health_details(path: Path, *, now: datetime) -> dict[str, Any]:
+    details: dict[str, Any] = {
+        "path": str(path),
+        "exists": path.exists(),
+        "size_bytes": 0,
+        "age_seconds": None,
+    }
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return details
+    details["size_bytes"] = stat.st_size
+    details["age_seconds"] = max(0.0, (now - datetime.fromtimestamp(stat.st_mtime, timezone.utc)).total_seconds())
+    return details
+
+
+def collector_log_candidates(lab_dir: Path) -> list[Path]:
+    candidates: list[Path] = []
+    log_dir = lab_dir / "logs"
+    if log_dir.exists():
+        candidates.extend(log_dir.glob("collector_*.log"))
+    for path in (lab_dir / "collector.supervisor.log", lab_dir / "collector.log"):
+        if path.exists():
+            candidates.append(path)
+    return candidates
+
+
 def evaluate_health(
     config_path: Path,
     *,
@@ -215,6 +242,11 @@ def evaluate_health(
     elif len(processes) > 1:
         issues.append(MonitorIssue("multiple_collectors", f"{len(processes)} collector processes are running"))
 
+    last_collect_at: datetime | None = None
+    last_collect_age: float | None = None
+    interval = max(1, int(lab_cfg.get("collector_interval_seconds", 900) or 900))
+    stale_collect_seconds = int(interval * stale_collect_multiplier)
+
     if not state:
         issues.append(MonitorIssue("missing_state", f"state file missing or empty: {state_path}"))
     elif state.get("_json_error"):
@@ -227,16 +259,12 @@ def evaluate_health(
         if state.get("run_state") == "errored":
             issues.append(MonitorIssue("collector_errored", "collector run_state is errored"))
 
-        interval = max(1, int(lab_cfg.get("collector_interval_seconds", 900) or 900))
-        stale_collect_seconds = int(interval * stale_collect_multiplier)
         last_collect_at = parse_iso(state.get("last_collect_at"))
         if last_collect_at is None:
             issues.append(MonitorIssue("missing_last_collect", "state.last_collect_at is missing"))
         else:
-            age = (now - last_collect_at).total_seconds()
-            details["last_collect_age_seconds"] = age
-            if age > stale_collect_seconds:
-                issues.append(MonitorIssue("stale_collect", f"last collect is {int(age)}s old; threshold {stale_collect_seconds}s"))
+            last_collect_age = (now - last_collect_at).total_seconds()
+            details["last_collect_age_seconds"] = last_collect_age
 
         storage_gb = float(state.get("storage_usage_gb") or 0.0)
         cap_gb = float(lab_cfg.get("collection_storage_cap_gb", 0) or 0)
@@ -250,20 +278,57 @@ def evaluate_health(
             details["state_heartbeat_age_seconds"] = (now - heartbeat_at).total_seconds()
 
     log_dir = lab_dir / "logs"
-    latest_log = max(log_dir.glob("collector_*.log"), key=lambda p: p.stat().st_mtime, default=None) if log_dir.exists() else None
+    log_candidates = collector_log_candidates(lab_dir)
+    latest_log = max(log_candidates, key=lambda p: p.stat().st_mtime, default=None)
+    details["collector_log_paths"] = [str(path) for path in log_candidates]
     details["latest_log"] = str(latest_log) if latest_log else None
     heartbeat_age = details.get("state_heartbeat_age_seconds")
     heartbeat_fresh = isinstance(heartbeat_age, (int, float)) and heartbeat_age <= stale_log_seconds
+    latest_log_age = file_age_seconds(latest_log, now=now) if latest_log is not None else None
+    log_fresh = isinstance(latest_log_age, (int, float)) and latest_log_age <= stale_log_seconds
     if latest_log is None:
         if not heartbeat_fresh:
-            issues.append(MonitorIssue("missing_log", f"no collector logs under {log_dir}"))
+            issues.append(MonitorIssue("missing_log", f"no collector logs under {log_dir} or supervisor logs under {lab_dir}"))
         else:
             details["latest_log_status"] = "missing_but_state_heartbeat_fresh"
     else:
-        age = file_age_seconds(latest_log, now=now)
-        details["latest_log_age_seconds"] = age
-        if age is not None and age > stale_log_seconds and not heartbeat_fresh:
-            issues.append(MonitorIssue("stale_log", f"latest collector log is {int(age)}s old; threshold {stale_log_seconds}s"))
+        details["latest_log_age_seconds"] = latest_log_age
+        if latest_log_age is not None and latest_log_age > stale_log_seconds and not heartbeat_fresh:
+            issues.append(MonitorIssue("stale_log", f"latest collector log is {int(latest_log_age)}s old; threshold {stale_log_seconds}s"))
+
+    market_snapshots = lab_dir / "market_snapshots.jsonl"
+    replay_inputs = {"market_snapshots": file_health_details(market_snapshots, now=now)}
+    details["replay_inputs"] = replay_inputs
+    market_snapshot_details = replay_inputs["market_snapshots"]
+    market_snapshot_age = market_snapshot_details["age_seconds"]
+    market_snapshot_present = bool(market_snapshot_details["exists"]) and int(market_snapshot_details["size_bytes"] or 0) > 0
+    market_snapshot_fresh = market_snapshot_present and isinstance(market_snapshot_age, (int, float)) and market_snapshot_age <= stale_collect_seconds
+    market_snapshot_details["fresh"] = market_snapshot_fresh
+    market_snapshot_details["fresh_threshold_seconds"] = stale_collect_seconds
+    if not market_snapshot_details["exists"]:
+        issues.append(MonitorIssue("missing_replay_input", f"market_snapshots.jsonl missing: {market_snapshots}", severity="warning"))
+    elif int(market_snapshot_details["size_bytes"] or 0) <= 0:
+        issues.append(MonitorIssue("empty_replay_input", f"market_snapshots.jsonl is empty: {market_snapshots}", severity="warning"))
+    elif not market_snapshot_fresh:
+        issues.append(
+            MonitorIssue(
+                "stale_replay_input",
+                f"market_snapshots.jsonl is {int(market_snapshot_age)}s old; threshold {stale_collect_seconds}s",
+                severity="warning",
+            )
+        )
+
+    liveness_fresh = heartbeat_fresh or log_fresh or market_snapshot_fresh
+    details["liveness_fresh"] = liveness_fresh
+    if last_collect_age is not None and last_collect_age > stale_collect_seconds:
+        severity = "warning" if processes and liveness_fresh else "critical"
+        issues.append(
+            MonitorIssue(
+                "stale_collect",
+                f"last collect is {int(last_collect_age)}s old; threshold {stale_collect_seconds}s",
+                severity=severity,
+            )
+        )
 
     return MonitorResult(healthy=not any(issue.severity == "critical" for issue in issues), issues=issues, details=details)
 

@@ -56,6 +56,7 @@ Stable main remains the default everywhere. Prediction Lab may opt into `version
 - Phase 3K adds lane-sizing delta reporting to analyze/replay summaries. This is observability-only: it extracts lane-sizing metadata from known artifact shapes and reports configured/would-adjust/applied/preserved/shadow counts plus size totals without changing decisions.
 - Phase 3L hardens validation hermeticity by moving `paper_loop.py` env/logging setup out of import time. Normal runtime execution still loads `.env`, sets `PAPER_MODE`, refreshes settings, and configures logging; importing the module no longer mutates env controls, root logging, log files, or `sys.path`.
 - Phase 3M adds analyze-only rollout readiness reporting for the beta strategy-lane system. The checklist is deterministic and conservative: it reports policy mode/features, hidden-gem evidence-card presence/cleanliness, beta lane-gate delta coverage, and lane-sizing delta coverage. Missing shadow evidence becomes a blocker or warning in the report, but the checklist is observational only and must not be treated as a decision, sizing, or order-placement input.
+- Phase 3N adds config/profile composition for beta-shadow weather runs. Shadow config files compose from stable `config.yaml`, then apply a shared beta-shadow observability overlay and a runtime-specific overlay. Explicit keys in the profile file remain the final override. This removes drift-prone full config forks while preserving stable as the source of truth. Composition is applied before env overrides and normalization, malformed composition blocks fail fast, and shadow runtime overlays explicitly disable inherited generic alerts/Telegram delivery.
 
 ## Beta Strategy-Lane Readiness Checklist
 
@@ -69,3 +70,14 @@ The checklist targets pre-enforce evidence collection, so a clean pass requires:
 - lane-sizing rows contain shadow sizing metadata, so final-vs-would-size deltas are measurable
 
 The readiness line is intentionally fail-closed. It can say `blocked` or `needs_review` even when trading behavior is working as configured, because it only answers whether the collected artifacts are clean enough to review before considering enforce. It does not change stable/off, beta/shadow, or beta/enforce final decisions.
+
+## Current Promotion Status
+
+As of the config-composition slice, the original strategy-lane beta-shadow mechanics are structurally in place, but not promotion-ready. The remaining blocker is evidence quality, not feature wiring:
+
+- stable config remains the decision source unless a runtime explicitly composes a beta-shadow profile;
+- beta-shadow paper and Prediction Lab profiles inherit stable base config and isolate output paths;
+- readiness reporting is available and intentionally conservative;
+- enforce/promotion remains blocked until clean replay-grade rows show hidden-gem evidence cards, lane-gate deltas, lane-sizing deltas, source/order-book snapshots, and resolution/PnL joins for the same opportunities.
+
+Next work should continue in shadow/offline mode: source reliability scoring, paper decision-lane comparison, and premium-weather-lane evidence collection. Do not promote beta enforce from this spec alone.

@@ -14,6 +14,7 @@ from copy import deepcopy
 from typing import Any
 from pathlib import Path
 
+from bot.config_composition import compose_config, deep_merge
 from bot.paper_wallets import build_paper_wallet_contracts
 from bot.strategy_policy import normalize_strategy_policy
 from bot.market_router import normalize_allowed_market_routes
@@ -271,13 +272,12 @@ def _find_config() -> Path:
 
 def _deep_merge(base: dict, override: dict) -> dict:
     """Deep merge override into base dict."""
-    result = base.copy()
-    for key, value in override.items():
-        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
-            result[key] = _deep_merge(result[key], value)
-        else:
-            result[key] = value
-    return result
+    return deep_merge(base, override)
+
+
+def _read_yaml_config(path: Path) -> dict:
+    with open(path) as f:
+        return yaml.safe_load(f) or {}
 
 
 def _apply_env_overrides(config: dict) -> dict:
@@ -455,12 +455,13 @@ def load_config(config_path: str | Path | None = None) -> dict:
 
     if config_path and yaml:
         try:
-            with open(config_path) as f:
-                config = yaml.safe_load(f) or {}
+            config = _read_yaml_config(config_path)
             logger.info(f"Loaded config from {config_path}")
         except Exception as e:
             logger.warning(f"Failed to load {config_path}: {e}")
             config = _default_config()
+        else:
+            config = compose_config(config, config_path=config_path, read_config=_read_yaml_config)
     else:
         config = _default_config()
 

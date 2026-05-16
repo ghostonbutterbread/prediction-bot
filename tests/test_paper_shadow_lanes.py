@@ -517,6 +517,265 @@ parameters:
         self.assertEqual(lane_row["reason_code"], "confidence_below_floor")
         self.assertEqual(lane_row["approved_position_size_usd"], 0.0)
 
+    def test_source_reliability_lane_trusted_support_dominates_excluded_dissent(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dataset_path = Path(tmpdir) / "shared" / "prediction_lab" / "market_snapshots.jsonl"
+            decision_path = Path(tmpdir) / "lanes.jsonl"
+            scoreboard_path = Path(tmpdir) / "source_scoreboard_by_slice.jsonl"
+            append_jsonl(
+                scoreboard_path,
+                {
+                    "source_id": "nws",
+                    "source_name": "nws",
+                    "city_id": "new_york_ny",
+                    "market_kind": "high",
+                    "contract_shape": "tail",
+                    "sample_count": 100,
+                    "threshold_direction_accuracy": 0.95,
+                },
+            )
+            append_jsonl(
+                scoreboard_path,
+                {
+                    "source_id": "bad_model",
+                    "source_name": "bad-model",
+                    "city_id": "new_york_ny",
+                    "market_kind": "high",
+                    "contract_shape": "tail",
+                    "sample_count": 100,
+                    "threshold_direction_accuracy": 0.30,
+                },
+            )
+            candidate_id = "candidate-1"
+            stable_decision = {
+                "shared_candidate_id": candidate_id,
+                "wallet_id": "stable_paper",
+                "run_id": "stable-run",
+                "candidate_dataset_path": str(dataset_path),
+                "decision_role": "paper_shadow",
+                "decision_id": "stable-source-decision",
+                "policy": "normal",
+                "market_id": "KXHIGHNY-260513-T71",
+                "observed_at": "2026-05-13T12:00:01+00:00",
+                "action": "BUY_YES",
+                "reason_code": "approved",
+                "confidence": 0.80,
+                "requested_position_size_usd": 10.0,
+                "approved_position_size_usd": 10.0,
+            }
+
+            result = write_paper_shadow_lane_decisions(
+                config={
+                    "paper_shadow_lanes": {
+                        "enabled": True,
+                        "decision_ledger_path": str(decision_path),
+                        "enabled_lanes": ["shadow_source_reliability"],
+                        "shadow_source_reliability": {"scoreboard_path": str(scoreboard_path), "enabled": True},
+                    }
+                },
+                candidate_dataset_path=dataset_path,
+                inputs_by_shared_candidate_id={
+                    candidate_id: {
+                        "stable": SimpleNamespace(
+                            signal={
+                                "shared_candidate_id": candidate_id,
+                                "market_id": "KXHIGHNY-260513-T71",
+                                "question": "Will the high temperature in New York exceed 71 degrees?",
+                                "city_id": "new_york_ny",
+                                "threshold": 71.0,
+                                "question_side": "above",
+                                "confidence": 0.80,
+                                "source_details": [
+                                    {"source_name": "nws", "forecast_high": 73.0},
+                                    {"source_name": "bad-model", "forecast_high": 69.0},
+                                ],
+                            },
+                            shared_candidate={
+                                "candidate_id": candidate_id,
+                                "market_id": "KXHIGHNY-260513-T71",
+                                "market": {
+                                    "id": "KXHIGHNY-260513-T71",
+                                    "question": "Will the high temperature in New York exceed 71 degrees?",
+                                },
+                            },
+                        ),
+                    }
+                },
+                wallet_decision_rows={"stable_paper": [stable_decision], "beta_paper": []},
+                wallet_runs={"stable_paper": SimpleNamespace(session_id="stable-run")},
+                ledger_root=tmpdir,
+            )
+            lane_row = load_jsonl(Path(result.decision_path))[0]
+
+        self.assertEqual(result.lane_ids, ("shadow_source_reliability",))
+        self.assertEqual(lane_row["action"], "BUY_YES")
+        self.assertEqual(lane_row["reason_code"], "approved")
+        self.assertEqual(lane_row["approved_position_size_usd"], 10.0)
+        reliability = lane_row["provenance"]["source_reliability"]
+        self.assertEqual(reliability["recommended_action"], "BUY_YES")
+        self.assertEqual(reliability["reason_code"], "trusted_support")
+        self.assertEqual(reliability["decision_contract"], "recommendation_only_top_level_lane_action_unchanged")
+        self.assertEqual(reliability["trusted_support_count"], 1)
+        self.assertEqual(reliability["excluded_dissent_count"], 1)
+        self.assertEqual(reliability["weighted_dissent"], 0.0)
+        self.assertFalse(lane_row["mutation_contract"]["mutates_accounting"])
+
+    def test_source_reliability_lane_records_skip_recommendation_without_mutating_top_level_action(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dataset_path = Path(tmpdir) / "shared" / "prediction_lab" / "market_snapshots.jsonl"
+            decision_path = Path(tmpdir) / "lanes.jsonl"
+            scoreboard_path = Path(tmpdir) / "source_scoreboard_by_slice.jsonl"
+            append_jsonl(
+                scoreboard_path,
+                {
+                    "source_id": "nws",
+                    "source_name": "nws",
+                    "city_id": "new_york_ny",
+                    "market_kind": "high",
+                    "contract_shape": "tail",
+                    "sample_count": 100,
+                    "threshold_direction_accuracy": 0.95,
+                },
+            )
+            candidate_id = "candidate-skip-recommendation"
+            stable_decision = {
+                "shared_candidate_id": candidate_id,
+                "wallet_id": "stable_paper",
+                "run_id": "stable-run",
+                "candidate_dataset_path": str(dataset_path),
+                "decision_role": "paper_shadow",
+                "decision_id": "stable-source-decision",
+                "policy": "normal",
+                "market_id": "KXHIGHNY-260513-T71",
+                "observed_at": "2026-05-13T12:00:01+00:00",
+                "action": "BUY_YES",
+                "reason_code": "approved",
+                "confidence": 0.80,
+                "requested_position_size_usd": 10.0,
+                "approved_position_size_usd": 10.0,
+            }
+
+            result = write_paper_shadow_lane_decisions(
+                config={
+                    "paper_shadow_lanes": {
+                        "enabled": True,
+                        "decision_ledger_path": str(decision_path),
+                        "enabled_lanes": ["shadow_source_reliability"],
+                        "shadow_source_reliability": {"scoreboard_path": str(scoreboard_path), "enabled": True},
+                    }
+                },
+                candidate_dataset_path=dataset_path,
+                inputs_by_shared_candidate_id={
+                    candidate_id: {
+                        "stable": SimpleNamespace(
+                            signal={
+                                "shared_candidate_id": candidate_id,
+                                "market_id": "KXHIGHNY-260513-T71",
+                                "question": "Will the high temperature in New York exceed 71 degrees?",
+                                "city_id": "new_york_ny",
+                                "threshold": 71.0,
+                                "question_side": "above",
+                                "confidence": 0.80,
+                                "source_details": [{"source_name": "nws", "forecast_high": 69.0}],
+                            },
+                            shared_candidate={
+                                "candidate_id": candidate_id,
+                                "market_id": "KXHIGHNY-260513-T71",
+                                "market": {
+                                    "id": "KXHIGHNY-260513-T71",
+                                    "question": "Will the high temperature in New York exceed 71 degrees?",
+                                },
+                            },
+                        ),
+                    }
+                },
+                wallet_decision_rows={"stable_paper": [stable_decision], "beta_paper": []},
+                wallet_runs={"stable_paper": SimpleNamespace(session_id="stable-run")},
+                ledger_root=tmpdir,
+            )
+            lane_row = load_jsonl(Path(result.decision_path))[0]
+
+        self.assertEqual(lane_row["action"], "BUY_YES")
+        self.assertEqual(lane_row["reason_code"], "approved")
+        self.assertEqual(lane_row["approved_position_size_usd"], 10.0)
+        self.assertEqual(lane_row["confidence"], 0.80)
+        reliability = lane_row["provenance"]["source_reliability"]
+        self.assertEqual(reliability["recommended_action"], "SKIP")
+        self.assertEqual(reliability["reason_code"], "trusted_dissent")
+        self.assertAlmostEqual(reliability["confidence_after"], 0.60)
+        self.assertFalse(lane_row["mutation_contract"]["mutates_accounting"])
+
+    def test_source_reliability_lane_missing_scoreboard_records_unavailable_without_mutating_top_level_action(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dataset_path = Path(tmpdir) / "shared" / "prediction_lab" / "market_snapshots.jsonl"
+            decision_path = Path(tmpdir) / "lanes.jsonl"
+            candidate_id = "candidate-missing-scoreboard"
+            stable_decision = {
+                "shared_candidate_id": candidate_id,
+                "wallet_id": "stable_paper",
+                "run_id": "stable-run",
+                "candidate_dataset_path": str(dataset_path),
+                "decision_role": "paper_shadow",
+                "decision_id": "stable-source-decision",
+                "policy": "normal",
+                "market_id": "KXHIGHNY-260513-T71",
+                "observed_at": "2026-05-13T12:00:01+00:00",
+                "action": "BUY_YES",
+                "reason_code": "approved",
+                "confidence": 0.80,
+                "requested_position_size_usd": 10.0,
+                "approved_position_size_usd": 10.0,
+            }
+
+            result = write_paper_shadow_lane_decisions(
+                config={
+                    "paper_shadow_lanes": {
+                        "enabled": True,
+                        "decision_ledger_path": str(decision_path),
+                        "enabled_lanes": ["shadow_source_reliability"],
+                        "shadow_source_reliability": {"enabled": True},
+                    }
+                },
+                candidate_dataset_path=dataset_path,
+                inputs_by_shared_candidate_id={
+                    candidate_id: {
+                        "stable": SimpleNamespace(
+                            signal={
+                                "shared_candidate_id": candidate_id,
+                                "market_id": "KXHIGHNY-260513-T71",
+                                "question": "Will the high temperature in New York exceed 71 degrees?",
+                                "city_id": "new_york_ny",
+                                "threshold": 71.0,
+                                "question_side": "above",
+                                "confidence": 0.80,
+                                "source_details": [{"source_name": "nws", "forecast_high": 73.0}],
+                            },
+                            shared_candidate={
+                                "candidate_id": candidate_id,
+                                "market_id": "KXHIGHNY-260513-T71",
+                                "market": {
+                                    "id": "KXHIGHNY-260513-T71",
+                                    "question": "Will the high temperature in New York exceed 71 degrees?",
+                                },
+                            },
+                        ),
+                    }
+                },
+                wallet_decision_rows={"stable_paper": [stable_decision], "beta_paper": []},
+                wallet_runs={"stable_paper": SimpleNamespace(session_id="stable-run")},
+                ledger_root=tmpdir,
+            )
+            lane_row = load_jsonl(Path(result.decision_path))[0]
+
+        self.assertEqual(lane_row["action"], "BUY_YES")
+        self.assertEqual(lane_row["reason_code"], "approved")
+        self.assertEqual(lane_row["approved_position_size_usd"], 10.0)
+        reliability = lane_row["provenance"]["source_reliability"]
+        self.assertFalse(reliability["available"])
+        self.assertEqual(reliability["recommended_action"], "SKIP")
+        self.assertEqual(reliability["reason_code"], "source_reliability_unavailable")
+        self.assertFalse(lane_row["mutation_contract"]["mutates_accounting"])
+
     def test_paper_shadow_lane_report_counts_rows_actions_and_reference_drift(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             dataset_path = Path(tmpdir) / "shared" / "prediction_lab" / "market_snapshots.jsonl"

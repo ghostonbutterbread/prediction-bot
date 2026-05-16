@@ -14,7 +14,17 @@ state and previews later shared-candidate cutover, see
 - Shadow root: `data/beta_shadow/paper`
 - Prediction Lab shadow root: `data/beta_shadow/paper/prediction_lab`
 
-Both configs enable:
+The shadow configs are intentionally small composition declarations. Do not
+manage separate full config forks for beta-shadow weather. The loader
+materializes each shadow config as:
+
+1. stable base: `config.yaml`
+2. all-observability profile: `beta_shadow_observability_all`
+3. runtime profile: `paper_beta_shadow_runtime` or
+   `prediction_lab_beta_shadow_runtime`
+4. explicit keys in the shadow YAML, when present, as the final override
+
+The shared `beta_shadow_observability_all` overlay enables:
 
 ```yaml
 strategy_policy:
@@ -28,9 +38,15 @@ strategy_lanes:
 
 with `weather_hidden_gem_evidence_card`, `bucket_distribution_scoring`,
 `hidden_gem_lane_gates`, `confidence_slow_profit`, and `lane_sizing_caps` set to
-`true`. Lane sizing caps
-are configured for shadow comparison only; they do not alter final paper/live
-actions unless beta mode is explicitly promoted to `enforce`.
+`true`. It also keeps the weather-only route/group mapping and disables
+news/social/AI inputs for the weather shadow mapping profile.
+
+The runtime overlays own output isolation, shared-market runtime settings, and
+paper-vs-observer runtime flags. They also explicitly disable generic alerts and
+Telegram delivery so inherited stable alert settings cannot notify from shadow
+runs. Lane sizing caps are configured for shadow comparison only; they do not
+alter final paper/live actions unless beta mode is explicitly promoted to
+`enforce`.
 
 Paper beta-shadow also records `shadow_intents.jsonl` for stable-skip candidates
 when beta lane metadata differs, so old `SKIP -> beta candidate` cases are not
