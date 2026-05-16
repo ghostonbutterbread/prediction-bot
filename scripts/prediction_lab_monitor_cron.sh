@@ -27,18 +27,31 @@ STATE_FILE="data/paper/prediction_lab/monitor_state.json"
 LOCK="data/paper/prediction_lab/monitor.lock"
 LOG="data/paper/prediction_lab/logs/monitor_cron.log"
 
-# If the beta-shadow collector is intentionally active or has an existing
-# shadow state/pid file, monitor that isolated project. This keeps an exited
-# beta-shadow collector from falling back to stale normal-runtime alerts.
-if [[ -f "$REPO/config.prediction_lab_beta_shadow_weather.yaml" ]] \
-  && { pgrep -af '^python3 scripts/prediction_lab_collect.py --config config.prediction_lab_beta_shadow_weather.yaml --observer' >/dev/null 2>&1 \
-    || [[ -f "$REPO/data/beta_shadow/paper/prediction_lab/state.json" ]] \
-    || [[ -f "$REPO/data/beta_shadow/paper/prediction_lab/collector.pid" ]]; }; then
-  CONFIG_PATH="config.prediction_lab_beta_shadow_weather.yaml"
-  STATE_FILE="data/beta_shadow/paper/prediction_lab/monitor_state.json"
-  LOCK="data/beta_shadow/paper/prediction_lab/monitor.lock"
-  LOG="data/beta_shadow/paper/prediction_lab/logs/monitor_cron.log"
-elif [[ ! -f "$REPO/$CONFIG_PATH" && -f "$REPO/config.yaml" ]]; then
+MONITOR_PROFILE="${PREDICTION_LAB_MONITOR_PROFILE:-stable}"
+case "$MONITOR_PROFILE" in
+  stable|normal|paper)
+    ;;
+  beta_shadow)
+    # Beta-shadow monitoring is opt-in. Do not auto-switch just because stale
+    # beta state/pid files exist; that can move operational alerts away from
+    # the intended stable Prediction Lab collector without explicit selection.
+    if [[ -f "$REPO/config.prediction_lab_beta_shadow_weather.yaml" ]]; then
+      CONFIG_PATH="config.prediction_lab_beta_shadow_weather.yaml"
+      STATE_FILE="data/beta_shadow/paper/prediction_lab/monitor_state.json"
+      LOCK="data/beta_shadow/paper/prediction_lab/monitor.lock"
+      LOG="data/beta_shadow/paper/prediction_lab/logs/monitor_cron.log"
+    else
+      echo "prediction_lab_monitor_cron: beta_shadow profile requested but beta config missing" >&2
+      exit 1
+    fi
+    ;;
+  *)
+    echo "prediction_lab_monitor_cron: unsupported PREDICTION_LAB_MONITOR_PROFILE=$MONITOR_PROFILE" >&2
+    exit 1
+    ;;
+esac
+
+if [[ ! -f "$REPO/$CONFIG_PATH" && -f "$REPO/config.yaml" ]]; then
   CONFIG_PATH="config.yaml"
 fi
 
