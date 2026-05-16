@@ -4,8 +4,10 @@ import unittest
 from pathlib import Path
 
 from bot.weather.source_scoreboard import (
+    build_scoreboard_report,
     build_source_scoreboard,
     extract_source_forecast_observations,
+    render_scoreboard_report_markdown,
 )
 from bot.weather.source_reliability import (
     SourceReliabilityTable,
@@ -223,6 +225,53 @@ class WeatherSourceScoreboardTests(unittest.TestCase):
 
         self.assertEqual(report["summary"]["observations_scored"], 1)
         self.assertEqual(report["slices"][0]["city_id"], "new_york_ny")
+
+    def test_report_generation_builds_ranked_slices_leaderboards_and_notes(self):
+        rows = [
+            weather_row(actual_temp=73.0),
+            weather_row(
+                market_id="KXHIGHSEA-26MAY16-T70",
+                market_date="2026-05-16",
+                actual_temp=66.0,
+                sources=[
+                    {"source_name": "nws", "forecast_high": 68.0},
+                    {"source_name": "open-meteo", "forecast_high": 65.0},
+                ],
+            ),
+            weather_row(
+                market_id="KXLOWNY-26MAY16-T60",
+                question="Will the minimum temperature in New York be >60 on May 16, 2026?",
+                city_id="new_york_ny",
+                city="New York",
+                actual_temp=None,
+                sources=[{"source_name": "nws", "forecast_low": 62.0}],
+            ),
+        ]
+
+        scoreboard = build_source_scoreboard(rows)
+        report = build_scoreboard_report(
+            scoreboard,
+            run_metadata={"generated_at": "2026-05-16T00:00:00+00:00", "mode": "offline_report_only"},
+            limit=2,
+        )
+
+        self.assertEqual(report["schema_version"], 1)
+        self.assertEqual(report["generated_at"], "2026-05-16T00:00:00+00:00")
+        self.assertEqual(len(report["best_slices"]), 2)
+        self.assertEqual(len(report["worst_slices"]), 2)
+        self.assertEqual(report["leaderboards"]["sources"][0]["label"], "nws")
+        self.assertEqual(report["leaderboards"]["sources"][0]["sample_count"], 2)
+        self.assertEqual(report["leaderboards"]["cities"][0]["city_id"], "seattle_wa")
+        self.assertEqual(report["leaderboards"]["types"][0]["market_kind"], "high")
+        self.assertIn(
+            "missing_actual_temperatures",
+            {note["code"] for note in report["missing_data_notes"]},
+        )
+
+        markdown = render_scoreboard_report_markdown(report)
+        self.assertIn("# Weather Source Scoreboard Report", markdown)
+        self.assertIn("## Missing Data Notes", markdown)
+        self.assertIn("Source Leaderboard", markdown)
 
 
 class WeatherSourceReliabilityTests(unittest.TestCase):
@@ -444,17 +493,37 @@ class WeatherSourceScoreboardScriptTests(unittest.TestCase):
             for name in (
                 "source_scoreboard.json",
                 "source_scoreboard_by_slice.jsonl",
+                "source_scoreboard_report.json",
+                "source_scoreboard_report.md",
+                "best_slices.jsonl",
                 "best_slices.md",
+                "worst_slices.jsonl",
                 "worst_slices.md",
+                "source_leaderboard.jsonl",
+                "source_leaderboard.md",
+                "city_leaderboard.jsonl",
+                "city_leaderboard.md",
+                "type_leaderboard.jsonl",
+                "type_leaderboard.md",
                 "run_metadata.json",
             ):
                 self.assertTrue((output_dir / name).exists(), name)
 
             payload = json.loads((output_dir / "source_scoreboard.json").read_text(encoding="utf-8"))
             self.assertEqual(payload["summary"]["observations_scored"], 2)
+            report = json.loads((output_dir / "source_scoreboard_report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["leaderboards"]["sources"][0]["sample_count"], 1)
+            self.assertIn("missing_data_notes", report)
+            source_leaderboard_rows = [
+                json.loads(line)
+                for line in (output_dir / "source_leaderboard.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(len(source_leaderboard_rows), 2)
             metadata = json.loads((output_dir / "run_metadata.json").read_text(encoding="utf-8"))
             self.assertEqual(metadata["mode"], "offline_report_only")
             self.assertFalse(metadata["network_access"])
+            self.assertIn("source_scoreboard_report.md", metadata["artifacts"])
 
     def test_cli_optionally_writes_source_outcome_ledger_jsonl(self):
         with tempfile.TemporaryDirectory() as tmpdir:
