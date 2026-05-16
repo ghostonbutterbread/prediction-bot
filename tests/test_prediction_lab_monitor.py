@@ -134,6 +134,18 @@ class PredictionLabMonitorTests(unittest.TestCase):
             )
         )
 
+
+    def test_monitor_cron_beta_shadow_selection_requires_explicit_profile(self):
+        script = (Path(__file__).resolve().parents[1] / "scripts" / "prediction_lab_monitor_cron.sh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('MONITOR_PROFILE="${PREDICTION_LAB_MONITOR_PROFILE:-stable}"', script)
+        self.assertIn('beta_shadow)', script)
+        self.assertIn('Beta-shadow monitoring is opt-in', script)
+        self.assertNotIn('|| [[ -f "$REPO/data/beta_shadow/paper/prediction_lab/state.json" ]]', script)
+        self.assertNotIn('|| [[ -f "$REPO/data/beta_shadow/paper/prediction_lab/collector.pid" ]]', script)
+
     def test_evaluate_health_healthy_when_collector_recent_and_safe(self):
         now = datetime(2026, 4, 28, 18, 0, tzinfo=timezone.utc)
         with tempfile.TemporaryDirectory() as tmpdir:
