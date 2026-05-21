@@ -44,6 +44,20 @@ REQUIRED_EXECUTION_AUDIT_FIELDS = (
 )
 
 SNAPSHOT_SOURCE_ORDER = ("book", "fallback", "missing", "unknown")
+DRIFT_CATEGORY_ORDER = ("logic_drift", "risk_drift", "execution_drift", "lifecycle_drift")
+RISK_FAILURE_STAGES = {"risk_block", "risk_check"}
+LIFECYCLE_CONTRACT_ISSUES = {
+    "rejected_with_fill",
+    "failed_with_active_size",
+    "placed_without_size",
+    "placed_with_fill",
+    "placed_remaining_mismatch",
+    "filled_with_remaining",
+    "partial_without_split_fill",
+    "partial_size_sum_mismatch",
+    "resolved_flag_status_mismatch",
+    "resolved_without_flag",
+}
 COMPARISON_FIELDS = (
     "status",
     "lifecycle_state",
@@ -532,11 +546,60 @@ def _group_by_comparison_key(rows: list[dict[str, Any]]) -> dict[str, list[dict[
     return grouped
 
 
+def _has_execution_snapshot_delta(row: dict[str, Any]) -> bool:
+    if row.get("execution_price_delta"):
+        return True
+    original_market_price = row.get("original_market_price")
+    execution_market_price = row.get("execution_market_price")
+    return original_market_price is not None and execution_market_price is not None and original_market_price != execution_market_price
+
+
+def _has_lifecycle_contract_issue(row: dict[str, Any]) -> bool:
+    for issue in row.get("contract_issues", []) or []:
+        if issue in LIFECYCLE_CONTRACT_ISSUES or str(issue).endswith("_lifecycle_mismatch"):
+            return True
+    return False
+
+
+def _has_risk_failure_stage(row: dict[str, Any]) -> bool:
+    return str(row.get("failure_stage") or "").strip().lower() in RISK_FAILURE_STAGES
+
+
+def _classify_drift_categories(
+    paper_row: dict[str, Any],
+    live_row: dict[str, Any],
+    field_deltas: dict[str, dict[str, Any]],
+) -> list[str]:
+    categories: list[str] = []
+    delta_fields = set(field_deltas)
+
+    if delta_fields & {"status", "lifecycle_state", "failure_stage"}:
+        categories.append("lifecycle_drift")
+    elif paper_row.get("lifecycle_contradictions") or live_row.get("lifecycle_contradictions"):
+        categories.append("lifecycle_drift")
+    elif _has_lifecycle_contract_issue(paper_row) or _has_lifecycle_contract_issue(live_row):
+        categories.append("lifecycle_drift")
+
+    if "execution_snapshot_source" in delta_fields or _has_execution_snapshot_delta(paper_row) or _has_execution_snapshot_delta(live_row):
+        categories.append("execution_drift")
+
+    if delta_fields & {"decision_reason_code", "execution_revalidation_outcome"}:
+        if _has_risk_failure_stage(paper_row) or _has_risk_failure_stage(live_row):
+            categories.append("risk_drift")
+        else:
+            categories.append("logic_drift")
+
+    if not categories:
+        categories.append("logic_drift")
+    return categories
+
+
 def build_paper_live_comparison(paper_rows: list[dict[str, Any]], live_rows: list[dict[str, Any]]) -> dict[str, Any]:
     paper_by_key = _group_by_comparison_key(paper_rows)
     live_by_key = _group_by_comparison_key(live_rows)
     all_keys = sorted(set(paper_by_key) | set(live_by_key))
     mismatch_field_counts: dict[str, int] = {}
+    drift_category_counts: dict[str, int] = {}
     mismatch_examples: list[dict[str, Any]] = []
     matched_keys = 0
     matched_pairs = 0
@@ -566,6 +629,9 @@ def build_paper_live_comparison(paper_rows: list[dict[str, Any]], live_rows: lis
             mismatched_pair_count += 1
             for field in field_deltas:
                 mismatch_field_counts[field] = mismatch_field_counts.get(field, 0) + 1
+            drift_categories = _classify_drift_categories(paper_row, live_row, field_deltas)
+            for category in drift_categories:
+                drift_category_counts[category] = drift_category_counts.get(category, 0) + 1
             if len(mismatch_examples) < 20:
                 mismatch_examples.append(
                     {
@@ -573,6 +639,7 @@ def build_paper_live_comparison(paper_rows: list[dict[str, Any]], live_rows: lis
                         "pair_index": index,
                         "paper_trade_id": paper_row.get("trade_id"),
                         "live_trade_id": live_row.get("trade_id"),
+                        "drift_categories": drift_categories,
                         "field_deltas": field_deltas,
                     }
                 )
@@ -592,6 +659,11 @@ def build_paper_live_comparison(paper_rows: list[dict[str, Any]], live_rows: lis
         "paper_only_row_count": paper_only_row_count,
         "live_only_row_count": live_only_row_count,
         "mismatched_pair_count": mismatched_pair_count,
+        "drift_category_counts": [
+            (category, drift_category_counts.get(category, 0))
+            for category in DRIFT_CATEGORY_ORDER
+            if drift_category_counts.get(category, 0)
+        ],
         "mismatch_field_counts": sorted(mismatch_field_counts.items(), key=lambda item: (-item[1], item[0])),
         "mismatch_examples": mismatch_examples,
     }

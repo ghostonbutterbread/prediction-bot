@@ -28,6 +28,7 @@ DEFAULT_TRUSTED_DIRECTION_ACCURACY = 0.90
 DEFAULT_EXCLUDED_DIRECTION_ACCURACY = 0.45
 DEFAULT_DEAD_ZONE_F = 0.5
 SOURCE_OUTCOME_LEDGER_SCHEMA_VERSION = 1
+SOURCE_EDGE_EVALUATION_SCHEMA_VERSION = 1
 
 TIER_STRONG_TRUSTED = "strong_trusted"
 TIER_TRUSTED = "trusted"
@@ -138,14 +139,14 @@ class SourceReliabilityTable:
         city_id = observation.market.city_id or "unknown"
         market_kind = observation.market.market_kind or "unknown"
         contract_shape = observation.market.contract_shape or "unknown"
-        for source_key in _source_keys(observation.source_id, observation.source_name):
+        for source_key in _source_id_keys(observation.source_id):
             stats = self._by_key.get((source_key, city_id, market_kind, contract_shape))
             if stats is not None:
                 return stats
         return None
 
     def _add(self, stats: SourceReliabilityStats) -> None:
-        for source_key in _source_keys(stats.source_id, stats.source_name):
+        for source_key in _source_id_keys(stats.source_id):
             self._by_key[(source_key, stats.city_id, stats.market_kind, stats.contract_shape)] = stats
 
 
@@ -402,6 +403,18 @@ def build_source_outcome_ledger_row(
         "forecast_temp_f": forecast,
         "threshold": threshold,
         "question_side": market.question_side,
+        "action": _optional_text(row.get("action") or row.get("direction")),
+        "entry_price": _price_value(row, "entry_price"),
+        "price": _price_value(row, "price"),
+        "market_price": _price_value(row, "market_price"),
+        "estimated_fill_price": _price_value(row, "estimated_fill_price"),
+        "yes_price": _price_value(row, "yes_price"),
+        "no_price": _price_value(row, "no_price"),
+        "best_yes_ask": _price_value(row, "best_yes_ask"),
+        "best_yes_bid": _price_value(row, "best_yes_bid"),
+        "best_no_ask": _price_value(row, "best_no_ask"),
+        "best_no_bid": _price_value(row, "best_no_bid"),
+        "execution_snapshot_source": _optional_text(row.get("execution_snapshot_source") or _mapping_at(row, "provenance", "future_pnl_inputs").get("execution_snapshot_source")),
         "actual_temp_f": actual,
         "predicted_outcome": predicted_outcome,
         "actual_outcome": actual_outcome,
@@ -417,6 +430,131 @@ def build_source_outcome_ledger_row(
     ledger_row["observation_id"] = _ledger_observation_id(ledger_row)
     return ledger_row
 
+
+
+
+def build_source_edge_evaluation_rows(
+    ledger_rows: Iterable[Mapping[str, Any]],
+    *,
+    outcome_lookup: Mapping[Any, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Evaluate source-implied sides against finalized market outcomes and prices.
+
+    This is the scoreboard settlement/edge layer. It consumes source-outcome
+    ledger rows produced from known-at-time scoreboard/candidate rows, then joins
+    official market outcomes supplied by the caller. It performs no network
+    access and does not mutate paper/live accounting.
+    """
+
+    lookup = outcome_lookup or {}
+    results: list[dict[str, Any]] = []
+    for row in ledger_rows:
+        if not isinstance(row, Mapping):
+            continue
+        results.append(build_source_edge_evaluation_row(row, outcome_lookup=lookup))
+    return results
+
+
+def build_source_edge_evaluation_row(
+    ledger_row: Mapping[str, Any],
+    *,
+    outcome_lookup: Mapping[Any, Any] | None = None,
+) -> dict[str, Any]:
+    """Build one realized-edge row for a source ledger observation."""
+
+    lookup = outcome_lookup or {}
+    market_id = _optional_text(ledger_row.get("market_id"))
+    official = _market_outcome_for(ledger_row, lookup)
+    official_outcome = _normalize_market_outcome(official.get("official_outcome"))
+    predicted_outcome = _normalize_market_outcome(ledger_row.get("predicted_outcome"))
+    source_side_price = _source_side_price_for(ledger_row, predicted_outcome)
+    win = predicted_outcome == official_outcome if predicted_outcome and official_outcome in {"YES", "NO"} else None
+    binary_edge = None
+    flat_pnl = None
+    if win is not None and source_side_price is not None:
+        binary_edge = (1.0 if win else 0.0) - source_side_price
+        flat_pnl = (1.0 - source_side_price) if win else -source_side_price
+
+    blockers: list[str] = []
+    if not market_id:
+        blockers.append("missing_market_id")
+    if predicted_outcome not in {"YES", "NO"}:
+        blockers.append("missing_source_implied_side")
+    if official_outcome not in {"YES", "NO"}:
+        blockers.append("missing_official_outcome")
+    if source_side_price is None:
+        blockers.append("missing_source_side_price")
+
+    result = {
+        "schema_version": SOURCE_EDGE_EVALUATION_SCHEMA_VERSION,
+        "row_type": "source_scoreboard_edge_evaluation",
+        "observation_id": _optional_text(ledger_row.get("observation_id")),
+        "market_id": market_id,
+        "shared_candidate_id": _optional_text(ledger_row.get("shared_candidate_id")),
+        "source_id": _optional_text(ledger_row.get("source_id")) or "unknown",
+        "source_name": _optional_text(ledger_row.get("source_name")) or _optional_text(ledger_row.get("source_id")) or "unknown",
+        "city_id": _optional_text(ledger_row.get("city_id")) or "unknown",
+        "market_kind": _optional_text(ledger_row.get("market_kind")) or "unknown",
+        "contract_shape": _optional_text(ledger_row.get("contract_shape")) or "unknown",
+        "observed_at": _optional_text(ledger_row.get("observed_at")),
+        "market_date": _optional_text(ledger_row.get("market_date")),
+        "known_after": _optional_text(ledger_row.get("known_after")),
+        "forecast_temp_f": _number(ledger_row.get("forecast_temp_f")),
+        "threshold": _number(ledger_row.get("threshold")),
+        "question_side": _optional_text(ledger_row.get("question_side")),
+        "source_implied_side": predicted_outcome,
+        "official_outcome": official_outcome,
+        "outcome_source": _optional_text(official.get("outcome_source")),
+        "outcome_known_at": _optional_text(official.get("outcome_known_at")),
+        "label_independence": _optional_text(official.get("label_independence")),
+        "source_side_price": _round_metric(source_side_price),
+        "market_implied_probability": _round_metric(source_side_price),
+        "win": win,
+        "binary_edge_realized": _round_metric(binary_edge),
+        "flat_1usd_pnl": _round_metric(flat_pnl),
+        "eligible_for_edge_validation": not blockers,
+        "exclusion_reason": ";".join(dict.fromkeys(blockers)) if blockers else None,
+    }
+    result["edge_evaluation_id"] = _edge_evaluation_id(result)
+    return result
+
+
+def summarize_source_edge_evaluation_rows(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    """Summarize realized edge by source/city/kind/shape slices."""
+
+    materialized = [dict(row) for row in rows if isinstance(row, Mapping)]
+    groups: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
+    reason_counts: Counter[str] = Counter()
+    for row in materialized:
+        reason = _optional_text(row.get("exclusion_reason"))
+        if reason:
+            for part in reason.split(";"):
+                if part:
+                    reason_counts[part] += 1
+        key = (
+            _optional_text(row.get("source_id")) or "unknown",
+            _optional_text(row.get("city_id")) or "unknown",
+            _optional_text(row.get("market_kind")) or "unknown",
+            _optional_text(row.get("contract_shape")) or "unknown",
+        )
+        groups.setdefault(key, []).append(row)
+
+    slices = [_summarize_edge_group(key, group_rows) for key, group_rows in groups.items()]
+    slices.sort(key=lambda row: (row.get("eligible_count") or 0, row.get("avg_binary_edge_realized") or -999), reverse=True)
+    eligible_count = sum(1 for row in materialized if row.get("eligible_for_edge_validation") is True)
+    return {
+        "schema_version": SOURCE_EDGE_EVALUATION_SCHEMA_VERSION,
+        "row_type": "source_scoreboard_edge_summary",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "summary": {
+            "input_rows": len(materialized),
+            "eligible_rows": eligible_count,
+            "blocked_rows": len(materialized) - eligible_count,
+            "source_slice_count": len(slices),
+            "reason_counts": dict(sorted(reason_counts.items())),
+        },
+        "slices": slices,
+    }
 
 def build_rolling_source_reliability_table(
     ledger_rows: Iterable[Mapping[str, Any]],
@@ -459,16 +597,17 @@ def build_rolling_source_reliability_rows(
     if as_of_dt is None:
         return []
 
-    grouped: dict[tuple[str, str, str, str, str], list[Mapping[str, Any]]] = {}
+    grouped: dict[tuple[str, str, str, str], list[Mapping[str, Any]]] = {}
     for row in ledger_rows:
         if not isinstance(row, Mapping) or row.get("eligible_for_reliability") is not True:
             continue
         known_after = _parse_dt(row.get("known_after"))
         if known_after is None or known_after >= as_of_dt:
             continue
+        source_name = _optional_text(row.get("source_name"))
+        source_id = _optional_text(row.get("source_id")) or _slug(source_name) or "unknown"
         key = (
-            _optional_text(row.get("source_id")) or "unknown",
-            _optional_text(row.get("source_name")) or _optional_text(row.get("source_id")) or "unknown",
+            source_id,
             _optional_text(row.get("city_id")) or "unknown",
             _optional_text(row.get("market_kind")) or "unknown",
             _optional_text(row.get("contract_shape")) or "unknown",
@@ -477,7 +616,8 @@ def build_rolling_source_reliability_rows(
 
     stats_rows: list[dict[str, Any]] = []
     for key, group_rows in grouped.items():
-        source_id, source_name, city_id, market_kind, contract_shape = key
+        source_id, city_id, market_kind, contract_shape = key
+        source_name = _canonical_source_name(group_rows, source_id)
         latest_rows = sorted(
             group_rows,
             key=lambda row: (
@@ -527,6 +667,19 @@ def build_rolling_source_reliability_rows(
             }
         )
     return sorted(stats_rows, key=lambda row: (row["source_id"], row["city_id"], row["market_kind"], row["contract_shape"]))
+
+
+def _canonical_source_name(rows: Iterable[Mapping[str, Any]], fallback_source_id: str) -> str:
+    counts: Counter[str] = Counter()
+    for row in rows:
+        source_name = _optional_text(row.get("source_name"))
+        if source_name:
+            counts[source_name] += 1
+    if fallback_source_id in counts:
+        return fallback_source_id
+    if counts:
+        return sorted(counts.items(), key=lambda item: (-item[1], item[0].lower(), item[0]))[0][0]
+    return fallback_source_id
 
 
 def classify_rolling_reliability_tier(
@@ -802,9 +955,148 @@ def _empty_evaluation(
     )
 
 
-def _source_keys(source_id: str | None, source_name: str | None) -> tuple[str, ...]:
+
+
+def _price_value(row: Mapping[str, Any], key: str) -> float | None:
+    return _number(row.get(key), _mapping_at(row, "provenance", "future_pnl_inputs").get(key))
+
+
+def _market_outcome_for(ledger_row: Mapping[str, Any], lookup: Mapping[Any, Any]) -> dict[str, Any]:
+    market_id = _optional_text(ledger_row.get("market_id"))
+    candidates = []
+    if market_id is not None:
+        candidates.extend([lookup.get(market_id), lookup.get(market_id.upper()), lookup.get(market_id.lower())])
+    candidates.extend([ledger_row.get("market_outcome"), ledger_row.get("official_outcome")])
+    for candidate in candidates:
+        normalized = _normalize_outcome_payload(candidate)
+        if normalized:
+            return normalized
+    return {}
+
+
+def _normalize_outcome_payload(value: Any) -> dict[str, Any]:
+    if isinstance(value, Mapping):
+        outcome = _normalize_market_outcome(
+            value.get("official_outcome")
+            or value.get("outcome")
+            or value.get("result")
+            or value.get("settlement_value")
+            or value.get("actual_outcome")
+        )
+        if outcome is None:
+            return {}
+        return {
+            "official_outcome": outcome,
+            "outcome_source": _optional_text(value.get("outcome_source") or value.get("source")) or "lookup",
+            "outcome_known_at": _optional_text(value.get("outcome_known_at") or value.get("known_at") or value.get("resolved_at") or value.get("settled_at")),
+            "label_independence": _optional_text(value.get("label_independence")) or "independent_kalshi_result",
+        }
+    outcome = _normalize_market_outcome(value)
+    if outcome is None:
+        return {}
+    return {
+        "official_outcome": outcome,
+        "outcome_source": "lookup",
+        "outcome_known_at": None,
+        "label_independence": "independent_kalshi_result",
+    }
+
+
+def _source_side_price_for(row: Mapping[str, Any], side: str | None) -> float | None:
+    side = _normalize_market_outcome(side)
+    if side == "YES":
+        side_specific = _number(row.get("source_side_price"), row.get("yes_price"), row.get("yes_ask"), row.get("best_yes_ask"))
+        return side_specific if side_specific is not None else _same_side_fill_price(row, side)
+    if side == "NO":
+        side_specific = _number(row.get("source_side_price"), row.get("no_price"), row.get("no_ask"), row.get("best_no_ask"))
+        return side_specific if side_specific is not None else _same_side_fill_price(row, side)
+    return None
+
+
+def _same_side_fill_price(row: Mapping[str, Any], side: str) -> float | None:
+    # Side-agnostic fill/entry prices are only valid when the row's action side
+    # matches the source-implied side. Otherwise a stable BUY_YES fill could be
+    # incorrectly used to price a source-implied BUY_NO counterfactual.
+    if _row_action_side(row) != side:
+        return None
+    return _number(row.get("estimated_fill_price"), row.get("entry_price"), row.get("price"), row.get("market_price"))
+
+
+def _row_action_side(row: Mapping[str, Any]) -> str | None:
+    for key in ("source_side", "direction", "action", "stable_action", "replayed_action"):
+        text = _optional_text(row.get(key))
+        if not text:
+            continue
+        normalized = text.strip().upper()
+        if normalized in {"YES", "BUY_YES"}:
+            return "YES"
+        if normalized in {"NO", "BUY_NO"}:
+            return "NO"
+    return None
+
+
+def _normalize_market_outcome(value: Any) -> str | None:
+    if isinstance(value, bool):
+        return "YES" if value else "NO"
+    text = _optional_text(value)
+    if not text:
+        return None
+    normalized = text.strip().upper()
+    if normalized in {"YES", "Y", "TRUE", "1", "1.0"}:
+        return "YES"
+    if normalized in {"NO", "N", "FALSE", "0", "0.0"}:
+        return "NO"
+    return None
+
+
+def _summarize_edge_group(key: tuple[str, str, str, str], rows: list[dict[str, Any]]) -> dict[str, Any]:
+    source_id, city_id, market_kind, contract_shape = key
+    eligible = [row for row in rows if row.get("eligible_for_edge_validation") is True]
+    wins = sum(1 for row in eligible if row.get("win") is True)
+    edge_values = [_number(row.get("binary_edge_realized")) for row in eligible]
+    pnl_values = [_number(row.get("flat_1usd_pnl")) for row in eligible]
+    prices = [_number(row.get("source_side_price")) for row in eligible]
+    edge_values = [value for value in edge_values if value is not None]
+    pnl_values = [value for value in pnl_values if value is not None]
+    prices = [value for value in prices if value is not None]
+    source_name = next((_optional_text(row.get("source_name")) for row in rows if _optional_text(row.get("source_name"))), source_id)
+    return {
+        "source_id": source_id,
+        "source_name": source_name,
+        "city_id": city_id,
+        "market_kind": market_kind,
+        "contract_shape": contract_shape,
+        "total_rows": len(rows),
+        "eligible_count": len(eligible),
+        "blocked_count": len(rows) - len(eligible),
+        "wins": wins,
+        "losses": len(eligible) - wins,
+        "win_rate": _round_metric(wins / len(eligible)) if eligible else None,
+        "avg_source_side_price": _round_metric(sum(prices) / len(prices)) if prices else None,
+        "avg_binary_edge_realized": _round_metric(sum(edge_values) / len(edge_values)) if edge_values else None,
+        "flat_1usd_pnl": _round_metric(sum(pnl_values)) if pnl_values else None,
+    }
+
+
+def _edge_evaluation_id(row: Mapping[str, Any]) -> str:
+    payload = {
+        key: row.get(key)
+        for key in (
+            "observation_id",
+            "market_id",
+            "shared_candidate_id",
+            "source_id",
+            "source_implied_side",
+            "official_outcome",
+            "source_side_price",
+        )
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return sha1(raw.encode("utf-8")).hexdigest()
+
+def _source_id_keys(source_id: str | None) -> tuple[str, ...]:
     keys = []
-    for value in (source_id, source_name, _slug(source_id), _slug(source_name)):
+    for value in (source_id, _slug(source_id)):
         text = _optional_text(value)
         if text and text not in keys:
             keys.append(text)
@@ -941,6 +1233,7 @@ def _ledger_observation_id(row: Mapping[str, Any]) -> str:
 
 __all__ = [
     "SOURCE_OUTCOME_LEDGER_SCHEMA_VERSION",
+    "SOURCE_EDGE_EVALUATION_SCHEMA_VERSION",
     "SourceReliabilityEvaluation",
     "SourceReliabilityStats",
     "SourceReliabilityTable",
@@ -948,6 +1241,8 @@ __all__ = [
     "build_rolling_source_reliability_rows",
     "build_rolling_source_reliability_table",
     "build_source_outcome_ledger_row",
+    "build_source_edge_evaluation_row",
+    "build_source_edge_evaluation_rows",
     "build_source_outcome_ledger_rows",
     "build_source_outcome_ledger_rows_for_row",
     "build_source_reliability_shadow_row",
@@ -959,4 +1254,5 @@ __all__ = [
     "load_scoreboard_rows",
     "stats_from_scoreboard_row",
     "summarize_source_reliability_shadow_rows",
+    "summarize_source_edge_evaluation_rows",
 ]

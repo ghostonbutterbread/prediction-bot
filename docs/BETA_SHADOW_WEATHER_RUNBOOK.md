@@ -48,6 +48,20 @@ runs. Lane sizing caps are configured for shadow comparison only; they do not
 alter final paper/live actions unless beta mode is explicitly promoted to
 `enforce`.
 
+Isolated source-scoreboard paper shadow collection now has its own opt-in
+runtime profile:
+
+- Config: `data/runtime_configs/paper_source_scoreboard_shadow_20260516.yaml`
+- Scoreboard input: `/tmp/weather_source_scoreboard_beta_smoke/source_scoreboard_by_slice.jsonl`
+- Lane decisions: `data/beta_shadow/paper/source_scoreboard/paper_shadow_lane_decisions.jsonl`
+
+This profile is still recommendation-only and non-mutating. It keeps the
+established paper shadow lanes enabled, adds `shadow_source_scoreboard`, and
+records the scoreboard recommendation under provenance only. It does not change
+stable/control paper actions, wallet balances, accounting, or live behavior.
+It is not enabled in `config.yaml` or the current limited-shadow runtime
+profiles.
+
 Paper beta-shadow also records `shadow_intents.jsonl` for stable-skip candidates
 when beta lane metadata differs, so old `SKIP -> beta candidate` cases are not
 invisible during later PnL/replay review.
@@ -140,3 +154,74 @@ storage audit/pruning rather than touching normal config paths.
 The analyze script still writes summaries under the normal summaries directory
 when run without `--report`, so treat shadow analysis output as review material
 and do not compare it as a normal paper report without labeling it.
+
+To review the isolated source-scoreboard lane decisions after a run:
+
+```bash
+python3 scripts/paper_shadow_lane_report.py \
+  --lane-decision-path data/beta_shadow/paper/source_scoreboard/paper_shadow_lane_decisions.jsonl
+```
+
+To materialize a derived, read-only lane-resolution artifact for resolved P&L/replay review:
+
+```bash
+python3 scripts/paper_shadow_lane_report.py \
+  --lane-decision-path data/beta_shadow/paper/source_scoreboard/paper_shadow_lane_decisions.jsonl \
+  --resolution-path data/paper/prediction_lab/resolutions.jsonl \
+  --section resolved_pnl \
+  --resolved-output-jsonl data/summaries/source_scoreboard_lane_resolutions.jsonl
+```
+
+The `--resolved-output-jsonl` file is a derived analysis artifact only. Do not point it at
+paper wallet session files, risk state, lifecycle/reconciliation ledgers, or live order/trade
+paths. Resolution rows are regenerated from lane decisions plus finalized market outcomes;
+they must not be consumed as wallet trades or accounting state.
+
+Resolved PnL review is also read-only. It joins lane decision rows to a
+resolution JSONL and builds replayable resolution rows internally from recorded
+action/side, entry or estimated fill price, notional/approved size, outcome, and
+replay sizing metadata. This remains separate from wallet accounting; it does
+not mutate balances, paper sessions, trades, risk state, or live orders.
+
+If a lane/candidate/decision file has old market IDs but the local
+`resolutions.jsonl` does not cover them yet, first build a derived Kalshi
+resolution backfill:
+
+```bash
+python3 scripts/backfill.py \
+  --kind scoreboard-resolutions \
+  --lane shadow_source_scoreboard \
+  data/beta_shadow/paper/source_scoreboard/paper_shadow_lane_decisions.jsonl \
+  --output data/summaries/source_scoreboard_kalshi_resolutions.jsonl \
+  --report-output data/summaries/source_scoreboard_kalshi_resolutions.report.json
+```
+
+Then feed that derived resolution file into the normal read-only P&L report:
+
+```bash
+python3 scripts/paper_shadow_lane_report.py \
+  --section resolved_pnl \
+  --lane-decision-path data/beta_shadow/paper/source_scoreboard/paper_shadow_lane_decisions.jsonl \
+  --resolution-path data/summaries/source_scoreboard_kalshi_resolutions.jsonl
+```
+
+The backfill tool fetches finalized public Kalshi market outcomes and writes
+derived artifacts only under report/summaries directories. It must not be used
+to overwrite paper wallet sessions, risk state, lifecycle/reconciliation
+ledgers, or live trade/order paths. The legacy
+`scripts/scoreboard_resolution_backfill.py` entrypoint still works, but
+`scripts/backfill.py --kind ...` is the preferred front door for new backfills
+so Prediction Lab, agent-decision, and lane-resolution backfills share one
+discoverable command shape.
+
+```bash
+python3 scripts/paper_shadow_lane_report.py \
+  --section resolved_pnl \
+  --lane-decision-path data/beta_shadow/paper/source_scoreboard/paper_shadow_lane_decisions.jsonl \
+  --resolution-path data/paper/prediction_lab/resolutions.jsonl
+```
+
+If the frozen scoreboard artifact is regenerated elsewhere, update
+`paper_shadow_lanes.source_scoreboard_path` in
+`data/runtime_configs/paper_source_scoreboard_shadow_20260516.yaml` before using
+that profile.

@@ -1,0 +1,92 @@
+# Weather source catalog for the source-scoreboard evaluator.
+#
+# This is metadata only. It does not enable a source, fetch network data, or
+# promote any source to trading. External provider claims are leads until the
+# scoreboard edge evaluator validates them against Kalshi finalized outcomes.
+
+sources:
+  - source_id: nws
+    family: noaa_nws
+    category: settlement_adjacent
+    api: weather.gov
+    cost: free
+    license_notes: public US government data
+    settlement_relevance: primary Kalshi weather settlement family via final NWS/NOAA climate reports when market rules specify those reports
+    strengths:
+      - official_station_context
+      - public_baseline
+      - station_mapping
+    risks:
+      - not_independent_for_nws_derived_temperature_labels
+      - market_may_already_price_public_forecasts
+    adapter_status: active
+    trading_status: scoreboard_only
+
+  - source_id: open_meteo
+    family: open_meteo
+    category: model_ensemble
+    api: open-meteo.com
+    cost: free_tier
+    license_notes: check API terms before commercial/live use
+    settlement_relevance: secondary predictor of the eventual settlement station or NWS-reported value
+    strengths:
+      - hourly_model_grid
+      - easy_api
+      - broad_city_coverage
+    risks:
+      - station_mismatch
+      - model_grid_may_not_match_settlement_station
+    adapter_status: active
+    trading_status: scoreboard_only
+
+  - source_id: metar_asos
+    family: noaa_station_observation
+    category: nowcast_station_adjacent
+    api: aviationweather.gov or NOAA station feeds
+    cost: free
+    license_notes: public US government data where sourced from NOAA
+    settlement_relevance: useful for final-day nowcasting when the Kalshi settlement station is airport/station based
+    strengths:
+      - station_local_observations
+      - settlement_station_proximity
+      - late_day_nowcast_signal
+    risks:
+      - observation_not_forecast
+      - must_preserve_known_at_time
+      - station_mapping_required
+    adapter_status: candidate_disabled
+    trading_status: disabled
+
+  - source_id: visual_crossing
+    family: visual_crossing
+    category: commercial_hyperlocal
+    api: visualcrossing.com
+    cost: commercial_or_limited_free_tier
+    license_notes: review terms before storing/redistributing data
+    settlement_relevance: candidate predictor; only valuable if it predicts Kalshi final settlement better than market price
+    strengths:
+      - hyperlocal_forecasts
+      - historical_api
+    risks:
+      - paid_access
+      - licensing_review_required
+      - station_or_interpolation_mismatch
+    adapter_status: research_only
+    trading_status: disabled
+
+  - source_id: tomorrow_io
+    family: tomorrow_io
+    category: commercial_hyperlocal
+    api: tomorrow.io
+    cost: commercial_or_limited_free_tier
+    license_notes: review terms before storing/redistributing data
+    settlement_relevance: candidate predictor; validate against Kalshi finalized outcomes before any promotion
+    strengths:
+      - nowcasting
+      - hyperlocal_forecasts
+    risks:
+      - paid_access
+      - licensing_review_required
+      - station_or_interpolation_mismatch
+    adapter_status: research_only
+    trading_status: disabled

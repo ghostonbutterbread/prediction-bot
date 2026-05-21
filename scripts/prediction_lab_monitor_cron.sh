@@ -6,6 +6,7 @@ SCRIPT_REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 REPO_CANDIDATES=(
   "$SCRIPT_REPO"
+  "/mnt/data-collection/prediction-bot"
   "/home/ryushe/projects/prediction-bot"
   "/home/ryushe/active-projects/prediction-bot"
 )
@@ -32,10 +33,15 @@ case "$MONITOR_PROFILE" in
   stable|normal|paper)
     ;;
   beta_shadow)
-    # Beta-shadow monitoring is opt-in. Do not auto-switch just because stale
-    # beta state/pid files exist; that can move operational alerts away from
-    # the intended stable Prediction Lab collector without explicit selection.
-    if [[ -f "$REPO/config.prediction_lab_beta_shadow_weather.yaml" ]]; then
+    # Beta-shadow monitoring is opt-in. Prefer the currently active limited
+    # runtime config when present so process matching follows the launched
+    # collector command exactly instead of the base template config.
+    if [[ -f "$REPO/data/runtime_configs/prediction_lab_limited_shadow_20260516.yaml" ]]; then
+      CONFIG_PATH="data/runtime_configs/prediction_lab_limited_shadow_20260516.yaml"
+      STATE_FILE="data/beta_shadow/paper/prediction_lab/monitor_state.json"
+      LOCK="data/beta_shadow/paper/prediction_lab/monitor.lock"
+      LOG="data/beta_shadow/paper/prediction_lab/logs/monitor_cron.log"
+    elif [[ -f "$REPO/config.prediction_lab_beta_shadow_weather.yaml" ]]; then
       CONFIG_PATH="config.prediction_lab_beta_shadow_weather.yaml"
       STATE_FILE="data/beta_shadow/paper/prediction_lab/monitor_state.json"
       LOCK="data/beta_shadow/paper/prediction_lab/monitor.lock"

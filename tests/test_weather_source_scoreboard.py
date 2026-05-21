@@ -13,11 +13,14 @@ from bot.weather.source_reliability import (
     SourceReliabilityTable,
     build_rolling_source_reliability_rows,
     build_rolling_source_reliability_table,
+    build_source_edge_evaluation_rows,
     build_source_outcome_ledger_rows,
     classify_reliability_tier,
     evaluate_source_reliability_candidate,
+    summarize_source_edge_evaluation_rows,
 )
 from scripts.weather_source_scoreboard import main as source_scoreboard_main
+from scripts.weather_source_edge_validate import main as source_edge_validate_main
 
 
 def weather_row(
@@ -429,6 +432,157 @@ class WeatherSourceReliabilityTests(unittest.TestCase):
         self.assertEqual(evaluation.weighted_dissent, 0.0)
         self.assertEqual(evaluation.recommended_action, "SKIP")
 
+    def test_source_edge_evaluation_compares_source_side_to_kalshi_outcome_and_price(self):
+        ledger_rows = [
+            {
+                **_ledger_row(1, correct=True, known_after=_known_after(2), source_id="nws"),
+                "predicted_outcome": "YES",
+                "actual_outcome": None,
+                "direction": "BUY_YES",
+                "estimated_fill_price": 0.25,
+            },
+            {
+                **_ledger_row(2, correct=False, known_after=_known_after(2), source_id="open_meteo"),
+                "predicted_outcome": "NO",
+                "actual_outcome": None,
+                "direction": "BUY_NO",
+                "estimated_fill_price": 0.40,
+            },
+        ]
+
+        rows = build_source_edge_evaluation_rows(
+            ledger_rows,
+            outcome_lookup={
+                "KXHIGHSEA-26MAY01-T70": {
+                    "official_outcome": "YES",
+                    "outcome_source": "kalshi_result",
+                    "outcome_known_at": "2026-05-03T00:00:00+00:00",
+                    "label_independence": "independent_kalshi_result",
+                },
+                "KXHIGHSEA-26MAY02-T70": {
+                    "official_outcome": "YES",
+                    "outcome_source": "kalshi_result",
+                },
+            },
+        )
+
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(rows[0]["eligible_for_edge_validation"])
+        self.assertEqual(rows[0]["source_implied_side"], "YES")
+        self.assertEqual(rows[0]["official_outcome"], "YES")
+        self.assertTrue(rows[0]["win"])
+        self.assertEqual(rows[0]["source_side_price"], 0.25)
+        self.assertEqual(rows[0]["binary_edge_realized"], 0.75)
+        self.assertEqual(rows[0]["flat_1usd_pnl"], 0.75)
+
+        self.assertTrue(rows[1]["eligible_for_edge_validation"])
+        self.assertEqual(rows[1]["source_implied_side"], "NO")
+        self.assertEqual(rows[1]["official_outcome"], "YES")
+        self.assertFalse(rows[1]["win"])
+        self.assertEqual(rows[1]["binary_edge_realized"], -0.4)
+        self.assertEqual(rows[1]["flat_1usd_pnl"], -0.4)
+
+    def test_source_edge_evaluation_requires_explicit_official_outcome(self):
+        row = {**_ledger_row(1, correct=True, known_after=_known_after(2), source_id="nws"), "predicted_outcome": "YES", "actual_outcome": "YES", "direction": "BUY_YES", "estimated_fill_price": 0.25}
+
+        edge_row = build_source_edge_evaluation_rows([row])[0]
+
+        self.assertFalse(edge_row["eligible_for_edge_validation"])
+        self.assertIn("missing_official_outcome", edge_row["exclusion_reason"])
+        self.assertIsNone(edge_row["official_outcome"])
+
+    def test_source_edge_evaluation_does_not_use_wrong_side_fill_price(self):
+        row = {**_ledger_row(1, correct=True, known_after=_known_after(2), source_id="nws"), "predicted_outcome": "NO", "direction": "BUY_YES", "estimated_fill_price": 0.25}
+
+        edge_row = build_source_edge_evaluation_rows([row], outcome_lookup={"KXHIGHSEA-26MAY01-T70": "NO"})[0]
+
+        self.assertFalse(edge_row["eligible_for_edge_validation"])
+        self.assertIn("missing_source_side_price", edge_row["exclusion_reason"])
+        self.assertIsNone(edge_row["source_side_price"])
+
+    def test_source_outcome_ledger_preserves_future_price_inputs_for_edge_evaluation(self):
+        row = weather_row(actual_temp=73.0, sources=[{"source_name": "nws", "forecast_high": 72.0}])
+        row.update({"observed_at": "2026-05-14T12:00:00+00:00", "resolved_at": "2026-05-16T13:00:00+00:00", "direction": "BUY_YES"})
+        row["provenance"] = {"future_pnl_inputs": {"estimated_fill_price": 0.25, "best_yes_ask": 0.25, "best_no_ask": 0.77}}
+
+        ledger_row = build_source_outcome_ledger_rows([row])[0]
+
+        self.assertEqual(ledger_row["action"], "BUY_YES")
+        self.assertEqual(ledger_row["estimated_fill_price"], 0.25)
+        self.assertEqual(ledger_row["best_yes_ask"], 0.25)
+        self.assertEqual(ledger_row["best_no_ask"], 0.77)
+
+    def test_source_edge_validate_cli_writes_report_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            ledger_path = tmp / "source_outcome_ledger.jsonl"
+            outcome_path = tmp / "outcomes.jsonl"
+            output_dir = tmp / "edge_report"
+            ledger_rows = [
+                {**_ledger_row(1, correct=True, known_after=_known_after(2), source_id="nws"), "predicted_outcome": "YES", "direction": "BUY_YES", "estimated_fill_price": 0.25},
+                {**_ledger_row(2, correct=True, known_after=_known_after(2), source_id="nws"), "predicted_outcome": "NO", "direction": "BUY_NO", "estimated_fill_price": 0.40},
+                {**_ledger_row(3, correct=True, known_after=_known_after(2), source_id="open_meteo"), "predicted_outcome": "YES", "direction": "BUY_YES", "estimated_fill_price": 0.10},
+            ]
+            _write_jsonl_test(ledger_path, ledger_rows)
+            _write_jsonl_test(
+                outcome_path,
+                [
+                    {"market_id": "KXHIGHSEA-26MAY01-T70", "official_outcome": "YES", "outcome_source": "kalshi_result", "outcome_known_at": "2026-05-03T00:00:00+00:00"},
+                    {"ticker": "KXHIGHSEA-26MAY02-T70", "result": "YES", "outcome_source": "kalshi_result"},
+                ],
+            )
+
+            rc = source_edge_validate_main([
+                "--ledger-input", str(ledger_path),
+                "--outcome-input", str(outcome_path),
+                "--output-dir", str(output_dir),
+                "--report-limit", "10",
+            ])
+
+            self.assertEqual(rc, 0)
+            summary = json.loads((output_dir / "source_edge_summary.json").read_text())
+            metadata = json.loads((output_dir / "run_metadata.json").read_text())
+            edge_rows = [json.loads(line) for line in (output_dir / "source_edge_evaluation_rows.jsonl").read_text().splitlines() if line]
+            report_md = (output_dir / "source_edge_report.md").read_text()
+
+        self.assertEqual(metadata["mode"], "offline_edge_validation_only")
+        self.assertFalse(metadata["network_access"])
+        self.assertEqual(metadata["outcome_load_stats"]["outcomes_loaded"], 2)
+        self.assertEqual(summary["summary"]["input_rows"], 3)
+        self.assertEqual(summary["summary"]["eligible_rows"], 2)
+        self.assertEqual(summary["summary"]["blocked_rows"], 1)
+        self.assertEqual(summary["summary"]["reason_counts"], {"missing_official_outcome": 1})
+        self.assertEqual(len(edge_rows), 3)
+        self.assertIn("Weather Source Edge Validation Report", report_md)
+        self.assertIn("missing_official_outcome", report_md)
+
+    def test_source_edge_summary_groups_by_source_city_kind_shape(self):
+        rows = build_source_edge_evaluation_rows(
+            [
+                {**_ledger_row(1, correct=True, known_after=_known_after(2), source_id="nws"), "predicted_outcome": "YES", "direction": "BUY_YES", "estimated_fill_price": 0.25},
+                {**_ledger_row(2, correct=True, known_after=_known_after(2), source_id="nws"), "predicted_outcome": "NO", "direction": "BUY_NO", "estimated_fill_price": 0.40},
+                {**_ledger_row(3, correct=True, known_after=_known_after(2), source_id="open_meteo"), "predicted_outcome": "NO"},
+            ],
+            outcome_lookup={
+                "KXHIGHSEA-26MAY01-T70": "YES",
+                "KXHIGHSEA-26MAY02-T70": "YES",
+                "KXHIGHSEA-26MAY03-T70": "NO",
+            },
+        )
+
+        summary = summarize_source_edge_evaluation_rows(rows)
+
+        self.assertEqual(summary["summary"]["input_rows"], 3)
+        self.assertEqual(summary["summary"]["eligible_rows"], 2)
+        self.assertEqual(summary["summary"]["blocked_rows"], 1)
+        nws = next(row for row in summary["slices"] if row["source_id"] == "nws")
+        self.assertEqual(nws["eligible_count"], 2)
+        self.assertEqual(nws["wins"], 1)
+        self.assertEqual(nws["losses"], 1)
+        self.assertEqual(nws["win_rate"], 0.5)
+        self.assertEqual(nws["avg_binary_edge_realized"], 0.175)
+        self.assertEqual(nws["flat_1usd_pnl"], 0.35)
+
 
 def _ledger_row(
     index: int,
@@ -600,6 +754,12 @@ class WeatherSourceScoreboardScriptTests(unittest.TestCase):
             metadata = json.loads((output_dir / "run_metadata.json").read_text(encoding="utf-8"))
             self.assertEqual(metadata["ledger_output"], str(ledger_path))
             self.assertEqual(metadata["ledger_rows"], 2)
+
+
+def _write_jsonl_test(path: Path, rows: list[dict]) -> None:
+    with path.open("w", encoding="utf-8") as fh:
+        for row in rows:
+            fh.write(json.dumps(row, sort_keys=True) + "\n")
 
 
 if __name__ == "__main__":

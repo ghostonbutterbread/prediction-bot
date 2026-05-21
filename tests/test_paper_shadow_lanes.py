@@ -1,5 +1,9 @@
+import json
+import os
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -11,12 +15,17 @@ from bot.config import load_config
 from bot.file_ops import append_jsonl, load_jsonl
 from bot.paper_shadow_lanes import (
     PAPER_LANE_DECISION_ROLE,
+    build_paper_shadow_lane_resolution_rows,
     paper_shadow_lanes_enabled,
     summarize_paper_shadow_lane_report,
+    summarize_paper_shadow_lane_resolved_pnl,
     write_paper_shadow_lane_decisions,
 )
 from bot.paper_wallet_runner import run_shared_candidate_paper_evaluation
 from bot.prediction_lab import PredictionLab
+from scripts.paper_shadow_lane_report import main as paper_shadow_lane_report_main
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class PaperShadowLaneTests(unittest.TestCase):
@@ -161,6 +170,19 @@ enabled: false
 description: Stable paper decision, but only allow buys for configured premium cities.
 parameters:
   allowlist: []
+"""
+        )
+        (lanes_dir / "shadow_source_scoreboard.yaml").write_text(
+            """
+id: shadow_source_scoreboard
+type: source_reliability
+source_wallet: stable_paper
+source_role: baseline
+input_source: shared_candidate_dataset
+input_market_source: shared_market
+enabled: false
+description: Stable paper decision, but record source scoreboard recommendations and future-PnL provenance only.
+parameters: {}
 """
         )
         return lanes_dir
@@ -618,6 +640,8 @@ parameters:
         self.assertEqual(reliability["trusted_support_count"], 1)
         self.assertEqual(reliability["excluded_dissent_count"], 1)
         self.assertEqual(reliability["weighted_dissent"], 0.0)
+        self.assertNotIn("source_scoreboard", lane_row["provenance"])
+        self.assertNotIn("future_pnl_inputs", lane_row["provenance"])
         self.assertFalse(lane_row["mutation_contract"]["mutates_accounting"])
 
     def test_source_reliability_lane_records_skip_recommendation_without_mutating_top_level_action(self):
@@ -776,6 +800,436 @@ parameters:
         self.assertEqual(reliability["reason_code"], "source_reliability_unavailable")
         self.assertFalse(lane_row["mutation_contract"]["mutates_accounting"])
 
+    def test_shadow_source_scoreboard_lane_loads_from_yaml_and_writes_non_mutating_row(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dataset_path = Path(tmpdir) / "shared" / "prediction_lab" / "market_snapshots.jsonl"
+            decision_path = Path(tmpdir) / "lanes.jsonl"
+            scoreboard_path = Path(tmpdir) / "source_scoreboard_by_slice.jsonl"
+            lanes_dir = self._write_lane_definition_dir(tmpdir)
+            append_jsonl(
+                scoreboard_path,
+                {
+                    "source_id": "nws",
+                    "source_name": "nws",
+                    "city_id": "new_york_ny",
+                    "market_kind": "high",
+                    "contract_shape": "tail",
+                    "sample_count": 100,
+                    "threshold_direction_accuracy": 0.95,
+                },
+            )
+            candidate_id = "candidate-scoreboard-yaml"
+            stable_decision = {
+                "shared_candidate_id": candidate_id,
+                "wallet_id": "stable_paper",
+                "run_id": "stable-run",
+                "candidate_dataset_path": str(dataset_path),
+                "decision_role": "paper_shadow",
+                "decision_id": "stable-source-decision",
+                "policy": "normal",
+                "market_id": "KXHIGHNY-260513-T71",
+                "observed_at": "2026-05-13T12:00:01+00:00",
+                "action": "BUY_YES",
+                "reason_code": "approved",
+                "reason": "stable approved",
+                "confidence": 0.80,
+                "requested_position_size_usd": 10.0,
+                "approved_position_size_usd": 10.0,
+            }
+
+            result = write_paper_shadow_lane_decisions(
+                config={
+                    "paper_shadow_lanes": {
+                        "enabled": True,
+                        "definitions_dir": str(lanes_dir),
+                        "decision_ledger_path": str(decision_path),
+                        "enabled_lanes": ["shadow_source_scoreboard"],
+                        "source_scoreboard_path": str(scoreboard_path),
+                    }
+                },
+                candidate_dataset_path=dataset_path,
+                inputs_by_shared_candidate_id={
+                    candidate_id: {
+                        "stable": SimpleNamespace(
+                            signal={
+                                "shared_candidate_id": candidate_id,
+                                "market_id": "KXHIGHNY-260513-T71",
+                                "question": "Will the high temperature in New York exceed 71 degrees?",
+                                "city_id": "new_york_ny",
+                                "threshold": 71.0,
+                                "question_side": "above",
+                                "confidence": 0.80,
+                                "source_details": [{"source_name": "nws", "forecast_high": 73.0}],
+                            },
+                            shared_candidate={
+                                "candidate_id": candidate_id,
+                                "market_id": "KXHIGHNY-260513-T71",
+                                "market": {
+                                    "id": "KXHIGHNY-260513-T71",
+                                    "question": "Will the high temperature in New York exceed 71 degrees?",
+                                },
+                            },
+                        ),
+                    }
+                },
+                wallet_decision_rows={"stable_paper": [stable_decision], "beta_paper": []},
+                wallet_runs={"stable_paper": SimpleNamespace(session_id="stable-run")},
+                ledger_root=tmpdir,
+            )
+            lane_row = load_jsonl(Path(result.decision_path))[0]
+
+        self.assertEqual(result.lane_ids, ("shadow_source_scoreboard",))
+        self.assertEqual(lane_row["policy"], "shadow_source_scoreboard")
+        self.assertFalse(lane_row["mutation_contract"]["mutates_accounting"])
+        self.assertFalse(lane_row["accounting_ref"]["mutates_accounting"])
+        self.assertTrue(lane_row["provenance"]["source_scoreboard"]["available"])
+        self.assertEqual(lane_row["provenance"]["source_scoreboard"]["recommended_action"], "BUY_YES")
+        self.assertIn("source scoreboard", lane_row["lane_description"].lower())
+
+    def test_shadow_source_scoreboard_keeps_top_level_action_stable_and_recommendation_in_provenance(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dataset_path = Path(tmpdir) / "shared" / "prediction_lab" / "market_snapshots.jsonl"
+            decision_path = Path(tmpdir) / "lanes.jsonl"
+            scoreboard_path = Path(tmpdir) / "source_scoreboard_by_slice.jsonl"
+            append_jsonl(
+                scoreboard_path,
+                {
+                    "source_id": "nws",
+                    "source_name": "nws",
+                    "city_id": "new_york_ny",
+                    "market_kind": "high",
+                    "contract_shape": "tail",
+                    "sample_count": 100,
+                    "threshold_direction_accuracy": 0.95,
+                },
+            )
+            candidate_id = "candidate-scoreboard-stable-aligned"
+            stable_decision = {
+                "shared_candidate_id": candidate_id,
+                "wallet_id": "stable_paper",
+                "run_id": "stable-run",
+                "candidate_dataset_path": str(dataset_path),
+                "decision_role": "paper_shadow",
+                "decision_id": "stable-source-decision",
+                "policy": "normal",
+                "market_id": "KXHIGHNY-260513-T71",
+                "observed_at": "2026-05-13T12:00:01+00:00",
+                "action": "BUY_YES",
+                "reason_code": "approved",
+                "reason": "stable approved",
+                "confidence": 0.80,
+                "requested_position_size_usd": 10.0,
+                "approved_position_size_usd": 10.0,
+            }
+
+            result = write_paper_shadow_lane_decisions(
+                config={
+                    "paper_shadow_lanes": {
+                        "enabled": True,
+                        "decision_ledger_path": str(decision_path),
+                        "enabled_lanes": ["shadow_source_scoreboard"],
+                        "shadow_source_scoreboard": {"scoreboard_path": str(scoreboard_path), "enabled": True},
+                    }
+                },
+                candidate_dataset_path=dataset_path,
+                inputs_by_shared_candidate_id={
+                    candidate_id: {
+                        "stable": SimpleNamespace(
+                            signal={
+                                "shared_candidate_id": candidate_id,
+                                "market_id": "KXHIGHNY-260513-T71",
+                                "question": "Will the high temperature in New York exceed 71 degrees?",
+                                "city_id": "new_york_ny",
+                                "threshold": 71.0,
+                                "question_side": "above",
+                                "confidence": 0.80,
+                                "source_details": [{"source_name": "nws", "forecast_high": 69.0}],
+                            },
+                            shared_candidate={
+                                "candidate_id": candidate_id,
+                                "market_id": "KXHIGHNY-260513-T71",
+                                "market": {
+                                    "id": "KXHIGHNY-260513-T71",
+                                    "question": "Will the high temperature in New York exceed 71 degrees?",
+                                },
+                            },
+                        ),
+                    }
+                },
+                wallet_decision_rows={"stable_paper": [stable_decision], "beta_paper": []},
+                wallet_runs={"stable_paper": SimpleNamespace(session_id="stable-run")},
+                ledger_root=tmpdir,
+            )
+            lane_row = load_jsonl(Path(result.decision_path))[0]
+
+        self.assertEqual(lane_row["action"], "BUY_YES")
+        self.assertEqual(lane_row["reason_code"], "approved")
+        scoreboard = lane_row["provenance"]["source_scoreboard"]
+        self.assertEqual(scoreboard["recommended_action"], "SKIP")
+        self.assertEqual(scoreboard["reason_code"], "trusted_dissent")
+        self.assertEqual(lane_row["provenance"]["source_reliability"]["recommended_action"], "SKIP")
+        self.assertEqual(lane_row["provenance"]["future_pnl_inputs"]["stable_action"], "BUY_YES")
+
+    def test_shadow_source_scoreboard_future_pnl_inputs_capture_order_book_and_label_fields(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dataset_path = Path(tmpdir) / "shared" / "prediction_lab" / "market_snapshots.jsonl"
+            decision_path = Path(tmpdir) / "lanes.jsonl"
+            scoreboard_path = Path(tmpdir) / "source_scoreboard_by_slice.jsonl"
+            append_jsonl(
+                scoreboard_path,
+                {
+                    "source_id": "nws",
+                    "source_name": "nws",
+                    "city_id": "seattle_wa",
+                    "market_kind": "high",
+                    "contract_shape": "tail",
+                    "sample_count": 100,
+                    "threshold_direction_accuracy": 0.95,
+                },
+            )
+            candidate_id = "candidate-future-pnl-inputs"
+            stable_decision = {
+                "shared_candidate_id": candidate_id,
+                "wallet_id": "stable_paper",
+                "run_id": "stable-run",
+                "candidate_dataset_path": str(dataset_path),
+                "decision_role": "paper_shadow",
+                "decision_id": "stable-source-decision",
+                "policy": "normal",
+                "market_id": "KXHIGHSEA-260515-T70",
+                "observed_at": "2026-05-14T12:00:00+00:00",
+                "action": "BUY_YES",
+                "reason_code": "approved",
+                "reason": "stable approved",
+                "confidence": 0.88,
+                "requested_position_size_usd": 10.0,
+                "approved_position_size_usd": 10.0,
+            }
+
+            result = write_paper_shadow_lane_decisions(
+                config={
+                    "paper_shadow_lanes": {
+                        "enabled": True,
+                        "decision_ledger_path": str(decision_path),
+                        "enabled_lanes": ["shadow_source_scoreboard"],
+                        "shadow_source_scoreboard": {"scoreboard_path": str(scoreboard_path), "enabled": True},
+                    }
+                },
+                candidate_dataset_path=dataset_path,
+                inputs_by_shared_candidate_id={
+                    candidate_id: {
+                        "stable": SimpleNamespace(
+                            signal={
+                                "shared_candidate_id": candidate_id,
+                                "market_id": "KXHIGHSEA-260515-T70",
+                                "question": "Will Seattle high temperature be above 70 degrees on May 15, 2026?",
+                                "city_id": "seattle_wa",
+                                "threshold": 70.0,
+                                "question_side": "above",
+                                "confidence": 0.88,
+                                "market_price": 0.44,
+                                "candidate_observed_at": "2026-05-14T12:00:00+00:00",
+                                "decision_artifact": {
+                                    "execution_snapshot_source": "book",
+                                    "order_book_snapshot": {
+                                        "source": "book",
+                                        "data": {
+                                            "best_yes_ask": 0.44,
+                                            "best_yes_bid": 0.42,
+                                            "best_no_ask": 0.58,
+                                            "best_no_bid": 0.56,
+                                        },
+                                    },
+                                    "execution_snapshot": {
+                                        "source": "book",
+                                        "best_yes_ask": 0.44,
+                                        "best_yes_bid": 0.42,
+                                        "best_no_ask": 0.58,
+                                        "best_no_bid": 0.56,
+                                        "estimated_fill_price": 0.445,
+                                        "as_of": "2026-05-14T12:00:00+00:00",
+                                    },
+                                },
+                                "source_details": [{"source_name": "nws", "forecast_high": 72.0}],
+                            },
+                            shared_candidate={
+                                "candidate_id": candidate_id,
+                                "market_id": "KXHIGHSEA-260515-T70",
+                                "snapshot_as_of": "2026-05-14T12:00:00+00:00",
+                                "market": {
+                                    "id": "KXHIGHSEA-260515-T70",
+                                    "question": "Will Seattle high temperature be above 70 degrees on May 15, 2026?",
+                                },
+                                "evidence": {
+                                    "weather_source_snapshot": {
+                                        "as_of": "2026-05-14T12:00:00+00:00",
+                                        "settlement_source": "kalshi_settlement",
+                                        "forecast": {"actual_temp_used": 73.0},
+                                    }
+                                },
+                                "resolution": {
+                                    "actual_source": "nws_observed",
+                                    "resolved_at": "2026-05-16T13:00:00+00:00",
+                                    "known_after": "2026-05-16T13:00:00+00:00",
+                                },
+                            },
+                        ),
+                    }
+                },
+                wallet_decision_rows={"stable_paper": [stable_decision], "beta_paper": []},
+                wallet_runs={"stable_paper": SimpleNamespace(session_id="stable-run")},
+                ledger_root=tmpdir,
+            )
+            lane_row = load_jsonl(Path(result.decision_path))[0]
+
+        future_pnl_inputs = lane_row["provenance"]["future_pnl_inputs"]
+        self.assertEqual(future_pnl_inputs["shared_candidate_id"], candidate_id)
+        self.assertEqual(future_pnl_inputs["market_id"], "KXHIGHSEA-260515-T70")
+        self.assertEqual(future_pnl_inputs["observed_at"], "2026-05-14T12:00:00+00:00")
+        self.assertEqual(future_pnl_inputs["stable_action"], "BUY_YES")
+        self.assertEqual(future_pnl_inputs["stable_reason_code"], "approved")
+        self.assertEqual(future_pnl_inputs["stable_requested_position_size_usd"], 10.0)
+        self.assertEqual(future_pnl_inputs["stable_confidence"], 0.88)
+        self.assertEqual(future_pnl_inputs["recommended_action"], "BUY_YES")
+        self.assertEqual(future_pnl_inputs["side"], "YES")
+        self.assertEqual(future_pnl_inputs["entry_price"], 0.44)
+        self.assertEqual(future_pnl_inputs["estimated_fill_price"], 0.445)
+        self.assertEqual(future_pnl_inputs["best_yes_ask"], 0.44)
+        self.assertEqual(future_pnl_inputs["best_yes_bid"], 0.42)
+        self.assertEqual(future_pnl_inputs["best_no_ask"], 0.58)
+        self.assertEqual(future_pnl_inputs["best_no_bid"], 0.56)
+        self.assertEqual(future_pnl_inputs["execution_snapshot_source"], "book")
+        self.assertEqual(future_pnl_inputs["order_book_source"], "book")
+        self.assertEqual(future_pnl_inputs["snapshot_as_of"], "2026-05-14T12:00:00+00:00")
+        self.assertEqual(future_pnl_inputs["execution_snapshot_as_of"], "2026-05-14T12:00:00+00:00")
+        self.assertEqual(future_pnl_inputs["actual_temp_used"], 73.0)
+        self.assertEqual(future_pnl_inputs["settlement_source"], "kalshi_settlement")
+        self.assertEqual(future_pnl_inputs["actual_source"], "nws_observed")
+        self.assertEqual(future_pnl_inputs["resolved_at"], "2026-05-16T13:00:00+00:00")
+        self.assertEqual(future_pnl_inputs["known_after"], "2026-05-16T13:00:00+00:00")
+        self.assertEqual(future_pnl_inputs["label_target"], "nws_observed")
+        self.assertEqual(future_pnl_inputs["threshold"], 70.0)
+        self.assertEqual(future_pnl_inputs["question_side"], "above")
+        self.assertEqual(future_pnl_inputs["market_kind"], "high")
+        self.assertEqual(future_pnl_inputs["contract_shape"], "tail")
+        self.assertEqual(
+            future_pnl_inputs["question"],
+            "Will Seattle high temperature be above 70 degrees on May 15, 2026?",
+        )
+        self.assertEqual(
+            lane_row["provenance"]["source_scoreboard"]["future_pnl_inputs"]["estimated_fill_price"],
+            0.445,
+        )
+
+    def test_shadow_source_scoreboard_future_pnl_inputs_capture_resolution_metadata_from_shared_weather_context(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dataset_path = Path(tmpdir) / "shared" / "prediction_lab" / "market_snapshots.jsonl"
+            decision_path = Path(tmpdir) / "lanes.jsonl"
+            scoreboard_path = Path(tmpdir) / "source_scoreboard_by_slice.jsonl"
+            append_jsonl(
+                scoreboard_path,
+                {
+                    "source_id": "nws",
+                    "source_name": "nws",
+                    "city_id": "seattle_wa",
+                    "market_kind": "high",
+                    "contract_shape": "tail",
+                    "sample_count": 100,
+                    "threshold_direction_accuracy": 0.95,
+                },
+            )
+            candidate_id = "candidate-future-pnl-resolution-context"
+            stable_decision = {
+                "shared_candidate_id": candidate_id,
+                "wallet_id": "stable_paper",
+                "run_id": "stable-run",
+                "candidate_dataset_path": str(dataset_path),
+                "decision_role": "paper_shadow",
+                "decision_id": "stable-source-decision",
+                "policy": "normal",
+                "market_id": "KXHIGHSEA-260515-T70",
+                "observed_at": "2026-05-14T12:00:00+00:00",
+                "action": "BUY_YES",
+                "reason_code": "approved",
+                "reason": "stable approved",
+                "confidence": 0.88,
+                "requested_position_size_usd": 10.0,
+                "approved_position_size_usd": 10.0,
+            }
+
+            result = write_paper_shadow_lane_decisions(
+                config={
+                    "paper_shadow_lanes": {
+                        "enabled": True,
+                        "decision_ledger_path": str(decision_path),
+                        "enabled_lanes": ["shadow_source_scoreboard"],
+                        "shadow_source_scoreboard": {"scoreboard_path": str(scoreboard_path), "enabled": True},
+                    }
+                },
+                candidate_dataset_path=dataset_path,
+                inputs_by_shared_candidate_id={
+                    candidate_id: {
+                        "stable": SimpleNamespace(
+                            signal={
+                                "shared_candidate_id": candidate_id,
+                                "market_id": "KXHIGHSEA-260515-T70",
+                                "confidence": 0.88,
+                                "market_price": 0.44,
+                                "candidate_observed_at": "2026-05-14T12:00:00+00:00",
+                                "source_details": [{"source_name": "nws", "forecast_high": 72.0}],
+                            },
+                            shared_candidate={
+                                "candidate_id": candidate_id,
+                                "market_id": "KXHIGHSEA-260515-T70",
+                                "market": {
+                                    "id": "KXHIGHSEA-260515-T70",
+                                    "question": "Will Seattle high temperature be above 70 degrees on May 15, 2026?",
+                                    "market_kind": "high",
+                                    "contract_shape": "tail",
+                                },
+                                "evidence": {
+                                    "weather_source_snapshot": {
+                                        "as_of": "2026-05-14T12:00:00+00:00",
+                                        "settlement_source": "kalshi_settlement",
+                                        "forecast": {
+                                            "threshold": 70.0,
+                                            "question_side": "above",
+                                            "actual_temp_used": 73.0,
+                                            "actual_outcome": "YES",
+                                        },
+                                    }
+                                },
+                                "resolution": {
+                                    "actual_source": "nws_observed",
+                                    "actual_outcome": "YES",
+                                    "resolved_outcome": "YES",
+                                    "settled_side": "YES",
+                                    "resolved_at": "2026-05-16T13:00:00+00:00",
+                                    "known_after": "2026-05-16T13:00:00+00:00",
+                                },
+                            },
+                        ),
+                    }
+                },
+                wallet_decision_rows={"stable_paper": [stable_decision], "beta_paper": []},
+                wallet_runs={"stable_paper": SimpleNamespace(session_id="stable-run")},
+                ledger_root=tmpdir,
+            )
+            lane_row = load_jsonl(Path(result.decision_path))[0]
+
+        future_pnl_inputs = lane_row["provenance"]["future_pnl_inputs"]
+        self.assertEqual(future_pnl_inputs["threshold"], 70.0)
+        self.assertEqual(future_pnl_inputs["question_side"], "above")
+        self.assertEqual(future_pnl_inputs["market_kind"], "high")
+        self.assertEqual(future_pnl_inputs["contract_shape"], "tail")
+        self.assertEqual(
+            future_pnl_inputs["question"],
+            "Will Seattle high temperature be above 70 degrees on May 15, 2026?",
+        )
+        self.assertEqual(future_pnl_inputs["actual_outcome"], "YES")
+        self.assertEqual(future_pnl_inputs["resolved_outcome"], "YES")
+        self.assertEqual(future_pnl_inputs["settled_side"], "YES")
+
     def test_paper_shadow_lane_report_counts_rows_actions_and_reference_drift(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             dataset_path = Path(tmpdir) / "shared" / "prediction_lab" / "market_snapshots.jsonl"
@@ -862,6 +1316,315 @@ parameters:
         )
         self.assertEqual(report["drift"]["vs_comparison"]["candidate_count_with_action_drift"], 1)
         self.assertEqual(report["drift"]["vs_comparison"]["by_lane"], {"control_stable": 1})
+
+    def test_paper_shadow_lane_report_includes_source_scoreboard_coverage_counts(self):
+        lane_rows = [
+            {
+                "policy": "shadow_source_scoreboard",
+                "shared_candidate_id": "candidate-1",
+                "action": "BUY_YES",
+                "provenance": {
+                    "source_scoreboard": {
+                        "available": True,
+                        "recommended_action": "BUY_YES",
+                        "reason_code": "trusted_support",
+                        "future_pnl_inputs": {
+                            "estimated_fill_price": 0.44,
+                            "best_yes_ask": 0.44,
+                            "actual_source": "nws_observed",
+                            "settlement_source": "kalshi_settlement",
+                            "label_target": "nws_observed",
+                        },
+                    }
+                },
+            },
+            {
+                "policy": "shadow_source_scoreboard",
+                "shared_candidate_id": "candidate-2",
+                "action": "BUY_YES",
+                "provenance": {
+                    "source_scoreboard": {
+                        "available": False,
+                        "recommended_action": "SKIP",
+                        "reason_code": "source_reliability_unavailable",
+                        "future_pnl_inputs": {"label_target": "unknown"},
+                    }
+                },
+            },
+        ]
+
+        report = summarize_paper_shadow_lane_report(lane_rows=lane_rows)
+
+        scoreboard = report["source_scoreboard"]
+        self.assertEqual(scoreboard["evaluated_rows"], 2)
+        self.assertEqual(scoreboard["lane_row_counts"], {"shadow_source_scoreboard": 2})
+        self.assertEqual(scoreboard["available_rows"], 1)
+        self.assertEqual(scoreboard["unavailable_rows"], 1)
+        self.assertEqual(scoreboard["recommended_action_counts"], {"BUY_YES": 1, "SKIP": 1})
+        self.assertEqual(
+            scoreboard["reason_code_counts"],
+            {"source_reliability_unavailable": 1, "trusted_support": 1},
+        )
+        self.assertEqual(scoreboard["rows_with_estimated_fill_price"], 1)
+        self.assertEqual(scoreboard["rows_with_order_book_execution_prices"], 1)
+        self.assertEqual(scoreboard["label_source_counts"], {"nws_observed": 1, "unknown": 1})
+        self.assertEqual(scoreboard["actual_source_counts"], {"nws_observed": 1})
+        self.assertEqual(scoreboard["settlement_source_counts"], {"kalshi_settlement": 1})
+
+    def test_paper_shadow_lane_report_keeps_source_reliability_and_scoreboard_counts_separate(self):
+        lane_rows = [
+            {
+                "policy": "shadow_source_reliability",
+                "shared_candidate_id": "candidate-1",
+                "action": "BUY_YES",
+                "provenance": {
+                    "source_reliability": {
+                        "available": True,
+                        "recommended_action": "BUY_YES",
+                        "reason_code": "trusted_support",
+                    }
+                },
+            },
+            {
+                "policy": "shadow_source_scoreboard",
+                "shared_candidate_id": "candidate-2",
+                "action": "BUY_YES",
+                "provenance": {
+                    "source_scoreboard": {
+                        "available": False,
+                        "recommended_action": "SKIP",
+                        "reason_code": "source_reliability_unavailable",
+                        "future_pnl_inputs": {"label_target": "unknown"},
+                    }
+                },
+            },
+        ]
+
+        report = summarize_paper_shadow_lane_report(lane_rows=lane_rows)
+
+        self.assertEqual(report["source_reliability"]["evaluated_rows"], 1)
+        self.assertEqual(report["source_reliability"]["lane_row_counts"], {"shadow_source_reliability": 1})
+        self.assertEqual(report["source_reliability"]["recommended_action_counts"], {"BUY_YES": 1})
+        self.assertEqual(report["source_reliability"]["reason_code_counts"], {"trusted_support": 1})
+        self.assertEqual(report["source_scoreboard"]["evaluated_rows"], 1)
+        self.assertEqual(report["source_scoreboard"]["lane_row_counts"], {"shadow_source_scoreboard": 1})
+        self.assertEqual(report["source_scoreboard"]["recommended_action_counts"], {"SKIP": 1})
+        self.assertEqual(
+            report["source_scoreboard"]["reason_code_counts"],
+            {"source_reliability_unavailable": 1},
+        )
+
+    def test_paper_shadow_lane_report_includes_source_scoreboard_readiness_counts(self):
+        lane_rows = [
+            {
+                "policy": "shadow_source_scoreboard",
+                "shared_candidate_id": "candidate-1",
+                "action": "BUY_YES",
+                "provenance": {
+                    "source_reliability": {"tier_counts": {"trusted": 1}},
+                    "source_scoreboard": {
+                        "available": True,
+                        "recommended_action": "BUY_YES",
+                        "reason_code": "trusted_support",
+                        "future_pnl_inputs": {
+                            "shared_candidate_id": "candidate-1",
+                            "market_id": "KXHIGHSEA-1",
+                            "observed_at": "2026-05-14T12:00:00+00:00",
+                            "known_after": "2026-05-16T13:00:00+00:00",
+                            "actual_outcome": "YES",
+                            "resolved_outcome": "YES",
+                            "label_target": "nws_observed",
+                            "actual_source": "nws_observed",
+                            "settlement_source": "kalshi_settlement",
+                            "estimated_fill_price": 0.44,
+                            "best_yes_ask": 0.44,
+                            "execution_snapshot_source": "book",
+                        },
+                    },
+                },
+            },
+            {
+                "policy": "shadow_source_scoreboard",
+                "shared_candidate_id": "candidate-2",
+                "action": "BUY_YES",
+                "provenance": {
+                    "source_reliability": {"tier_counts": {"neutral": 1}},
+                    "source_scoreboard": {
+                        "available": True,
+                        "recommended_action": "SKIP",
+                        "reason_code": "no_trusted_support",
+                        "future_pnl_inputs": {
+                            "shared_candidate_id": "candidate-2",
+                            "market_id": "KXHIGHSEA-2",
+                            "observed_at": "2026-05-17T12:00:00+00:00",
+                            "known_after": "2026-05-16T13:00:00+00:00",
+                            "actual_outcome": "NO",
+                            "resolved_outcome": "NO",
+                            "label_target": "kalshi_settlement",
+                            "settlement_source": "kalshi_settlement",
+                        },
+                    },
+                },
+            },
+            {
+                "policy": "shadow_source_scoreboard",
+                "shared_candidate_id": "candidate-3",
+                "action": "BUY_YES",
+                "provenance": {
+                    "source_reliability": {"tier_counts": {"excluded": 1}},
+                    "source_scoreboard": {
+                        "available": False,
+                        "recommended_action": "SKIP",
+                        "reason_code": "source_reliability_unavailable",
+                        "future_pnl_inputs": {
+                            "shared_candidate_id": "candidate-3",
+                            "market_id": "KXHIGHSEA-3",
+                            "observed_at": "2026-05-14T12:00:00+00:00",
+                            "label_target": "unknown",
+                        },
+                    },
+                },
+            },
+        ]
+
+        report = summarize_paper_shadow_lane_report(lane_rows=lane_rows)
+
+        readiness = report["source_scoreboard_readiness"]
+        self.assertEqual(readiness["evaluated_rows"], 3)
+        self.assertTrue(readiness["recommendation_only"])
+        self.assertEqual(
+            readiness["label_source_counts"],
+            {"kalshi_settlement": 1, "nws_observed": 1, "unknown": 1},
+        )
+        self.assertEqual(
+            readiness["label_class_counts"],
+            {
+                "explicit_non_independent": 0,
+                "independent": 0,
+                "settlement_derived": 2,
+                "unknown": 1,
+            },
+        )
+        self.assertEqual(readiness["explicit_label_rows"], 2)
+        self.assertEqual(readiness["independent_label_rows"], 0)
+        self.assertEqual(readiness["order_book_quote_rows"], 1)
+        self.assertEqual(readiness["execution_snapshot_rows"], 1)
+        self.assertEqual(readiness["estimated_fill_price_rows"], 1)
+        self.assertEqual(
+            readiness["reliability_tier_counts"],
+            {"excluded": 1, "neutral": 1, "trusted": 1},
+        )
+        self.assertEqual(readiness["rows_with_trusted_sources"], 1)
+        self.assertEqual(readiness["rows_with_neutral_sources"], 1)
+        self.assertEqual(readiness["rows_with_excluded_sources"], 1)
+        self.assertEqual(
+            readiness["reason_code_counts"],
+            {
+                "no_trusted_support": 1,
+                "source_reliability_unavailable": 1,
+                "trusted_support": 1,
+            },
+        )
+        self.assertEqual(
+            readiness["leak_risk_indicators"],
+            {
+                "known_after_not_after_observed_at_rows": 1,
+                "label_matches_settlement_source_rows": 1,
+                "settlement_derived_label_rows": 2,
+                "unknown_label_rows": 1,
+            },
+        )
+        self.assertEqual(
+            readiness["missing_field_blockers"],
+            {
+                "missing_actual_outcome_rows": 1,
+                "missing_estimated_fill_price_rows": 2,
+                "missing_execution_snapshot_rows": 2,
+                "missing_known_after_rows": 1,
+                "missing_label_source_rows": 1,
+                "missing_market_id_rows": 0,
+                "missing_observed_at_rows": 0,
+                "missing_order_book_quotes_rows": 2,
+                "missing_resolution_outcome_rows": 1,
+                "missing_shared_candidate_id_rows": 0,
+            },
+        )
+        self.assertEqual(readiness["rows_with_any_blocker"], 2)
+        self.assertEqual(readiness["rows_with_any_leak_risk"], 3)
+
+    def test_paper_shadow_lane_report_cli_prints_source_scoreboard_readiness(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lane_path = Path(tmpdir) / "paper_shadow_lane_decisions.jsonl"
+            append_jsonl(
+                lane_path,
+                {
+                    "policy": "shadow_source_scoreboard",
+                    "shared_candidate_id": "candidate-1",
+                    "action": "BUY_YES",
+                    "provenance": {
+                        "source_reliability": {"tier_counts": {"trusted": 1}},
+                        "source_scoreboard": {
+                            "available": True,
+                            "recommended_action": "BUY_YES",
+                            "reason_code": "trusted_support",
+                            "future_pnl_inputs": {
+                                "shared_candidate_id": "candidate-1",
+                                "market_id": "KXHIGHSEA-1",
+                                "observed_at": "2026-05-14T12:00:00+00:00",
+                                "known_after": "2026-05-16T13:00:00+00:00",
+                                "actual_outcome": "YES",
+                                "resolved_outcome": "YES",
+                                "label_target": "nws_observed",
+                                "actual_source": "nws_observed",
+                                "settlement_source": "kalshi_settlement",
+                                "estimated_fill_price": 0.44,
+                                "best_yes_ask": 0.44,
+                                "execution_snapshot_source": "book",
+                            },
+                        },
+                    },
+                },
+            )
+
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                exit_code = paper_shadow_lane_report_main(
+                    ["--lane-decision-path", str(lane_path), "--format", "json"]
+                )
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["evaluated_rows"], 1)
+        self.assertEqual(payload["independent_label_rows"], 0)
+        self.assertEqual(payload["order_book_quote_rows"], 1)
+
+    def test_repo_source_scoreboard_runtime_config_uses_isolated_output_path(self):
+        config_path = REPO_ROOT / "data/runtime_configs/paper_source_scoreboard_shadow_20260516.yaml"
+
+        with patch.dict(os.environ, {}, clear=True):
+            config = load_config(config_path)
+
+        paper_shadow_lanes = config["paper_shadow_lanes"]
+        self.assertTrue(paper_shadow_lanes["enabled"])
+        self.assertEqual(
+            paper_shadow_lanes["enabled_lanes"],
+            [
+                "control_stable",
+                "shadow_confidence_floor",
+                "shadow_current_beta",
+                "shadow_source_scoreboard",
+            ],
+        )
+        self.assertEqual(
+            paper_shadow_lanes["decision_ledger_path"],
+            "data/beta_shadow/paper/source_scoreboard/paper_shadow_lane_decisions.jsonl",
+        )
+        self.assertEqual(
+            paper_shadow_lanes["source_scoreboard_path"],
+            "/tmp/weather_source_scoreboard_beta_smoke/source_scoreboard_by_slice.jsonl",
+        )
+        self.assertFalse(config["alerts"]["enabled"])
+        self.assertFalse(config["alerts"]["telegram_enabled"])
 
     def test_paper_shadow_lane_report_filters_rows_to_requested_candidates(self):
         lane_rows = [
@@ -1131,6 +1894,326 @@ parameters:
         self.assertEqual(control_row["provenance"]["source_decision_id"], "current-stable")
         self.assertEqual(confidence_row["action"], "BUY_YES")
         self.assertEqual(confidence_row["reason_code"], "approved_confidence_floor")
+
+
+    def test_source_scoreboard_resolution_rows_preserve_replayable_pnl_inputs(self):
+        lane_rows = [
+            {
+                "decision_id": "lane-decision-1",
+                "agent_run_id": "agent-run",
+                "run_id": "lane-run",
+                "policy": "shadow_source_scoreboard",
+                "shared_candidate_id": "candidate-win",
+                "market_id": "KXHIGHSEA-1",
+                "observed_at": "2026-05-14T12:00:00+00:00",
+                "action": "BUY_YES",
+                "approved_position_size_usd": 10.0,
+                "provenance": {
+                    "source_scoreboard": {
+                        "recommended_action": "BUY_YES",
+                        "future_pnl_inputs": {
+                            "shared_candidate_id": "candidate-win",
+                            "market_id": "KXHIGHSEA-1",
+                            "recommended_action": "BUY_YES",
+                            "side": "YES",
+                            "entry_price": 0.24,
+                            "estimated_fill_price": 0.25,
+                            "stable_approved_position_size_usd": 10.0,
+                        },
+                    }
+                },
+            }
+        ]
+        resolution_rows = [{"market_id": "KXHIGHSEA-1", "resolution": {"outcome": "YES", "resolved_at": "2026-05-16T13:00:00+00:00"}}]
+
+        joined = build_paper_shadow_lane_resolution_rows(lane_rows=lane_rows, resolution_rows=resolution_rows)
+
+        self.assertEqual(len(joined), 1)
+        row = joined[0]
+        self.assertEqual(row["schema_name"], "paper_shadow_lane_resolution")
+        self.assertTrue(row["non_mutating"])
+        self.assertEqual(row["lane_decision_id"], "lane-decision-1")
+        self.assertEqual(row["lane_id"], "shadow_source_scoreboard")
+        self.assertEqual(row["shared_candidate_id"], "candidate-win")
+        self.assertEqual(row["market_id"], "KXHIGHSEA-1")
+        self.assertEqual(row["action"], "BUY_YES")
+        self.assertEqual(row["side"], "YES")
+        self.assertEqual(row["entry_price"], 0.24)
+        self.assertEqual(row["fill_price"], 0.25)
+        self.assertEqual(row["notional_usd"], 10.0)
+        self.assertEqual(row["resolution"]["matched"], True)
+        self.assertEqual(row["resolution"]["match_source"], "market_id")
+        self.assertEqual(row["resolution"]["outcome"], "YES")
+        self.assertEqual(row["pnl"], {"calculable": True, "stake_usd": 10.0, "contracts": 40.0, "payout_usd": 40.0, "pnl_usd": 30.0, "won": True})
+        self.assertEqual(row["blocker"], None)
+        self.assertEqual(row["replay_sizing"]["recorded_notional_usd"], 10.0)
+        self.assertEqual(row["replay_sizing"]["sizing_source"], "lane_approved_position_size_usd")
+        self.assertTrue(row["replay_sizing"]["replayable_with_alternate_balance"])
+
+    def test_source_scoreboard_resolved_pnl_joins_lane_rows_to_resolution_rows(self):
+        lane_rows = [
+            {
+                "policy": "shadow_source_scoreboard",
+                "shared_candidate_id": "candidate-win",
+                "action": "BUY_YES",
+                "approved_position_size_usd": 10.0,
+                "provenance": {
+                    "source_scoreboard": {
+                        "recommended_action": "BUY_YES",
+                        "future_pnl_inputs": {
+                            "shared_candidate_id": "candidate-win",
+                            "market_id": "KXHIGHSEA-1",
+                            "recommended_action": "BUY_YES",
+                            "side": "YES",
+                            "estimated_fill_price": 0.25,
+                            "stable_approved_position_size_usd": 10.0,
+                        },
+                    }
+                },
+            },
+            {
+                "policy": "shadow_source_scoreboard",
+                "shared_candidate_id": "candidate-loss",
+                "action": "BUY_NO",
+                "approved_position_size_usd": 5.0,
+                "provenance": {
+                    "source_scoreboard": {
+                        "recommended_action": "BUY_NO",
+                        "future_pnl_inputs": {
+                            "shared_candidate_id": "candidate-loss",
+                            "market_id": "KXHIGHSEA-2",
+                            "recommended_action": "BUY_NO",
+                            "side": "NO",
+                            "entry_price": 0.20,
+                            "stable_approved_position_size_usd": 5.0,
+                        },
+                    }
+                },
+            },
+            {
+                "policy": "shadow_source_scoreboard",
+                "shared_candidate_id": "candidate-skip",
+                "action": "SKIP",
+                "provenance": {
+                    "source_scoreboard": {
+                        "recommended_action": "SKIP",
+                        "future_pnl_inputs": {
+                            "shared_candidate_id": "candidate-skip",
+                            "market_id": "KXHIGHSEA-3",
+                            "recommended_action": "SKIP",
+                        },
+                    }
+                },
+            },
+        ]
+        resolution_rows = [
+            {"shared_candidate_id": "candidate-win", "market_id": "KXHIGHSEA-1", "outcome": "YES"},
+            {"market_id": "KXHIGHSEA-2", "outcome": "YES"},
+            {"shared_candidate_id": "candidate-skip", "market_id": "KXHIGHSEA-3", "outcome": "NO"},
+        ]
+
+        report = summarize_paper_shadow_lane_resolved_pnl(lane_rows=lane_rows, resolution_rows=resolution_rows)
+
+        self.assertEqual(report["evaluated_rows"], 3)
+        self.assertEqual(report["resolved_rows"], 3)
+        self.assertEqual(report["buy_rows"], 2)
+        self.assertEqual(report["skip_rows"], 1)
+        self.assertEqual(report["winning_buy_rows"], 1)
+        self.assertEqual(report["losing_buy_rows"], 1)
+        self.assertEqual(report["total_stake_usd"], 15.0)
+        self.assertEqual(report["total_payout_usd"], 40.0)
+        self.assertEqual(report["total_pnl_usd"], 25.0)
+        self.assertEqual(report["by_lane"]["shadow_source_scoreboard"]["total_pnl_usd"], 25.0)
+        self.assertEqual(report["blocker_counts"], {})
+
+    def test_source_scoreboard_resolved_pnl_reports_blockers_without_guessing(self):
+        lane_rows = [
+            {
+                "policy": "shadow_source_scoreboard",
+                "shared_candidate_id": "candidate-missing-fill",
+                "action": "BUY_YES",
+                "provenance": {
+                    "source_scoreboard": {
+                        "future_pnl_inputs": {
+                            "shared_candidate_id": "candidate-missing-fill",
+                            "market_id": "KXHIGHSEA-1",
+                            "side": "YES",
+                            "stable_approved_position_size_usd": 10.0,
+                        }
+                    }
+                },
+            },
+            {
+                "policy": "shadow_source_scoreboard",
+                "shared_candidate_id": "candidate-missing-resolution",
+                "action": "BUY_YES",
+                "provenance": {
+                    "source_scoreboard": {
+                        "future_pnl_inputs": {
+                            "shared_candidate_id": "candidate-missing-resolution",
+                            "market_id": "KXHIGHSEA-2",
+                            "side": "YES",
+                            "estimated_fill_price": 0.25,
+                            "stable_approved_position_size_usd": 10.0,
+                        }
+                    }
+                },
+            },
+        ]
+        resolution_rows = [{"shared_candidate_id": "candidate-missing-fill", "outcome": "YES"}]
+
+        report = summarize_paper_shadow_lane_resolved_pnl(lane_rows=lane_rows, resolution_rows=resolution_rows)
+
+        self.assertEqual(report["evaluated_rows"], 2)
+        self.assertEqual(report["resolved_rows"], 1)
+        self.assertEqual(report["pnl_calculable_rows"], 0)
+        self.assertEqual(
+            report["blocker_counts"],
+            {"missing_fill_price": 1, "missing_resolution": 1},
+        )
+
+    def test_lane_resolution_prefers_shared_candidate_over_market_fallback(self):
+        lane_rows = [
+            {
+                "policy": "shadow_source_scoreboard",
+                "shared_candidate_id": "candidate-specific",
+                "market_id": "KXDUP-1",
+                "action": "BUY_YES",
+                "approved_position_size_usd": 10.0,
+                "provenance": {
+                    "future_pnl_inputs": {
+                        "shared_candidate_id": "candidate-specific",
+                        "market_id": "KXDUP-1",
+                        "recommended_action": "BUY_YES",
+                        "side": "YES",
+                        "estimated_fill_price": 0.25,
+                    }
+                },
+            }
+        ]
+        resolution_rows = [
+            {"shared_candidate_id": "other-candidate", "market_id": "KXDUP-1", "outcome": "NO"},
+            {"shared_candidate_id": "candidate-specific", "market_id": "KXDUP-1", "resolution": {"outcome": "YES"}, "prediction_id": "pred-specific"},
+        ]
+
+        rows = build_paper_shadow_lane_resolution_rows(lane_rows=lane_rows, resolution_rows=resolution_rows)
+
+        self.assertEqual(rows[0]["resolution"]["outcome"], "YES")
+        self.assertEqual(rows[0]["resolution"]["matched_by"], "shared_candidate_id")
+        self.assertEqual(rows[0]["resolution"]["resolution_row_id"], "pred-specific")
+        self.assertEqual(rows[0]["blocker"], None)
+
+    def test_lane_resolution_reports_ambiguous_market_fallback(self):
+        lane_rows = [
+            {
+                "policy": "shadow_source_scoreboard",
+                "market_id": "KXAMBIG-1",
+                "action": "BUY_YES",
+                "approved_position_size_usd": 10.0,
+                "provenance": {"future_pnl_inputs": {"market_id": "KXAMBIG-1", "side": "YES", "estimated_fill_price": 0.25}},
+            }
+        ]
+        resolution_rows = [
+            {"shared_candidate_id": "c1", "market_id": "KXAMBIG-1", "outcome": "YES"},
+            {"shared_candidate_id": "c2", "market_id": "KXAMBIG-1", "outcome": "NO"},
+        ]
+
+        rows = build_paper_shadow_lane_resolution_rows(lane_rows=lane_rows, resolution_rows=resolution_rows)
+        report = summarize_paper_shadow_lane_resolved_pnl(lane_rows=lane_rows, resolution_rows=resolution_rows)
+
+        self.assertEqual(rows[0]["blocker"], "ambiguous_resolution")
+        self.assertEqual(rows[0]["resolution"]["matched_by"], "market_id")
+        self.assertEqual(report["blocker_counts"], {"ambiguous_resolution": 1})
+
+    def test_paper_shadow_lane_report_materializes_resolution_jsonl(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lane_path = Path(tmpdir) / "lane_decisions.jsonl"
+            resolution_path = Path(tmpdir) / "resolutions.jsonl"
+            output_path = REPO_ROOT / "data" / "summaries" / "test_lane_resolutions.jsonl"
+            append_jsonl(
+                lane_path,
+                {
+                    "policy": "shadow_source_scoreboard",
+                    "shared_candidate_id": "candidate-jsonl",
+                    "market_id": "KXJSONL-1",
+                    "action": "BUY_NO",
+                    "approved_position_size_usd": 8.0,
+                    "provenance": {
+                        "future_pnl_inputs": {
+                            "shared_candidate_id": "candidate-jsonl",
+                            "market_id": "KXJSONL-1",
+                            "recommended_action": "BUY_NO",
+                            "side": "NO",
+                            "estimated_fill_price": 0.20,
+                        }
+                    },
+                },
+            )
+            append_jsonl(resolution_path, {"shared_candidate_id": "candidate-jsonl", "market_id": "KXJSONL-1", "resolution": {"outcome": "NO"}})
+            cwd_lane = os.path.relpath(lane_path, REPO_ROOT)
+            cwd_resolution = os.path.relpath(resolution_path, REPO_ROOT)
+            cwd_output = os.path.relpath(output_path, REPO_ROOT)
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                rc = paper_shadow_lane_report_main(
+                    [
+                        "--lane-decision-path",
+                        cwd_lane,
+                        "--resolution-path",
+                        cwd_resolution,
+                        "--section",
+                        "resolved_pnl",
+                        "--resolved-output-jsonl",
+                        cwd_output,
+                    ]
+                )
+
+            self.assertEqual(rc, 0)
+            materialized = load_jsonl(output_path)
+            self.assertEqual(len(materialized), 1)
+            self.assertTrue(materialized[0]["non_mutating"])
+            self.assertEqual(materialized[0]["resolution"]["outcome"], "NO")
+            self.assertEqual(materialized[0]["pnl"]["pnl_usd"], 32.0)
+            output_path.unlink(missing_ok=True)
+
+    def test_paper_shadow_lane_report_rejects_wallet_like_resolution_output_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lane_path = Path(tmpdir) / "lane_decisions.jsonl"
+            append_jsonl(lane_path, {"policy": "shadow_source_scoreboard", "market_id": "KXSAFE-1", "action": "SKIP"})
+            cwd_lane = os.path.relpath(lane_path, REPO_ROOT)
+            with self.assertRaises(ValueError):
+                paper_shadow_lane_report_main(
+                    [
+                        "--lane-decision-path",
+                        cwd_lane,
+                        "--section",
+                        "resolved_pnl",
+                        "--resolved-output-jsonl",
+                        "data/paper/risk_state.json",
+                    ]
+                )
+
+    def test_lane_resolution_uses_run_market_before_ambiguous_market_fallback(self):
+        lane_rows = [
+            {
+                "policy": "shadow_source_scoreboard",
+                "run_id": "run-target",
+                "market_id": "KXRUN-1",
+                "action": "BUY_YES",
+                "approved_position_size_usd": 10.0,
+                "provenance": {"future_pnl_inputs": {"market_id": "KXRUN-1", "side": "YES", "estimated_fill_price": 0.25}},
+            }
+        ]
+        resolution_rows = [
+            {"run_id": "run-other", "market_id": "KXRUN-1", "outcome": "NO"},
+            {"run_id": "run-target", "market_id": "KXRUN-1", "outcome": "YES"},
+        ]
+
+        rows = build_paper_shadow_lane_resolution_rows(lane_rows=lane_rows, resolution_rows=resolution_rows)
+
+        self.assertEqual(rows[0]["resolution"]["outcome"], "YES")
+        self.assertEqual(rows[0]["resolution"]["matched_by"], "run_id_market_id")
+        self.assertEqual(rows[0]["resolution"]["candidate_match_count"], 1)
 
 
 if __name__ == "__main__":
