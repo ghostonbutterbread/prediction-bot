@@ -20,6 +20,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from bot.paper_shadow_lanes import paper_shadow_lanes_enabled, summarize_paper_shadow_lane_report  # noqa: E402
 from scripts import analyze as paper_analyze  # noqa: E402
 from scripts import prediction_lab_monitor as lab_monitor  # noqa: E402
 
@@ -92,12 +93,19 @@ def _format_pids(processes: list[dict[str, Any]]) -> str:
 
 
 def _config_from_processes(processes: list[dict[str, Any]]) -> Path | None:
+    configs = _configs_from_processes(processes)
+    return configs[0] if configs else None
+
+
+def _configs_from_processes(processes: list[dict[str, Any]]) -> list[Path]:
+    configs: list[Path] = []
     for process in processes:
         cmdline = lab_monitor.normalize_cmdline(process.get("cmdline") or [])
         for index, part in enumerate(cmdline):
             if part == "--config" and index + 1 < len(cmdline):
-                return Path(cmdline[index + 1])
-    return None
+                configs.append(Path(cmdline[index + 1]))
+                break
+    return configs
 
 
 def _paper_data_dir_from_config(config_path: Path | None) -> Path | None:
@@ -152,11 +160,98 @@ def _strip_lower_detail(report: str) -> str:
     return "\n".join(output)
 
 
-def format_paper_section(processes: list[dict[str, Any]], report: str | None) -> str:
+def _paper_shadow_lane_status(config_path: Path | None) -> dict[str, Any] | None:
+    if config_path is None:
+        return None
+    try:
+        config = paper_analyze.load_config(config_path)
+    except Exception:
+        return None
+    lane_config = config.get("paper_shadow_lanes") or config.get("paper_decision_lanes") or {}
+    if not paper_shadow_lanes_enabled(config):
+        return {"enabled": False, "lane_ids": [], "decision_path": None, "lane_row_counts": {}}
+
+    lane_ids = lane_config.get("enabled_lanes") or []
+    if isinstance(lane_ids, str):
+        lane_ids = [part.strip() for part in lane_ids.split(",") if part.strip()]
+    elif isinstance(lane_ids, dict):
+        lane_ids = [str(lane_id) for lane_id, enabled in lane_ids.items() if enabled]
+    else:
+        lane_ids = [str(lane_id) for lane_id in lane_ids if str(lane_id).strip()]
+
+    decision_path = lane_config.get("decision_ledger_path") or lane_config.get("ledger_path")
+    if not decision_path:
+        data_dir = config.get("data_dir") or _paper_data_dir_from_config(config_path)
+        decision_path = str(Path(data_dir) / "paper_shadow_lane_decisions.jsonl") if data_dir else None
+
+    row_counts: dict[str, int] = {}
+    action_counts: dict[str, int] = {}
+    scoreboard_readiness: dict[str, Any] = {}
+    if decision_path and Path(decision_path).exists():
+        try:
+            summary = summarize_paper_shadow_lane_report(lane_decision_path=decision_path, config=config)
+            row_counts = dict(summary.get("lane_row_counts") or {})
+            action_counts = dict(summary.get("action_counts") or {})
+            scoreboard_readiness = dict(summary.get("source_scoreboard_readiness") or {})
+        except Exception:
+            row_counts = {}
+            action_counts = {}
+            scoreboard_readiness = {}
+
+    return {
+        "enabled": True,
+        "lane_ids": lane_ids,
+        "decision_path": decision_path,
+        "lane_row_counts": row_counts,
+        "action_counts": action_counts,
+        "source_scoreboard_readiness": scoreboard_readiness,
+    }
+
+
+def _format_paper_shadow_lane_status(status: dict[str, Any] | None) -> list[str]:
+    if not status:
+        return []
+    if not status.get("enabled"):
+        return ["• Paper shadow lanes: disabled"]
+    lane_ids = list(status.get("lane_ids") or [])
+    lines = ["• Paper shadow lanes: " + (", ".join(lane_ids) if lane_ids else "enabled")]
+    row_counts = status.get("lane_row_counts") if isinstance(status.get("lane_row_counts"), dict) else {}
+    if row_counts:
+        compact_counts = ", ".join(f"{lane}={row_counts[lane]}" for lane in sorted(row_counts))
+        lines.append(f"• Lane rows: {compact_counts}")
+    decision_path = status.get("decision_path")
+    if decision_path:
+        lines.append(f"• Lane ledger: {decision_path}")
+    readiness = status.get("source_scoreboard_readiness") if isinstance(status.get("source_scoreboard_readiness"), dict) else {}
+    if readiness and int(readiness.get("evaluated_rows") or 0) > 0:
+        lines.append(
+            "• Source-scoreboard readiness: "
+            f"rows={readiness.get('evaluated_rows', 0)}, "
+            f"independent_labels={readiness.get('independent_label_rows', 0)}, "
+            f"order_book={readiness.get('order_book_quote_rows', 0)}, "
+            f"execution={readiness.get('execution_snapshot_rows', 0)}, "
+            f"estimated_fill={readiness.get('estimated_fill_price_rows', 0)}"
+        )
+    return lines
+
+
+def _paper_shadow_lane_status_from_processes(processes: list[dict[str, Any]]) -> dict[str, Any] | None:
+    disabled_status: dict[str, Any] | None = None
+    for config_path in _configs_from_processes(processes):
+        status = _paper_shadow_lane_status(config_path)
+        if status and status.get("enabled"):
+            return status
+        if status and disabled_status is None:
+            disabled_status = status
+    return disabled_status
+
+
+def format_paper_section(processes: list[dict[str, Any]], report: str | None, lane_status: dict[str, Any] | None = None) -> str:
     lines = [
         "📄 **Paper Trading**",
         f"• 🟢 Process: active (PID(s): {_format_pids(processes)})",
     ]
+    lines.extend(_format_paper_shadow_lane_status(lane_status))
     if report:
         lines.extend(["", report])
     else:
@@ -231,8 +326,9 @@ def build_report(
     paper_report: str | None = None
     if paper_processes:
         active_modes.append(PAPER_MODE_NAME)
-        paper_report = latest_paper_report(_config_from_processes(paper_processes))
-        sections.append(format_paper_section(paper_processes, paper_report))
+        paper_config = _config_from_processes(paper_processes)
+        paper_report = latest_paper_report(paper_config)
+        sections.append(format_paper_section(paper_processes, paper_report, _paper_shadow_lane_status_from_processes(paper_processes)))
 
     if collector_processes:
         active_modes.append(COLLECTOR_MODE_NAME)
@@ -282,6 +378,7 @@ def build_json(
         "timestamp": now.isoformat(),
         "paper_trading_active": bool(paper_processes),
         "paper_processes": paper_processes,
+        "paper_shadow_lanes": _paper_shadow_lane_status_from_processes(paper_processes) if paper_processes else None,
         "prediction_lab_collector_active": bool(collector_processes),
         "prediction_lab_processes": collector_processes,
         "live_trading_active": bool(live_processes),

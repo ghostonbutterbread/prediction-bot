@@ -191,12 +191,13 @@ Planning docs:
 - `LIVE_PARITY_CHECKLIST.md` — current parity gaps and priorities
 - `docs/LIVE_PARITY_MODE_SPEC.md` — optional parity-mode design so paper can mimic live execution-time revalidation without complicating default paper mode
 
-Planned next step:
-- Phase 1 parity mode work to let paper optionally perform live-style execution-time revalidation before final approval
+Current parity status:
+- Phase 1 live-parity paper mode is implemented: paper can optionally perform live-style execution-time revalidation before final approval using the shared execution snapshot path.
+- Current focus is parity/operator visibility hardening and deeper live lifecycle/reconciliation work.
 
 ## Roadmap
 
-- [ ] Phase 1 live-parity paper mode
+- [x] Phase 1 live-parity paper mode
 - [ ] Polymarket exchange adapter
 - [ ] Cross-market arbitrage (Kalshi vs Polymarket)
 - [ ] WebSocket real-time data feeds

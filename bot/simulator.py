@@ -5,11 +5,20 @@ from collections import Counter
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from dataclasses import dataclass, asdict, field
+from types import SimpleNamespace
 from typing import Any, Optional
 
 from bot.config import ensure_mode_storage_dir
 from bot.decision_pipeline import build_pre_execution_decision_artifact
+from bot.file_ops import load_jsonl
 from bot.market_router import DEFAULT_ALLOWED_MARKET_ROUTES
+from bot.paper_shadow_lanes import (
+    SOURCE_SCOREBOARD_LANE_ID,
+    paper_shadow_lanes_enabled,
+    requested_paper_shadow_lane_ids,
+    write_paper_shadow_lane_decisions,
+)
+from bot.paper_wallets import BETA_PAPER_WALLET_ID, STABLE_PAPER_WALLET_ID
 from bot.prediction_lab_shadow_delta import build_shadow_delta
 from bot.paper_adapters import (
     LoadedPaperSession,
@@ -33,6 +42,7 @@ from bot.shared_core import (
     reason_to_key,
 )
 from bot.shared_core.decision import HIDDEN_GEM_ENTRY_PRICE_CAP
+from bot.shared_market_feed import build_shared_market_candidate_row
 from bot.strategy_lanes import select_strategy_lane
 from bot.strategies.enhanced import EnhancedStrategyEngine, KellySizer, strategy_config_with_policy
 from bot.parity_audit import normalize_parity_trade_row, summarize_normalized_rows
@@ -465,16 +475,21 @@ class Simulator:
                 
         signals_found = []
         trades_taken = []
+        shadow_source_scoreboard_inputs: dict[str, dict[str, Any]] = {}
 
         for market in markets:
             try:
                 # Build order book from market-level bid/ask
+                yes_price = self._coerce_float_or_none(getattr(market, "yes_price", None))
+                no_price = self._coerce_float_or_none(getattr(market, "no_price", None))
                 order_book = {
-                    "best_yes_ask": market.yes_price,
-                    "best_yes_bid": max(0, market.yes_price - 0.01),
-                    "mid_yes": market.yes_price,
+                    "best_yes_ask": yes_price,
+                    "best_yes_bid": max(0, round(yes_price - 0.01, 4)) if yes_price is not None else None,
+                    "best_no_ask": no_price,
+                    "best_no_bid": max(0, round(no_price - 0.01, 4)) if no_price is not None else None,
+                    "mid_yes": yes_price,
                     "spread": 0.01,
-                    "spread_pct": (0.01 / market.yes_price * 100) if market.yes_price > 0 else 10,
+                    "spread_pct": (0.01 / yes_price * 100) if yes_price and yes_price > 0 else 10,
                 }
 
                 try:
@@ -493,6 +508,12 @@ class Simulator:
                         signal,
                         shared_market_context,
                         publish_metadata=shared_market_publish_metadata,
+                    )
+                    self._prepare_shadow_source_scoreboard_signal(
+                        signal,
+                        market=market,
+                        order_book=order_book,
+                        inputs_by_shared_candidate_id=shadow_source_scoreboard_inputs,
                     )
                     signals_found.append(signal)
 
@@ -653,6 +674,7 @@ class Simulator:
                 logger.debug(f"Resolution pass error: {e}")
 
         self.risk.record_blocked_scan(dict(blockers), trades_taken=len(trades_taken))
+        self._safe_write_shadow_source_scoreboard_lane_decisions(shadow_source_scoreboard_inputs)
         self._save_session()
 
         result = {
@@ -1302,6 +1324,204 @@ class Simulator:
         except Exception as exc:
             logger.debug("paper_shadow_intent_stable_skip_failed market_id=%s error=%s", signal.get("market_id"), exc)
             return None
+
+    def _shadow_source_scoreboard_enabled(self) -> bool:
+        """Return true when this paper runtime should append source-scoreboard lane rows.
+
+        This is intentionally shadow/reporting-only. It only gates whether we emit
+        lane-decision provenance rows; it must not affect trade creation,
+        balances, risk state, or paper accounting.
+        """
+
+        if self.runtime_mode != "paper" or not paper_shadow_lanes_enabled(self.config):
+            return False
+        lane_cfg = self.config.get("paper_shadow_lanes") if isinstance(self.config.get("paper_shadow_lanes"), dict) else {}
+        enabled_lanes = lane_cfg.get("enabled_lanes") or lane_cfg.get("lanes") or []
+        return SOURCE_SCOREBOARD_LANE_ID in set(requested_paper_shadow_lane_ids(enabled_lanes))
+
+    def _prepare_shadow_source_scoreboard_signal(
+        self,
+        signal: dict,
+        *,
+        market: Any,
+        order_book: dict[str, Any],
+        inputs_by_shared_candidate_id: dict[str, dict[str, Any]],
+    ) -> None:
+        """Prepare a read-only shared-candidate input for source-scoreboard rows."""
+
+        if not self._shadow_source_scoreboard_enabled():
+            return
+        try:
+            def _shadow_float(value):
+                try:
+                    if value is None:
+                        return None
+                    return float(value)
+                except (TypeError, ValueError):
+                    return None
+
+            observed_at = datetime.now(timezone.utc).isoformat()
+            direction = str(signal.get("direction") or "BUY_YES").upper()
+            execution_snapshot = build_execution_snapshot(
+                signal,
+                direction=direction,
+                bid_ask=order_book,
+                fallback_to_signal_prices=True,
+            )
+            # This is not an executed paper/live fill. It is the observed book
+            # snapshot we would use later for hypothetical P&L replay.
+            execution_snapshot.update(
+                {
+                    "source": "paper_shadow_hypothetical_book",
+                    "as_of": observed_at,
+                    "marker": "paper_shadow_source_scoreboard_hypothetical_execution",
+                    "hypothetical": True,
+                }
+            )
+            writer_signal = dict(signal)
+            writer_signal.update(
+                {
+                    "execution_snapshot_source": execution_snapshot.get("source"),
+                    "execution_snapshot_as_of": observed_at,
+                    "execution_snapshot_marker": execution_snapshot.get("marker"),
+                    "estimated_fill_price": execution_snapshot.get("estimated_fill_price"),
+                    "best_yes_ask": execution_snapshot.get("best_yes_ask"),
+                    "best_yes_bid": execution_snapshot.get("best_yes_bid"),
+                    "best_no_ask": execution_snapshot.get("best_no_ask"),
+                    "best_no_bid": execution_snapshot.get("best_no_bid"),
+                    "order_book_source": "paper_scan_market_quote",
+                }
+            )
+            decision_artifact = build_pre_execution_decision_artifact(
+                mode="paper_shadow_observation",
+                context=None,
+                decision=TradeDecision(
+                    action=direction if direction in {"BUY_YES", "BUY_NO"} else "SKIP",
+                    approved=False,
+                    reason_code="paper_shadow_observation_only",
+                    reason="Paper shadow source-scoreboard observation only; no accounting mutation",
+                    confidence=_shadow_float(signal.get("confidence")) or 0.0,
+                    edge=_shadow_float(signal.get("edge")) or 0.0,
+                    entry_price=_shadow_float(signal.get("market_price")) or 0.0,
+                    win_probability=_shadow_float(signal.get("model_probability")) or 0.0,
+                    requested_position_size=0.0,
+                    position_size=0.0,
+                    risk_score=0.0,
+                    warnings=[],
+                    reasoning={"paper_shadow_source_scoreboard": {"recommendation_only": True}},
+                ),
+                signal=writer_signal,
+                order_book=order_book,
+                execution_snapshot=execution_snapshot,
+                config_snapshot=self.config,
+                observed_at=datetime.fromisoformat(observed_at.replace("Z", "+00:00")),
+            )
+            shared_candidate = build_shared_market_candidate_row(
+                run_id=f"{self.session_id}:scan-{self.scan_count}",
+                market=market,
+                signal=writer_signal,
+                decision_artifact=decision_artifact,
+                source_runtime="paper_shadow_source_scoreboard",
+                provenance="paper_loop_shadow_observation",
+                observed_at=observed_at,
+                snapshot_as_of=observed_at,
+                main_runtime="paper",
+            )
+            shared_candidate_id = str(shared_candidate.get("candidate_id") or "")
+            if not shared_candidate_id:
+                return
+            writer_signal["shared_candidate_id"] = shared_candidate_id
+            writer_signal["candidate_observed_at"] = observed_at
+            writer_signal["decision_artifact"] = decision_artifact
+            inputs_by_shared_candidate_id[shared_candidate_id] = {
+                STABLE_PAPER_WALLET_ID: SimpleNamespace(signal=writer_signal, shared_candidate=shared_candidate)
+            }
+        except Exception as exc:
+            logger.debug("prepare_shadow_source_scoreboard_signal_failed market_id=%s error=%s", signal.get("market_id"), exc)
+
+    def _shadow_source_scoreboard_gate_reason(self, signal: dict[str, Any]) -> str | None:
+        def _num(value, default=0.0):
+            try:
+                if value is None:
+                    return default
+                return float(value)
+            except (TypeError, ValueError):
+                return default
+
+        edge = _num(signal.get("edge"))
+        confidence = _num(signal.get("confidence"))
+        entry_price = _num(signal.get("market_price", signal.get("entry_price")))
+        if edge < float(getattr(self, "min_edge", 0.0) or 0.0):
+            return "edge_below_threshold"
+        if confidence < float(getattr(self, "min_confidence", 0.0) or 0.0):
+            return "confidence_below_threshold"
+        max_entry = float(getattr(self, "max_entry_price", 1.0) or 1.0)
+        if entry_price > max_entry:
+            return "entry_price_above_cap"
+        return None
+
+    def _safe_write_shadow_source_scoreboard_lane_decisions(
+        self,
+        inputs_by_shared_candidate_id: dict[str, dict[str, Any]],
+    ) -> None:
+        """Append source-scoreboard lane rows for the current paper scan.
+
+        This synthesizes stable wallet decision rows from already-evaluated paper
+        signals. It is deliberately warning-only: a scoreboard write failure must
+        not block the paper loop or mutate paper portfolio state.
+        """
+
+        if not inputs_by_shared_candidate_id or not self._shadow_source_scoreboard_enabled():
+            return
+        try:
+            candidate_dataset_path = str(self.data_dir / "source_scoreboard" / f"paper_loop_scan_{self.scan_count}.jsonl")
+            stable_rows: list[dict[str, Any]] = []
+            for shared_candidate_id, wallet_inputs in inputs_by_shared_candidate_id.items():
+                candidate_input = wallet_inputs.get(STABLE_PAPER_WALLET_ID)
+                signal = dict(getattr(candidate_input, "signal", {}) or {})
+                gate_reason = signal.get("_blocked") or self._shadow_source_scoreboard_gate_reason(signal)
+                action = str(signal.get("direction") or "SKIP").upper() if gate_reason is None else "SKIP"
+                if action not in {"BUY_YES", "BUY_NO"}:
+                    action = "SKIP"
+                stable_rows.append(
+                    {
+                        "shared_candidate_id": shared_candidate_id,
+                        "wallet_id": STABLE_PAPER_WALLET_ID,
+                        "run_id": self.session_id,
+                        "candidate_dataset_path": candidate_dataset_path,
+                        "decision_role": "paper_shadow",
+                        "decision_id": f"{self.session_id}:scan-{self.scan_count}:{shared_candidate_id}:stable",
+                        "policy": "normal",
+                        "market_id": signal.get("market_id"),
+                        "observed_at": signal.get("candidate_observed_at") or signal.get("observed_at"),
+                        "action": action,
+                        "reason_code": gate_reason or "approved",
+                        "reason": gate_reason or "Stable paper signal passed pre-trade gates",
+                        "confidence": signal.get("confidence"),
+                        "edge": signal.get("edge"),
+                        "model_probability": signal.get("model_probability"),
+                        "entry_price": signal.get("market_price") or signal.get("entry_price"),
+                        "price": signal.get("market_price") or signal.get("entry_price"),
+                        "requested_position_size_usd": 0.0,
+                        "approved_position_size_usd": 0.0,
+                    }
+                )
+            result = write_paper_shadow_lane_decisions(
+                config=self.config,
+                candidate_dataset_path=candidate_dataset_path,
+                inputs_by_shared_candidate_id=inputs_by_shared_candidate_id,
+                wallet_decision_rows={STABLE_PAPER_WALLET_ID: stable_rows, BETA_PAPER_WALLET_ID: []},
+                wallet_runs={STABLE_PAPER_WALLET_ID: SimpleNamespace(session_id=self.session_id)},
+                ledger_root=self.data_dir,
+            )
+            logger.info(
+                "Wrote paper shadow source-scoreboard lane rows path=%s rows=%s lanes=%s",
+                result.decision_path,
+                result.rows_written,
+                ",".join(result.lane_ids),
+            )
+        except Exception as exc:
+            logger.warning("failed to write paper shadow source-scoreboard lane rows: %s", exc)
 
     def _safe_append_agent_run(self) -> None:
         if self.runtime_mode != "paper":

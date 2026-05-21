@@ -312,7 +312,14 @@ def build_trade_decision(
                 entry_price=entry_price,
                 win_probability=win_probability,
             )
-        if weather_assessment.should_skip and reasoning["weather_risk"]["beta_gate"]["enforced"]:
+        stable_hidden_gem_guardrail_enforced = _stable_weather_hidden_gem_guardrail_enforced(
+            strategy_policy,
+            weather_assessment,
+        )
+        reasoning["weather_risk"]["stable_enforced"] = stable_hidden_gem_guardrail_enforced
+        if weather_assessment.should_skip and (
+            reasoning["weather_risk"]["beta_gate"]["enforced"] or stable_hidden_gem_guardrail_enforced
+        ):
             return TradeDecision(
                 action="SKIP",
                 approved=False,
@@ -855,6 +862,15 @@ def _apply_lane_sizing_caps(
     lane_sizing["applied_size"] = beta_adjusted_size
     return beta_adjusted_size
 
+
+
+def _stable_weather_hidden_gem_guardrail_enforced(strategy_policy: Any, weather_assessment) -> bool:
+    """Promote weather hidden-gem evidence gates into stable/control behavior."""
+
+    policy = coerce_strategy_policy(strategy_policy)
+    if policy.is_configured_beta:
+        return False
+    return bool(weather_assessment.should_skip and weather_assessment.reason_code)
 
 def _weather_rejection_beta_gate(strategy_policy: Any, weather_assessment) -> dict[str, Any]:
     policy = coerce_strategy_policy(strategy_policy)

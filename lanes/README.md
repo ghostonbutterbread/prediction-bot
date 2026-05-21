@@ -44,3 +44,4 @@ Merge precedence is:
 - `shadow_current_beta` — shared-candidate-fed shadow lane that mirrors the current beta paper wallet decision as comparison provenance.
 - `shadow_confidence_floor` — starts from the stable baseline decision, but uses the shared signal confidence to require confidence greater than or equal to the configured floor before the lane would buy.
 - `shadow_premium_city` — starts from the stable baseline decision, but only allows buys for configured premium cities. Disabled by default.
+- `shadow_source_scoreboard` — starts from the stable baseline decision, but records source scoreboard recommendations and compact future-PnL reconstruction inputs under provenance only. Disabled by default and still non-mutating: no balance, accounting, or PnL state is changed. Resolved P&L is available only through derived read-only report artifacts built from lane decisions plus finalized market resolutions.

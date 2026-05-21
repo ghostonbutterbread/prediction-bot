@@ -10,7 +10,8 @@ Status update: the dry-run OpenClaw cron has been installed as `1a731ace-3796-47
 
 ## Current state
 
-- Development repo: `/home/ryushe/projects/prediction-bot`
+- Development repo at the time of this plan: `/home/ryushe/projects/prediction-bot`
+  - Canonical runtime/data repo path is now: `/mnt/data-collection/prediction-bot` (the old `~/projects/prediction-bot` path remains as a compatibility symlink).
   - Branch: `feature/weather-strategy-lanes`
   - Current commit: `16703d9 Add monthly JSONL partition helper`
   - Dirty/untracked work exists and must be preserved. Runtime update must use committed refs only, not dirty worktree state.
@@ -88,7 +89,7 @@ Recommended rollout:
 Create an OpenClaw cron/systemd job that runs around the first day of each month, but only in dry-run/report mode:
 
 ```bash
-cd /home/ryushe/projects/prediction-bot
+cd /mnt/data-collection/prediction-bot
 python3 scripts/partition_jsonl_by_month.py \
   data/paper/prediction_lab/market_snapshots.jsonl \
   data/beta_shadow/paper/prediction_lab/market_snapshots.jsonl
@@ -101,7 +102,7 @@ Deliver the manifest summary to Bot Status. This confirms the datasets are parti
 After dry-run output is stable, schedule a copy-first writer to a non-runtime location. Use separate output roots for files with the same stem:
 
 ```bash
-cd /home/ryushe/projects/prediction-bot
+cd /mnt/data-collection/prediction-bot
 python3 scripts/partition_jsonl_by_month.py \
   data/paper/prediction_lab/market_snapshots.jsonl \
   --write \

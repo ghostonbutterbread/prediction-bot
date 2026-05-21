@@ -528,7 +528,11 @@ class ParityAuditTests(unittest.TestCase):
             self.assertEqual(comparison["matched_keys"], 1)
             self.assertEqual(comparison["matched_pairs"], 1)
             self.assertEqual(comparison["mismatched_pair_count"], 1)
+            self.assertIn(("logic_drift", 1), comparison["drift_category_counts"])
+            self.assertIn(("lifecycle_drift", 1), comparison["drift_category_counts"])
+            self.assertIn(("execution_drift", 1), comparison["drift_category_counts"])
             self.assertIn(("status", 1), comparison["mismatch_field_counts"])
+            self.assertEqual(comparison["mismatch_examples"][0]["drift_categories"], ["lifecycle_drift", "execution_drift", "logic_drift"])
             self.assertEqual(view["live_summary"]["decision_delta_rows"], 1)
             self.assertEqual(view["live_summary"]["execution_price_delta_rows"], 1)
             self.assertEqual(view["live_summary"]["top_decision_delta_pairs"][0][0], "approved -> price_above_threshold")
@@ -541,7 +545,63 @@ class ParityAuditTests(unittest.TestCase):
             artifact_text = artifact.read_text()
             self.assertIn('"comparison"', artifact_text)
             self.assertIn('"comparison_context"', artifact_text)
+            self.assertIn('"drift_category_counts"', artifact_text)
             self.assertIn('"live_mode_label": "identical-risk comparison"', artifact_text)
+
+    def test_build_parity_view_classifies_logic_drift_without_risk_or_lifecycle_drift(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "data"
+            (data_dir / "paper").mkdir(parents=True)
+            (data_dir / "live").mkdir(parents=True)
+            (data_dir / "paper" / "sim_20260423_000000.json").write_text(
+                '{"trades":[{"schema_name":"execution_audit_row","schema_version":1,"trade_id":"paper-logic-1","timestamp":"2026-04-23T00:00:00+00:00","market_id":"m-logic","event_key":"event-logic","question":"Q","exchange":"kalshi","direction":"BUY_YES","status":"filled","lifecycle_state":"filled_open","requested_size":1.0,"approved_size":1.0,"placed_size":1.0,"filled_size":1.0,"remaining_size":0.0,"reserved_capital":1.0,"market_price":0.4,"entry_price":0.4,"decision_reason_code":"edge_above_threshold","parity_mode_enabled":true,"execution_revalidated":true,"execution_revalidation_outcome":"approved","execution_snapshot_source":"book","original_decision_reason_code":"edge_above_threshold","execution_decision_reason_code":"edge_above_threshold","original_signal_snapshot":{"market_price":0.4},"execution_snapshot":{"market_price":0.4}}]}'
+            )
+            (data_dir / "live" / "trades.jsonl").write_text(
+                '{"schema_name":"execution_audit_row","schema_version":1,"trade_id":"live-logic-1","timestamp":"2026-04-23T00:00:01+00:00","market_id":"m-logic","event_key":"event-logic","question":"Q","exchange":"kalshi","direction":"BUY_YES","status":"filled","lifecycle_state":"filled_open","requested_size":1.0,"approved_size":1.0,"placed_size":1.0,"filled_size":1.0,"remaining_size":0.0,"reserved_capital":1.0,"market_price":0.4,"entry_price":0.4,"decision_reason_code":"momentum_tiebreaker","parity_mode_enabled":true,"execution_revalidated":true,"execution_revalidation_outcome":"approved","execution_snapshot_source":"book","original_decision_reason_code":"momentum_tiebreaker","execution_decision_reason_code":"momentum_tiebreaker","original_signal_snapshot":{"market_price":0.4},"execution_snapshot":{"market_price":0.4}}\n'
+            )
+
+            view = build_parity_view(data_dir)
+            comparison = view["comparison"]
+
+            self.assertEqual(comparison["matched_pairs"], 1)
+            self.assertEqual(comparison["drift_category_counts"], [("logic_drift", 1)])
+            self.assertEqual(comparison["mismatch_examples"][0]["drift_categories"], ["logic_drift"])
+            self.assertIn(("decision_reason_code", 1), comparison["mismatch_field_counts"])
+
+    def test_build_parity_view_keeps_risk_drift_for_risk_stage_rejections(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "data"
+            (data_dir / "paper").mkdir(parents=True)
+            (data_dir / "live").mkdir(parents=True)
+            (data_dir / "paper" / "sim_20260423_000000.json").write_text(
+                '{"trades":[{"schema_name":"execution_audit_row","schema_version":1,"trade_id":"paper-risk-1","timestamp":"2026-04-23T00:00:00+00:00","market_id":"m-risk","event_key":"event-risk","question":"Q","exchange":"kalshi","direction":"BUY_YES","status":"approved","lifecycle_state":"approved","requested_size":1.0,"approved_size":1.0,"placed_size":0.0,"filled_size":0.0,"remaining_size":0.0,"reserved_capital":0.0,"market_price":0.4,"entry_price":0.4,"decision_reason_code":"approved","execution_snapshot_source":"book"}]}'
+            )
+            (data_dir / "live" / "trades.jsonl").write_text(
+                '{"schema_name":"execution_audit_row","schema_version":1,"trade_id":"live-risk-1","timestamp":"2026-04-23T00:00:01+00:00","market_id":"m-risk","event_key":"event-risk","question":"Q","exchange":"kalshi","direction":"BUY_YES","status":"rejected","lifecycle_state":"risk_check_rejected","failure_stage":"risk_block","requested_size":1.0,"approved_size":0.0,"placed_size":0.0,"filled_size":0.0,"remaining_size":0.0,"reserved_capital":0.0,"market_price":0.4,"entry_price":0.4,"decision_reason_code":"kelly_zero_size","execution_snapshot_source":"book"}\n'
+            )
+
+            comparison = build_parity_view(data_dir)["comparison"]
+
+            self.assertIn(("risk_drift", 1), comparison["drift_category_counts"])
+            self.assertEqual(comparison["mismatch_examples"][0]["drift_categories"], ["lifecycle_drift", "risk_drift"])
+
+    def test_build_parity_view_does_not_map_generic_contract_invalidity_to_lifecycle_drift(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "data"
+            (data_dir / "paper").mkdir(parents=True)
+            (data_dir / "live").mkdir(parents=True)
+            (data_dir / "paper" / "sim_20260423_000000.json").write_text(
+                '{"trades":[{"schema_name":"execution_audit_row","schema_version":1,"trade_id":"paper-contract-1","timestamp":"2026-04-23T00:00:00+00:00","market_id":"m-contract","event_key":"event-contract","question":"Q","exchange":"kalshi","direction":"BUY_YES","status":"filled","lifecycle_state":"filled_open","requested_size":1.0,"approved_size":1.0,"placed_size":1.0,"filled_size":1.0,"remaining_size":0.0,"reserved_capital":1.0,"market_price":0.4,"entry_price":0.4,"decision_reason_code":"approved","parity_mode_enabled":true,"execution_revalidated":true,"execution_revalidation_outcome":"approved","execution_snapshot_source":"book","original_signal_snapshot":{"market_price":0.4},"execution_snapshot":{"market_price":0.4}}]}'
+            )
+            (data_dir / "live" / "trades.jsonl").write_text(
+                '{"schema_name":"execution_audit_row","schema_version":1,"trade_id":"live-contract-1","timestamp":"2026-04-23T00:00:01+00:00","market_id":"m-contract","event_key":"event-contract","question":"Q","exchange":"kalshi","direction":"BUY_YES","status":"filled","lifecycle_state":"filled_open","requested_size":1.0,"approved_size":1.0,"placed_size":1.0,"filled_size":1.0,"remaining_size":0.0,"reserved_capital":1.0,"market_price":0.4,"entry_price":0.4,"decision_reason_code":"approved","parity_mode_enabled":true,"execution_revalidated":true,"execution_revalidation_outcome":"approved","execution_snapshot_source":"book","original_signal_snapshot":{"market_price":0.4}}\n'
+            )
+
+            comparison = build_parity_view(data_dir)["comparison"]
+
+            self.assertIn(("contract_valid", 1), comparison["mismatch_field_counts"])
+            self.assertEqual(comparison["drift_category_counts"], [("logic_drift", 1)])
+            self.assertEqual(comparison["mismatch_examples"][0]["drift_categories"], ["logic_drift"])
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+import re
 from typing import Any, Iterable, Mapping
 
 from bot.agent_decision_ledger import (
@@ -14,17 +15,23 @@ from bot.agent_decision_ledger import (
 )
 from bot.file_ops import append_jsonl, load_jsonl
 from bot.paper_wallets import BETA_PAPER_WALLET_ID, STABLE_PAPER_WALLET_ID
+from bot.weather.thresholds import extract_threshold_value, infer_question_side
 
 PAPER_LANE_AGENT_ID = "paper"
 PAPER_LANE_RUNTIME = "paper"
 PAPER_LANE_DECISION_ROLE = "paper_lane"
 PAPER_LANE_SCHEMA_VERSION = 1
+PAPER_LANE_RESOLUTION_SCHEMA_VERSION = 1
 DEFAULT_CONFIDENCE_FLOOR = 0.58
 DEFAULT_LANE_IDS = ("control_stable", "shadow_current_beta", "shadow_confidence_floor")
 PREMIUM_CITY_LANE_ID = "shadow_premium_city"
 SOURCE_RELIABILITY_LANE_ID = "shadow_source_reliability"
-KNOWN_LANE_IDS = (*DEFAULT_LANE_IDS, PREMIUM_CITY_LANE_ID, SOURCE_RELIABILITY_LANE_ID)
+SOURCE_SCOREBOARD_LANE_ID = "shadow_source_scoreboard"
+SOURCE_RELIABILITY_EVALUATOR_LANE_IDS = frozenset({SOURCE_RELIABILITY_LANE_ID, SOURCE_SCOREBOARD_LANE_ID})
+SOURCE_SCOREBOARD_LANE_IDS = frozenset({SOURCE_SCOREBOARD_LANE_ID})
+KNOWN_LANE_IDS = (*DEFAULT_LANE_IDS, PREMIUM_CITY_LANE_ID, SOURCE_RELIABILITY_LANE_ID, SOURCE_SCOREBOARD_LANE_ID)
 REPO_ROOT = Path(__file__).resolve().parent.parent
+MAX_COMPACT_FUTURE_PNL_QUESTION_CHARS = 200
 
 try:
     import yaml
@@ -257,6 +264,17 @@ def _build_lane_row(
     }
     if isinstance(decision.get("source_reliability"), Mapping):
         row["provenance"]["source_reliability"] = dict(decision["source_reliability"])
+        if _is_source_scoreboard_lane(lane.lane_id):
+            source_scoreboard = _source_scoreboard_provenance(
+                lane,
+                signal=signal,
+                shared_candidate=shared_candidate,
+                source_row=source_row,
+                source_reliability=decision["source_reliability"],
+            )
+            row["provenance"]["source_scoreboard"] = source_scoreboard
+            if isinstance(source_scoreboard.get("future_pnl_inputs"), Mapping):
+                row["provenance"]["future_pnl_inputs"] = dict(source_scoreboard["future_pnl_inputs"])
     if lane.definition_path:
         row["lane_definition_path"] = lane.definition_path
         row["provenance"]["lane_definition_path"] = lane.definition_path
@@ -280,7 +298,9 @@ def _lane_evaluator(lane: _LaneDefinition):
         lane_type = "confidence_floor"
     elif lane.lane_id == PREMIUM_CITY_LANE_ID:
         lane_type = "premium_city"
-    elif lane.lane_id == SOURCE_RELIABILITY_LANE_ID:
+    elif lane.lane_id in SOURCE_RELIABILITY_EVALUATOR_LANE_IDS:
+        lane_type = "source_reliability"
+    elif lane_type == "source_scoreboard":
         lane_type = "source_reliability"
     evaluator = LANE_EVALUATORS.get(lane_type)
     if evaluator is None:
@@ -502,6 +522,9 @@ def summarize_paper_shadow_lane_report(
     buy_counts = _counts_sorted(_lane_id_for_row(row) for row in rows if _is_buy_action(row.get("action")))
     skip_counts = _counts_sorted(_lane_id_for_row(row) for row in rows if _is_skip_action(row.get("action")))
     action_counts = _counts_sorted(_action_label(row.get("action")) for row in rows)
+    source_scoreboard = _summarize_source_scoreboard_rows(rows)
+    source_reliability = _summarize_source_reliability_rows(rows)
+    source_scoreboard_readiness = _summarize_source_scoreboard_readiness(rows)
     return {
         "schema_version": PAPER_LANE_SCHEMA_VERSION,
         "enabled_lane_ids": enabled_lane_ids,
@@ -517,6 +540,9 @@ def summarize_paper_shadow_lane_report(
         "buy_counts": buy_counts,
         "skip_counts": skip_counts,
         "action_counts": action_counts,
+        "source_scoreboard": source_scoreboard,
+        "source_reliability": source_reliability,
+        "source_scoreboard_readiness": source_scoreboard_readiness,
         "drift": {
             "vs_baseline": _summarize_reference_drift(
                 rows,
@@ -573,11 +599,12 @@ def _configured_lane_definition_map(config: Mapping[str, Any]) -> dict[str, _Lan
     for key in ("source_reliability_scoreboard", "source_reliability_scoreboard_path", "source_scoreboard_path"):
         if config.get(key) in (None, ""):
             continue
-        reliability_cfg = raw_by_id.get(SOURCE_RELIABILITY_LANE_ID, {"id": SOURCE_RELIABILITY_LANE_ID})
-        parameters = _mapping(reliability_cfg.get("parameters"))
-        parameters["scoreboard_path"] = config.get(key)
-        reliability_cfg["parameters"] = parameters
-        raw_by_id[SOURCE_RELIABILITY_LANE_ID] = reliability_cfg
+        for lane_id in SOURCE_RELIABILITY_EVALUATOR_LANE_IDS:
+            reliability_cfg = raw_by_id.get(lane_id, {"id": lane_id})
+            parameters = _mapping(reliability_cfg.get("parameters"))
+            parameters["scoreboard_path"] = config.get(key)
+            reliability_cfg["parameters"] = parameters
+            raw_by_id[lane_id] = reliability_cfg
         break
 
     return {
@@ -640,6 +667,17 @@ def _built_in_lane_definition_map() -> dict[str, dict[str, Any]]:
             "input_market_source": "shared_market",
             "enabled": False,
             "description": "Shared-candidate-fed lane that starts from stable baseline and applies source reliability metadata only.",
+            "parameters": {},
+        },
+        SOURCE_SCOREBOARD_LANE_ID: {
+            "id": SOURCE_SCOREBOARD_LANE_ID,
+            "type": "source_reliability",
+            "source_wallet": STABLE_PAPER_WALLET_ID,
+            "source_role": "baseline",
+            "input_source": "shared_candidate_dataset",
+            "input_market_source": "shared_market",
+            "enabled": False,
+            "description": "Shared-candidate-fed lane that starts from stable baseline and records source scoreboard recommendations plus future-PnL provenance only.",
             "parameters": {},
         },
     }
@@ -714,6 +752,12 @@ def _lane_definition_from_raw(lane_id: str, raw: Mapping[str, Any]) -> _LaneDefi
         parameters=parameters,
         definition_path=str(raw.get("definition_path")) if raw.get("definition_path") not in (None, "") else None,
     )
+
+
+def requested_paper_shadow_lane_ids(value: Any) -> list[str]:
+    """Return requested enabled lane ids using shared lane config semantics."""
+
+    return _requested_lane_ids(value)
 
 
 def _requested_lane_ids(value: Any) -> list[str]:
@@ -1015,6 +1059,456 @@ def _sorted_count_dict(counts: Mapping[str, int]) -> dict[str, int]:
     return {key: int(counts[key]) for key in sorted(counts)}
 
 
+
+def summarize_paper_shadow_lane_resolved_pnl(
+    *,
+    lane_rows: Iterable[Mapping[str, Any]] | None = None,
+    lane_decision_path: str | Path | None = None,
+    resolution_rows: Iterable[Mapping[str, Any]] | None = None,
+    resolution_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Join paper shadow lane rows to finalized outcomes and compute read-only hypothetical PnL.
+
+    This never mutates paper wallet state. It is an audit/reporting join over lane
+    decisions plus resolution rows so recommendation-only lanes can be scored once
+    outcomes are known.
+    """
+
+    joined_rows = build_paper_shadow_lane_resolution_rows(
+        lane_rows=lane_rows,
+        lane_decision_path=lane_decision_path,
+        resolution_rows=resolution_rows,
+        resolution_path=resolution_path,
+    )
+    totals = _empty_pnl_bucket()
+    by_lane: dict[str, dict[str, Any]] = {}
+    blocker_counts: dict[str, int] = {}
+
+    for joined in joined_rows:
+        lane_id = str(joined.get("lane_id") or "unknown")
+        bucket = by_lane.setdefault(lane_id, _empty_pnl_bucket())
+        _increment_pnl_bucket(totals, "evaluated_rows")
+        _increment_pnl_bucket(bucket, "evaluated_rows")
+
+        blocker = _optional_text(joined.get("blocker"))
+        resolution = _mapping(joined.get("resolution"))
+        if resolution.get("outcome") is not None:
+            _increment_pnl_bucket(totals, "resolved_rows")
+            _increment_pnl_bucket(bucket, "resolved_rows")
+        if blocker:
+            _add_blocker(blocker_counts, blocker)
+            _add_blocker(bucket["blocker_counts"], blocker)
+            continue
+
+        action = _action_label(joined.get("action"))
+        if _is_skip_action(action):
+            _increment_pnl_bucket(totals, "skip_rows")
+            _increment_pnl_bucket(bucket, "skip_rows")
+            _increment_pnl_bucket(totals, "pnl_calculable_rows")
+            _increment_pnl_bucket(bucket, "pnl_calculable_rows")
+            continue
+
+        pnl = _mapping(joined.get("pnl"))
+        stake_f = float(_number(pnl.get("stake_usd")) or 0.0)
+        payout = float(_number(pnl.get("payout_usd")) or 0.0)
+        pnl_value = float(_number(pnl.get("pnl_usd")) or 0.0)
+        won = bool(pnl.get("won"))
+
+        _increment_pnl_bucket(totals, "buy_rows")
+        _increment_pnl_bucket(bucket, "buy_rows")
+        _increment_pnl_bucket(totals, "pnl_calculable_rows")
+        _increment_pnl_bucket(bucket, "pnl_calculable_rows")
+        _increment_pnl_bucket(totals, "winning_buy_rows" if won else "losing_buy_rows")
+        _increment_pnl_bucket(bucket, "winning_buy_rows" if won else "losing_buy_rows")
+        for target in (totals, bucket):
+            target["total_stake_usd"] += stake_f
+            target["total_payout_usd"] += payout
+            target["total_pnl_usd"] += pnl_value
+
+    return _finalize_pnl_bucket({**totals, "by_lane": by_lane, "blocker_counts": blocker_counts})
+
+
+def build_paper_shadow_lane_resolution_rows(
+    *,
+    lane_rows: Iterable[Mapping[str, Any]] | None = None,
+    lane_decision_path: str | Path | None = None,
+    resolution_rows: Iterable[Mapping[str, Any]] | None = None,
+    resolution_path: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    """Return replayable, read-only resolution rows for paper shadow lane decisions.
+
+    The artifact is intentionally separate from wallet accounting. It preserves the
+    lane's recorded action/side/price/notional inputs plus matched market outcome so
+    later analyses can replay PnL under different balance or sizing assumptions.
+    """
+
+    rows = [dict(row) for row in lane_rows] if lane_rows is not None else load_jsonl(Path(lane_decision_path or ""))
+    resolutions = (
+        [dict(row) for row in resolution_rows]
+        if resolution_rows is not None
+        else (load_jsonl(Path(resolution_path)) if resolution_path not in (None, "") else [])
+    )
+    resolution_index = _resolution_index(resolutions, resolution_path=resolution_path)
+    return [_build_lane_resolution_row(row, resolution_index) for row in rows]
+
+
+def _build_lane_resolution_row(
+    row: Mapping[str, Any],
+    resolution_index: Mapping[str, Any],
+) -> dict[str, Any]:
+    future_inputs = _row_future_pnl_inputs(row)
+    shared_candidate_id = _optional_text(row.get("shared_candidate_id"), future_inputs.get("shared_candidate_id"))
+    market_id = _optional_text(row.get("market_id"), future_inputs.get("market_id"))
+    resolution_match = _find_resolution(
+        resolution_index,
+        shared_candidate_id=shared_candidate_id,
+        run_id=_optional_text(row.get("run_id"), future_inputs.get("run_id")),
+        market_id=market_id,
+    )
+    resolution = resolution_match.get("row") if isinstance(resolution_match.get("row"), Mapping) else None
+    resolution_blocker = _optional_text(resolution_match.get("blocker"))
+    outcome = _normalized_resolution_outcome(resolution) or _normalized_resolution_outcome(future_inputs)
+    action = _action_label(_optional_text(future_inputs.get("recommended_action"), row.get("action"), row.get("side")))
+    side = _side_from_action(action) or _optional_text(future_inputs.get("side"))
+    fill_price = _number(future_inputs.get("estimated_fill_price"), future_inputs.get("entry_price"), row.get("entry_price"), row.get("price"))
+    entry_price = _number(future_inputs.get("entry_price"), row.get("entry_price"), row.get("price"))
+    stake = _number(
+        row.get("approved_position_size_usd"),
+        row.get("requested_position_size_usd"),
+        future_inputs.get("approved_position_size_usd"),
+        future_inputs.get("requested_position_size_usd"),
+        future_inputs.get("stable_approved_position_size_usd"),
+        future_inputs.get("stable_requested_position_size_usd"),
+    )
+    blocker = resolution_blocker or _resolution_row_blocker(action=action, outcome=outcome, side=side, fill_price=fill_price, stake=stake)
+    pnl = _resolution_row_pnl(action=action, outcome=outcome, side=side, fill_price=fill_price, stake=stake) if blocker is None else None
+    return {
+        "schema_name": "paper_shadow_lane_resolution",
+        "schema_version": PAPER_LANE_RESOLUTION_SCHEMA_VERSION,
+        "non_mutating": True,
+        "lane_decision_id": _optional_text(row.get("decision_id")),
+        "agent_run_id": _optional_text(row.get("agent_run_id")),
+        "run_id": _optional_text(row.get("run_id")),
+        "lane_id": _lane_id_for_row(row),
+        "shared_candidate_id": shared_candidate_id,
+        "market_id": market_id,
+        "observed_at": _optional_text(row.get("observed_at"), future_inputs.get("observed_at")),
+        "action": action,
+        "side": side,
+        "entry_price": entry_price,
+        "fill_price": fill_price,
+        "notional_usd": stake,
+        "requested_position_size_usd": _number(row.get("requested_position_size_usd"), future_inputs.get("requested_position_size_usd"), future_inputs.get("stable_requested_position_size_usd")),
+        "approved_position_size_usd": _number(row.get("approved_position_size_usd"), future_inputs.get("approved_position_size_usd"), future_inputs.get("stable_approved_position_size_usd")),
+        "resolution": {
+            "matched": resolution is not None or outcome is not None,
+            "match_source": _optional_text(resolution_match.get("matched_by")) if resolution is not None else ("future_pnl_inputs" if outcome is not None else None),
+            "matched_by": _optional_text(resolution_match.get("matched_by")),
+            "match_key": _optional_text(resolution_match.get("match_key")),
+            "outcome": outcome,
+            "resolved_at": _optional_text(_mapping(resolution).get("resolved_at"), _mapping(_mapping(resolution).get("resolution")).get("resolved_at"), future_inputs.get("resolved_at")),
+            "market_id": _optional_text(_mapping(resolution).get("market_id"), market_id),
+            "shared_candidate_id": _optional_text(_mapping(resolution).get("shared_candidate_id"), shared_candidate_id),
+            "resolution_source_path": _optional_text(resolution_match.get("resolution_source_path")),
+            "resolution_row_id": _optional_text(_mapping(resolution).get("prediction_id"), _mapping(resolution).get("resolution_id"), _mapping(resolution).get("decision_id")),
+            "candidate_match_count": int(resolution_match.get("candidate_match_count") or 0) if resolution_match.get("candidate_match_count") is not None else None,
+        },
+        "pnl": pnl,
+        "blocker": blocker,
+        "replay_sizing": {
+            "mode": "recorded_fixed_notional",
+            "recorded_notional_usd": stake,
+            "sizing_source": _notional_source(row, future_inputs),
+            "starting_balance_usd": _number(future_inputs.get("starting_balance_usd")),
+            "replayable_with_alternate_balance": True,
+        },
+        "cost_model": {"fees_supported": False, "fees_usd": 0.0, "slippage_supported": False},
+        "source_inputs": {"future_pnl_inputs": future_inputs},
+    }
+
+
+def _resolution_row_blocker(*, action: str, outcome: str | None, side: str | None, fill_price: float | None, stake: float | None) -> str | None:
+    if not outcome:
+        return "missing_resolution"
+    if _is_skip_action(action):
+        return None
+    if not _is_buy_action(action):
+        return "unsupported_action"
+    if side not in {"YES", "NO"}:
+        return "missing_side"
+    if fill_price is None or float(fill_price) <= 0:
+        return "missing_fill_price"
+    if stake is None or float(stake) <= 0:
+        return "missing_position_size"
+    return None
+
+
+def _resolution_row_pnl(*, action: str, outcome: str | None, side: str | None, fill_price: float | None, stake: float | None) -> dict[str, Any]:
+    if _is_skip_action(action):
+        return {"calculable": True, "stake_usd": 0.0, "contracts": 0.0, "payout_usd": 0.0, "pnl_usd": 0.0, "won": None}
+    stake_f = float(stake or 0.0)
+    fill_f = float(fill_price or 0.0)
+    contracts = stake_f / fill_f
+    won = side == outcome
+    payout = contracts if won else 0.0
+    return {
+        "calculable": True,
+        "stake_usd": round(stake_f, 4),
+        "contracts": round(contracts, 4),
+        "payout_usd": round(payout, 4),
+        "pnl_usd": round(payout - stake_f, 4),
+        "won": won,
+    }
+
+
+def _notional_source(row: Mapping[str, Any], future_inputs: Mapping[str, Any]) -> str | None:
+    for key, source in (
+        ("approved_position_size_usd", "lane_approved_position_size_usd"),
+        ("requested_position_size_usd", "lane_requested_position_size_usd"),
+    ):
+        if _number(row.get(key)) is not None:
+            return source
+    for key, source in (
+        ("approved_position_size_usd", "future_approved_position_size_usd"),
+        ("requested_position_size_usd", "future_requested_position_size_usd"),
+        ("stable_approved_position_size_usd", "stable_approved_position_size_usd"),
+        ("stable_requested_position_size_usd", "stable_requested_position_size_usd"),
+    ):
+        if _number(future_inputs.get(key)) is not None:
+            return source
+    return None
+
+def _row_future_pnl_inputs(row: Mapping[str, Any]) -> dict[str, Any]:
+    provenance = _mapping(row.get("provenance"))
+    direct = _mapping(provenance.get("future_pnl_inputs"))
+    if direct:
+        return direct
+    scoreboard = _mapping(provenance.get("source_scoreboard"))
+    return _mapping(scoreboard.get("future_pnl_inputs"))
+
+
+def _resolution_index(
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    resolution_path: str | Path | None = None,
+) -> dict[str, Any]:
+    entries: list[dict[str, Any]] = []
+    by_shared_candidate_id: dict[str, list[int]] = {}
+    by_run_market: dict[tuple[str, str], list[int]] = {}
+    by_market_id: dict[str, list[int]] = {}
+    source_path = str(resolution_path) if resolution_path not in (None, "") else None
+    for row in rows:
+        entry = {"row": dict(row), "resolution_source_path": source_path}
+        entry_index = len(entries)
+        entries.append(entry)
+        shared_candidate_id = _optional_text(row.get("shared_candidate_id"))
+        market_id = _optional_text(row.get("market_id"), row.get("ticker"))
+        run_id = _optional_text(row.get("run_id"))
+        if shared_candidate_id:
+            by_shared_candidate_id.setdefault(shared_candidate_id, []).append(entry_index)
+        if run_id and market_id:
+            by_run_market.setdefault((run_id, market_id), []).append(entry_index)
+        if market_id:
+            by_market_id.setdefault(market_id, []).append(entry_index)
+    return {
+        "entries": entries,
+        "by_shared_candidate_id": by_shared_candidate_id,
+        "by_run_market": by_run_market,
+        "by_market_id": by_market_id,
+    }
+
+
+def _find_resolution(
+    index: Mapping[str, Any],
+    *,
+    shared_candidate_id: str | None,
+    run_id: str | None,
+    market_id: str | None,
+) -> dict[str, Any]:
+    lookup_plan: list[tuple[str, Any, str | None]] = []
+    if shared_candidate_id:
+        lookup_plan.append(("shared_candidate_id", shared_candidate_id, shared_candidate_id))
+    if run_id and market_id:
+        lookup_plan.append(("run_id_market_id", (run_id, market_id), f"{run_id}|{market_id}"))
+    if market_id:
+        lookup_plan.append(("market_id", market_id, market_id))
+
+    entries = list(index.get("entries", []) or [])
+    for matched_by, key, display_key in lookup_plan:
+        bucket_name = {
+            "shared_candidate_id": "by_shared_candidate_id",
+            "run_id_market_id": "by_run_market",
+            "market_id": "by_market_id",
+        }[matched_by]
+        entry_indexes = list(_mapping(index.get(bucket_name)).get(key, []) or [])
+        if not entry_indexes:
+            continue
+        if len(entry_indexes) > 1:
+            outcomes = {
+                _normalized_resolution_outcome(entries[i].get("row"))
+                for i in entry_indexes
+                if i < len(entries)
+            }
+            outcomes.discard(None)
+            if len(outcomes) != 1 or matched_by == "market_id":
+                return {
+                    "row": None,
+                    "blocker": "ambiguous_resolution",
+                    "matched_by": matched_by,
+                    "match_key": display_key,
+                    "candidate_match_count": len(entry_indexes),
+                }
+        entry = entries[entry_indexes[0]] if entry_indexes[0] < len(entries) else {}
+        return {
+            "row": _mapping(entry.get("row")),
+            "matched_by": matched_by,
+            "match_key": display_key,
+            "resolution_source_path": _optional_text(entry.get("resolution_source_path")),
+            "candidate_match_count": len(entry_indexes),
+        }
+    return {"row": None, "matched_by": None, "match_key": None}
+
+def _normalized_resolution_outcome(row: Mapping[str, Any] | None) -> str | None:
+    if not isinstance(row, Mapping):
+        return None
+    for source in (row, _mapping(row.get("resolution"))):
+        if not source:
+            continue
+        for key in ("resolved_outcome", "actual_outcome", "outcome", "result", "settled_side", "settlement_value"):
+            value = _optional_text(source.get(key))
+            if value in {"YES", "NO", "VOID"}:
+                return value
+            upper = str(value or "").strip().upper()
+            if upper in {"YES", "NO", "VOID"}:
+                return upper
+            if upper in {"TRUE", "1", "1.0"}:
+                return "YES"
+            if upper in {"FALSE", "0", "0.0"}:
+                return "NO"
+    return None
+
+
+def _empty_pnl_bucket() -> dict[str, Any]:
+    return {
+        "evaluated_rows": 0,
+        "resolved_rows": 0,
+        "buy_rows": 0,
+        "skip_rows": 0,
+        "pnl_calculable_rows": 0,
+        "winning_buy_rows": 0,
+        "losing_buy_rows": 0,
+        "total_stake_usd": 0.0,
+        "total_payout_usd": 0.0,
+        "total_pnl_usd": 0.0,
+        "blocker_counts": {},
+    }
+
+
+def _increment_pnl_bucket(bucket: dict[str, Any], key: str) -> None:
+    bucket[key] = int(bucket.get(key, 0)) + 1
+
+
+def _add_blocker(counts: dict[str, int], key: str) -> None:
+    counts[key] = int(counts.get(key, 0)) + 1
+
+
+def _finalize_pnl_bucket(bucket: dict[str, Any]) -> dict[str, Any]:
+    finalized: dict[str, Any] = {}
+    for key, value in bucket.items():
+        if key == "by_lane" and isinstance(value, Mapping):
+            finalized[key] = {lane_id: _finalize_pnl_bucket(dict(lane_bucket)) for lane_id, lane_bucket in value.items()}
+        elif key == "blocker_counts" and isinstance(value, Mapping):
+            finalized[key] = {str(k): int(v) for k, v in sorted(value.items()) if int(v)}
+        elif isinstance(value, float):
+            finalized[key] = round(value, 4)
+        else:
+            finalized[key] = value
+    stake = float(finalized.get("total_stake_usd") or 0.0)
+    finalized["roi_pct"] = round((float(finalized.get("total_pnl_usd") or 0.0) / stake) * 100.0, 2) if stake else None
+    return finalized
+
+def _coverage_pct(count: int, total: int) -> float | None:
+    if total <= 0:
+        return None
+    return round((count / total) * 100.0, 2)
+
+
+def _label_source_name(future_pnl_inputs: Mapping[str, Any]) -> str:
+    return (
+        _optional_text(
+            future_pnl_inputs.get("label_target"),
+            future_pnl_inputs.get("actual_source"),
+            future_pnl_inputs.get("settlement_source"),
+        )
+        or "unknown"
+    )
+
+
+def _label_source_classification(label_source: str, *, settlement_source: str | None) -> str:
+    normalized = _normalized_source_label(label_source)
+    settlement_normalized = _normalized_source_label(settlement_source or "")
+    if normalized in ("", "unknown"):
+        return "unknown"
+    if _is_independent_label_source(normalized):
+        return "independent"
+    if _is_settlement_derived_label_source(normalized) or (
+        settlement_normalized and normalized == settlement_normalized
+    ):
+        return "settlement_derived"
+    return "explicit_non_independent"
+
+
+def _is_independent_label_source(value: str) -> bool:
+    normalized = _normalized_source_label(value)
+    if _is_settlement_derived_label_source(normalized):
+        return False
+    return any(token in normalized for token in ("observed", "daily", "archive", "asos", "station", "iem"))
+
+
+def _is_settlement_derived_label_source(value: str) -> bool:
+    normalized = _normalized_source_label(value)
+    return (
+        "settlement" in normalized
+        or normalized in {"kalshi", "nws"}
+        or normalized.startswith("nws_")
+        or normalized.endswith("_nws")
+    )
+
+
+def _normalized_source_label(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    return re.sub(r"[^a-z0-9]+", "_", text).strip("_")
+
+
+def _has_order_book_quotes(future_pnl_inputs: Mapping[str, Any]) -> bool:
+    return any(
+        _number(future_pnl_inputs.get(key)) is not None
+        for key in ("best_yes_ask", "best_yes_bid", "best_no_ask", "best_no_bid")
+    )
+
+
+def _has_execution_snapshot(future_pnl_inputs: Mapping[str, Any]) -> bool:
+    return bool(
+        _optional_text(
+            future_pnl_inputs.get("execution_snapshot_source"),
+            future_pnl_inputs.get("execution_snapshot_as_of"),
+        )
+    )
+
+
+def _parse_timestamp(value: Any) -> datetime | None:
+    text = _optional_text(value)
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
 def _shared_candidate(candidate_input: Any) -> dict[str, Any]:
     shared_candidate = getattr(candidate_input, "shared_candidate", None)
     return dict(shared_candidate) if isinstance(shared_candidate, dict) else {}
@@ -1073,6 +1567,758 @@ def _source_reliability_scoreboard_path(lane: _LaneDefinition) -> str | None:
         if value not in (None, ""):
             return str(value)
     return None
+
+
+def _source_scoreboard_provenance(
+    lane: _LaneDefinition,
+    *,
+    signal: Mapping[str, Any],
+    shared_candidate: Mapping[str, Any],
+    source_row: Mapping[str, Any] | None,
+    source_reliability: Mapping[str, Any],
+) -> dict[str, Any]:
+    future_pnl_inputs = _future_pnl_inputs(
+        signal=signal,
+        shared_candidate=shared_candidate,
+        source_row=source_row,
+        source_reliability=source_reliability,
+    )
+    summary = {
+        "lane_id": lane.lane_id,
+        "available": bool(source_reliability.get("available")),
+        "recommended_action": _optional_text(source_reliability.get("recommended_action")),
+        "recommended_side": _side_from_action(str(source_reliability.get("recommended_action") or "")),
+        "reason_code": _optional_text(source_reliability.get("reason_code")),
+        "reason": _optional_text(source_reliability.get("reason")),
+        "effect": _optional_text(source_reliability.get("effect")),
+        "scoreboard_path": _optional_text(source_reliability.get("scoreboard_path")),
+        "label_target": _optional_text(future_pnl_inputs.get("label_target")),
+        "future_pnl_inputs": future_pnl_inputs or None,
+    }
+    return {key: value for key, value in summary.items() if value not in (None, "", {}, []) or key == "available"}
+
+
+def _future_pnl_inputs(
+    *,
+    signal: Mapping[str, Any],
+    shared_candidate: Mapping[str, Any],
+    source_row: Mapping[str, Any] | None,
+    source_reliability: Mapping[str, Any],
+) -> dict[str, Any]:
+    source_row = source_row if isinstance(source_row, Mapping) else {}
+    artifact = _candidate_artifact(signal, shared_candidate)
+    artifact_order_book = _mapping(artifact.get("order_book"))
+    order_book_snapshot = _mapping(artifact.get("order_book_snapshot"))
+    order_book_data = _mapping(order_book_snapshot.get("data"))
+    execution_snapshot = _mapping(artifact.get("execution_snapshot"))
+    weather_snapshot = _candidate_weather_source_snapshot(signal, shared_candidate, artifact)
+    weather_forecast = _mapping(weather_snapshot.get("forecast"))
+    signal_resolution = _mapping(signal.get("resolution"))
+    shared_resolution = _mapping(shared_candidate.get("resolution"))
+    market = _mapping(shared_candidate.get("market"))
+    route_evidence = _candidate_route_evidence(shared_candidate, artifact)
+    market_metadata = _candidate_market_metadata(shared_candidate, artifact)
+    label_target = _label_target(signal, shared_candidate, source_row, weather_snapshot)
+    question = _compact_question_text(
+        signal.get("question"),
+        shared_candidate.get("question"),
+        market.get("question"),
+        weather_snapshot.get("question"),
+        market_metadata.get("question"),
+        source_row.get("question"),
+    )
+    question_context = {
+        **market_metadata,
+        **route_evidence,
+        **market,
+        **weather_snapshot,
+        **weather_forecast,
+        **source_row,
+        **shared_candidate,
+        **signal,
+    }
+    question_side = _optional_text(
+        signal.get("question_side"),
+        shared_candidate.get("question_side"),
+        market.get("question_side"),
+        weather_forecast.get("question_side"),
+        weather_snapshot.get("question_side"),
+        source_row.get("question_side"),
+    )
+    if not question_side and question:
+        inferred_question_side = infer_question_side(question, question_context)
+        if inferred_question_side and inferred_question_side != "unknown":
+            question_side = inferred_question_side
+    threshold = _number(
+        signal.get("threshold"),
+        shared_candidate.get("threshold"),
+        market.get("threshold"),
+        weather_forecast.get("threshold"),
+        weather_snapshot.get("threshold"),
+        market_metadata.get("threshold"),
+        route_evidence.get("threshold"),
+        source_row.get("threshold"),
+    )
+    if threshold is None and question:
+        threshold = _number(extract_threshold_value(question, question_context))
+    market_kind = _future_pnl_market_kind(
+        signal=signal,
+        shared_candidate=shared_candidate,
+        source_row=source_row,
+        weather_snapshot=weather_snapshot,
+        market=market,
+        question=question,
+    )
+    contract_shape = _future_pnl_contract_shape(
+        signal=signal,
+        shared_candidate=shared_candidate,
+        source_row=source_row,
+        weather_snapshot=weather_snapshot,
+        market=market,
+        market_id=_optional_text(signal.get("market_id"), shared_candidate.get("market_id"), source_row.get("market_id")),
+        question=question,
+        question_side=question_side,
+    )
+    payload = {
+        "shared_candidate_id": _optional_text(
+            signal.get("shared_candidate_id"),
+            shared_candidate.get("candidate_id"),
+            source_row.get("shared_candidate_id"),
+        ),
+        "market_id": _optional_text(signal.get("market_id"), shared_candidate.get("market_id"), source_row.get("market_id")),
+        "observed_at": _optional_text(
+            signal.get("candidate_observed_at"),
+            signal.get("observed_at"),
+            shared_candidate.get("observed_at"),
+            source_row.get("observed_at"),
+        ),
+        "stable_action": _optional_text(source_row.get("action")),
+        "stable_reason_code": _optional_text(source_row.get("reason_code")),
+        "stable_reason": _optional_text(source_row.get("reason")),
+        "stable_requested_position_size_usd": _number(source_row.get("requested_position_size_usd")),
+        "stable_approved_position_size_usd": _number(source_row.get("approved_position_size_usd")),
+        "stable_confidence": _number(source_row.get("confidence"), signal.get("confidence")),
+        "recommended_action": _optional_text(source_reliability.get("recommended_action")),
+        "recommended_side": _side_from_action(str(source_reliability.get("recommended_action") or "")),
+        "recommendation_reason_code": _optional_text(source_reliability.get("reason_code")),
+        "recommendation_reason": _optional_text(source_reliability.get("reason")),
+        "side": _side_from_action(str(source_row.get("action") or signal.get("direction") or "")),
+        "entry_price": _number(
+            signal.get("entry_price"),
+            signal.get("market_price"),
+            source_row.get("entry_price"),
+            source_row.get("price"),
+        ),
+        "estimated_fill_price": _number(
+            signal.get("estimated_fill_price"),
+            execution_snapshot.get("estimated_fill_price"),
+            order_book_data.get("estimated_fill_price"),
+            artifact_order_book.get("estimated_fill_price"),
+        ),
+        "best_yes_ask": _number(
+            signal.get("best_yes_ask"),
+            execution_snapshot.get("best_yes_ask"),
+            order_book_data.get("best_yes_ask"),
+            artifact_order_book.get("best_yes_ask"),
+        ),
+        "best_yes_bid": _number(
+            signal.get("best_yes_bid"),
+            execution_snapshot.get("best_yes_bid"),
+            order_book_data.get("best_yes_bid"),
+            artifact_order_book.get("best_yes_bid"),
+        ),
+        "best_no_ask": _number(
+            signal.get("best_no_ask"),
+            execution_snapshot.get("best_no_ask"),
+            order_book_data.get("best_no_ask"),
+            artifact_order_book.get("best_no_ask"),
+        ),
+        "best_no_bid": _number(
+            signal.get("best_no_bid"),
+            execution_snapshot.get("best_no_bid"),
+            order_book_data.get("best_no_bid"),
+            artifact_order_book.get("best_no_bid"),
+        ),
+        "execution_snapshot_source": _optional_text(
+            signal.get("execution_snapshot_source"),
+            artifact.get("execution_snapshot_source"),
+            execution_snapshot.get("source"),
+        ),
+        "execution_snapshot_marker": _optional_text(
+            signal.get("execution_snapshot_marker"),
+            execution_snapshot.get("marker"),
+            execution_snapshot.get("snapshot_kind"),
+        ),
+        "hypothetical_execution_snapshot": _first_present(
+            signal.get("hypothetical_execution_snapshot"),
+            execution_snapshot.get("hypothetical"),
+        ),
+        "order_book_source": _optional_text(
+            signal.get("order_book_source"),
+            artifact.get("order_book_source"),
+            order_book_snapshot.get("source"),
+            artifact_order_book.get("source"),
+        ),
+        "snapshot_as_of": _optional_text(
+            signal.get("snapshot_as_of"),
+            signal.get("source_as_of"),
+            shared_candidate.get("snapshot_as_of"),
+            weather_snapshot.get("as_of"),
+            artifact.get("source_as_of"),
+        ),
+        "execution_snapshot_as_of": _optional_text(execution_snapshot.get("as_of"), execution_snapshot.get("observed_at")),
+        "order_book_snapshot_as_of": _optional_text(order_book_snapshot.get("as_of"), order_book_snapshot.get("observed_at")),
+        "actual_temp_used": _number(
+            signal.get("actual_temp_used"),
+            weather_forecast.get("actual_temp_used"),
+            weather_snapshot.get("actual_temp_used"),
+            signal_resolution.get("actual_temp_used"),
+            shared_resolution.get("actual_temp_used"),
+        ),
+        "settlement_source": _optional_text(
+            signal.get("settlement_source"),
+            weather_snapshot.get("settlement_source"),
+            signal_resolution.get("settlement_source"),
+            shared_resolution.get("settlement_source"),
+        ),
+        "actual_source": _optional_text(
+            signal.get("actual_source"),
+            weather_snapshot.get("actual_source"),
+            signal_resolution.get("actual_source"),
+            shared_resolution.get("actual_source"),
+            source_row.get("actual_source"),
+        ),
+        "resolved_at": _optional_text(
+            signal.get("resolved_at"),
+            weather_snapshot.get("resolved_at"),
+            signal_resolution.get("resolved_at"),
+            shared_resolution.get("resolved_at"),
+            source_row.get("resolved_at"),
+        ),
+        "known_after": _optional_text(
+            signal.get("known_after"),
+            weather_snapshot.get("known_after"),
+            signal_resolution.get("known_after"),
+            shared_resolution.get("known_after"),
+            source_row.get("known_after"),
+        ),
+        "threshold": threshold,
+        "question_side": question_side,
+        "market_kind": market_kind,
+        "contract_shape": contract_shape,
+        "question": question,
+        "resolved_outcome": _optional_text(
+            signal.get("resolved_outcome"),
+            weather_forecast.get("resolved_outcome"),
+            weather_snapshot.get("resolved_outcome"),
+            signal_resolution.get("resolved_outcome"),
+            shared_resolution.get("resolved_outcome"),
+            source_row.get("resolved_outcome"),
+        ),
+        "actual_outcome": _optional_text(
+            signal.get("actual_outcome"),
+            weather_forecast.get("actual_outcome"),
+            weather_snapshot.get("actual_outcome"),
+            signal_resolution.get("actual_outcome"),
+            shared_resolution.get("actual_outcome"),
+            source_row.get("actual_outcome"),
+        ),
+        "settled_side": _optional_text(
+            signal.get("settled_side"),
+            weather_forecast.get("settled_side"),
+            weather_snapshot.get("settled_side"),
+            signal_resolution.get("settled_side"),
+            shared_resolution.get("settled_side"),
+            source_row.get("settled_side"),
+        ),
+        "label_target": label_target,
+    }
+    return {key: value for key, value in payload.items() if value not in (None, "", [], {})}
+
+
+def _summarize_source_scoreboard_rows(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    scoreboard_rows: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        if not _is_source_scoreboard_lane(_lane_id_for_row(row)):
+            continue
+        row_dict = dict(row)
+        provenance = _mapping(row.get("provenance"))
+        scoreboard = _mapping(provenance.get("source_scoreboard"))
+        if not scoreboard:
+            continue
+        scoreboard_rows.append((row_dict, scoreboard))
+
+    label_source_counts: dict[str, int] = {}
+    actual_source_counts: dict[str, int] = {}
+    settlement_source_counts: dict[str, int] = {}
+    recommended_action_counts: dict[str, int] = {}
+    reason_code_counts: dict[str, int] = {}
+    lane_row_counts: dict[str, int] = {}
+    available_rows = 0
+    unavailable_rows = 0
+    rows_with_estimated_fill_price = 0
+    rows_with_order_book_execution_prices = 0
+
+    for row, scoreboard in scoreboard_rows:
+        lane_id = _lane_id_for_row(row)
+        lane_row_counts[lane_id] = lane_row_counts.get(lane_id, 0) + 1
+        if bool(scoreboard.get("available")):
+            available_rows += 1
+        else:
+            unavailable_rows += 1
+        recommended_action = _optional_text(scoreboard.get("recommended_action"))
+        if recommended_action:
+            recommended_action_counts[recommended_action] = recommended_action_counts.get(recommended_action, 0) + 1
+        reason_code = _optional_text(scoreboard.get("reason_code"))
+        if reason_code:
+            reason_code_counts[reason_code] = reason_code_counts.get(reason_code, 0) + 1
+        future_pnl_inputs = _mapping(scoreboard.get("future_pnl_inputs"))
+        if _number(future_pnl_inputs.get("estimated_fill_price")) is not None:
+            rows_with_estimated_fill_price += 1
+        if any(
+            _number(future_pnl_inputs.get(key)) is not None
+            for key in ("best_yes_ask", "best_yes_bid", "best_no_ask", "best_no_bid")
+        ):
+            rows_with_order_book_execution_prices += 1
+        label_source = _optional_text(
+            future_pnl_inputs.get("label_target"),
+            future_pnl_inputs.get("actual_source"),
+            future_pnl_inputs.get("settlement_source"),
+        )
+        if label_source:
+            label_source_counts[label_source] = label_source_counts.get(label_source, 0) + 1
+        actual_source = _optional_text(future_pnl_inputs.get("actual_source"))
+        if actual_source:
+            actual_source_counts[actual_source] = actual_source_counts.get(actual_source, 0) + 1
+        settlement_source = _optional_text(future_pnl_inputs.get("settlement_source"))
+        if settlement_source:
+            settlement_source_counts[settlement_source] = settlement_source_counts.get(settlement_source, 0) + 1
+
+    return {
+        "evaluated_rows": len(scoreboard_rows),
+        "lane_row_counts": _sorted_count_dict(lane_row_counts),
+        "available_rows": available_rows,
+        "unavailable_rows": unavailable_rows,
+        "recommended_action_counts": _sorted_count_dict(recommended_action_counts),
+        "reason_code_counts": _sorted_count_dict(reason_code_counts),
+        "rows_with_estimated_fill_price": rows_with_estimated_fill_price,
+        "rows_with_order_book_execution_prices": rows_with_order_book_execution_prices,
+        "label_source_counts": _sorted_count_dict(label_source_counts),
+        "actual_source_counts": _sorted_count_dict(actual_source_counts),
+        "settlement_source_counts": _sorted_count_dict(settlement_source_counts),
+    }
+
+
+def _summarize_source_reliability_rows(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    reliability_rows: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        if not _is_source_reliability_lane(_lane_id_for_row(row)):
+            continue
+        row_dict = dict(row)
+        provenance = _mapping(row.get("provenance"))
+        reliability = _mapping(provenance.get("source_reliability"))
+        if not reliability:
+            continue
+        reliability_rows.append((row_dict, reliability))
+
+    recommended_action_counts: dict[str, int] = {}
+    reason_code_counts: dict[str, int] = {}
+    lane_row_counts: dict[str, int] = {}
+    available_rows = 0
+    unavailable_rows = 0
+
+    for row, reliability in reliability_rows:
+        lane_id = _lane_id_for_row(row)
+        lane_row_counts[lane_id] = lane_row_counts.get(lane_id, 0) + 1
+        if bool(reliability.get("available")):
+            available_rows += 1
+        else:
+            unavailable_rows += 1
+        recommended_action = _optional_text(reliability.get("recommended_action"))
+        if recommended_action:
+            recommended_action_counts[recommended_action] = recommended_action_counts.get(recommended_action, 0) + 1
+        reason_code = _optional_text(reliability.get("reason_code"))
+        if reason_code:
+            reason_code_counts[reason_code] = reason_code_counts.get(reason_code, 0) + 1
+
+    return {
+        "evaluated_rows": len(reliability_rows),
+        "lane_row_counts": _sorted_count_dict(lane_row_counts),
+        "available_rows": available_rows,
+        "unavailable_rows": unavailable_rows,
+        "recommended_action_counts": _sorted_count_dict(recommended_action_counts),
+        "reason_code_counts": _sorted_count_dict(reason_code_counts),
+    }
+
+
+def _summarize_source_scoreboard_readiness(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    readiness_rows: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        if not _is_source_scoreboard_lane(_lane_id_for_row(row)):
+            continue
+        provenance = _mapping(row.get("provenance"))
+        scoreboard = _mapping(provenance.get("source_scoreboard"))
+        if not scoreboard:
+            continue
+        readiness_rows.append(
+            (
+                dict(row),
+                scoreboard,
+                _mapping(scoreboard.get("future_pnl_inputs")),
+                _mapping(provenance.get("source_reliability")),
+            )
+        )
+
+    label_source_counts: dict[str, int] = {}
+    reliability_tier_counts: dict[str, int] = {}
+    reason_code_counts: dict[str, int] = {}
+    label_class_counts = {
+        "explicit_non_independent": 0,
+        "independent": 0,
+        "settlement_derived": 0,
+        "unknown": 0,
+    }
+    leak_risk_indicators = {
+        "known_after_not_after_observed_at_rows": 0,
+        "label_matches_settlement_source_rows": 0,
+        "settlement_derived_label_rows": 0,
+        "unknown_label_rows": 0,
+    }
+    missing_field_blockers = {
+        "missing_actual_outcome_rows": 0,
+        "missing_estimated_fill_price_rows": 0,
+        "missing_execution_snapshot_rows": 0,
+        "missing_known_after_rows": 0,
+        "missing_label_source_rows": 0,
+        "missing_market_id_rows": 0,
+        "missing_observed_at_rows": 0,
+        "missing_order_book_quotes_rows": 0,
+        "missing_resolution_outcome_rows": 0,
+        "missing_shared_candidate_id_rows": 0,
+    }
+    explicit_label_rows = 0
+    independent_label_rows = 0
+    order_book_quote_rows = 0
+    execution_snapshot_rows = 0
+    estimated_fill_price_rows = 0
+    rows_with_trusted_sources = 0
+    rows_with_neutral_sources = 0
+    rows_with_excluded_sources = 0
+    rows_with_any_blocker = 0
+    rows_with_any_leak_risk = 0
+
+    for row, scoreboard, future_pnl_inputs, source_reliability in readiness_rows:
+        row_has_blocker = False
+        row_has_leak_risk = False
+
+        label_source = _label_source_name(future_pnl_inputs)
+        label_source_counts[label_source] = label_source_counts.get(label_source, 0) + 1
+        label_class = _label_source_classification(
+            label_source,
+            settlement_source=_optional_text(future_pnl_inputs.get("settlement_source")),
+        )
+        label_class_counts[label_class] += 1
+        if label_source != "unknown":
+            explicit_label_rows += 1
+        else:
+            leak_risk_indicators["unknown_label_rows"] += 1
+            missing_field_blockers["missing_label_source_rows"] += 1
+            row_has_blocker = True
+            row_has_leak_risk = True
+        if label_class == "independent":
+            independent_label_rows += 1
+        if label_class == "settlement_derived":
+            leak_risk_indicators["settlement_derived_label_rows"] += 1
+            row_has_leak_risk = True
+
+        reason_code = _optional_text(scoreboard.get("reason_code"), source_reliability.get("reason_code"))
+        if reason_code:
+            reason_code_counts[reason_code] = reason_code_counts.get(reason_code, 0) + 1
+
+        tier_counts = _mapping(source_reliability.get("tier_counts"))
+        trusted_count = 0
+        neutral_count = 0
+        excluded_count = 0
+        for key, value in tier_counts.items():
+            count = int(value) if isinstance(value, (int, float)) else 0
+            if count <= 0:
+                continue
+            tier = str(key)
+            reliability_tier_counts[tier] = reliability_tier_counts.get(tier, 0) + count
+            if tier in {"trusted", "strong_trusted"}:
+                trusted_count += count
+            elif tier == "neutral":
+                neutral_count += count
+            elif tier == "excluded":
+                excluded_count += count
+        if trusted_count > 0:
+            rows_with_trusted_sources += 1
+        if neutral_count > 0:
+            rows_with_neutral_sources += 1
+        if excluded_count > 0:
+            rows_with_excluded_sources += 1
+
+        if _has_order_book_quotes(future_pnl_inputs):
+            order_book_quote_rows += 1
+        else:
+            missing_field_blockers["missing_order_book_quotes_rows"] += 1
+            row_has_blocker = True
+        if _has_execution_snapshot(future_pnl_inputs):
+            execution_snapshot_rows += 1
+        else:
+            missing_field_blockers["missing_execution_snapshot_rows"] += 1
+            row_has_blocker = True
+        if _number(future_pnl_inputs.get("estimated_fill_price")) is not None:
+            estimated_fill_price_rows += 1
+        else:
+            missing_field_blockers["missing_estimated_fill_price_rows"] += 1
+            row_has_blocker = True
+
+        if not _optional_text(future_pnl_inputs.get("shared_candidate_id")):
+            missing_field_blockers["missing_shared_candidate_id_rows"] += 1
+            row_has_blocker = True
+        if not _optional_text(future_pnl_inputs.get("market_id")):
+            missing_field_blockers["missing_market_id_rows"] += 1
+            row_has_blocker = True
+        observed_at = _optional_text(future_pnl_inputs.get("observed_at"))
+        if not observed_at:
+            missing_field_blockers["missing_observed_at_rows"] += 1
+            row_has_blocker = True
+        known_after = _optional_text(future_pnl_inputs.get("known_after"))
+        if not known_after:
+            missing_field_blockers["missing_known_after_rows"] += 1
+            row_has_blocker = True
+        actual_outcome = _optional_text(future_pnl_inputs.get("actual_outcome"))
+        if not actual_outcome:
+            missing_field_blockers["missing_actual_outcome_rows"] += 1
+            row_has_blocker = True
+        resolved_outcome = _optional_text(future_pnl_inputs.get("resolved_outcome"))
+        if not resolved_outcome:
+            missing_field_blockers["missing_resolution_outcome_rows"] += 1
+            row_has_blocker = True
+
+        settlement_source = _optional_text(future_pnl_inputs.get("settlement_source"))
+        if label_source != "unknown" and settlement_source and label_source == settlement_source:
+            leak_risk_indicators["label_matches_settlement_source_rows"] += 1
+            row_has_leak_risk = True
+        observed_dt = _parse_timestamp(observed_at)
+        known_after_dt = _parse_timestamp(known_after)
+        if observed_dt is not None and known_after_dt is not None and known_after_dt <= observed_dt:
+            leak_risk_indicators["known_after_not_after_observed_at_rows"] += 1
+            row_has_leak_risk = True
+
+        if row_has_blocker:
+            rows_with_any_blocker += 1
+        if row_has_leak_risk:
+            rows_with_any_leak_risk += 1
+
+    total_rows = len(readiness_rows)
+    return {
+        "evaluated_rows": total_rows,
+        "recommendation_only": True,
+        "independence_inference": "heuristic_from_label_target_actual_source_and_settlement_source",
+        "label_source_counts": _sorted_count_dict(label_source_counts),
+        "label_class_counts": label_class_counts,
+        "explicit_label_rows": explicit_label_rows,
+        "explicit_label_coverage_pct": _coverage_pct(explicit_label_rows, total_rows),
+        "independent_label_rows": independent_label_rows,
+        "independent_label_coverage_pct": _coverage_pct(independent_label_rows, total_rows),
+        "order_book_quote_rows": order_book_quote_rows,
+        "order_book_quote_coverage_pct": _coverage_pct(order_book_quote_rows, total_rows),
+        "execution_snapshot_rows": execution_snapshot_rows,
+        "execution_snapshot_coverage_pct": _coverage_pct(execution_snapshot_rows, total_rows),
+        "estimated_fill_price_rows": estimated_fill_price_rows,
+        "estimated_fill_coverage_pct": _coverage_pct(estimated_fill_price_rows, total_rows),
+        "reliability_tier_counts": _sorted_count_dict(reliability_tier_counts),
+        "rows_with_trusted_sources": rows_with_trusted_sources,
+        "rows_with_neutral_sources": rows_with_neutral_sources,
+        "rows_with_excluded_sources": rows_with_excluded_sources,
+        "reason_code_counts": _sorted_count_dict(reason_code_counts),
+        "leak_risk_indicators": leak_risk_indicators,
+        "missing_field_blockers": missing_field_blockers,
+        "rows_with_any_blocker": rows_with_any_blocker,
+        "rows_with_any_leak_risk": rows_with_any_leak_risk,
+    }
+
+
+def _is_source_scoreboard_lane(lane_id: Any) -> bool:
+    return str(lane_id or "") in SOURCE_SCOREBOARD_LANE_IDS
+
+
+def _is_source_reliability_lane(lane_id: Any) -> bool:
+    return str(lane_id or "") == SOURCE_RELIABILITY_LANE_ID
+
+
+def _candidate_artifact(signal: Mapping[str, Any], shared_candidate: Mapping[str, Any]) -> dict[str, Any]:
+    for value in (
+        signal.get("decision_artifact"),
+        shared_candidate.get("decision_artifact"),
+        shared_candidate.get("artifact"),
+        _mapping(shared_candidate.get("evidence")).get("decision_artifact"),
+    ):
+        if isinstance(value, Mapping) and value:
+            return dict(value)
+    return {}
+
+
+def _candidate_weather_source_snapshot(
+    signal: Mapping[str, Any],
+    shared_candidate: Mapping[str, Any],
+    artifact: Mapping[str, Any],
+) -> dict[str, Any]:
+    for value in (
+        signal.get("weather_source_snapshot"),
+        shared_candidate.get("weather_source_snapshot"),
+        _mapping(shared_candidate.get("evidence")).get("weather_source_snapshot"),
+        _mapping(_mapping(_mapping(artifact.get("source_context")).get("data")).get("weather_source_snapshot")),
+    ):
+        if isinstance(value, Mapping) and value:
+            return dict(value)
+    return {}
+
+
+def _candidate_route_evidence(shared_candidate: Mapping[str, Any], artifact: Mapping[str, Any]) -> dict[str, Any]:
+    for value in (
+        _mapping(shared_candidate.get("market_route")).get("evidence"),
+        _mapping(artifact.get("market_route")).get("evidence"),
+    ):
+        if isinstance(value, Mapping) and value:
+            return dict(value)
+    return {}
+
+
+def _candidate_market_metadata(shared_candidate: Mapping[str, Any], artifact: Mapping[str, Any]) -> dict[str, Any]:
+    source_context_data = _mapping(_mapping(artifact.get("source_context")).get("data"))
+    for value in (
+        source_context_data.get("market_metadata"),
+        shared_candidate.get("market_metadata"),
+        shared_candidate.get("metadata"),
+    ):
+        if isinstance(value, Mapping) and value:
+            return dict(value)
+    return {}
+
+
+def _label_target(
+    signal: Mapping[str, Any],
+    shared_candidate: Mapping[str, Any],
+    source_row: Mapping[str, Any],
+    weather_snapshot: Mapping[str, Any],
+) -> str:
+    for value in (
+        signal.get("label_target"),
+        weather_snapshot.get("label_target"),
+        _mapping(signal.get("resolution")).get("label_target"),
+        _mapping(shared_candidate.get("resolution")).get("label_target"),
+        source_row.get("label_target"),
+    ):
+        text = _optional_text(value)
+        if text:
+            return text
+    return (
+        _optional_text(
+            signal.get("actual_source"),
+            weather_snapshot.get("actual_source"),
+            _mapping(signal.get("resolution")).get("actual_source"),
+            _mapping(shared_candidate.get("resolution")).get("actual_source"),
+            signal.get("settlement_source"),
+            weather_snapshot.get("settlement_source"),
+            _mapping(signal.get("resolution")).get("settlement_source"),
+            _mapping(shared_candidate.get("resolution")).get("settlement_source"),
+        )
+        or "unknown"
+    )
+
+
+def _future_pnl_market_kind(
+    *,
+    signal: Mapping[str, Any],
+    shared_candidate: Mapping[str, Any],
+    source_row: Mapping[str, Any],
+    weather_snapshot: Mapping[str, Any],
+    market: Mapping[str, Any],
+    question: str | None,
+) -> str | None:
+    market_kind = _optional_text(
+        signal.get("market_kind"),
+        shared_candidate.get("market_kind"),
+        market.get("market_kind"),
+        _mapping(weather_snapshot.get("forecast")).get("market_kind"),
+        weather_snapshot.get("market_kind"),
+        source_row.get("market_kind"),
+    )
+    if market_kind and market_kind != "unknown":
+        return market_kind
+    candidates = " ".join(
+        value.lower()
+        for value in (
+            _optional_text(signal.get("market_id"), shared_candidate.get("market_id"), source_row.get("market_id")),
+            question,
+            _optional_text(signal.get("market_type"), shared_candidate.get("market_type"), market.get("market_type")),
+        )
+        if value
+    )
+    if re.search(r"\b(high|max|maximum)\b", candidates) or "kxhigh" in candidates:
+        return "high"
+    if re.search(r"\b(low|min|minimum)\b", candidates) or "kxlow" in candidates:
+        return "low"
+    return None
+
+
+def _future_pnl_contract_shape(
+    *,
+    signal: Mapping[str, Any],
+    shared_candidate: Mapping[str, Any],
+    source_row: Mapping[str, Any],
+    weather_snapshot: Mapping[str, Any],
+    market: Mapping[str, Any],
+    market_id: str | None,
+    question: str | None,
+    question_side: str | None,
+) -> str | None:
+    contract_shape = _optional_text(
+        signal.get("contract_shape"),
+        shared_candidate.get("contract_shape"),
+        market.get("contract_shape"),
+        _mapping(weather_snapshot.get("forecast")).get("contract_shape"),
+        weather_snapshot.get("contract_shape"),
+        source_row.get("contract_shape"),
+    )
+    if contract_shape and contract_shape != "unknown":
+        return contract_shape
+    normalized_side = str(question_side or "").lower()
+    text = " ".join(
+        value.lower()
+        for value in (
+            market_id,
+            question,
+            _optional_text(signal.get("market_type"), shared_candidate.get("market_type"), market.get("market_type")),
+        )
+        if value
+    )
+    if normalized_side == "range" or "between" in text:
+        return "range"
+    if normalized_side == "binary_bucket" or "bucket" in text or re.search(r"-b-?\d", text):
+        return "bucket"
+    if normalized_side in {"above", "below"} or ">" in text or "<" in text:
+        return "tail"
+    return None
+
+
+def _compact_question_text(*values: Any) -> str | None:
+    question = _optional_text(*values)
+    if not question:
+        return None
+    compact = " ".join(question.split())
+    if len(compact) > MAX_COMPACT_FUTURE_PNL_QUESTION_CHARS:
+        return None
+    return compact
 
 
 def _candidate_city_tokens(signal: Mapping[str, Any]) -> set[str]:
@@ -1168,7 +2414,9 @@ __all__ = [
     "DEFAULT_CONFIDENCE_FLOOR",
     "PAPER_LANE_DECISION_ROLE",
     "PaperShadowLaneWriteResult",
+    "build_paper_shadow_lane_resolution_rows",
     "paper_shadow_lanes_enabled",
     "summarize_paper_shadow_lane_report",
+    "summarize_paper_shadow_lane_resolved_pnl",
     "write_paper_shadow_lane_decisions",
 ]

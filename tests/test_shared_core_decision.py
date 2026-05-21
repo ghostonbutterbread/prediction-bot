@@ -280,6 +280,75 @@ class SharedCoreDecisionTests(unittest.TestCase):
         kelly_sizer.calculate.assert_not_called()
         risk_policy.check_trade.assert_not_called()
 
+
+    def test_stable_policy_rejects_bucket_hidden_gem_without_distribution_support(self):
+        context = self._bucket_missing_distribution_context({"version": "stable"})
+        kelly_sizer = Mock()
+        risk_policy = Mock()
+
+        decision = build_trade_decision(
+            context,
+            kelly_sizer=kelly_sizer,
+            risk_policy=risk_policy,
+            min_edge=0.05,
+            min_confidence=0.5,
+            max_entry_price=0.7,
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertEqual(decision.reason_code, "weather_bucket_hidden_gem_missing_distribution_probability")
+        self.assertTrue(decision.reasoning["weather_risk"]["stable_enforced"])
+        kelly_sizer.calculate.assert_not_called()
+        risk_policy.check_trade.assert_not_called()
+
+    def test_stable_policy_rejects_tail_hidden_gem_without_strong_evidence(self):
+        context = TradeContext(
+            exchange="kalshi",
+            market_id="KXHIGHTSEA-26APR26-T64",
+            question="Will the maximum temperature be <64° on Apr 26?",
+            direction="BUY_YES",
+            market_price=0.04,
+            yes_price=0.04,
+            no_price=0.96,
+            model_probability=0.20,
+            edge=0.16,
+            confidence=0.9,
+            account_state=AccountState(
+                starting_balance=100.0,
+                current_balance=100.0,
+                available_cash=100.0,
+                reserved_capital=0.0,
+                total_exposure=0.0,
+                open_positions=0,
+            ),
+            source_context={
+                "market_id": "KXHIGHTSEA-26APR26-T64",
+                "question": "Will the maximum temperature be <64° on Apr 26?",
+                "market_volume": 700,
+            },
+            metadata={
+                "market_route": ALLOWED_MARKET_ROUTE,
+                "strategy_policy": {"version": "stable"},
+            },
+        )
+        kelly_sizer = Mock()
+        risk_policy = Mock()
+
+        decision = build_trade_decision(
+            context,
+            kelly_sizer=kelly_sizer,
+            risk_policy=risk_policy,
+            min_edge=0.05,
+            min_confidence=0.5,
+            max_entry_price=0.7,
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertEqual(decision.reason_code, "weather_hidden_gem_without_strong_evidence")
+        self.assertTrue(decision.reasoning["weather_risk"]["stable_enforced"])
+        kelly_sizer.calculate.assert_not_called()
+        risk_policy.check_trade.assert_not_called()
+
     def test_build_trade_decision_rejects_bucket_hidden_gem_without_distribution_support(self):
         account_state = AccountState(
             starting_balance=100.0,
@@ -475,7 +544,7 @@ class SharedCoreDecisionTests(unittest.TestCase):
         )
         risk_policy.check_trade.assert_called_once_with(context.source_context, 2.0, available_cash=100.0)
 
-    def test_stable_policy_preserves_bucket_source_station_quality_rejection(self):
+    def test_stable_policy_rejects_bucket_source_station_quality_rejection(self):
         context = self._bucket_missing_distribution_context()
         context.source_context.update(
             {
@@ -496,18 +565,13 @@ class SharedCoreDecisionTests(unittest.TestCase):
             max_entry_price=0.7,
         )
 
-        self.assertTrue(decision.approved)
-        gate = decision.reasoning["weather_risk"]["beta_gate"]
-        self.assertEqual(
-            gate["reason_code"],
-            "weather_bucket_hidden_gem_source_station_quality_below_minimum",
-        )
-        self.assertFalse(gate["active"])
-        self.assertFalse(gate["enforced"])
-        self.assertTrue(gate["preserved_stable_action"])
-        risk_policy.check_trade.assert_called_once_with(context.source_context, 2.0, available_cash=100.0)
+        self.assertFalse(decision.approved)
+        self.assertEqual(decision.reason_code, "weather_bucket_hidden_gem_source_station_quality_below_minimum")
+        self.assertTrue(decision.reasoning["weather_risk"]["stable_enforced"])
+        kelly_sizer.calculate.assert_not_called()
+        risk_policy.check_trade.assert_not_called()
 
-    def test_stable_policy_records_weather_beta_rejection_but_preserves_final_action(self):
+    def test_stable_policy_rejects_weather_hidden_gem_instead_of_preserving_action(self):
         context = self._bucket_missing_distribution_context()
         kelly_sizer, risk_policy = self._approving_dependencies(size=2.0)
 
@@ -520,15 +584,13 @@ class SharedCoreDecisionTests(unittest.TestCase):
             max_entry_price=0.7,
         )
 
-        self.assertTrue(decision.approved)
-        gate = decision.reasoning["weather_risk"]["beta_gate"]
-        self.assertTrue(gate["would_reject"])
-        self.assertFalse(gate["active"])
-        self.assertFalse(gate["enforced"])
-        self.assertTrue(gate["preserved_stable_action"])
-        risk_policy.check_trade.assert_called_once_with(context.source_context, 2.0, available_cash=100.0)
+        self.assertFalse(decision.approved)
+        self.assertEqual(decision.reason_code, "weather_bucket_hidden_gem_missing_distribution_probability")
+        self.assertTrue(decision.reasoning["weather_risk"]["stable_enforced"])
+        kelly_sizer.calculate.assert_not_called()
+        risk_policy.check_trade.assert_not_called()
 
-    def test_stable_policy_preserves_bucket_distribution_threshold_rejection(self):
+    def test_stable_policy_rejects_bucket_distribution_threshold_rejection(self):
         context = self._bucket_missing_distribution_context()
         context.source_context.update(
             {
@@ -549,15 +611,14 @@ class SharedCoreDecisionTests(unittest.TestCase):
             max_entry_price=0.7,
         )
 
-        self.assertTrue(decision.approved)
-        gate = decision.reasoning["weather_risk"]["beta_gate"]
+        self.assertFalse(decision.approved)
         self.assertEqual(
-            gate["reason_code"],
+            decision.reason_code,
             "weather_bucket_hidden_gem_distribution_probability_below_entry_plus_buffer",
         )
-        self.assertFalse(gate["active"])
-        self.assertFalse(gate["enforced"])
-        risk_policy.check_trade.assert_called_once_with(context.source_context, 2.0, available_cash=100.0)
+        self.assertTrue(decision.reasoning["weather_risk"]["stable_enforced"])
+        kelly_sizer.calculate.assert_not_called()
+        risk_policy.check_trade.assert_not_called()
 
     def test_enforce_policy_without_bucket_feature_preserves_bucket_distribution_threshold_rejection(self):
         context = self._bucket_missing_distribution_context(
@@ -707,7 +768,9 @@ class SharedCoreDecisionTests(unittest.TestCase):
             max_entry_price=0.7,
         )
 
-        self.assertTrue(decision.approved)
+        self.assertFalse(decision.approved)
+        self.assertEqual(decision.reason_code, "weather_bucket_hidden_gem_missing_distribution_probability")
+        self.assertTrue(decision.reasoning["weather_risk"]["stable_enforced"])
         card = decision.reasoning["hidden_gem_evidence_card"]
         self.assertEqual(card["source_mode"], "missing")
         self.assertFalse(card["volume_known"])
@@ -824,7 +887,7 @@ class SharedCoreDecisionTests(unittest.TestCase):
         kelly_sizer.calculate.assert_not_called()
         risk_policy.check_trade.assert_not_called()
 
-    def test_stable_policy_preserves_tail_distribution_rejection(self):
+    def test_stable_policy_rejects_tail_distribution_rejection(self):
         context = self._tail_hidden_gem_context(distribution_probability=0.12)
         kelly_sizer, risk_policy = self._approving_dependencies(size=2.0)
 
@@ -837,22 +900,17 @@ class SharedCoreDecisionTests(unittest.TestCase):
             max_entry_price=0.7,
         )
 
-        self.assertTrue(decision.approved)
-        gate = decision.reasoning["weather_risk"]["beta_gate"]
-        self.assertEqual(
-            gate["reason_code"],
-            "weather_tail_hidden_gem_distribution_probability_below_threshold",
-        )
-        self.assertEqual(gate["feature"], "weather_hidden_gem_evidence_card")
-        self.assertFalse(gate["active"])
-        self.assertFalse(gate["enforced"])
+        self.assertFalse(decision.approved)
+        self.assertEqual(decision.reason_code, "weather_tail_hidden_gem_distribution_probability_below_threshold")
+        self.assertTrue(decision.reasoning["weather_risk"]["stable_enforced"])
         card = decision.reasoning["hidden_gem_evidence_card"]
         self.assertEqual(card["tail"]["probability_scoring"]["source"], "distribution")
         self.assertEqual(
             card["tail"]["probability_scoring"]["reason_code"],
             "weather_tail_hidden_gem_distribution_probability_below_threshold",
         )
-        risk_policy.check_trade.assert_called_once_with(context.source_context, 2.0, available_cash=100.0)
+        kelly_sizer.calculate.assert_not_called()
+        risk_policy.check_trade.assert_not_called()
 
     def test_shadow_policy_records_tail_distribution_delta_but_preserves_final_action(self):
         context = self._tail_hidden_gem_context(

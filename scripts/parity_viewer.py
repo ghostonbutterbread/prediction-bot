@@ -69,6 +69,7 @@ def _render_comparison(view: dict) -> str:
         f"<li><b>Paper-only rows:</b> {comparison.get('paper_only_row_count', 0)}</li>",
         f"<li><b>Live-only rows:</b> {comparison.get('live_only_row_count', 0)}</li>",
         f"<li><b>Mismatched pairs:</b> {comparison.get('mismatched_pair_count', 0)}</li>",
+        f"<li><b>Drift categories:</b> <code>{html.escape(json.dumps(comparison.get('drift_category_counts', [])))}</code></li>",
         f"<li><b>Mismatch fields:</b> <code>{html.escape(json.dumps(comparison.get('mismatch_field_counts', [])))}</code></li>",
         f"<li><b>Mismatch examples:</b> <code>{html.escape(json.dumps(comparison.get('mismatch_examples', [])))}</code></li>",
         f"<li><b>Paper-only keys:</b> <code>{html.escape(json.dumps(comparison.get('paper_only_keys', [])))}</code></li>",

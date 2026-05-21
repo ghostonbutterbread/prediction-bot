@@ -233,6 +233,45 @@ class AgentDecisionBackfillTests(unittest.TestCase):
         self.assertTrue(runs_exists)
         self.assertTrue(report_exists)
 
+    def test_unified_backfill_cli_writes_agent_decision_sidecars(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_path = Path(tmpdir) / "market_snapshots.jsonl"
+            output_dir = Path(tmpdir) / "sidecars"
+            self._write_jsonl(
+                input_path,
+                [
+                    {
+                        "timestamp": "2026-05-12T10:00:00+00:00",
+                        "run_id": "plab-run-6",
+                        "market_id": "KXHIGHNY-260512-T77",
+                        "decision_artifact": {
+                            "final_action": "SKIP",
+                            "final_reason_code": "edge_below_threshold",
+                        },
+                    }
+                ],
+            )
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "backfill.py"),
+                    "--kind",
+                    "agent-decisions",
+                    str(input_path),
+                    "--output-dir",
+                    str(output_dir),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            report = json.loads(completed.stdout)
+            decisions = load_jsonl(output_dir / "agent_decisions.jsonl")
+
+        self.assertEqual(report["decision_rows_written"], 1)
+        self.assertEqual(len(decisions), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

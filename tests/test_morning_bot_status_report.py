@@ -52,6 +52,86 @@ class MorningBotStatusReportTests(unittest.TestCase):
         self.assertNotIn("**Prediction Lab Collector**", text)
         self.assertNotIn("**Live Trading**", text)
 
+
+    def test_build_report_includes_active_paper_shadow_lanes(self):
+        now = datetime(2026, 4, 30, 15, 0, tzinfo=timezone.utc)
+        lane_status = {
+            "enabled": True,
+            "lane_ids": ["control_stable", "shadow_confidence_floor", "shadow_source_scoreboard"],
+            "decision_path": "data/beta_shadow/paper/source_scoreboard/paper_shadow_lane_decisions.jsonl",
+            "lane_row_counts": {
+                "control_stable": 10,
+                "shadow_confidence_floor": 10,
+                "shadow_source_scoreboard": 10,
+            },
+            "source_scoreboard_readiness": {
+                "evaluated_rows": 10,
+                "independent_label_rows": 2,
+                "order_book_quote_rows": 8,
+                "execution_snapshot_rows": 3,
+                "estimated_fill_price_rows": 3,
+            },
+        }
+
+        with patch.object(morning, "latest_paper_report", return_value="paper report"):
+            with patch.object(morning, "_paper_shadow_lane_status", return_value=lane_status):
+                text = morning.build_report(
+                    cmdlines=[(11, ["python3", "paper_loop.py", "--config", "config.paper.yaml"])],
+                    now=now,
+                )
+
+        self.assertIn("Paper shadow lanes: control_stable, shadow_confidence_floor, shadow_source_scoreboard", text)
+        self.assertIn("Lane rows: control_stable=10, shadow_confidence_floor=10, shadow_source_scoreboard=10", text)
+        self.assertIn("Lane ledger: data/beta_shadow/paper/source_scoreboard/paper_shadow_lane_decisions.jsonl", text)
+        self.assertIn("Source-scoreboard readiness: rows=10, independent_labels=2, order_book=8, execution=3, estimated_fill=3", text)
+
+    def test_build_report_includes_paper_shadow_lanes_from_second_paper_config(self):
+        now = datetime(2026, 4, 30, 15, 0, tzinfo=timezone.utc)
+        lane_status = {
+            "enabled": True,
+            "lane_ids": ["shadow_limited"],
+            "decision_path": "data/beta_shadow/paper/limited/paper_shadow_lane_decisions.jsonl",
+            "lane_row_counts": {"shadow_limited": 3},
+        }
+
+        def lane_status_for_config(config_path):
+            if config_path == Path("data/runtime_configs/paper_limited_shadow_20260516.yaml"):
+                return lane_status
+            return {"enabled": False, "lane_ids": [], "decision_path": None, "lane_row_counts": {}}
+
+        with patch.object(morning, "latest_paper_report", return_value="paper report"):
+            with patch.object(morning, "_paper_shadow_lane_status", side_effect=lane_status_for_config) as shadow_status:
+                text = morning.build_report(
+                    cmdlines=[
+                        (11, ["python3", "paper_loop.py", "--config", "config.paper.yaml"]),
+                        (
+                            12,
+                            [
+                                "python3",
+                                "paper_loop.py",
+                                "--config",
+                                "data/runtime_configs/paper_limited_shadow_20260516.yaml",
+                            ],
+                        ),
+                    ],
+                    now=now,
+                )
+
+        self.assertEqual(
+            [call.args[0] for call in shadow_status.call_args_list],
+            [Path("config.paper.yaml"), Path("data/runtime_configs/paper_limited_shadow_20260516.yaml")],
+        )
+        self.assertIn("PID(s): 11, 12", text)
+        self.assertIn("Paper shadow lanes: shadow_limited", text)
+        self.assertIn("Lane rows: shadow_limited=3", text)
+
+    def test_build_json_includes_paper_shadow_lanes(self):
+        lane_status = {"enabled": True, "lane_ids": ["control_stable"], "decision_path": "lanes.jsonl", "lane_row_counts": {"control_stable": 1}}
+        with patch.object(morning, "_paper_shadow_lane_status", return_value=lane_status):
+            payload = morning.build_json(cmdlines=[(11, ["python3", "paper_loop.py", "--config", "config.paper.yaml"])])
+
+        self.assertEqual(payload["paper_shadow_lanes"], lane_status)
+
     def test_build_report_includes_active_collector_health_and_inactive_others(self):
         now = datetime(2026, 4, 30, 15, 0, tzinfo=timezone.utc)
         result = monitor.MonitorResult(
