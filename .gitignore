@@ -27,4 +27,5 @@ researcher_recommendations.jsonl
 Thumbs.db
 logs/
 .codex_prompt.txt
+.clawpatch/
 2x

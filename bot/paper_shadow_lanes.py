@@ -27,9 +27,20 @@ DEFAULT_LANE_IDS = ("control_stable", "shadow_current_beta", "shadow_confidence_
 PREMIUM_CITY_LANE_ID = "shadow_premium_city"
 SOURCE_RELIABILITY_LANE_ID = "shadow_source_reliability"
 SOURCE_SCOREBOARD_LANE_ID = "shadow_source_scoreboard"
+SOURCE_ROUTER_LANE_ID = "shadow_source_router"
 SOURCE_RELIABILITY_EVALUATOR_LANE_IDS = frozenset({SOURCE_RELIABILITY_LANE_ID, SOURCE_SCOREBOARD_LANE_ID})
 SOURCE_SCOREBOARD_LANE_IDS = frozenset({SOURCE_SCOREBOARD_LANE_ID})
-KNOWN_LANE_IDS = (*DEFAULT_LANE_IDS, PREMIUM_CITY_LANE_ID, SOURCE_RELIABILITY_LANE_ID, SOURCE_SCOREBOARD_LANE_ID)
+SOURCE_COLLECTION_LANE_IDS = frozenset({SOURCE_SCOREBOARD_LANE_ID, SOURCE_ROUTER_LANE_ID})
+SOURCE_SCOREBOARD_CONFIG_LANE_IDS = frozenset(
+    {SOURCE_RELIABILITY_LANE_ID, SOURCE_SCOREBOARD_LANE_ID, SOURCE_ROUTER_LANE_ID}
+)
+KNOWN_LANE_IDS = (
+    *DEFAULT_LANE_IDS,
+    PREMIUM_CITY_LANE_ID,
+    SOURCE_RELIABILITY_LANE_ID,
+    SOURCE_SCOREBOARD_LANE_ID,
+    SOURCE_ROUTER_LANE_ID,
+)
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MAX_COMPACT_FUTURE_PNL_QUESTION_CHARS = 200
 
@@ -275,6 +286,23 @@ def _build_lane_row(
             row["provenance"]["source_scoreboard"] = source_scoreboard
             if isinstance(source_scoreboard.get("future_pnl_inputs"), Mapping):
                 row["provenance"]["future_pnl_inputs"] = dict(source_scoreboard["future_pnl_inputs"])
+    if isinstance(decision.get("source_router"), Mapping):
+        source_router = _source_router_provenance(
+            lane,
+            signal=signal,
+            shared_candidate=shared_candidate,
+            source_row=source_row,
+            source_router=decision["source_router"],
+            requested_position_size_usd=_number(decision.get("requested_position_size_usd")),
+            approved_position_size_usd=_number(decision.get("approved_position_size_usd")),
+        )
+        row["provenance"]["source_router"] = source_router
+        if isinstance(source_router.get("future_pnl_inputs"), Mapping):
+            row["provenance"]["future_pnl_inputs"] = dict(source_router["future_pnl_inputs"])
+            side_price = _number(source_router["future_pnl_inputs"].get("estimated_fill_price"))
+            if side_price is not None:
+                row["entry_price"] = side_price
+                row["price"] = side_price
     if lane.definition_path:
         row["lane_definition_path"] = lane.definition_path
         row["provenance"]["lane_definition_path"] = lane.definition_path
@@ -298,6 +326,8 @@ def _lane_evaluator(lane: _LaneDefinition):
         lane_type = "confidence_floor"
     elif lane.lane_id == PREMIUM_CITY_LANE_ID:
         lane_type = "premium_city"
+    elif lane.lane_id == SOURCE_ROUTER_LANE_ID:
+        lane_type = "source_router"
     elif lane.lane_id in SOURCE_RELIABILITY_EVALUATOR_LANE_IDS:
         lane_type = "source_reliability"
     elif lane_type == "source_scoreboard":
@@ -455,11 +485,79 @@ def _source_reliability_decision(
     return baseline
 
 
+def _source_router_decision(
+    lane: _LaneDefinition,
+    signal: Mapping[str, Any],
+    source_row: dict[str, Any] | None,
+    shared_candidate: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    baseline = _passthrough_decision(
+        _LaneDefinition("control_stable", source_wallet_id=lane.source_wallet_id or STABLE_PAPER_WALLET_ID),
+        signal,
+        source_row,
+        shared_candidate,
+    )
+    from bot.weather.source_confidence import build_source_confidence_row
+    from bot.weather.source_reliability import build_reliability_candidate_row, load_scoreboard_rows
+
+    candidate_row = build_reliability_candidate_row(signal, shared_candidate)
+    if not _optional_text(candidate_row.get("predicted_outcome")):
+        candidate_row["predicted_outcome"] = "YES"
+        candidate_row["source_router_candidate_outcome_default"] = "market_yes_event"
+    scoreboard_path = _source_reliability_scoreboard_path(lane)
+    reliability_rows = load_scoreboard_rows(scoreboard_path) if scoreboard_path else None
+    confidence_row = build_source_confidence_row(candidate_row, reliability_table=reliability_rows)
+    source_direction = _optional_text(confidence_row.get("source_direction"))
+    action = _action_from_source_direction(source_direction)
+    if action == "SKIP":
+        reason_code = _optional_text(confidence_row.get("reason_code")) or "source_router_no_trade"
+        reason = "Source router did not have a usable source direction for this candidate"
+        requested = 0.0
+        approved = 0.0
+    else:
+        reason_code = f"source_router_{source_direction.lower()}"
+        reason = "Source router shadow lane selected the source-implied market side"
+        requested = _source_router_notional(lane, baseline)
+        approved = requested
+    return {
+        "source_row": source_row,
+        "action": action,
+        "reason_code": reason_code,
+        "reason": reason,
+        "confidence_after": _number(confidence_row.get("source_confidence_score"), signal.get("confidence")),
+        "requested_position_size_usd": requested,
+        "approved_position_size_usd": approved,
+        "source_router": {
+            "available": True,
+            "schema": confidence_row.get("schema"),
+            "engine_version": confidence_row.get("engine_version"),
+            "source_direction": source_direction,
+            "source_grade": confidence_row.get("source_grade"),
+            "source_confidence_score": confidence_row.get("source_confidence_score"),
+            "confidence_type": confidence_row.get("confidence_type"),
+            "recommended_action": action,
+            "source_confidence_recommended_action": confidence_row.get("recommended_action"),
+            "reason_code": reason_code,
+            "source_confidence_reason_code": confidence_row.get("reason_code"),
+            "agreement_state": confidence_row.get("agreement_state"),
+            "weighted_support": confidence_row.get("weighted_support"),
+            "weighted_dissent": confidence_row.get("weighted_dissent"),
+            "sources_used": confidence_row.get("sources_used") or [],
+            "sources_excluded": confidence_row.get("sources_excluded") or [],
+            "source_observations": confidence_row.get("source_observations") or [],
+            "data_quality": confidence_row.get("data_quality") or {},
+            "scoreboard_path": scoreboard_path,
+            "decision_contract": "shadow_lane_recommendation_only_no_accounting_mutation",
+        },
+    }
+
+
 LANE_EVALUATORS = {
     "passthrough": _passthrough_decision,
     "confidence_floor": _confidence_floor_decision,
     "premium_city": _premium_city_decision,
     "source_reliability": _source_reliability_decision,
+    "source_router": _source_router_decision,
 }
 
 
@@ -599,7 +697,7 @@ def _configured_lane_definition_map(config: Mapping[str, Any]) -> dict[str, _Lan
     for key in ("source_reliability_scoreboard", "source_reliability_scoreboard_path", "source_scoreboard_path"):
         if config.get(key) in (None, ""):
             continue
-        for lane_id in SOURCE_RELIABILITY_EVALUATOR_LANE_IDS:
+        for lane_id in SOURCE_SCOREBOARD_CONFIG_LANE_IDS:
             reliability_cfg = raw_by_id.get(lane_id, {"id": lane_id})
             parameters = _mapping(reliability_cfg.get("parameters"))
             parameters["scoreboard_path"] = config.get(key)
@@ -680,6 +778,17 @@ def _built_in_lane_definition_map() -> dict[str, dict[str, Any]]:
             "description": "Shared-candidate-fed lane that starts from stable baseline and records source scoreboard recommendations plus future-PnL provenance only.",
             "parameters": {},
         },
+        SOURCE_ROUTER_LANE_ID: {
+            "id": SOURCE_ROUTER_LANE_ID,
+            "type": "source_router",
+            "source_wallet": STABLE_PAPER_WALLET_ID,
+            "source_role": "baseline",
+            "input_source": "shared_candidate_dataset",
+            "input_market_source": "shared_market",
+            "enabled": False,
+            "description": "Shared-candidate-fed source-router lane that records independent source-implied BUY_YES/BUY_NO/SKIP decisions with future-PnL provenance only.",
+            "parameters": {"hypothetical_notional_usd": 10.0},
+        },
     }
 
 
@@ -729,6 +838,7 @@ def _lane_definition_from_raw(lane_id: str, raw: Mapping[str, Any]) -> _LaneDefi
         "source_reliability_scoreboard",
         "source_reliability_scoreboard_path",
         "source_scoreboard_path",
+        "hypothetical_notional_usd",
     ):
         if key in raw:
             parameters[key] = raw.get(key)
@@ -1016,7 +1126,13 @@ def _reference_action(
 
 
 def _lane_id_for_row(row: Mapping[str, Any]) -> str:
-    return _text(row.get("policy"), row.get("selected_lane"), _mapping(row.get("provenance")).get("lane_id"), "unknown")
+    return _text(
+        row.get("policy"),
+        row.get("selected_lane"),
+        row.get("lane_id"),
+        _mapping(row.get("provenance")).get("lane_id"),
+        "unknown",
+    )
 
 
 def _row_shared_candidate_id(row: Mapping[str, Any]) -> str | None:
@@ -1080,9 +1196,18 @@ def summarize_paper_shadow_lane_resolved_pnl(
         resolution_rows=resolution_rows,
         resolution_path=resolution_path,
     )
+    return summarize_paper_shadow_lane_resolution_rows(joined_rows)
+
+
+def summarize_paper_shadow_lane_resolution_rows(
+    rows: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Summarize prebuilt paper shadow lane resolution rows."""
+
     totals = _empty_pnl_bucket()
     by_lane: dict[str, dict[str, Any]] = {}
     blocker_counts: dict[str, int] = {}
+    joined_rows = [dict(row) for row in rows]
 
     for joined in joined_rows:
         lane_id = str(joined.get("lane_id") or "unknown")
@@ -1125,7 +1250,10 @@ def summarize_paper_shadow_lane_resolved_pnl(
             target["total_payout_usd"] += payout
             target["total_pnl_usd"] += pnl_value
 
-    return _finalize_pnl_bucket({**totals, "by_lane": by_lane, "blocker_counts": blocker_counts})
+    source_router = _summarize_source_router_resolution_rows(joined_rows)
+    return _finalize_pnl_bucket(
+        {**totals, "by_lane": by_lane, "blocker_counts": blocker_counts, "source_router": source_router}
+    )
 
 
 def build_paper_shadow_lane_resolution_rows(
@@ -1404,6 +1532,73 @@ def _empty_pnl_bucket() -> dict[str, Any]:
     }
 
 
+def _summarize_source_router_resolution_rows(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    """Return first-class source-router win-rate and standardized-PnL metrics."""
+
+    summary = _empty_pnl_bucket()
+    action_counts: dict[str, int] = {}
+    side_counts: dict[str, int] = {}
+    blocker_counts: dict[str, int] = {}
+    resolved_buy_rows = 0
+    correct_side_rows = 0
+
+    for row in rows:
+        if _lane_id_for_row(row) != SOURCE_ROUTER_LANE_ID:
+            continue
+        _increment_pnl_bucket(summary, "evaluated_rows")
+        action = _action_label(row.get("action"))
+        action_counts[action] = int(action_counts.get(action, 0)) + 1
+        side = _optional_text(row.get("side"))
+        if side:
+            side_counts[side] = int(side_counts.get(side, 0)) + 1
+
+        resolution = _mapping(row.get("resolution"))
+        outcome = _optional_text(resolution.get("outcome"))
+        if outcome is not None:
+            _increment_pnl_bucket(summary, "resolved_rows")
+
+        blocker = _optional_text(row.get("blocker"))
+        if blocker:
+            _add_blocker(blocker_counts, blocker)
+            _add_blocker(summary["blocker_counts"], blocker)
+            continue
+
+        if _is_skip_action(action):
+            _increment_pnl_bucket(summary, "skip_rows")
+            _increment_pnl_bucket(summary, "pnl_calculable_rows")
+            continue
+        if not _is_buy_action(action):
+            continue
+
+        pnl = _mapping(row.get("pnl"))
+        won = bool(pnl.get("won"))
+        stake_f = float(_number(pnl.get("stake_usd")) or 0.0)
+        payout = float(_number(pnl.get("payout_usd")) or 0.0)
+        pnl_value = float(_number(pnl.get("pnl_usd")) or 0.0)
+
+        resolved_buy_rows += 1
+        if won:
+            correct_side_rows += 1
+        _increment_pnl_bucket(summary, "buy_rows")
+        _increment_pnl_bucket(summary, "pnl_calculable_rows")
+        _increment_pnl_bucket(summary, "winning_buy_rows" if won else "losing_buy_rows")
+        summary["total_stake_usd"] += stake_f
+        summary["total_payout_usd"] += payout
+        summary["total_pnl_usd"] += pnl_value
+
+    finalized = _finalize_pnl_bucket(summary)
+    finalized["raw_router_resolved_buy_rows"] = resolved_buy_rows
+    finalized["raw_router_correct_side_rows"] = correct_side_rows
+    finalized["raw_router_win_rate_pct"] = _coverage_pct(correct_side_rows, resolved_buy_rows)
+    finalized["standardized_hypothetical_stake_usd"] = finalized.get("total_stake_usd")
+    finalized["standardized_hypothetical_pnl_usd"] = finalized.get("total_pnl_usd")
+    finalized["standardized_hypothetical_roi_pct"] = finalized.get("roi_pct")
+    finalized["action_counts"] = _sorted_count_dict(action_counts)
+    finalized["side_counts"] = _sorted_count_dict(side_counts)
+    finalized["blocker_counts"] = {str(k): int(v) for k, v in sorted(blocker_counts.items()) if int(v)}
+    return finalized
+
+
 def _increment_pnl_bucket(bucket: dict[str, Any], key: str) -> None:
     bucket[key] = int(bucket.get(key, 0)) + 1
 
@@ -1594,6 +1789,64 @@ def _source_scoreboard_provenance(
         "scoreboard_path": _optional_text(source_reliability.get("scoreboard_path")),
         "label_target": _optional_text(future_pnl_inputs.get("label_target")),
         "future_pnl_inputs": future_pnl_inputs or None,
+    }
+    return {key: value for key, value in summary.items() if value not in (None, "", {}, []) or key == "available"}
+
+
+def _source_router_provenance(
+    lane: _LaneDefinition,
+    *,
+    signal: Mapping[str, Any],
+    shared_candidate: Mapping[str, Any],
+    source_row: Mapping[str, Any] | None,
+    source_router: Mapping[str, Any],
+    requested_position_size_usd: float | None,
+    approved_position_size_usd: float | None,
+) -> dict[str, Any]:
+    action = _optional_text(source_router.get("recommended_action")) or "SKIP"
+    future_pnl_inputs = _future_pnl_inputs(
+        signal=signal,
+        shared_candidate=shared_candidate,
+        source_row=source_row,
+        source_reliability={
+            "recommended_action": action,
+            "reason_code": source_router.get("reason_code"),
+            "reason": "Source router shadow lane selected the source-implied side",
+        },
+    )
+    side = _side_from_action(action)
+    side_price = _side_specific_price(future_pnl_inputs, side)
+    if side_price is not None:
+        future_pnl_inputs["entry_price"] = side_price
+        future_pnl_inputs["estimated_fill_price"] = side_price
+    future_pnl_inputs["recommended_action"] = action
+    future_pnl_inputs["recommended_side"] = side
+    future_pnl_inputs["side"] = side
+    future_pnl_inputs["requested_position_size_usd"] = requested_position_size_usd
+    future_pnl_inputs["approved_position_size_usd"] = approved_position_size_usd
+    future_pnl_inputs["source_router_source_direction"] = _optional_text(source_router.get("source_direction"))
+    future_pnl_inputs["source_router_source_grade"] = _optional_text(source_router.get("source_grade"))
+
+    compact_observations = _compact_source_observations(source_router.get("source_observations"))
+    summary = {
+        "lane_id": lane.lane_id,
+        "available": bool(source_router.get("available")),
+        "recommended_action": action,
+        "recommended_side": side,
+        "reason_code": _optional_text(source_router.get("reason_code")),
+        "source_confidence_reason_code": _optional_text(source_router.get("source_confidence_reason_code")),
+        "source_direction": _optional_text(source_router.get("source_direction")),
+        "source_grade": _optional_text(source_router.get("source_grade")),
+        "source_confidence_score": _number(source_router.get("source_confidence_score")),
+        "confidence_type": _optional_text(source_router.get("confidence_type")),
+        "agreement_state": _optional_text(source_router.get("agreement_state")),
+        "scoreboard_path": _optional_text(source_router.get("scoreboard_path")),
+        "data_quality": _mapping(source_router.get("data_quality")),
+        "sources_used": _list_of_mappings(source_router.get("sources_used")),
+        "sources_excluded": _list_of_mappings(source_router.get("sources_excluded")),
+        "source_observations": compact_observations,
+        "future_pnl_inputs": future_pnl_inputs or None,
+        "decision_contract": _optional_text(source_router.get("decision_contract")),
     }
     return {key: value for key, value in summary.items() if value not in (None, "", {}, []) or key == "available"}
 
@@ -1834,6 +2087,73 @@ def _future_pnl_inputs(
         "label_target": label_target,
     }
     return {key: value for key, value in payload.items() if value not in (None, "", [], {})}
+
+
+def _action_from_source_direction(value: Any) -> str:
+    text = str(value or "").strip().upper()
+    if text == "YES":
+        return "BUY_YES"
+    if text == "NO":
+        return "BUY_NO"
+    return "SKIP"
+
+
+def _source_router_notional(lane: _LaneDefinition, baseline: Mapping[str, Any]) -> float:
+    configured = _number(lane.parameters.get("hypothetical_notional_usd"), lane.parameters.get("notional_usd"))
+    if configured is not None and configured > 0:
+        return float(configured)
+    baseline_size = _number(baseline.get("approved_position_size_usd"), baseline.get("requested_position_size_usd"))
+    if baseline_size is not None and baseline_size > 0:
+        return float(baseline_size)
+    return 10.0
+
+
+def _side_specific_price(future_pnl_inputs: Mapping[str, Any], side: str | None) -> float | None:
+    if side == "YES":
+        return _number(
+            future_pnl_inputs.get("best_yes_ask"),
+            future_pnl_inputs.get("entry_price"),
+            future_pnl_inputs.get("estimated_fill_price"),
+        )
+    if side == "NO":
+        return _number(
+            future_pnl_inputs.get("best_no_ask"),
+            future_pnl_inputs.get("entry_price") if future_pnl_inputs.get("side") == "NO" else None,
+            future_pnl_inputs.get("estimated_fill_price") if future_pnl_inputs.get("side") == "NO" else None,
+        )
+    return None
+
+
+def _compact_source_observations(value: Any) -> list[dict[str, Any]]:
+    observations: list[dict[str, Any]] = []
+    for row in _list_of_mappings(value):
+        observations.append(
+            {
+                key: row.get(key)
+                for key in (
+                    "source_id",
+                    "source_name",
+                    "source_family",
+                    "forecast_temp_f",
+                    "forecast_target",
+                    "forecast_valid_at",
+                    "observed_at",
+                    "fetched_at",
+                    "known_at_time_assertion",
+                    "adapter_version",
+                    "normalizer_version",
+                    "provenance",
+                )
+                if row.get(key) not in (None, "", [], {})
+            }
+        )
+    return observations
+
+
+def _list_of_mappings(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, Mapping)]
 
 
 def _summarize_source_scoreboard_rows(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:

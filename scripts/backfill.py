@@ -21,6 +21,15 @@ from bot.prediction_lab_backfill import (  # noqa: E402
     run_prediction_lab_canonical_analysis,
 )
 from bot.scoreboard_resolution_backfill import backfill_scoreboard_resolutions  # noqa: E402
+from bot.weather.source_reliability import load_source_outcome_ledger_rows  # noqa: E402
+from bot.weather.source_router import (  # noqa: E402
+    build_joined_source_router_ledger_rows,
+    build_source_router_replay_rows,
+    summarize_source_router_replay_rows,
+)
+from bot.weather.source_scoreboard import load_jsonl_rows  # noqa: E402
+from scripts.weather_source_edge_validate import _load_outcome_lookup  # noqa: E402
+from scripts.weather_source_router_replay import render_source_router_report_markdown  # noqa: E402
 
 
 DEFAULT_SOURCE_SCOREBOARD_INPUT = "data/beta_shadow/paper/source_scoreboard/paper_shadow_lane_decisions.jsonl"
@@ -40,6 +49,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "agent-decisions",
             "scoreboard-resolutions",
             "source-scoreboard-resolutions",
+            "source-router-replay",
         ],
         help="Backfill family to run.",
     )
@@ -86,6 +96,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Resolution backfills: optional cap for smoke/backfill slices. Overrides --limit.",
     )
+    parser.add_argument(
+        "--min-sample-count",
+        type=int,
+        default=5,
+        help="Source router replay: minimum prior resolved source rows required before routing.",
+    )
+    parser.add_argument(
+        "--source-input",
+        action="append",
+        default=None,
+        help="Source router replay: raw source snapshot / market snapshot JSONL path. Repeatable.",
+    )
+    parser.add_argument(
+        "--history-ledger-input",
+        action="append",
+        default=None,
+        help="Source router replay: prior source-outcome ledger JSON/JSONL rows used only as selector history. Repeatable.",
+    )
+    parser.add_argument(
+        "--decision-input",
+        action="append",
+        default=None,
+        help="Source router replay: stable/main decision JSONL path to join against --source-input. Repeatable.",
+    )
     return parser.parse_args(argv)
 
 
@@ -97,6 +131,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_agent_decisions(args)
     if args.kind in {"scoreboard-resolutions", "source-scoreboard-resolutions"}:
         return _run_scoreboard_resolutions(args)
+    if args.kind == "source-router-replay":
+        return _run_source_router_replay(args)
     raise SystemExit(f"unsupported --kind: {args.kind}")
 
 
@@ -163,11 +199,116 @@ def _run_scoreboard_resolutions(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_source_router_replay(args: argparse.Namespace) -> int:
+    inputs = _input_paths(args)
+    source_inputs = list(args.source_input or [])
+    decision_inputs = list(args.decision_input or [])
+    history_ledger_inputs = list(args.history_ledger_input or [])
+    if not (inputs or source_inputs) or not args.resolutions or not args.output_dir:
+        raise SystemExit(
+            "positional source-outcome ledger inputs or --source-input, --resolutions finalized outcome path, "
+            "and --output-dir are required for --kind source-router-replay"
+        )
+    if source_inputs and not decision_inputs:
+        raise SystemExit("--decision-input is required when --source-input is used")
+    output_dir = _safe_derived_output_path(Path(args.output_dir) / "source_router_replay_marker").parent
+    output_dir.mkdir(parents=True, exist_ok=True)
+    ledger_rows, input_stats = _load_source_router_ledger_rows(
+        inputs,
+        history_ledger_inputs=history_ledger_inputs,
+        source_inputs=source_inputs,
+        decision_inputs=decision_inputs,
+        limit=args.limit,
+    )
+    outcome_lookup, outcome_stats = _load_outcome_lookup([_repo_path(path) for path in args.resolutions])
+    replay_rows = build_source_router_replay_rows(
+        ledger_rows,
+        outcome_lookup=outcome_lookup,
+        min_sample_count=args.min_sample_count,
+    )
+    summary = summarize_source_router_replay_rows(replay_rows)
+    metadata = {
+        "schema_version": 1,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "mode": "unified_backfill_source_router_replay",
+        "network_access": False,
+        "ledger_inputs": inputs,
+        "history_ledger_inputs": history_ledger_inputs,
+        "source_inputs": source_inputs,
+        "decision_inputs": decision_inputs,
+        "outcome_inputs": args.resolutions,
+        "output_dir": str(output_dir),
+        "min_sample_count": args.min_sample_count,
+        "limit": args.limit,
+        "outcome_load_stats": outcome_stats,
+        "input_load_stats": input_stats,
+        "summary": summary["summary"],
+    }
+    _write_jsonl(output_dir / "source_router_decisions.jsonl", replay_rows)
+    _write_json(output_dir / "source_router_summary.json", summary)
+    _write_jsonl(output_dir / "source_router_slices.jsonl", summary["slices"])
+    (output_dir / "source_router_vs_stable.md").write_text(
+        render_source_router_report_markdown(summary, metadata=metadata),
+        encoding="utf-8",
+    )
+    _write_json(output_dir / "run_metadata.json", metadata)
+    if args.format == "json":
+        print(json.dumps(metadata, indent=2, sort_keys=True))
+    else:
+        counts = summary["summary"]
+        print(
+            "Backfill kind=source-router-replay "
+            f"inputs={len(inputs)} rows={len(ledger_rows)} "
+            f"routeable={counts.get('routeable_rows', 0)} "
+            f"stable_pnl={counts.get('stable_pnl_usd', 0.0)} "
+            f"source_filter_pnl={counts.get('source_filter_pnl_usd', 0.0)} "
+            f"output={output_dir}"
+        )
+    return 0
+
+
 def _input_paths(args: argparse.Namespace) -> list[str]:
     values = list(args.inputs or [])
     if args.single_input:
         values.insert(0, args.single_input)
     return values
+
+
+def _load_source_router_ledger_rows(
+    inputs: list[str],
+    *,
+    history_ledger_inputs: list[str],
+    source_inputs: list[str],
+    decision_inputs: list[str],
+    limit: int | None,
+) -> tuple[list[dict[str, object]], dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    stats: dict[str, object] = {"mode": "ledger_input"}
+    for path in history_ledger_inputs:
+        for row in load_source_outcome_ledger_rows(_repo_path(path)):
+            copied = dict(row)
+            copied["source_router_history_only"] = True
+            rows.append(copied)
+    if rows:
+        stats["history_ledger_rows"] = len(rows)
+    for path in inputs:
+        for row in load_source_outcome_ledger_rows(_repo_path(path)):
+            if limit is not None and len(rows) >= limit:
+                stats["limit_reached"] = True
+                return rows, stats
+            rows.append(row)
+    if source_inputs:
+        source_rows, source_stats = load_jsonl_rows([_repo_path(path) for path in source_inputs], limit=limit)
+        decision_rows, decision_stats = load_jsonl_rows([_repo_path(path) for path in decision_inputs])
+        joined_rows, join_stats = build_joined_source_router_ledger_rows(source_rows, decision_rows)
+        rows.extend(joined_rows)
+        stats = {
+            "mode": "joined_source_and_decision_inputs",
+            "source_load_stats": source_stats,
+            "decision_load_stats": decision_stats,
+            "join_stats": join_stats,
+        }
+    return rows, stats
 
 
 def _single_positional_input(args: argparse.Namespace) -> str | None:
@@ -231,6 +372,16 @@ def _format_scoreboard_resolution_report(report: dict[str, object], *, lane: str
             f"report={report.get('report_path')}",
         ]
     )
+
+
+def _write_json(path: Path, payload: object) -> None:
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
+    with path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, sort_keys=True) + "\n")
 
 
 if __name__ == "__main__":

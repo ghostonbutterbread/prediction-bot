@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from bot.weather.source_scoreboard import SourceForecastObservation, extract_source_forecast_observations
-from bot.weather.thresholds import infer_direction_from_value, infer_predicted_outcome
+from bot.weather.thresholds import extract_threshold_value, infer_direction_from_value, infer_predicted_outcome, infer_question_side
 
 
 DEFAULT_MIN_SAMPLE_COUNT = 100
@@ -259,6 +259,8 @@ def build_reliability_candidate_row(
     row.setdefault("market_id", shared_candidate.get("market_id") or market.get("id"))
     row.setdefault("question", market.get("question"))
     row.setdefault("market", dict(market))
+    row.setdefault("shared_candidate", dict(shared_candidate))
+    _enrich_reliability_candidate_market_fields(row, shared_candidate, market)
     if "weather_source_snapshot" in evidence:
         row.setdefault("weather_source_snapshot", evidence.get("weather_source_snapshot"))
     artifact = row.get("decision_artifact") if isinstance(row.get("decision_artifact"), dict) else {}
@@ -276,7 +278,147 @@ def build_reliability_candidate_row(
         artifact["source_context"] = source_context
     if artifact:
         row["decision_artifact"] = artifact
+    _enrich_reliability_candidate_market_fields(row, shared_candidate, market)
     return row
+
+
+def _enrich_reliability_candidate_market_fields(
+    row: dict[str, Any],
+    shared_candidate: Mapping[str, Any],
+    market: Mapping[str, Any],
+) -> None:
+    """Normalize market metadata needed by source-confidence scoring.
+
+    Paper shadow observations can be market-fed instead of stable-decision-fed.
+    In that path the source observations are present, but city/threshold/shape
+    often live in market text, route metadata, or the decision artifact. The
+    source-confidence scorer expects those fields at predictable row locations.
+    """
+
+    artifact = row.get("decision_artifact") if isinstance(row.get("decision_artifact"), Mapping) else {}
+    strategy_signal = artifact.get("strategy_signal") if isinstance(artifact.get("strategy_signal"), Mapping) else {}
+    strategy_data = strategy_signal.get("data") if isinstance(strategy_signal.get("data"), Mapping) else {}
+    market_payload = artifact.get("market") if isinstance(artifact.get("market"), Mapping) else {}
+    question = _first_text(
+        row.get("question"),
+        shared_candidate.get("question"),
+        market.get("question"),
+        market_payload.get("question"),
+        strategy_data.get("question"),
+    )
+    if question:
+        row.setdefault("question", question)
+    market_id = _first_text(row.get("market_id"), shared_candidate.get("market_id"), market.get("id"), market_payload.get("id"))
+    if market_id:
+        row.setdefault("market_id", market_id)
+
+    context: dict[str, Any] = {}
+    for candidate in (market_payload, market, shared_candidate, strategy_data, row):
+        if isinstance(candidate, Mapping):
+            context.update(candidate)
+
+    question_side = _first_text(
+        row.get("question_side"),
+        shared_candidate.get("question_side"),
+        market.get("question_side"),
+        market_payload.get("question_side"),
+        strategy_data.get("question_side"),
+    )
+    if not question_side and question:
+        inferred_side = infer_question_side(question, context)
+        if inferred_side and inferred_side != "unknown":
+            question_side = inferred_side
+    if question_side:
+        row.setdefault("question_side", question_side)
+
+    threshold = _number(
+        row.get("threshold"),
+        shared_candidate.get("threshold"),
+        market.get("threshold"),
+        market_payload.get("threshold"),
+        strategy_data.get("threshold"),
+    )
+    if threshold is None and question:
+        threshold = _number(extract_threshold_value(question, context))
+    if threshold is not None:
+        row.setdefault("threshold", threshold)
+
+    market_kind = _first_text(
+        row.get("market_kind"),
+        shared_candidate.get("market_kind"),
+        market.get("market_kind"),
+        market_payload.get("market_kind"),
+        strategy_data.get("market_kind"),
+    ) or _infer_market_kind_from_text(market_id=market_id, question=question)
+    if market_kind:
+        row.setdefault("market_kind", market_kind)
+
+    contract_shape = _first_text(
+        row.get("contract_shape"),
+        shared_candidate.get("contract_shape"),
+        market.get("contract_shape"),
+        market_payload.get("contract_shape"),
+        strategy_data.get("contract_shape"),
+    ) or _infer_contract_shape_from_text(market_id=market_id, question=question, question_side=question_side)
+    if contract_shape:
+        row.setdefault("contract_shape", contract_shape)
+
+    city_id = _first_text(
+        row.get("city_id"),
+        shared_candidate.get("city_id"),
+        market.get("city_id"),
+        market_payload.get("city_id"),
+        strategy_data.get("city_id"),
+        strategy_data.get("city"),
+        row.get("city"),
+    )
+    if city_id:
+        row.setdefault("city_id", _slug(city_id) or city_id)
+    else:
+        inferred_city = _infer_city_id_from_candidate(row)
+        if inferred_city:
+            row.setdefault("city_id", inferred_city)
+
+
+def _infer_market_kind_from_text(*, market_id: str | None, question: str | None) -> str | None:
+    text = " ".join(value.lower() for value in (market_id, question) if value)
+    if "kxhigh" in text or re.search(r"\b(high|max|maximum)\b", text):
+        return "high"
+    if "kxlow" in text or re.search(r"\b(low|min|minimum)\b", text):
+        return "low"
+    return None
+
+
+def _infer_contract_shape_from_text(*, market_id: str | None, question: str | None, question_side: str | None) -> str | None:
+    side = str(question_side or "").strip().lower()
+    text = " ".join(value.lower() for value in (market_id, question) if value)
+    if side == "range" or re.search(r"\b\d+\s*(?:-|to)\s*\d+\b", text):
+        return "range"
+    if side == "binary_bucket" or "bucket" in text or re.search(r"-b-?\d", text):
+        return "bucket"
+    if side in {"above", "below"} or ">" in text or "<" in text:
+        return "tail"
+    return None
+
+
+def _infer_city_id_from_candidate(row: Mapping[str, Any]) -> str | None:
+    try:
+        from bot.weather.station_mapping import resolve_weather_station
+    except Exception:  # pragma: no cover - optional enrichment only.
+        return None
+    try:
+        resolved = resolve_weather_station(row)
+    except Exception:  # pragma: no cover - defensive for malformed candidates.
+        return None
+    return _optional_text(getattr(resolved, "city_id", None))
+
+
+def _first_text(*values: Any) -> str | None:
+    for value in values:
+        text = _optional_text(value)
+        if text:
+            return text
+    return None
 
 
 def build_source_outcome_ledger_rows(
@@ -340,8 +482,20 @@ def build_source_outcome_ledger_row(
     threshold = market.threshold
     predicted_direction = infer_direction_from_value(forecast, threshold)
     actual_direction = infer_direction_from_value(actual, threshold)
-    predicted_outcome = infer_predicted_outcome(market.question_side, predicted_direction)
-    actual_outcome = infer_predicted_outcome(market.question_side, actual_direction)
+    predicted_outcome = _infer_market_outcome_from_value(
+        value=forecast,
+        question_side=market.question_side,
+        threshold=threshold,
+        question=_optional_text(row.get("question")),
+        direction=predicted_direction,
+    )
+    actual_outcome = _infer_market_outcome_from_value(
+        value=actual,
+        question_side=market.question_side,
+        threshold=threshold,
+        question=_optional_text(row.get("question")),
+        direction=actual_direction,
+    )
     direction_correct = predicted_outcome == actual_outcome if predicted_outcome and actual_outcome else None
     absolute_error = abs(forecast - actual) if forecast is not None and actual is not None else None
     bias = forecast - actual if forecast is not None and actual is not None else None
@@ -391,6 +545,7 @@ def build_source_outcome_ledger_row(
         "source_line_number": _int(row.get("source_line_number")) or source_line_number,
         "market_id": market_id,
         "shared_candidate_id": shared_candidate_id,
+        "question": _optional_text(row.get("question")),
         "source_id": observation.source_id,
         "source_name": observation.source_name,
         "city_id": market.city_id or "unknown",
@@ -466,7 +621,18 @@ def build_source_edge_evaluation_row(
     market_id = _optional_text(ledger_row.get("market_id"))
     official = _market_outcome_for(ledger_row, lookup)
     official_outcome = _normalize_market_outcome(official.get("official_outcome"))
-    predicted_outcome = _normalize_market_outcome(ledger_row.get("predicted_outcome"))
+    predicted_outcome = _first_market_outcome(
+        ledger_row.get("predicted_outcome"),
+        ledger_row.get("source_implied_outcome"),
+        ledger_row.get("source_implied_side"),
+    )
+    if predicted_outcome is None:
+        predicted_outcome = _infer_market_outcome_from_value(
+            value=_number(ledger_row.get("forecast_temp_f")),
+            question_side=_optional_text(ledger_row.get("question_side")),
+            threshold=_number(ledger_row.get("threshold")),
+            question=_optional_text(ledger_row.get("question")),
+        )
     source_side_price = _source_side_price_for(ledger_row, predicted_outcome)
     win = predicted_outcome == official_outcome if predicted_outcome and official_outcome in {"YES", "NO"} else None
     binary_edge = None
@@ -976,19 +1142,31 @@ def _market_outcome_for(ledger_row: Mapping[str, Any], lookup: Mapping[Any, Any]
 
 def _normalize_outcome_payload(value: Any) -> dict[str, Any]:
     if isinstance(value, Mapping):
+        resolution = value.get("resolution") if isinstance(value.get("resolution"), Mapping) else {}
         outcome = _normalize_market_outcome(
             value.get("official_outcome")
             or value.get("outcome")
             or value.get("result")
+            or value.get("kalshi_result")
             or value.get("settlement_value")
             or value.get("actual_outcome")
+            or resolution.get("official_outcome")
+            or resolution.get("outcome")
+            or resolution.get("result")
         )
         if outcome is None:
             return {}
         return {
             "official_outcome": outcome,
-            "outcome_source": _optional_text(value.get("outcome_source") or value.get("source")) or "lookup",
-            "outcome_known_at": _optional_text(value.get("outcome_known_at") or value.get("known_at") or value.get("resolved_at") or value.get("settled_at")),
+            "outcome_source": _optional_text(value.get("outcome_source") or value.get("source") or resolution.get("source")) or "lookup",
+            "outcome_known_at": _optional_text(
+                value.get("outcome_known_at")
+                or value.get("known_at")
+                or value.get("resolved_at")
+                or value.get("settled_at")
+                or resolution.get("resolved_at")
+                or resolution.get("settled_at")
+            ),
             "label_independence": _optional_text(value.get("label_independence")) or "independent_kalshi_result",
         }
     outcome = _normalize_market_outcome(value)
@@ -1047,6 +1225,48 @@ def _normalize_market_outcome(value: Any) -> str | None:
     if normalized in {"NO", "N", "FALSE", "0", "0.0"}:
         return "NO"
     return None
+
+
+def _first_market_outcome(*values: Any) -> str | None:
+    for value in values:
+        outcome = _normalize_market_outcome(value)
+        if outcome in {"YES", "NO"}:
+            return outcome
+    return None
+
+
+def _infer_market_outcome_from_value(
+    *,
+    value: float | None,
+    question_side: str | None,
+    threshold: float | None,
+    question: str | None = None,
+    direction: str | None = None,
+) -> str | None:
+    normalized_side = str(question_side or "").strip().lower()
+    if value is None:
+        return None
+    if normalized_side == "range":
+        bounds = _range_bounds(question, threshold)
+        if bounds is None:
+            return None
+        low, high = bounds
+        rounded = math.floor(value + 0.5)
+        return "YES" if low <= rounded <= high else "NO"
+    inferred_direction = direction or infer_direction_from_value(value, threshold)
+    return infer_predicted_outcome(normalized_side, inferred_direction)
+
+
+def _range_bounds(question: str | None, threshold: float | None) -> tuple[float, float] | None:
+    text = str(question or "")
+    match = re.search(r"(-?\d+(?:\.\d+)?)\s*(?:to|-|–)\s*(-?\d+(?:\.\d+)?)\s*(?:°|degrees?\b)?", text, flags=re.IGNORECASE)
+    if match:
+        low = float(match.group(1))
+        high = float(match.group(2))
+        return (min(low, high), max(low, high))
+    if threshold is None:
+        return None
+    return (threshold, threshold)
 
 
 def _summarize_edge_group(key: tuple[str, str, str, str], rows: list[dict[str, Any]]) -> dict[str, Any]:

@@ -1,0 +1,10 @@
+id: shadow_source_router
+type: source_router
+source_wallet: stable_paper
+source_role: baseline
+input_source: shared_candidate_dataset
+input_market_source: shared_market
+enabled: false
+description: Shared-candidate-fed source-router lane that records independent source-implied BUY_YES/BUY_NO/SKIP decisions with future-PnL provenance only.
+parameters:
+  hypothetical_notional_usd: 10.0

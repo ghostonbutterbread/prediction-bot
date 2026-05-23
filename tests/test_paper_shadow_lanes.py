@@ -185,6 +185,20 @@ description: Stable paper decision, but record source scoreboard recommendations
 parameters: {}
 """
         )
+        (lanes_dir / "shadow_source_router.yaml").write_text(
+            """
+id: shadow_source_router
+type: source_router
+source_wallet: stable_paper
+source_role: baseline
+input_source: shared_candidate_dataset
+input_market_source: shared_market
+enabled: false
+description: Source-router shadow lane that records independent source-implied decisions and future-PnL provenance only.
+parameters:
+  hypothetical_notional_usd: 10.0
+"""
+        )
         return lanes_dir
 
     def _production_lanes_dir(self) -> Path:
@@ -1026,6 +1040,8 @@ parameters: {}
                                 "city_id": "seattle_wa",
                                 "threshold": 70.0,
                                 "question_side": "above",
+                                "contract_shape": "tail",
+                                "direction": "BUY_YES",
                                 "confidence": 0.88,
                                 "market_price": 0.44,
                                 "candidate_observed_at": "2026-05-14T12:00:00+00:00",
@@ -1229,6 +1245,181 @@ parameters: {}
         self.assertEqual(future_pnl_inputs["actual_outcome"], "YES")
         self.assertEqual(future_pnl_inputs["resolved_outcome"], "YES")
         self.assertEqual(future_pnl_inputs["settled_side"], "YES")
+
+    def test_shadow_source_router_writes_independent_buy_no_with_side_specific_price(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dataset_path = Path(tmpdir) / "shared" / "prediction_lab" / "market_snapshots.jsonl"
+            decision_path = Path(tmpdir) / "lanes.jsonl"
+            scoreboard_path = Path(tmpdir) / "source_scoreboard_by_slice.jsonl"
+            append_jsonl(
+                scoreboard_path,
+                {
+                    "source_id": "nws",
+                    "source_name": "nws",
+                    "city_id": "seattle_wa",
+                    "market_kind": "high",
+                    "contract_shape": "tail",
+                    "sample_count": 200,
+                    "threshold_direction_accuracy": 0.95,
+                },
+            )
+            candidate_id = "candidate-router-buy-no"
+            stable_decision = {
+                "shared_candidate_id": candidate_id,
+                "wallet_id": "stable_paper",
+                "run_id": "stable-run",
+                "candidate_dataset_path": str(dataset_path),
+                "decision_role": "paper_shadow",
+                "decision_id": "stable-source-decision",
+                "policy": "normal",
+                "market_id": "KXHIGHSEA-260515-T70",
+                "observed_at": "2026-05-14T12:00:00+00:00",
+                "action": "BUY_YES",
+                "reason_code": "approved",
+                "reason": "stable approved",
+                "confidence": 0.88,
+                "requested_position_size_usd": 10.0,
+                "approved_position_size_usd": 10.0,
+            }
+
+            result = write_paper_shadow_lane_decisions(
+                config={
+                    "paper_shadow_lanes": {
+                        "enabled": True,
+                        "decision_ledger_path": str(decision_path),
+                        "enabled_lanes": ["shadow_source_router"],
+                        "source_scoreboard_path": str(scoreboard_path),
+                        "shadow_source_router": {
+                            "enabled": True,
+                            "parameters": {"hypothetical_notional_usd": 12.5},
+                        },
+                    }
+                },
+                candidate_dataset_path=dataset_path,
+                inputs_by_shared_candidate_id={
+                    candidate_id: {
+                        "stable": SimpleNamespace(
+                            signal={
+                                "shared_candidate_id": candidate_id,
+                                "market_id": "KXHIGHSEA-260515-T70",
+                                "question": "Will Seattle high temperature be above 70 degrees on May 15, 2026?",
+                                "city_id": "seattle_wa",
+                                "threshold": 70.0,
+                                "question_side": "above",
+                                "contract_shape": "tail",
+                                "direction": "BUY_YES",
+                                "confidence": 0.88,
+                                "market_price": 0.44,
+                                "candidate_observed_at": "2026-05-14T12:00:00+00:00",
+                                "best_yes_ask": 0.44,
+                                "best_yes_bid": 0.42,
+                                "best_no_ask": 0.58,
+                                "best_no_bid": 0.56,
+                                "source_details": [
+                                    {
+                                        "source_id": "nws",
+                                        "source_name": "nws",
+                                        "forecast_high": 68.0,
+                                        "observed_at": "2026-05-14T11:55:00+00:00",
+                                    },
+                                    {
+                                        "source_id": "local_station_98101",
+                                        "source_name": "Seattle local station 98101",
+                                        "forecast_high": 69.0,
+                                        "observed_at": "2026-05-14T11:56:00+00:00",
+                                    },
+                                ],
+                            },
+                            shared_candidate={
+                                "candidate_id": candidate_id,
+                                "market_id": "KXHIGHSEA-260515-T70",
+                                "market": {
+                                    "id": "KXHIGHSEA-260515-T70",
+                                    "question": "Will Seattle high temperature be above 70 degrees on May 15, 2026?",
+                                },
+                            },
+                        ),
+                    }
+                },
+                wallet_decision_rows={"stable_paper": [stable_decision], "beta_paper": []},
+                wallet_runs={"stable_paper": SimpleNamespace(session_id="stable-run")},
+                ledger_root=tmpdir,
+            )
+            lane_row = load_jsonl(Path(result.decision_path))[0]
+
+        self.assertEqual(result.lane_ids, ("shadow_source_router",))
+        self.assertEqual(lane_row["action"], "BUY_NO")
+        self.assertEqual(lane_row["side"], "NO")
+        self.assertEqual(lane_row["entry_price"], 0.58)
+        self.assertEqual(lane_row["price"], 0.58)
+        self.assertEqual(lane_row["requested_position_size_usd"], 12.5)
+        self.assertEqual(lane_row["approved_position_size_usd"], 12.5)
+        self.assertFalse(lane_row["mutation_contract"]["mutates_accounting"])
+        router = lane_row["provenance"]["source_router"]
+        self.assertEqual(router["recommended_action"], "BUY_NO")
+        self.assertEqual(router["source_direction"], "NO")
+        self.assertEqual(router["scoreboard_path"], str(scoreboard_path))
+        self.assertEqual(router["future_pnl_inputs"]["recommended_action"], "BUY_NO")
+        self.assertEqual(router["future_pnl_inputs"]["side"], "NO")
+        self.assertEqual(router["future_pnl_inputs"]["estimated_fill_price"], 0.58)
+        self.assertEqual(router["future_pnl_inputs"]["approved_position_size_usd"], 12.5)
+        self.assertEqual(lane_row["provenance"]["baseline_action"], "BUY_YES")
+        source_ids = {row["source_id"] for row in router["source_observations"]}
+        self.assertIn("nws", source_ids)
+        self.assertIn("local_station_98101", source_ids)
+
+    def test_shadow_source_router_preserves_source_observations_when_history_missing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dataset_path = Path(tmpdir) / "shared" / "prediction_lab" / "market_snapshots.jsonl"
+            decision_path = Path(tmpdir) / "lanes.jsonl"
+            candidate_id = "candidate-router-no-history"
+
+            result = write_paper_shadow_lane_decisions(
+                config={
+                    "paper_shadow_lanes": {
+                        "enabled": True,
+                        "decision_ledger_path": str(decision_path),
+                        "enabled_lanes": ["shadow_source_router"],
+                        "shadow_source_router": {"enabled": True},
+                    }
+                },
+                candidate_dataset_path=dataset_path,
+                inputs_by_shared_candidate_id={
+                    candidate_id: {
+                        "stable": SimpleNamespace(
+                            signal={
+                                "shared_candidate_id": candidate_id,
+                                "market_id": "KXHIGHSEA-260515-T70",
+                                "question": "Will Seattle high temperature be above 70 degrees on May 15, 2026?",
+                                "city_id": "seattle_wa",
+                                "threshold": 70.0,
+                                "question_side": "above",
+                                "confidence": 0.88,
+                                "source_details": [
+                                    {
+                                        "source_id": "local_station_98101",
+                                        "source_name": "Seattle local station 98101",
+                                        "forecast_high": 69.0,
+                                    }
+                                ],
+                            },
+                            shared_candidate={"candidate_id": candidate_id, "market_id": "KXHIGHSEA-260515-T70"},
+                        ),
+                    }
+                },
+                wallet_decision_rows={"stable_paper": [], "beta_paper": []},
+                wallet_runs={"stable_paper": SimpleNamespace(session_id="stable-run")},
+                ledger_root=tmpdir,
+            )
+            lane_row = load_jsonl(Path(result.decision_path))[0]
+
+        self.assertEqual(lane_row["action"], "SKIP")
+        self.assertEqual(lane_row["approved_position_size_usd"], 0.0)
+        router = lane_row["provenance"]["source_router"]
+        self.assertEqual(router["recommended_action"], "SKIP")
+        self.assertEqual(router["source_direction"], "UNKNOWN")
+        self.assertEqual(router["source_observations"][0]["source_id"], "local_station_98101")
+        self.assertEqual(router["future_pnl_inputs"]["recommended_action"], "SKIP")
 
     def test_paper_shadow_lane_report_counts_rows_actions_and_reference_drift(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1613,6 +1804,7 @@ parameters: {}
                 "shadow_confidence_floor",
                 "shadow_current_beta",
                 "shadow_source_scoreboard",
+                "shadow_source_router",
             ],
         )
         self.assertEqual(
@@ -1622,6 +1814,11 @@ parameters: {}
         self.assertEqual(
             paper_shadow_lanes["source_scoreboard_path"],
             "/tmp/weather_source_scoreboard_beta_smoke/source_scoreboard_by_slice.jsonl",
+        )
+        self.assertTrue(paper_shadow_lanes["shadow_source_router"]["enabled"])
+        self.assertEqual(
+            paper_shadow_lanes["shadow_source_router"]["parameters"]["hypothetical_notional_usd"],
+            10.0,
         )
         self.assertFalse(config["alerts"]["enabled"])
         self.assertFalse(config["alerts"]["telegram_enabled"])
@@ -2025,6 +2222,101 @@ parameters: {}
         self.assertEqual(report["total_pnl_usd"], 25.0)
         self.assertEqual(report["by_lane"]["shadow_source_scoreboard"]["total_pnl_usd"], 25.0)
         self.assertEqual(report["blocker_counts"], {})
+
+    def test_source_router_resolved_pnl_reports_raw_win_rate_and_standardized_pnl(self):
+        lane_rows = [
+            {
+                "policy": "shadow_source_router",
+                "shared_candidate_id": "router-win",
+                "action": "BUY_NO",
+                "approved_position_size_usd": 10.0,
+                "provenance": {
+                    "source_router": {
+                        "recommended_action": "BUY_NO",
+                        "future_pnl_inputs": {
+                            "shared_candidate_id": "router-win",
+                            "market_id": "KXROUTER-1",
+                            "recommended_action": "BUY_NO",
+                            "side": "NO",
+                            "estimated_fill_price": 0.25,
+                            "approved_position_size_usd": 10.0,
+                        },
+                    },
+                    "future_pnl_inputs": {
+                        "shared_candidate_id": "router-win",
+                        "market_id": "KXROUTER-1",
+                        "recommended_action": "BUY_NO",
+                        "side": "NO",
+                        "estimated_fill_price": 0.25,
+                        "approved_position_size_usd": 10.0,
+                    },
+                },
+            },
+            {
+                "policy": "shadow_source_router",
+                "shared_candidate_id": "router-loss",
+                "action": "BUY_YES",
+                "approved_position_size_usd": 10.0,
+                "provenance": {
+                    "future_pnl_inputs": {
+                        "shared_candidate_id": "router-loss",
+                        "market_id": "KXROUTER-2",
+                        "recommended_action": "BUY_YES",
+                        "side": "YES",
+                        "estimated_fill_price": 0.50,
+                        "approved_position_size_usd": 10.0,
+                    }
+                },
+            },
+            {
+                "policy": "shadow_source_router",
+                "shared_candidate_id": "router-skip",
+                "action": "SKIP",
+                "provenance": {
+                    "future_pnl_inputs": {
+                        "shared_candidate_id": "router-skip",
+                        "market_id": "KXROUTER-3",
+                        "recommended_action": "SKIP",
+                    }
+                },
+            },
+            {
+                "policy": "shadow_source_scoreboard",
+                "shared_candidate_id": "scoreboard-row",
+                "action": "BUY_YES",
+                "approved_position_size_usd": 10.0,
+                "provenance": {
+                    "future_pnl_inputs": {
+                        "shared_candidate_id": "scoreboard-row",
+                        "market_id": "KXSCORE-1",
+                        "recommended_action": "BUY_YES",
+                        "side": "YES",
+                        "estimated_fill_price": 0.25,
+                    }
+                },
+            },
+        ]
+        resolution_rows = [
+            {"shared_candidate_id": "router-win", "market_id": "KXROUTER-1", "outcome": "NO"},
+            {"shared_candidate_id": "router-loss", "market_id": "KXROUTER-2", "outcome": "NO"},
+            {"shared_candidate_id": "router-skip", "market_id": "KXROUTER-3", "outcome": "YES"},
+            {"shared_candidate_id": "scoreboard-row", "market_id": "KXSCORE-1", "outcome": "YES"},
+        ]
+
+        report = summarize_paper_shadow_lane_resolved_pnl(lane_rows=lane_rows, resolution_rows=resolution_rows)
+
+        router = report["source_router"]
+        self.assertEqual(router["evaluated_rows"], 3)
+        self.assertEqual(router["buy_rows"], 2)
+        self.assertEqual(router["skip_rows"], 1)
+        self.assertEqual(router["raw_router_resolved_buy_rows"], 2)
+        self.assertEqual(router["raw_router_correct_side_rows"], 1)
+        self.assertEqual(router["raw_router_win_rate_pct"], 50.0)
+        self.assertEqual(router["standardized_hypothetical_stake_usd"], 20.0)
+        self.assertEqual(router["standardized_hypothetical_pnl_usd"], 20.0)
+        self.assertEqual(router["standardized_hypothetical_roi_pct"], 100.0)
+        self.assertEqual(router["action_counts"], {"BUY_NO": 1, "BUY_YES": 1, "SKIP": 1})
+        self.assertEqual(report["by_lane"]["shadow_source_router"]["total_pnl_usd"], 20.0)
 
     def test_source_scoreboard_resolved_pnl_reports_blockers_without_guessing(self):
         lane_rows = [
