@@ -168,6 +168,13 @@ class SignalValidatorTests(unittest.TestCase):
                 "source_forecast_period_names": {"nws": "Today"},
                 "source_forecast_period_starts": {"nws": "2026-04-27T06:00:00-05:00"},
                 "source_forecast_period_ends": {"nws": "2026-04-27T18:00:00-05:00"},
+                "local_station_observation": {
+                    "station": "KAUS",
+                    "city": "austin",
+                    "current_temp_f": 72.4,
+                    "observation_time": "2026-04-27T12:03:00+00:00",
+                    "source": "nws_observation",
+                },
                 "settlement_source": "nws",
             },
         )
@@ -180,6 +187,11 @@ class SignalValidatorTests(unittest.TestCase):
         self.assertEqual(by_source["nws"]["forecast_period_name"], "Today")
         self.assertNotIn("weather_date", by_source["open-meteo"])
         self.assertNotIn("forecast_date", by_source["nws"])
+        self.assertEqual(by_source["Local station AUS"]["source_id"], "local_station_aus")
+        self.assertEqual(by_source["Local station AUS"]["source_family"], "local_station")
+        self.assertEqual(by_source["Local station AUS"]["source_location_basis"], "station")
+        self.assertEqual(by_source["Local station AUS"]["current_forecast"], 72.4)
+        self.assertEqual(by_source["Local station AUS"]["station_id"], "KAUS")
 
         snapshot = WeatherSnapshot(
             city="austin",

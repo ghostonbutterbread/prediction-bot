@@ -1,0 +1,7 @@
+composition:
+  name: source_router_side_stable_size
+  base_lane: control_stable
+  action_lane: shadow_source_router
+  sizing_lane: control_stable
+  price_lane: shadow_source_router
+  fallback_to_base: true

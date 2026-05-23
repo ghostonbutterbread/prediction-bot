@@ -526,6 +526,10 @@ class ProWeatherEngine:
         if not snapshots:
             return None
 
+        local_station_observation = None
+        if nws:
+            local_station_observation = self.nws.get_station_observation(city_lower)
+
         # Cross-validate
         highs = [s.high_temp_f for s in snapshots]
         lows = [s.low_temp_f for s in snapshots]
@@ -606,6 +610,7 @@ class ProWeatherEngine:
                 "source_forecast_period_starts": {s.source: s.forecast_period_start for s in snapshots if s.forecast_period_start},
                 "source_forecast_period_ends": {s.source: s.forecast_period_end for s in snapshots if s.forecast_period_end},
                 "source_metadata": {s.source: dict(s.source_details) for s in snapshots if s.source_details},
+                "local_station_observation": local_station_observation,
                 "settlement_source": "nws",  # Kalshi uses NWS to settle
                 "forecast_driver": "nws" if has_nws else "equal_source_average",
                 "nws_high": nws_snapshot.high_temp_f if nws_snapshot else None,
@@ -764,6 +769,34 @@ class ProWeatherEngine:
                     "forecast_period_end": forecast.details.get("source_forecast_period_ends", {}).get(source),
                     "source_metadata": forecast.details.get("source_metadata", {}).get(source),
                 }
+                )
+            )
+        local_station = forecast.details.get("local_station_observation")
+        if isinstance(local_station, dict):
+            station_id = str(local_station.get("station") or "").strip().upper()
+            station_cli = station_id[1:] if station_id.startswith("K") else station_id
+            source_id = f"local_station_{station_cli.lower()}" if station_cli else "local_station_unknown"
+            details.append(
+                _drop_none(
+                    {
+                        "source_id": source_id,
+                        "source_name": f"Local station {station_cli}" if station_cli else "Local station",
+                        "source_family": "local_station",
+                        "source_location_basis": "station",
+                        "role": "local_station_observation",
+                        "forecast_target": "current_observation",
+                        "current_forecast": local_station.get("current_temp_f"),
+                        "current_temp": local_station.get("current_temp_f"),
+                        "station_id": station_id or None,
+                        "station_cli": station_cli or None,
+                        "observed_at": local_station.get("observation_time"),
+                        "as_of": local_station.get("observation_time"),
+                        "source_metadata": {
+                            "source": local_station.get("source"),
+                            "city": local_station.get("city"),
+                            "observation_time": local_station.get("observation_time"),
+                        },
+                    }
                 )
             )
         return details

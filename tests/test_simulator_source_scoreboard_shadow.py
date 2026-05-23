@@ -7,6 +7,7 @@ from unittest.mock import patch
 from bot.file_ops import append_jsonl, load_jsonl
 from bot.paper_shadow_lanes import summarize_paper_shadow_lane_report
 from bot.simulator import Simulator
+from bot.strategies.enhanced import StrategyTrace
 
 
 class FakeExchange:
@@ -55,6 +56,16 @@ def shadow_config(tmpdir, scoreboard_path, decision_path):
     }
 
 
+def router_shadow_config(tmpdir, scoreboard_path, decision_path):
+    config = shadow_config(tmpdir, scoreboard_path, decision_path)
+    config["paper_shadow_lanes"]["enabled_lanes"] = ["shadow_source_router"]
+    config["paper_shadow_lanes"]["shadow_source_router"] = {
+        "enabled": True,
+        "parameters": {"hypothetical_notional_usd": 10.0},
+    }
+    return config
+
+
 def weather_signal():
     return {
         "direction": "BUY_YES",
@@ -70,6 +81,35 @@ def weather_signal():
         "source_details": [{"source_name": "nws", "forecast_high": 72.0}],
         "signals": {"unit": 0.67},
     }
+
+
+class StableSkipWeatherTraceStrategy:
+    def analyze_market(self, market, order_book=None):
+        return None
+
+    def analyze_market_with_trace(self, market, order_book=None):
+        live_signal = {
+            "signal_type": "weather",
+            "predicted_prob": 0.20,
+            "confidence": 0.82,
+            "data": {
+                "city": "seattle_wa",
+                "threshold": 70.0,
+                "question_side": "above",
+                "source_details": [
+                    {
+                        "source_id": "nws",
+                        "source_name": "nws",
+                        "forecast_high": 68.0,
+                    }
+                ],
+            },
+        }
+        return None, StrategyTrace(
+            raw_signals={"live": dict(live_signal)},
+            accepted_signals={"live": dict(live_signal)},
+            skip_reason_code="confidence_below_threshold",
+        )
 
 
 class SimulatorSourceScoreboardShadowTests(unittest.TestCase):
@@ -180,6 +220,40 @@ class SimulatorSourceScoreboardShadowTests(unittest.TestCase):
         self.assertEqual(readiness["order_book_quote_rows"], 1)
         self.assertEqual(readiness["execution_snapshot_rows"], 1)
         self.assertEqual(readiness["estimated_fill_price_rows"], 1)
+
+    def test_source_router_gets_market_candidate_when_stable_strategy_returns_none(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            scoreboard_path = Path(tmpdir) / "source_scoreboard_by_slice.jsonl"
+            decision_path = Path(tmpdir) / "paper_shadow_lane_decisions.jsonl"
+            append_jsonl(
+                scoreboard_path,
+                {
+                    "source_id": "nws",
+                    "source_name": "nws",
+                    "city_id": "seattle_wa",
+                    "market_kind": "high",
+                    "contract_shape": "tail",
+                    "sample_count": 100,
+                    "threshold_direction_accuracy": 0.95,
+                },
+            )
+            sim = Simulator(router_shadow_config(tmpdir, scoreboard_path, decision_path))
+            sim.strategy = StableSkipWeatherTraceStrategy()
+
+            result = sim.scan(FakeExchange([fake_weather_market()]))
+
+            lane_rows = load_jsonl(decision_path)
+            router_rows = [row for row in lane_rows if row.get("policy") == "shadow_source_router"]
+
+        self.assertEqual(result["signals"], 0)
+        self.assertEqual(result["trades"], 0)
+        self.assertEqual(len(router_rows), 1)
+        self.assertEqual(router_rows[0]["action"], "BUY_NO")
+        self.assertEqual(router_rows[0]["side"], "NO")
+        self.assertEqual(router_rows[0]["entry_price"], 0.58)
+        self.assertEqual(router_rows[0]["provenance"]["baseline_action"], "SKIP")
+        self.assertEqual(router_rows[0]["provenance"]["source_router"]["source_direction"], "NO")
+        self.assertFalse(router_rows[0]["mutation_contract"]["mutates_accounting"])
 
 
 if __name__ == "__main__":

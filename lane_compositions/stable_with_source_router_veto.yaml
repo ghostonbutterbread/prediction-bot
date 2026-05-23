@@ -1,0 +1,10 @@
+composition:
+  name: stable_with_source_router_veto
+  base_lane: control_stable
+  action_lane: control_stable
+  sizing_lane: control_stable
+  price_lane: control_stable
+  fallback_to_base: true
+  vetoes:
+    - lane: shadow_source_router
+      mode: require_agreement

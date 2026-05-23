@@ -150,6 +150,7 @@ def _format_source_scoreboard_readiness(payload: dict[str, object]) -> str:
 def _format_resolved_pnl(payload: dict[str, object]) -> str:
     blockers = payload.get("blocker_counts") if isinstance(payload.get("blocker_counts"), dict) else {}
     by_lane = payload.get("by_lane") if isinstance(payload.get("by_lane"), dict) else {}
+    source_router = payload.get("source_router") if isinstance(payload.get("source_router"), dict) else {}
     lane_summary = {
         str(lane): {
             "pnl": data.get("total_pnl_usd"),
@@ -172,6 +173,20 @@ def _format_resolved_pnl(payload: dict[str, object]) -> str:
             f"roi={payload.get('roi_pct')}%",
             f"blockers={json.dumps(blockers, sort_keys=True)}",
             f"by_lane={json.dumps(lane_summary, sort_keys=True)}",
+            "source_router="
+            + json.dumps(
+                {
+                    "raw_win_rate_pct": source_router.get("raw_router_win_rate_pct"),
+                    "correct_side_rows": source_router.get("raw_router_correct_side_rows"),
+                    "resolved_buy_rows": source_router.get("raw_router_resolved_buy_rows"),
+                    "standardized_stake": source_router.get("standardized_hypothetical_stake_usd"),
+                    "standardized_pnl": source_router.get("standardized_hypothetical_pnl_usd"),
+                    "standardized_roi_pct": source_router.get("standardized_hypothetical_roi_pct"),
+                    "actions": source_router.get("action_counts"),
+                    "blockers": source_router.get("blocker_counts"),
+                },
+                sort_keys=True,
+            ),
         ]
     )
 

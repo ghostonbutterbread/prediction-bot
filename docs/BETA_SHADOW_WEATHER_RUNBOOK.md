@@ -56,9 +56,10 @@ runtime profile:
 - Lane decisions: `data/beta_shadow/paper/source_scoreboard/paper_shadow_lane_decisions.jsonl`
 
 This profile is still recommendation-only and non-mutating. It keeps the
-established paper shadow lanes enabled, adds `shadow_source_scoreboard`, and
-records the scoreboard recommendation under provenance only. It does not change
-stable/control paper actions, wallet balances, accounting, or live behavior.
+established paper shadow lanes enabled, adds `shadow_source_scoreboard` and
+`shadow_source_router`, and records the scoreboard/router recommendations under
+provenance only. It does not change stable/control paper actions, wallet
+balances, accounting, or live behavior.
 It is not enabled in `config.yaml` or the current limited-shadow runtime
 profiles.
 
@@ -101,6 +102,15 @@ PAPER_MODE=true \
 SIMULATE_ONLY=true \
 PAPER_LOG_FILE=data/beta_shadow/paper/paper_loop.log \
 python3 paper_loop.py --config config.paper_beta_shadow_weather.yaml
+```
+
+Source-scoreboard/router collection profile:
+
+```bash
+PAPER_MODE=true \
+SIMULATE_ONLY=true \
+PAPER_LOG_FILE=data/beta_shadow/paper/source_scoreboard/source_router_shadow_loop.log \
+python3 paper_loop.py --config data/runtime_configs/paper_source_scoreboard_shadow_20260516.yaml
 ```
 
 Paper remains `trading.mode: paper`; no live config is involved. The command

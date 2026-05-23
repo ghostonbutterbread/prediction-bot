@@ -13,7 +13,7 @@ from bot.decision_pipeline import build_pre_execution_decision_artifact
 from bot.file_ops import load_jsonl
 from bot.market_router import DEFAULT_ALLOWED_MARKET_ROUTES
 from bot.paper_shadow_lanes import (
-    SOURCE_SCOREBOARD_LANE_ID,
+    SOURCE_COLLECTION_LANE_IDS,
     paper_shadow_lanes_enabled,
     requested_paper_shadow_lane_ids,
     write_paper_shadow_lane_decisions,
@@ -499,6 +499,11 @@ class Simulator:
                     continue
 
                 if signal is None:
+                    self._prepare_shadow_source_scoreboard_market_observation(
+                        market=market,
+                        order_book=order_book,
+                        inputs_by_shared_candidate_id=shadow_source_scoreboard_inputs,
+                    )
                     continue
 
                 if signal:
@@ -1337,7 +1342,138 @@ class Simulator:
             return False
         lane_cfg = self.config.get("paper_shadow_lanes") if isinstance(self.config.get("paper_shadow_lanes"), dict) else {}
         enabled_lanes = lane_cfg.get("enabled_lanes") or lane_cfg.get("lanes") or []
-        return SOURCE_SCOREBOARD_LANE_ID in set(requested_paper_shadow_lane_ids(enabled_lanes))
+        return bool(set(requested_paper_shadow_lane_ids(enabled_lanes)) & SOURCE_COLLECTION_LANE_IDS)
+
+    def _prepare_shadow_source_scoreboard_market_observation(
+        self,
+        *,
+        market: Any,
+        order_book: dict[str, Any],
+        inputs_by_shared_candidate_id: dict[str, dict[str, Any]],
+    ) -> None:
+        """Prepare a source-router observation for a market stable did not trade."""
+
+        if not self._shadow_source_scoreboard_enabled():
+            return
+        analyze_with_trace = getattr(self.strategy, "analyze_market_with_trace", None)
+        if not callable(analyze_with_trace):
+            return
+        try:
+            trace_signal, trace = analyze_with_trace(market, order_book)
+        except Exception as exc:
+            logger.debug("shadow_source_market_trace_failed market_id=%s error=%s", getattr(market, "id", ""), exc)
+            return
+        shadow_signal = self._shadow_signal_from_market_trace(market, order_book, trace, trace_signal=trace_signal)
+        if shadow_signal is None:
+            return
+        shadow_signal["_blocked"] = shadow_signal.get("skip_reason_code") or "stable_strategy_returned_none"
+        self._annotate_signal_shared_market_provenance(
+            shadow_signal,
+            None,
+            publish_metadata=None,
+        )
+        self._prepare_shadow_source_scoreboard_signal(
+            shadow_signal,
+            market=market,
+            order_book=order_book,
+            inputs_by_shared_candidate_id=inputs_by_shared_candidate_id,
+        )
+
+    def _shadow_signal_from_market_trace(
+        self,
+        market: Any,
+        order_book: dict[str, Any],
+        trace: Any,
+        *,
+        trace_signal: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        trace_dict = trace.to_dict() if hasattr(trace, "to_dict") else {}
+        raw_signals = trace_dict.get("raw_signals") if isinstance(trace_dict.get("raw_signals"), dict) else {}
+        accepted_signals = trace_dict.get("accepted_signals") if isinstance(trace_dict.get("accepted_signals"), dict) else {}
+        rejected_signals = trace_dict.get("rejected_signals") if isinstance(trace_dict.get("rejected_signals"), dict) else {}
+        live_signal = accepted_signals.get("live") or raw_signals.get("live") or rejected_signals.get("live")
+        if not isinstance(live_signal, dict) or live_signal.get("signal_type") != "weather":
+            return None
+
+        data = live_signal.get("data") if isinstance(live_signal.get("data"), dict) else {}
+        question = str(getattr(market, "question", "") or "")
+        question_side = data.get("question_side") or self._shadow_weather_question_side(question)
+        predicted_prob = self._coerce_float_or_none(live_signal.get("predicted_prob"))
+        if predicted_prob is None and isinstance(trace_signal, dict):
+            predicted_prob = self._coerce_float_or_none(trace_signal.get("model_probability"))
+        predicted_prob = predicted_prob if predicted_prob is not None else 0.5
+        confidence = self._coerce_float_or_none(live_signal.get("confidence"))
+        yes_price = self._coerce_float_or_none(order_book.get("best_yes_ask"))
+        if yes_price is None:
+            yes_price = self._coerce_float_or_none(getattr(market, "yes_price", None))
+        no_price = self._coerce_float_or_none(order_book.get("best_no_ask"))
+        if no_price is None:
+            no_price = self._coerce_float_or_none(getattr(market, "no_price", None))
+        direction = "BUY_YES" if predicted_prob >= 0.5 else "BUY_NO"
+        entry_price = yes_price if direction == "BUY_YES" else no_price
+        yes_edge = predicted_prob - yes_price if yes_price is not None else 0.0
+        no_edge = (1 - predicted_prob) - no_price if no_price is not None else 0.0
+        edge = yes_edge if direction == "BUY_YES" else no_edge
+
+        return {
+            "market_id": getattr(market, "id", ""),
+            "exchange": getattr(market, "exchange", "kalshi"),
+            "question": question,
+            "category": getattr(market, "category", ""),
+            "direction": direction,
+            "model_probability": round(float(predicted_prob), 4),
+            "market_price": entry_price,
+            "yes_market_price": yes_price,
+            "no_market_price": no_price,
+            "edge": round(float(edge or 0.0), 4),
+            "confidence": confidence if confidence is not None else 0.0,
+            "signals": {"live": predicted_prob},
+            "signal_details": {"live": dict(live_signal)},
+            "strategy_trace": trace_dict,
+            "skip_reason_code": trace_dict.get("skip_reason_code") or "stable_strategy_returned_none",
+            "city_id": data.get("city_id") or data.get("city"),
+            "market_kind": self._shadow_weather_market_kind(question),
+            "contract_shape": data.get("contract_shape") or self._shadow_weather_contract_shape(question_side),
+            "threshold": data.get("threshold"),
+            "threshold_low": data.get("threshold_low"),
+            "threshold_high": data.get("threshold_high"),
+            "question_side": question_side,
+            "source_details": data.get("source_details") if isinstance(data.get("source_details"), list) else None,
+            "station_id": data.get("station_id"),
+            "station_cli": data.get("station_cli"),
+            "source_agreement_score": data.get("agreement"),
+            "weather_confidence": live_signal.get("confidence"),
+            "weather_station_mapping": "exact" if data.get("station_id") else "inferred",
+        }
+
+    @staticmethod
+    def _shadow_weather_market_kind(question: str) -> str | None:
+        text = question.lower()
+        if any(token in text for token in ("low", "minimum", "min")):
+            return "low"
+        if any(token in text for token in ("high", "maximum", "max")):
+            return "high"
+        return None
+
+    @staticmethod
+    def _shadow_weather_question_side(question: str) -> str | None:
+        text = question.lower()
+        if any(token in text for token in ("above", "over", ">", "more than", "exceed")):
+            return "above"
+        if any(token in text for token in ("below", "under", "<", "less than")):
+            return "below"
+        if "-" in text and any(char.isdigit() for char in text):
+            return "range"
+        return None
+
+    @staticmethod
+    def _shadow_weather_contract_shape(question_side: Any) -> str | None:
+        normalized = str(question_side or "").strip().lower()
+        if normalized == "range":
+            return "range"
+        if normalized in {"above", "below"}:
+            return "tail"
+        return None
 
     def _prepare_shadow_source_scoreboard_signal(
         self,
