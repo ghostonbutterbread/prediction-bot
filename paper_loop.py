@@ -37,6 +37,7 @@ logger = logging.getLogger("paper-loop")
 from dotenv import load_dotenv
 
 from bot.config import ensure_mode_storage_dir, load_config
+from bot.resolution_feed import run_resolution_feed_once
 from bot.runner import PredictionBot
 from bot.simulator import Simulator
 from bot.dashboard import render_simple
@@ -381,6 +382,22 @@ def _log_blockers(scan_num: int, blocked_reasons: dict):
     logger.info("SCAN BLOCKERS scan=%s %s", scan_num, top)
 
 
+def _run_resolution_feed(config: dict, *, runner=run_resolution_feed_once):
+    try:
+        result = runner(config)
+    except Exception as exc:
+        logger.exception("resolution feed refresh failed: %s", exc)
+        return None
+    if getattr(result, "refreshed", False):
+        logger.info(
+            "resolution feed refreshed resolved=%s unresolved=%s errors=%s",
+            getattr(result, "resolved_market_count", None),
+            getattr(result, "unresolved_market_count", None),
+            getattr(result, "fetch_error_count", None),
+        )
+    return result
+
+
 def run(config_path: str | Path | None = None):
     config = get_config(config_path)
     mode = "PAPER (simulation)" if config["paper_mode"] else "LIVE (real orders)"
@@ -425,6 +442,8 @@ def run(config_path: str | Path | None = None):
             if cooldown_logged:
                 logger.info("Cooldown cleared; resuming scans")
                 cooldown_logged = False
+
+            _run_resolution_feed(config)
 
             if SIMULATE_ONLY:
                 # Run simulator scan — tracks trades, balance, P&L

@@ -1,0 +1,10 @@
+composition:
+  name: confidence_floor_with_source_router_veto
+  base_lane: shadow_confidence_floor
+  action_lane: shadow_confidence_floor
+  sizing_lane: shadow_confidence_floor
+  price_lane: shadow_confidence_floor
+  fallback_to_base: true
+  vetoes:
+    - lane: shadow_source_router
+      mode: require_agreement

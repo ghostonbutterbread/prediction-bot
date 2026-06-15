@@ -1,0 +1,21 @@
+composition:
+  name: range_nws_cap1
+  base_lane: control_stable
+  action_lane: shadow_source_router
+  sizing_lane: control_stable
+  price_lane: shadow_source_router
+  fallback_to_base: true
+  fixed_notional_usd: 10.0
+  gates:
+    - name: range_contract
+      field: contract_shape
+      op: eq
+      value: range
+    - name: nws_only
+      field: source_ids
+      op: eq
+      value: nws
+  exposure:
+    max_rows_per_market: 1
+    selector: latest
+    per_side: false

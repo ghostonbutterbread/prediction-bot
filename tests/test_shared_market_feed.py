@@ -94,6 +94,47 @@ class SharedMarketFeedTests(unittest.TestCase):
         self.assertEqual(first["decision"]["final_action"], "BUY_YES")
         json.dumps(first, sort_keys=True)
 
+    def test_shared_candidate_preserves_nested_weather_source_snapshot(self):
+        artifact = {
+            "final_action": "BUY_YES",
+            "final_reason_code": "approved",
+            "source_context": {
+                "data": {
+                    "weather_source_snapshot": {
+                        "mode": "recorded_as_of",
+                        "source_signal": {
+                            "data": {
+                                "source_details": [
+                                    {
+                                        "source_name": "nws",
+                                        "predicted_temp": 72,
+                                        "question_side": "above",
+                                    }
+                                ]
+                            }
+                        },
+                    }
+                }
+            },
+        }
+
+        row = build_shared_market_candidate_row(
+            run_id="run-1",
+            market=self._market(),
+            signal=self._signal(),
+            decision_artifact=artifact,
+            source_runtime="prediction_lab",
+            provenance="live_known_at_time",
+            observed_at="2026-05-06T12:00:01+00:00",
+            snapshot_as_of="2026-05-06T12:00:00+00:00",
+            snapshot_ttl_seconds=900,
+        )
+
+        self.assertIn("weather_source_snapshot", row["evidence"])
+        snapshot = row["evidence"]["weather_source_snapshot"]
+        self.assertEqual(snapshot["mode"], "recorded_as_of")
+        self.assertEqual(snapshot["source_signal"]["data"]["source_details"][0]["source_name"], "nws")
+
     def test_prediction_lab_snapshot_row_preserves_legacy_fields_and_embeds_shared_candidate(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             lab = PredictionLab(

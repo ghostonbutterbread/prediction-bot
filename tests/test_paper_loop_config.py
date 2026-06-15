@@ -9,6 +9,7 @@ import textwrap
 import unittest
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import dotenv
@@ -159,6 +160,24 @@ PAPER_SUMMARY_LOG_SECONDS=9
                 self.assertFalse(paper_loop.SIMULATE_ONLY)
                 self.assertEqual(paper_loop.SUMMARY_SCAN_INTERVAL, 8)
                 self.assertEqual(paper_loop.SUMMARY_LOG_SECONDS, 9)
+
+    def test_run_resolution_feed_uses_shared_runner(self):
+        paper_loop = import_paper_loop()
+        calls = []
+
+        def runner(config):
+            calls.append(config)
+            return SimpleNamespace(
+                refreshed=True,
+                resolved_market_count=3,
+                unresolved_market_count=1,
+                fetch_error_count=0,
+            )
+
+        result = paper_loop._run_resolution_feed({"resolution_feed": {"enabled": True}}, runner=runner)
+
+        self.assertTrue(result.refreshed)
+        self.assertEqual(calls, [{"resolution_feed": {"enabled": True}}])
 
     def test_get_config_loads_scan_limit_from_yaml(self):
         paper_loop = import_paper_loop()

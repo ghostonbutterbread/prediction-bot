@@ -104,6 +104,9 @@ def compose_lane_replay(
         if row is not None:
             composed_rows.append(row)
 
+    composed_rows, exposure_diagnostics = _apply_exposure_controls(composed_rows, composition)
+    diagnostics.update(exposure_diagnostics)
+
     resolved_rows = build_paper_shadow_lane_resolution_rows(
         lane_rows=composed_rows,
         resolution_rows=resolution_rows,
@@ -176,6 +179,18 @@ def _compose_candidate(
             "composition_price_lane": price_lane,
         }
     )
+    gate_context = _gate_context(
+        base_row=base_row,
+        action_row=action_row,
+        sizing_row=sizing_row,
+        price_row=price_row,
+        future_inputs=future_inputs,
+        action=action,
+        side=side,
+    )
+    failed_gate = _failed_gate_reason(gate_context, composition)
+    if failed_gate:
+        return None, failed_gate
 
     row = {
         "schema_name": "paper_shadow_lane_composition_decision",
@@ -205,6 +220,7 @@ def _compose_candidate(
                 "source_lane_ids": sorted(lane_map.keys()),
             },
             "future_pnl_inputs": {key: value for key, value in future_inputs.items() if value not in (None, "", {}, [])},
+            "gate_context": {key: value for key, value in gate_context.items() if value not in (None, "", {}, [])},
         },
         "mutation_contract": {
             "mutates_balance": False,
@@ -261,6 +277,8 @@ def _normalize_composition(config: Mapping[str, Any]) -> dict[str, Any]:
         "fallback_to_base": bool(raw.get("fallback_to_base", True)),
         "fixed_notional_usd": _number(raw.get("fixed_notional_usd")),
         "vetoes": list(raw.get("vetoes") or []),
+        "gates": list(raw.get("gates") or []),
+        "exposure": dict(raw.get("exposure") or {}),
         "variable_ownership": {
             "action": action_lane,
             "sizing": sizing_lane,
@@ -347,6 +365,170 @@ def _future_inputs(row: Mapping[str, Any] | None) -> dict[str, Any]:
         if future:
             return dict(future)
     return {}
+
+
+def _gate_context(
+    *,
+    base_row: Mapping[str, Any],
+    action_row: Mapping[str, Any],
+    sizing_row: Mapping[str, Any],
+    price_row: Mapping[str, Any],
+    future_inputs: Mapping[str, Any],
+    action: str,
+    side: str | None,
+) -> dict[str, Any]:
+    rows = [base_row, sizing_row, action_row, price_row]
+    router = _first_mapping(rows, ("provenance", "source_router"))
+    data_quality = router.get("data_quality") if isinstance(router.get("data_quality"), Mapping) else {}
+    sources_used = router.get("sources_used") if isinstance(router.get("sources_used"), list) else []
+    source_ids = sorted(
+        {
+            str(source.get("source_id") or "").strip()
+            for source in sources_used
+            if isinstance(source, Mapping) and str(source.get("source_id") or "").strip()
+        }
+    )
+    sample_counts = [
+        _number(source.get("sample_count"))
+        for source in sources_used
+        if isinstance(source, Mapping) and _number(source.get("sample_count")) is not None
+    ]
+    source_tiers = sorted(
+        {
+            str(source.get("tier") or "").strip()
+            for source in sources_used
+            if isinstance(source, Mapping) and str(source.get("tier") or "").strip()
+        }
+    )
+    return {
+        "action": action,
+        "side": side,
+        "market_id": _first_text(future_inputs.get("market_id"), _field(action_row, "market_id"), _field(base_row, "market_id")),
+        "shared_candidate_id": _first_text(future_inputs.get("shared_candidate_id"), _field(action_row, "shared_candidate_id"), _field(base_row, "shared_candidate_id")),
+        "observed_at": _first_text(future_inputs.get("observed_at"), _field(action_row, "observed_at"), _field(base_row, "observed_at")),
+        "contract_shape": _first_text(future_inputs.get("contract_shape")),
+        "market_kind": _first_text(future_inputs.get("market_kind")),
+        "question_side": _first_text(future_inputs.get("question_side")),
+        "source_ids": "+".join(source_ids) if source_ids else None,
+        "source_id_count": len(source_ids),
+        "source_grade": _first_text(future_inputs.get("source_router_source_grade"), router.get("source_grade")),
+        "source_direction": _first_text(future_inputs.get("source_router_source_direction"), router.get("source_direction")),
+        "agreement_state": _first_text(router.get("agreement_state")),
+        "source_confidence_score": _number(router.get("source_confidence_score")),
+        "source_observation_count": _number(data_quality.get("source_observation_count")),
+        "usable_forecast_count": _number(data_quality.get("usable_forecast_count")),
+        "min_sample_count_met": data_quality.get("min_sample_count_met") if isinstance(data_quality.get("min_sample_count_met"), bool) else None,
+        "known_at_time": data_quality.get("known_at_time") if isinstance(data_quality.get("known_at_time"), bool) else None,
+        "min_source_sample_count": min(sample_counts) if sample_counts else None,
+        "max_source_sample_count": max(sample_counts) if sample_counts else None,
+        "source_tiers": "+".join(source_tiers) if source_tiers else None,
+        "edge": _number(_field(action_row, "edge"), future_inputs.get("edge")),
+        "entry_price": _number(future_inputs.get("estimated_fill_price"), future_inputs.get("entry_price"), _field(action_row, "entry_price"), _field(action_row, "price")),
+    }
+
+
+def _first_mapping(rows: Iterable[Mapping[str, Any]], path: tuple[str, ...]) -> dict[str, Any]:
+    for row in rows:
+        value: Any = row
+        for key in path:
+            value = value.get(key) if isinstance(value, Mapping) else None
+        if isinstance(value, Mapping):
+            return dict(value)
+    return {}
+
+
+def _failed_gate_reason(gate_context: Mapping[str, Any], composition: Mapping[str, Any]) -> str | None:
+    for gate in composition.get("gates", []):
+        if not isinstance(gate, Mapping):
+            continue
+        name = str(gate.get("name") or gate.get("field") or "gate")
+        field = str(gate.get("field") or "")
+        op = str(gate.get("op") or "eq")
+        actual = gate_context.get(field)
+        expected = gate.get("value")
+        if not _gate_passes(actual, op=op, expected=expected):
+            return f"gate_failed:{name}"
+    return None
+
+
+def _gate_passes(actual: Any, *, op: str, expected: Any) -> bool:
+    if op in {"eq", "=="}:
+        return str(actual) == str(expected)
+    if op in {"ne", "!="}:
+        return str(actual) != str(expected)
+    if op == "in":
+        values = expected if isinstance(expected, list) else [expected]
+        return str(actual) in {str(value) for value in values}
+    if op == "not_in":
+        values = expected if isinstance(expected, list) else [expected]
+        return str(actual) not in {str(value) for value in values}
+    if op in {"gte", ">="}:
+        actual_number = _number(actual)
+        expected_number = _number(expected)
+        return actual_number is not None and expected_number is not None and actual_number >= expected_number
+    if op in {"gt", ">"}:
+        actual_number = _number(actual)
+        expected_number = _number(expected)
+        return actual_number is not None and expected_number is not None and actual_number > expected_number
+    if op in {"lte", "<="}:
+        actual_number = _number(actual)
+        expected_number = _number(expected)
+        return actual_number is not None and expected_number is not None and actual_number <= expected_number
+    if op in {"lt", "<"}:
+        actual_number = _number(actual)
+        expected_number = _number(expected)
+        return actual_number is not None and expected_number is not None and actual_number < expected_number
+    if op == "truthy":
+        return bool(actual)
+    if op == "falsey":
+        return not bool(actual)
+    raise ValueError(f"unknown composition gate op: {op}")
+
+
+def _apply_exposure_controls(
+    composed_rows: list[dict[str, Any]],
+    composition: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], Counter[str]]:
+    exposure = composition.get("exposure") if isinstance(composition.get("exposure"), Mapping) else {}
+    max_rows = _number(exposure.get("max_rows_per_market"))
+    if max_rows is None:
+        return composed_rows, Counter()
+    max_rows_i = int(max_rows)
+    if max_rows_i <= 0:
+        return [], Counter({"exposure_removed_all": len(composed_rows)})
+
+    per_side = bool(exposure.get("per_side", False))
+    selector = str(exposure.get("selector") or "latest")
+    groups: dict[tuple[str, str | None], list[dict[str, Any]]] = {}
+    for row in composed_rows:
+        market_id = str(row.get("market_id") or "")
+        side = str(row.get("side") or "") if per_side else None
+        if not market_id:
+            groups.setdefault((str(row.get("shared_candidate_id") or ""), side), []).append(row)
+        else:
+            groups.setdefault((market_id, side), []).append(row)
+
+    kept: list[dict[str, Any]] = []
+    removed = 0
+    for rows in groups.values():
+        selected = _select_exposure_rows(rows, max_rows=max_rows_i, selector=selector)
+        kept.extend(selected)
+        removed += max(0, len(rows) - len(selected))
+    return sorted(kept, key=lambda row: (_first_text(row.get("observed_at"), row.get("shared_candidate_id")) or "")), Counter({"exposure_dropped_rows": removed} if removed else {})
+
+
+def _select_exposure_rows(rows: list[dict[str, Any]], *, max_rows: int, selector: str) -> list[dict[str, Any]]:
+    def sort_key(row: Mapping[str, Any]) -> str:
+        return _first_text(row.get("observed_at"), row.get("shared_candidate_id")) or ""
+
+    ordered = sorted(rows, key=sort_key)
+    if selector == "earliest":
+        return ordered[:max_rows]
+    if selector == "latest":
+        return ordered[-max_rows:]
+    if selector == "highest_edge":
+        return sorted(rows, key=lambda row: _number(_mapping(_mapping(row.get("provenance")).get("gate_context")).get("edge")) or float("-inf"), reverse=True)[:max_rows]
+    raise ValueError(f"unknown exposure selector: {selector}")
 
 
 def _lane_id(row: Mapping[str, Any]) -> str | None:

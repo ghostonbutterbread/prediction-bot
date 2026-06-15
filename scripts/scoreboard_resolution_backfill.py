@@ -47,6 +47,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Also write unresolved market rows with null outcomes. Defaults to finalized outcomes only.",
     )
     parser.add_argument("--max-markets", type=int, default=None, help="Optional cap for smoke/backfill slices.")
+    parser.add_argument(
+        "--max-fetch-attempts",
+        type=int,
+        default=3,
+        help="Maximum attempts for retryable Kalshi fetch failures such as HTTP 429.",
+    )
+    parser.add_argument(
+        "--retry-delay-seconds",
+        type=float,
+        default=1.0,
+        help="Delay between retry passes when Kalshi does not return Retry-After.",
+    )
     parser.add_argument("--format", choices=["text", "json"], default="text", help="Console output format.")
     return parser.parse_args(argv)
 
@@ -63,6 +75,8 @@ def main(argv: list[str] | None = None) -> int:
         report_path=report_path,
         include_unresolved=args.include_unresolved,
         max_markets=args.max_markets,
+        max_fetch_attempts=args.max_fetch_attempts,
+        retry_delay_seconds=args.retry_delay_seconds,
     )
     if args.format == "json":
         print(json.dumps(result.report, indent=2, sort_keys=True))
@@ -102,7 +116,8 @@ def _format_report(report: dict[str, object]) -> str:
             f"written={report.get('resolution_rows_written', 0)} "
             f"resolved={report.get('resolved_market_count', 0)} "
             f"unresolved={report.get('unresolved_market_count', 0)} "
-            f"errors={report.get('fetch_error_count', 0)}",
+            f"errors={report.get('fetch_error_count', 0)} "
+            f"retries={report.get('retryable_fetch_error_count', 0)}",
             f"outcomes={json.dumps(report.get('by_outcome') or {}, sort_keys=True)}",
             f"statuses={json.dumps(report.get('by_status') or {}, sort_keys=True)}",
             f"output={report.get('output_path')}",

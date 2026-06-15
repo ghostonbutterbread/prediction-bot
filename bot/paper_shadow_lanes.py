@@ -459,6 +459,16 @@ def _source_reliability_decision(
             "reason": "Source reliability scoreboard is not configured for this shadow lane",
         }
         return baseline
+    if not Path(scoreboard_path).exists():
+        baseline["source_reliability"] = {
+            "available": False,
+            "reason_code": "source_reliability_scoreboard_missing",
+            "recommended_action": "SKIP",
+            "effect": "unavailable",
+            "reason": "Source reliability scoreboard file is not available for this shadow lane",
+            "scoreboard_path": scoreboard_path,
+        }
+        return baseline
 
     from bot.weather.source_reliability import (
         SourceReliabilityTable,
@@ -505,7 +515,7 @@ def _source_router_decision(
         candidate_row["predicted_outcome"] = "YES"
         candidate_row["source_router_candidate_outcome_default"] = "market_yes_event"
     scoreboard_path = _source_reliability_scoreboard_path(lane)
-    reliability_rows = load_scoreboard_rows(scoreboard_path) if scoreboard_path else None
+    reliability_rows = load_scoreboard_rows(scoreboard_path) if scoreboard_path and Path(scoreboard_path).exists() else None
     confidence_row = build_source_confidence_row(candidate_row, reliability_table=reliability_rows)
     source_direction = _optional_text(confidence_row.get("source_direction"))
     action = _action_from_source_direction(source_direction)
@@ -519,6 +529,24 @@ def _source_router_decision(
         reason = "Source router shadow lane selected the source-implied market side"
         requested = _source_router_notional(lane, baseline)
         approved = requested
+        min_edge = _number(lane.parameters.get("min_edge")) or 0.0
+        if min_edge > 0:
+            edge = _compute_source_router_edge(signal, action)
+            if edge is None:
+                action = "SKIP"
+                reason_code = "source_router_edge_unavailable"
+                reason = "Source router selected a side but edge could not be computed"
+                requested = 0.0
+                approved = 0.0
+            elif edge < min_edge:
+                action = "SKIP"
+                reason_code = "source_router_insufficient_edge"
+                reason = (
+                    f"Source router selected {source_direction} but edge "
+                    f"{edge:.4f} < minimum {min_edge:.4f}"
+                )
+                requested = 0.0
+                approved = 0.0
     return {
         "source_row": source_row,
         "action": action,
@@ -2106,6 +2134,39 @@ def _source_router_notional(lane: _LaneDefinition, baseline: Mapping[str, Any]) 
     if baseline_size is not None and baseline_size > 0:
         return float(baseline_size)
     return 10.0
+
+
+def _compute_source_router_edge(
+    signal: Mapping[str, Any],
+    action: str,
+) -> float | None:
+    """Compute the expected-value edge for a source-router trade.
+
+    Returns the edge in decimal (e.g., 0.05 = 5% edge over market).
+    Returns None when required data is missing.
+    """
+    model_prob = _number(signal.get("model_probability"))
+    if model_prob is None:
+        return None
+    if action == "BUY_YES":
+        price = _number(
+            signal.get("best_yes_ask"),
+            signal.get("market_price"),
+        )
+        if price is None:
+            return None
+        return model_prob - price
+    # BUY_NO
+    price = _number(
+        signal.get("best_no_ask"),
+    )
+    if price is None:
+        # Fallback: approximate NO price from YES midpoint
+        mp = _number(signal.get("market_price"))
+        if mp is None:
+            return None
+        price = 1.0 - mp
+    return (1.0 - model_prob) - price
 
 
 def _side_specific_price(future_pnl_inputs: Mapping[str, Any], side: str | None) -> float | None:

@@ -115,6 +115,11 @@ strategy:
   weather_observation_log_path: data/weather_observations.jsonl
   weather_observation_cooldown_seconds: 21600
 kalshi_fee_rate: 0.07
+kalshi:
+  rate_limit:
+    account_tier: shared-runtime-throttle
+    reads_per_second: 1.0
+    writes_per_second: 2.0
 trading:
   mode: paper
   enabled: true

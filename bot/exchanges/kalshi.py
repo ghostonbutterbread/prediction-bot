@@ -35,6 +35,10 @@ class KalshiExchange(BaseExchange):
         self._allowed_market_routes: set[str] = set(DEFAULT_ALLOWED_MARKET_ROUTES)
         self._account_tier = os.getenv("KALSHI_ACCOUNT_TIER", "basic")
         self._throttle = RequestThrottle(RateLimitProfile.from_account_tier(self._account_tier))
+        self._rate_limit_config: dict[str, object] = {}
+
+    def set_rate_limit_config(self, config: dict[str, object] | None) -> None:
+        self._rate_limit_config = dict(config or {})
 
     def set_allowed_market_groups(self, groups: list[str] | set[str] | tuple[str, ...] | None):
         normalized = {str(group).strip().lower() for group in (groups or []) if str(group).strip()}
@@ -57,6 +61,12 @@ class KalshiExchange(BaseExchange):
             self._throttle.update_profile(RateLimitProfile.from_values(reads, writes, tier))
             return
 
+        config_profile = self._configured_rate_limit_profile()
+        if config_profile is not None:
+            self._account_tier = config_profile.account_tier
+            self._throttle.update_profile(config_profile)
+            return
+
         profile = self._fetch_account_limit_profile()
         if profile is not None:
             self._account_tier = profile.account_tier
@@ -66,6 +76,15 @@ class KalshiExchange(BaseExchange):
         tier = self._fetch_account_tier() or self._account_tier
         self._account_tier = tier
         self._throttle.update_profile(RateLimitProfile.from_account_tier(tier))
+
+    def _configured_rate_limit_profile(self) -> RateLimitProfile | None:
+        cfg = self._rate_limit_config if isinstance(self._rate_limit_config, dict) else {}
+        reads = cfg.get("reads_per_second")
+        writes = cfg.get("writes_per_second")
+        if reads in (None, "") and writes in (None, ""):
+            return None
+        tier = str(cfg.get("account_tier") or "config").strip().lower()
+        return RateLimitProfile.from_values(float(reads or 20), float(writes or 10), tier)
 
     def _fetch_account_tier(self) -> str | None:
         env_tier = os.getenv("KALSHI_ACCOUNT_TIER")

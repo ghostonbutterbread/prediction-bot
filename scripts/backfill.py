@@ -97,6 +97,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Resolution backfills: optional cap for smoke/backfill slices. Overrides --limit.",
     )
     parser.add_argument(
+        "--max-fetch-attempts",
+        type=int,
+        default=3,
+        help="Resolution backfills: maximum attempts for retryable Kalshi fetch failures such as HTTP 429.",
+    )
+    parser.add_argument(
+        "--retry-delay-seconds",
+        type=float,
+        default=1.0,
+        help="Resolution backfills: delay between retry passes when Kalshi does not return Retry-After.",
+    )
+    parser.add_argument(
         "--min-sample-count",
         type=int,
         default=5,
@@ -191,6 +203,8 @@ def _run_scoreboard_resolutions(args: argparse.Namespace) -> int:
         report_path=report_path,
         include_unresolved=args.include_unresolved,
         max_markets=args.max_markets if args.max_markets is not None else args.limit,
+        max_fetch_attempts=args.max_fetch_attempts,
+        retry_delay_seconds=args.retry_delay_seconds,
     )
     if args.format == "json":
         print(json.dumps(result.report, indent=2, sort_keys=True))
@@ -365,7 +379,8 @@ def _format_scoreboard_resolution_report(report: dict[str, object], *, lane: str
             f"written={report.get('resolution_rows_written', 0)} "
             f"resolved={report.get('resolved_market_count', 0)} "
             f"unresolved={report.get('unresolved_market_count', 0)} "
-            f"errors={report.get('fetch_error_count', 0)}",
+            f"errors={report.get('fetch_error_count', 0)} "
+            f"retries={report.get('retryable_fetch_error_count', 0)}",
             f"outcomes={json.dumps(report.get('by_outcome') or {}, sort_keys=True)}",
             f"statuses={json.dumps(report.get('by_status') or {}, sort_keys=True)}",
             f"output={report.get('output_path')}",

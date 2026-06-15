@@ -143,6 +143,10 @@ class PredictionBot:
         from bot.exchanges.kalshi import KalshiExchange
 
         exchange = KalshiExchange(api_key_id, private_key_path, demo)
+        kalshi_cfg = self.config.get("kalshi", {}) if isinstance(self.config.get("kalshi"), dict) else {}
+        rate_limit_cfg = kalshi_cfg.get("rate_limit") if isinstance(kalshi_cfg.get("rate_limit"), dict) else None
+        if rate_limit_cfg:
+            exchange.set_rate_limit_config(rate_limit_cfg)
         self.exchanges["kalshi"] = exchange
         return exchange
 

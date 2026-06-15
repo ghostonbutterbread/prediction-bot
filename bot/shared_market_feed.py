@@ -815,6 +815,11 @@ def _build_evidence(
         for key in ("source_snapshots", "weather_source_snapshot", "pre_logic_order_book_snapshot", "post_logic_order_book_snapshot"):
             if key in decision_artifact:
                 evidence[key] = decision_artifact.get(key)
+        source_context = decision_artifact.get("source_context") if isinstance(decision_artifact.get("source_context"), dict) else {}
+        source_data = source_context.get("data") if isinstance(source_context.get("data"), dict) else {}
+        weather_snapshot = source_data.get("weather_source_snapshot")
+        if isinstance(weather_snapshot, dict) and "weather_source_snapshot" not in evidence:
+            evidence["weather_source_snapshot"] = weather_snapshot
     return evidence
 
 
