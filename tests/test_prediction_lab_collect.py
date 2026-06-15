@@ -299,6 +299,42 @@ class PredictionLabCollectorTests(unittest.TestCase):
             self.assertTrue(config["prediction_lab"]["paused"])
             self.assertFalse(config["prediction_lab"]["observer_mode"])
 
+    def test_collector_runs_resolution_feed_runner_each_cycle(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            config_path = tmp_path / "config.yaml"
+            self._write_config(config_path, data_dir=tmp_path, paused=False)
+            config_path.write_text(
+                config_path.read_text(encoding="utf-8")
+                .replace("  continue_collecting: true", "  continue_collecting: false")
+                + "\nresolution_feed:\n  enabled: true\n  decision_ledger_path: /tmp/decisions.jsonl\n"
+            )
+            calls = []
+
+            def resolution_runner(config, *, now=None):
+                calls.append((config, now))
+                return SimpleNamespace(
+                    refreshed=True,
+                    resolved_market_count=1,
+                    unresolved_market_count=2,
+                    fetch_error_count=0,
+                )
+
+            daemon = PredictionLabCollectorDaemon(
+                config_path,
+                config_loader=load_config,
+                exchange_builder=lambda config, demo=False: (_FakeBot(), SimpleNamespace(name="kalshi")),
+                resolution_feed_runner=resolution_runner,
+                sleep_fn=lambda seconds: None,
+                monotonic_fn=lambda: 0.0,
+            )
+
+            status = daemon.run(max_cycles=1, idle_sleep_seconds=0)
+
+        self.assertEqual(status.exit_reason, "max_cycles")
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0][0]["resolution_feed"]["enabled"])
+
     def test_observer_patch_refreshes_runtime_paths_after_env_trading_mode_override(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "shadow.yaml"

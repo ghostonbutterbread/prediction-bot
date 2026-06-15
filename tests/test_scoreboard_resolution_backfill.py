@@ -15,6 +15,13 @@ from bot.scoreboard_resolution_backfill import (
 ROOT = Path(__file__).resolve().parent.parent
 
 
+class FakeHttpError(Exception):
+    def __init__(self, code: int, retry_after: str | None = None):
+        super().__init__(f"HTTP Error {code}")
+        self.code = code
+        self.headers = {"Retry-After": retry_after} if retry_after is not None else {}
+
+
 class ScoreboardResolutionBackfillTests(unittest.TestCase):
     def _write_jsonl(self, path: Path, rows: list[dict]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -93,6 +100,66 @@ class ScoreboardResolutionBackfillTests(unittest.TestCase):
         self.assertEqual(result.report["markets_requested"], 2)
         self.assertEqual(result.report["resolution_rows_written"], 1)
         self.assertEqual(result.report["unresolved_market_count"], 1)
+
+    def test_backfill_retries_429_before_marking_fetch_error(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_path = Path(tmpdir) / "lane.jsonl"
+            output_path = Path(tmpdir) / "out.jsonl"
+            self._write_jsonl(input_path, [{"market_id": "KXHIGHSEA-26MAY17-T70"}])
+            calls = []
+            sleeps = []
+
+            def fetch(market_id: str):
+                calls.append(market_id)
+                if len(calls) == 1:
+                    raise FakeHttpError(429, retry_after="0.25")
+                return {
+                    "ticker": market_id,
+                    "status": "finalized",
+                    "result": "yes",
+                    "settlement_value_dollars": "1.0000",
+                }
+
+            result = backfill_scoreboard_resolutions(
+                [input_path],
+                output_path=output_path,
+                fetch_market=fetch,
+                fetched_at="2026-05-20T00:00:00+00:00",
+                sleep_fn=sleeps.append,
+            )
+            rows = load_jsonl(output_path)
+
+        self.assertEqual(calls, ["KXHIGHSEA-26MAY17-T70", "KXHIGHSEA-26MAY17-T70"])
+        self.assertEqual(sleeps, [0.25])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["resolution"]["outcome"], "YES")
+        self.assertEqual(result.report["fetch_error_count"], 0)
+        self.assertEqual(result.report["retryable_fetch_error_count"], 1)
+
+    def test_backfill_reports_429_after_retry_budget_is_exhausted(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_path = Path(tmpdir) / "lane.jsonl"
+            output_path = Path(tmpdir) / "out.jsonl"
+            self._write_jsonl(input_path, [{"market_id": "KXHIGHSEA-26MAY17-T70"}])
+            sleeps = []
+
+            result = backfill_scoreboard_resolutions(
+                [input_path],
+                output_path=output_path,
+                fetch_market=lambda market_id: (_ for _ in ()).throw(FakeHttpError(429)),
+                fetched_at="2026-05-20T00:00:00+00:00",
+                max_fetch_attempts=2,
+                retry_delay_seconds=0,
+                sleep_fn=sleeps.append,
+            )
+            rows = load_jsonl(output_path)
+
+        self.assertEqual(rows, [])
+        self.assertEqual(sleeps, [])
+        self.assertEqual(result.report["fetch_error_count"], 1)
+        self.assertEqual(result.report["fetch_error_samples"][0]["attempts"], 2)
+        self.assertEqual(result.report["fetch_error_samples"][0]["retryable"], True)
+        self.assertEqual(result.report["retryable_fetch_error_count"], 1)
 
     def test_include_unresolved_writes_null_outcome_rows(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -8,3 +8,4 @@ enabled: false
 description: Shared-candidate-fed source-router lane that records independent source-implied BUY_YES/BUY_NO/SKIP decisions with future-PnL provenance only.
 parameters:
   hypothetical_notional_usd: 10.0
+  min_edge: 0.03

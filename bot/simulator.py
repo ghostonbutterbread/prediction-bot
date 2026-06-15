@@ -1,6 +1,7 @@
 """Simulation engine — paper trades with full audit trail."""
 
 import logging
+import json
 from collections import Counter
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -10,9 +11,11 @@ from typing import Any, Optional
 
 from bot.config import ensure_mode_storage_dir
 from bot.decision_pipeline import build_pre_execution_decision_artifact
-from bot.file_ops import load_jsonl
+from bot.file_ops import atomic_write_json, load_jsonl, rewrite_jsonl
+from bot.paper_evaluator_input import load_shared_candidate_paper_inputs
 from bot.market_router import DEFAULT_ALLOWED_MARKET_ROUTES
 from bot.paper_shadow_lanes import (
+    PaperShadowLaneWriteResult,
     SOURCE_COLLECTION_LANE_IDS,
     paper_shadow_lanes_enabled,
     requested_paper_shadow_lane_ids,
@@ -848,6 +851,7 @@ class Simulator:
             snapshot.get("publisher_runtime") or (context.get("publisher") or {}).get("runtime_kind"),
             snapshot.get("publisher_instance_id") or (context.get("publisher") or {}).get("instance_id"),
         )
+        shadow_emit = self._emit_shadow_lanes_from_shared_market_snapshot(context)
         self.risk.record_blocked_scan({}, trades_taken=0)
         self._save_session()
         result = {
@@ -863,7 +867,194 @@ class Simulator:
                 "blocked_scan_count": self.risk.state.standby_blocked_scan_count,
             },
         }
+        if shadow_emit is not None:
+            result["shadow_lane_emission"] = shadow_emit
         return self._finish_paper_shared_market_result(result, context)
+
+    def _emit_shadow_lanes_from_shared_market_snapshot(self, context: dict[str, Any]) -> dict[str, Any] | None:
+        """Emit source shadow lane rows from the collector-owned shared data pool.
+
+        The normal paper direct-fetch path builds source-scoreboard/source-router
+        lane inputs while it loops over live markets. When another runtime owns
+        the shared market publisher lease, paper deliberately skips that fetch.
+        This method keeps the skip path non-mutating while still deriving the
+        same shadow lane rows from the collector's latest shared candidate rows.
+        """
+
+        if not self._shadow_source_scoreboard_enabled():
+            return None
+        snapshot = dict(context.get("latest_snapshot") or {})
+        snapshot_id = self._safe_path_token(snapshot.get("snapshot_id"))
+        if not snapshot_id:
+            return {"status": "skipped", "reason_code": "missing_snapshot_id", "rows_written": 0}
+        marker_path = self.data_dir / "source_scoreboard" / "shared_market_shadow_emissions.json"
+        previous = self._read_json_object(marker_path)
+        if previous.get("last_snapshot_id") == snapshot_id:
+            return {"status": "skipped", "reason_code": "snapshot_already_emitted", "rows_written": 0, "snapshot_id": snapshot_id}
+
+        source_path = self._shared_market_snapshot_candidate_source_path(snapshot)
+        if source_path is None or not source_path.exists():
+            return {
+                "status": "skipped",
+                "reason_code": "missing_shared_candidate_source",
+                "rows_written": 0,
+                "snapshot_id": snapshot_id,
+                "source_path": str(source_path) if source_path is not None else None,
+            }
+
+        requested_count = int(snapshot.get("candidate_count") or snapshot.get("market_count") or 0)
+        tail_limit = max(1, requested_count) if requested_count > 0 else self._shared_market_snapshot_tail_limit()
+        recent_rows = self._load_recent_jsonl_rows(source_path, tail_limit)
+        snapshot_rows = self._rows_for_shared_snapshot(recent_rows, snapshot_id=snapshot_id)
+        if not snapshot_rows:
+            return {
+                "status": "skipped",
+                "reason_code": "no_rows_for_snapshot",
+                "rows_written": 0,
+                "snapshot_id": snapshot_id,
+                "source_path": str(source_path),
+                "tail_rows_loaded": len(recent_rows),
+            }
+
+        candidate_dataset_path = self._shared_market_shadow_candidate_dataset_path(snapshot_id)
+        rewrite_jsonl(candidate_dataset_path, snapshot_rows)
+        try:
+            load_result = load_shared_candidate_paper_inputs(
+                candidate_dataset_path,
+                config=self.config,
+                data_dir=self.data_dir,
+                wallet_ids=(STABLE_PAPER_WALLET_ID,),
+                session_id=self.session_id,
+            )
+            lane_write_result = self._safe_write_shadow_source_scoreboard_lane_decisions(
+                load_result.inputs_by_shared_candidate_id,
+                candidate_dataset_path=load_result.candidate_dataset_path,
+            )
+        except Exception as exc:
+            logger.warning("failed to emit shared-market shadow lane rows snapshot_id=%s: %s", snapshot_id, exc)
+            return {
+                "status": "error",
+                "reason_code": "shadow_lane_emit_failed",
+                "rows_written": 0,
+                "snapshot_id": snapshot_id,
+                "source_path": str(source_path),
+                "candidate_dataset_path": str(candidate_dataset_path),
+                "error": str(exc),
+            }
+        if lane_write_result is None:
+            return {
+                "status": "error",
+                "reason_code": "shadow_lane_write_failed",
+                "rows_written": 0,
+                "snapshot_id": snapshot_id,
+                "source_path": str(source_path),
+                "candidate_dataset_path": str(candidate_dataset_path),
+            }
+
+        rows_written = lane_write_result.rows_written
+        atomic_write_json(
+            marker_path,
+            {
+                "last_snapshot_id": snapshot_id,
+                "emitted_at": datetime.now(timezone.utc).isoformat(),
+                "source_path": str(source_path),
+                "candidate_dataset_path": str(candidate_dataset_path),
+                "accepted_candidate_count": load_result.accepted_candidate_count,
+                "rows_written": rows_written,
+            },
+        )
+        return {
+            "status": "emitted",
+            "reason_code": "shared_snapshot_shadow_lanes_emitted",
+            "snapshot_id": snapshot_id,
+            "source_path": str(source_path),
+            "candidate_dataset_path": str(candidate_dataset_path),
+            "loaded_rows": load_result.loaded_row_count,
+            "accepted_candidate_count": load_result.accepted_candidate_count,
+            "skipped_rows": len(load_result.skipped_rows),
+            "rows_written": rows_written,
+        }
+
+    def _shared_market_snapshot_candidate_source_path(self, snapshot: dict[str, Any]) -> Path | None:
+        for key in ("candidate_dataset_path", "source_path", "market_snapshots_path"):
+            value = snapshot.get(key)
+            if value not in (None, ""):
+                return Path(str(value))
+        prediction_lab_cfg = self.config.get("prediction_lab") if isinstance(self.config.get("prediction_lab"), dict) else {}
+        configured = prediction_lab_cfg.get("market_snapshots_path") or prediction_lab_cfg.get("candidate_dataset_path")
+        if configured not in (None, ""):
+            return Path(str(configured))
+        return self.data_dir / "prediction_lab" / "market_snapshots.jsonl"
+
+    def _shared_market_shadow_candidate_dataset_path(self, snapshot_id: str) -> Path:
+        return self.data_dir.parent / "source_scoreboard_inputs" / f"shared_market_{snapshot_id}.jsonl"
+
+    def _shared_market_snapshot_tail_limit(self) -> int:
+        prediction_lab_cfg = self.config.get("prediction_lab") if isinstance(self.config.get("prediction_lab"), dict) else {}
+        scan_cfg = self.config.get("scan") if isinstance(self.config.get("scan"), dict) else {}
+        value = prediction_lab_cfg.get("max_markets_per_run") or scan_cfg.get("markets_per_exchange") or 1000
+        try:
+            return max(1, int(value))
+        except (TypeError, ValueError):
+            return 1000
+
+    @staticmethod
+    def _rows_for_shared_snapshot(rows: list[dict[str, Any]], *, snapshot_id: str) -> list[dict[str, Any]]:
+        if not snapshot_id:
+            return list(rows)
+        matched = []
+        for row in rows:
+            shared = row.get("shared_candidate") if isinstance(row.get("shared_candidate"), dict) else {}
+            row_run_id = row.get("run_id") or shared.get("run_id") or row.get("snapshot_id") or shared.get("snapshot_id")
+            if str(row_run_id or "") == snapshot_id:
+                matched.append(row)
+        return matched or list(rows)
+
+    @staticmethod
+    def _load_recent_jsonl_rows(path: Path, limit: int) -> list[dict[str, Any]]:
+        if limit <= 0 or not path.exists():
+            return []
+        chunk_size = 1024 * 1024
+        with path.open("rb") as fh:
+            fh.seek(0, 2)
+            position = fh.tell()
+            data = b""
+            lines: list[bytes] = []
+            while position > 0 and len(lines) <= limit:
+                read_size = min(chunk_size, position)
+                position -= read_size
+                fh.seek(position)
+                data = fh.read(read_size) + data
+                lines = data.splitlines()
+                if len(lines) > limit:
+                    break
+        rows: list[dict[str, Any]] = []
+        for raw in lines[-limit:]:
+            if not raw.strip():
+                continue
+            try:
+                row = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if isinstance(row, dict):
+                rows.append(row)
+        return rows
+
+    @staticmethod
+    def _safe_path_token(value: Any) -> str | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        safe = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in text)
+        return safe[:160] if safe else None
+
+    @staticmethod
+    def _read_json_object(path: Path) -> dict[str, Any]:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
 
     def _record_paper_shared_market_snapshot_metadata(
         self,
@@ -1599,7 +1790,9 @@ class Simulator:
     def _safe_write_shadow_source_scoreboard_lane_decisions(
         self,
         inputs_by_shared_candidate_id: dict[str, dict[str, Any]],
-    ) -> None:
+        *,
+        candidate_dataset_path: str | Path | None = None,
+    ) -> PaperShadowLaneWriteResult | None:
         """Append source-scoreboard lane rows for the current paper scan.
 
         This synthesizes stable wallet decision rows from already-evaluated paper
@@ -1608,17 +1801,28 @@ class Simulator:
         """
 
         if not inputs_by_shared_candidate_id or not self._shadow_source_scoreboard_enabled():
-            return
+            return None
         try:
-            candidate_dataset_path = str(self.data_dir / "source_scoreboard" / f"paper_loop_scan_{self.scan_count}.jsonl")
+            candidate_dataset_path = str(
+                candidate_dataset_path or self.data_dir / "source_scoreboard" / f"paper_loop_scan_{self.scan_count}.jsonl"
+            )
             stable_rows: list[dict[str, Any]] = []
             for shared_candidate_id, wallet_inputs in inputs_by_shared_candidate_id.items():
                 candidate_input = wallet_inputs.get(STABLE_PAPER_WALLET_ID)
                 signal = dict(getattr(candidate_input, "signal", {}) or {})
+                shared_candidate = getattr(candidate_input, "shared_candidate", {}) if candidate_input is not None else {}
+                shared_decision = self._stable_shadow_source_decision(shared_candidate)
                 gate_reason = signal.get("_blocked") or self._shadow_source_scoreboard_gate_reason(signal)
-                action = str(signal.get("direction") or "SKIP").upper() if gate_reason is None else "SKIP"
+                action = str(shared_decision.get("action") or signal.get("direction") or "SKIP").upper()
+                if not shared_decision and gate_reason is not None:
+                    action = "SKIP"
                 if action not in {"BUY_YES", "BUY_NO"}:
                     action = "SKIP"
+                position_size = self._coerce_float_or_none(
+                    shared_decision.get("approved_position_size_usd")
+                    or shared_decision.get("position_size_usd")
+                    or shared_decision.get("size")
+                )
                 stable_rows.append(
                     {
                         "shared_candidate_id": shared_candidate_id,
@@ -1631,15 +1835,15 @@ class Simulator:
                         "market_id": signal.get("market_id"),
                         "observed_at": signal.get("candidate_observed_at") or signal.get("observed_at"),
                         "action": action,
-                        "reason_code": gate_reason or "approved",
-                        "reason": gate_reason or "Stable paper signal passed pre-trade gates",
+                        "reason_code": shared_decision.get("reason_code") or gate_reason or "approved",
+                        "reason": shared_decision.get("reason") or gate_reason or "Stable paper signal passed pre-trade gates",
                         "confidence": signal.get("confidence"),
                         "edge": signal.get("edge"),
                         "model_probability": signal.get("model_probability"),
                         "entry_price": signal.get("market_price") or signal.get("entry_price"),
                         "price": signal.get("market_price") or signal.get("entry_price"),
-                        "requested_position_size_usd": 0.0,
-                        "approved_position_size_usd": 0.0,
+                        "requested_position_size_usd": position_size if position_size is not None else 0.0,
+                        "approved_position_size_usd": position_size if position_size is not None else 0.0,
                     }
                 )
             result = write_paper_shadow_lane_decisions(
@@ -1656,8 +1860,25 @@ class Simulator:
                 result.rows_written,
                 ",".join(result.lane_ids),
             )
+            return result
         except Exception as exc:
             logger.warning("failed to write paper shadow source-scoreboard lane rows: %s", exc)
+            return None
+
+    @staticmethod
+    def _stable_shadow_source_decision(shared_candidate: Any) -> dict[str, Any]:
+        if not isinstance(shared_candidate, dict):
+            return {}
+        for key in ("normal_decision", "main_decision"):
+            decision = shared_candidate.get(key)
+            if not isinstance(decision, dict):
+                continue
+            action = str(decision.get("action") or decision.get("direction") or "").upper()
+            if action in {"BUY_YES", "BUY_NO", "SKIP"}:
+                copied = dict(decision)
+                copied["action"] = action
+                return copied
+        return {}
 
     def _safe_append_agent_run(self) -> None:
         if self.runtime_mode != "paper":

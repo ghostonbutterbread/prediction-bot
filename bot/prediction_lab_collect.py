@@ -12,6 +12,7 @@ from typing import Any, Callable
 from bot.config import ensure_mode_storage_dir, get_runtime_mode, load_config
 from bot.prediction_lab import PredictionLab
 from bot.prediction_lab_support import build_prediction_lab_exchange
+from bot.resolution_feed import run_resolution_feed_once
 from bot.shared_market_runtime import SharedMarketRuntimeManager, build_shared_market_snapshot_metadata
 
 logger = logging.getLogger(__name__)
@@ -37,6 +38,7 @@ class PredictionLabCollectorDaemon:
         verbose: bool = False,
         config_loader: Callable[[str | Path], dict[str, Any]] = load_config,
         exchange_builder: Callable[..., tuple[Any, Any]] = build_prediction_lab_exchange,
+        resolution_feed_runner: Callable[..., Any] = run_resolution_feed_once,
         sleep_fn: Callable[[float], None] = time.sleep,
         monotonic_fn: Callable[[], float] = time.monotonic,
         config_patch: dict[str, Any] | None = None,
@@ -46,6 +48,7 @@ class PredictionLabCollectorDaemon:
         self.verbose = verbose
         self.config_loader = config_loader
         self.exchange_builder = exchange_builder
+        self.resolution_feed_runner = resolution_feed_runner
         self.sleep_fn = sleep_fn
         self.monotonic_fn = monotonic_fn
         self.config_patch = deepcopy(config_patch) if config_patch else None
@@ -354,6 +357,18 @@ class PredictionLabCollectorDaemon:
                             logger.info('collector: resolve pass finished cycle=%s result=%s', cycle, resolve_result)
                         lab = PredictionLab(self._load_config())
                         open_prediction_count = int(lab.state.get("open_prediction_count") or 0)
+
+                    try:
+                        resolution_feed_result = self.resolution_feed_runner(config, now=wall_now)
+                        if self.verbose and getattr(resolution_feed_result, "refreshed", False):
+                            logger.info(
+                                "collector: resolution feed refreshed resolved=%s unresolved=%s errors=%s",
+                                getattr(resolution_feed_result, "resolved_market_count", None),
+                                getattr(resolution_feed_result, "unresolved_market_count", None),
+                                getattr(resolution_feed_result, "fetch_error_count", None),
+                            )
+                    except Exception as exc:
+                        logger.exception("collector: resolution feed refresh failed: %s", exc)
 
                     if paused:
                         if self.verbose:

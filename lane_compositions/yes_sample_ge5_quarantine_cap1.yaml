@@ -1,0 +1,21 @@
+composition:
+  name: yes_sample_ge5_quarantine_cap1
+  base_lane: control_stable
+  action_lane: shadow_source_router
+  sizing_lane: control_stable
+  price_lane: shadow_source_router
+  fallback_to_base: true
+  fixed_notional_usd: 10.0
+  gates:
+    - name: buy_yes
+      field: side
+      op: eq
+      value: "YES"
+    - name: min_source_sample_ge5
+      field: min_source_sample_count
+      op: gte
+      value: 5
+  exposure:
+    max_rows_per_market: 1
+    selector: latest
+    per_side: false

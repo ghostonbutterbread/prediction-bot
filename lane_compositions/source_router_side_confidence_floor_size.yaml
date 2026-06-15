@@ -1,0 +1,7 @@
+composition:
+  name: source_router_side_confidence_floor_size
+  base_lane: shadow_confidence_floor
+  action_lane: shadow_source_router
+  sizing_lane: shadow_confidence_floor
+  price_lane: shadow_source_router
+  fallback_to_base: false

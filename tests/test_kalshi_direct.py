@@ -49,6 +49,24 @@ class KalshiDirectMarketTests(unittest.TestCase):
         exchange.set_allowed_market_groups(["weather"])
         return exchange
 
+    def test_configured_rate_limit_profile_overrides_account_limit_fetch(self):
+        exchange = self._exchange()
+        exchange.set_rate_limit_config(
+            {
+                "account_tier": "shared-runtime-throttle",
+                "reads_per_second": 4.0,
+                "writes_per_second": 2.0,
+            }
+        )
+
+        with patch.object(exchange, "_fetch_account_limit_profile") as fetch_limits:
+            exchange._refresh_rate_limit_profile()
+
+        fetch_limits.assert_not_called()
+        self.assertEqual(exchange._throttle.profile.account_tier, "shared-runtime-throttle")
+        self.assertEqual(exchange._throttle.profile.reads_per_second, 4.0)
+        self.assertEqual(exchange._throttle.profile.writes_per_second, 2.0)
+
     def test_get_markets_direct_queries_weather_series_before_generic_pagination(self):
         exchange = self._exchange()
         exchange._daily_series_tickers = ["KXHIGHNY", "KXBTC"]
