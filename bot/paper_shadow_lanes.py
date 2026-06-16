@@ -14,7 +14,7 @@ from bot.agent_decision_ledger import (
     build_agent_run_id,
     validate_agent_decision_row,
 )
-from bot.file_ops import append_jsonl, load_jsonl
+from bot.file_ops import append_jsonl, atomic_write_json, load_jsonl
 from bot.paper_wallets import BETA_PAPER_WALLET_ID, STABLE_PAPER_WALLET_ID
 from bot.weather.thresholds import extract_threshold_value, infer_question_side
 
@@ -23,6 +23,7 @@ PAPER_LANE_RUNTIME = "paper"
 PAPER_LANE_DECISION_ROLE = "paper_lane"
 PAPER_LANE_SCHEMA_VERSION = 1
 PAPER_LANE_RESOLUTION_SCHEMA_VERSION = 1
+PAPER_LANE_INCREMENTAL_PNL_SCHEMA_VERSION = 1
 DEFAULT_CONFIDENCE_FLOOR = 0.58
 DEFAULT_LANE_IDS = ("control_stable", "shadow_current_beta", "shadow_confidence_floor")
 PREMIUM_CITY_LANE_ID = "shadow_premium_city"
@@ -1240,6 +1241,128 @@ def summarize_paper_shadow_lane_resolved_pnl(
     return summarize_paper_shadow_lane_resolution_rows(joined_rows)
 
 
+def update_paper_shadow_lane_incremental_pnl(
+    *,
+    lane_decision_path: str | Path,
+    resolution_path: str | Path,
+    state_path: str | Path,
+    event_output_path: str | Path | None = None,
+    starting_balance_usd: float = 100.0,
+    sizing_mode: str = "recorded_notional",
+    balance_fraction: float = 0.1,
+    max_new_rows: int = 10000,
+    max_pending_rows: int = 50000,
+    reset: bool = False,
+) -> dict[str, Any]:
+    """Advance a derived, non-mutating PnL replay state for paper shadow lanes.
+
+    The state is a synthetic balance ledger for reporting. It never writes paper
+    wallet/accounting files and can be rerun with different `state_path` values to
+    compare starting balances or sizing assumptions.
+    """
+
+    lane_path = Path(lane_decision_path)
+    resolution_rows = load_jsonl(Path(resolution_path))
+    resolution_index = _resolution_index(resolution_rows, resolution_path=resolution_path)
+    state_file = Path(state_path)
+    state = {} if reset else _load_incremental_pnl_state(state_file)
+    file_size = lane_path.stat().st_size if lane_path.exists() else 0
+    cursor = int(state.get("cursor_offset") or 0)
+    if cursor > file_size:
+        cursor = 0
+
+    replay_config = {
+        "starting_balance_usd": round(float(starting_balance_usd), 4),
+        "sizing_mode": _incremental_sizing_mode(sizing_mode),
+        "balance_fraction": round(float(balance_fraction), 6),
+    }
+    lanes = _incremental_lanes(state.get("lanes"), starting_balance_usd=float(starting_balance_usd))
+    pending_rows = list(state.get("pending_rows") or [])
+    if not isinstance(pending_rows, list):
+        pending_rows = []
+
+    events: list[dict[str, Any]] = []
+    next_pending: list[dict[str, Any]] = []
+    applied = 0
+    resolved_pending = 0
+    still_pending = 0
+    blocker_rows = 0
+
+    for pending in pending_rows:
+        row = _mapping(pending.get("row"))
+        joined = _build_lane_resolution_row(row, resolution_index)
+        if joined.get("blocker") == "missing_resolution":
+            if len(next_pending) < max_pending_rows:
+                next_pending.append({"key": pending.get("key") or _incremental_row_key(row), "row": dict(row)})
+            still_pending += 1
+            continue
+        event = _apply_incremental_pnl_row(joined, lanes=lanes, replay_config=replay_config)
+        events.append(event)
+        applied += 1
+        resolved_pending += 1
+        if event.get("blocker"):
+            blocker_rows += 1
+
+    rows_read = 0
+    if lane_path.exists() and max_new_rows > 0:
+        with lane_path.open("r", encoding="utf-8") as handle:
+            handle.seek(cursor)
+            while rows_read < max_new_rows:
+                line = handle.readline()
+                if not line:
+                    break
+                rows_read += 1
+                try:
+                    raw_row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(raw_row, Mapping):
+                    continue
+                row = _compact_incremental_lane_row(raw_row)
+                joined = _build_lane_resolution_row(row, resolution_index)
+                if joined.get("blocker") == "missing_resolution":
+                    if len(next_pending) < max_pending_rows:
+                        next_pending.append({"key": _incremental_row_key(row), "row": row})
+                    still_pending += 1
+                    continue
+                event = _apply_incremental_pnl_row(joined, lanes=lanes, replay_config=replay_config)
+                events.append(event)
+                applied += 1
+                if event.get("blocker"):
+                    blocker_rows += 1
+            cursor = handle.tell()
+
+    event_path = Path(event_output_path) if event_output_path not in (None, "") else None
+    if event_path:
+        for event in events:
+            append_jsonl(event_path, event)
+
+    updated_state = {
+        "schema_name": "paper_shadow_lane_incremental_pnl_state",
+        "schema_version": PAPER_LANE_INCREMENTAL_PNL_SCHEMA_VERSION,
+        "non_mutating": True,
+        "lane_decision_path": str(lane_path),
+        "resolution_path": str(resolution_path),
+        "cursor_offset": cursor,
+        "cursor_file_size": file_size,
+        "replay_config": replay_config,
+        "lanes": _finalize_incremental_lanes(lanes),
+        "pending_rows": next_pending,
+        "pending_count": len(next_pending),
+        "last_run": {
+            "new_rows_read": rows_read,
+            "events_written": len(events),
+            "applied_rows": applied,
+            "resolved_pending_rows": resolved_pending,
+            "still_pending_rows": still_pending,
+            "blocker_rows": blocker_rows,
+        },
+        "summary": _incremental_summary(lanes),
+    }
+    atomic_write_json(state_file, updated_state, lock_path=state_file.with_suffix(state_file.suffix + ".lock"))
+    return updated_state
+
+
 def summarize_paper_shadow_lane_resolution_rows(
     rows: Iterable[Mapping[str, Any]],
 ) -> dict[str, Any]:
@@ -1338,6 +1461,254 @@ def _accumulate_paper_shadow_lane_resolution_row(
         target["total_stake_usd"] += stake_f
         target["total_payout_usd"] += payout
         target["total_pnl_usd"] += pnl_value
+
+
+def _load_incremental_pnl_state(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _incremental_sizing_mode(value: str) -> str:
+    mode = str(value or "recorded_notional").strip()
+    if mode not in {"recorded_notional", "balance_scaled", "balance_fraction"}:
+        raise ValueError(f"unsupported incremental PnL sizing mode: {mode}")
+    return mode
+
+
+def _incremental_lanes(raw_lanes: Any, *, starting_balance_usd: float) -> dict[str, dict[str, Any]]:
+    lanes: dict[str, dict[str, Any]] = {}
+    if isinstance(raw_lanes, Mapping):
+        for lane_id, raw in raw_lanes.items():
+            if not isinstance(raw, Mapping):
+                continue
+            lanes[str(lane_id)] = {
+                "starting_balance_usd": _money(raw.get("starting_balance_usd"), starting_balance_usd),
+                "balance_usd": _money(raw.get("balance_usd"), starting_balance_usd),
+                "total_pnl_usd": _money(raw.get("total_pnl_usd"), 0.0),
+                "total_stake_usd": _money(raw.get("total_stake_usd"), 0.0),
+                "total_payout_usd": _money(raw.get("total_payout_usd"), 0.0),
+                "applied_rows": int(raw.get("applied_rows") or 0),
+                "buy_rows": int(raw.get("buy_rows") or 0),
+                "skip_rows": int(raw.get("skip_rows") or 0),
+                "winning_buy_rows": int(raw.get("winning_buy_rows") or 0),
+                "losing_buy_rows": int(raw.get("losing_buy_rows") or 0),
+                "blocker_counts": dict(raw.get("blocker_counts") or {}),
+            }
+    return lanes
+
+
+def _compact_incremental_lane_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    provenance = _mapping(row.get("provenance"))
+    future_inputs = _row_future_pnl_inputs(row)
+    compact: dict[str, Any] = {
+        key: row.get(key)
+        for key in (
+            "decision_id",
+            "agent_run_id",
+            "run_id",
+            "policy",
+            "selected_lane",
+            "shared_candidate_id",
+            "market_id",
+            "observed_at",
+            "action",
+            "side",
+            "entry_price",
+            "price",
+            "requested_position_size_usd",
+            "approved_position_size_usd",
+        )
+        if row.get(key) not in (None, "")
+    }
+    compact["provenance"] = {"future_pnl_inputs": dict(future_inputs)}
+    if provenance.get("source_scoreboard"):
+        compact["provenance"]["source_scoreboard"] = {
+            "future_pnl_inputs": dict(future_inputs),
+            "recommended_action": future_inputs.get("recommended_action"),
+        }
+    if provenance.get("source_router"):
+        compact["provenance"]["source_router"] = {
+            "future_pnl_inputs": dict(future_inputs),
+            "recommended_action": future_inputs.get("recommended_action"),
+        }
+    return compact
+
+
+def _incremental_row_key(row: Mapping[str, Any]) -> str:
+    for key in ("decision_id", "shared_candidate_id"):
+        value = row.get(key)
+        if value not in (None, ""):
+            return str(value)
+    parts = [
+        _optional_text(row.get("run_id")) or "",
+        _lane_id_for_row(row) or "",
+        _optional_text(row.get("market_id"), _row_future_pnl_inputs(row).get("market_id")) or "",
+        _optional_text(row.get("observed_at"), _row_future_pnl_inputs(row).get("observed_at")) or "",
+    ]
+    return "|".join(parts)
+
+
+def _apply_incremental_pnl_row(
+    joined: Mapping[str, Any],
+    *,
+    lanes: dict[str, dict[str, Any]],
+    replay_config: Mapping[str, Any],
+) -> dict[str, Any]:
+    lane_id = str(joined.get("lane_id") or "unknown")
+    lane = lanes.setdefault(
+        lane_id,
+        {
+            "starting_balance_usd": float(replay_config.get("starting_balance_usd") or 100.0),
+            "balance_usd": float(replay_config.get("starting_balance_usd") or 100.0),
+            "total_pnl_usd": 0.0,
+            "total_stake_usd": 0.0,
+            "total_payout_usd": 0.0,
+            "applied_rows": 0,
+            "buy_rows": 0,
+            "skip_rows": 0,
+            "winning_buy_rows": 0,
+            "losing_buy_rows": 0,
+            "blocker_counts": {},
+        },
+    )
+    balance_before = float(lane.get("balance_usd") or 0.0)
+    blocker = _optional_text(joined.get("blocker"))
+    action = _action_label(joined.get("action"))
+    pnl = None if blocker else _incremental_row_pnl(joined, balance_before=balance_before, replay_config=replay_config)
+    pnl_usd = float(_mapping(pnl).get("pnl_usd") or 0.0)
+    stake_usd = float(_mapping(pnl).get("stake_usd") or 0.0)
+    payout_usd = float(_mapping(pnl).get("payout_usd") or 0.0)
+    balance_after = balance_before + pnl_usd
+
+    lane["applied_rows"] = int(lane.get("applied_rows") or 0) + 1
+    if blocker:
+        _add_blocker(lane.setdefault("blocker_counts", {}), blocker)
+    elif _is_skip_action(action):
+        lane["skip_rows"] = int(lane.get("skip_rows") or 0) + 1
+    elif _is_buy_action(action):
+        lane["buy_rows"] = int(lane.get("buy_rows") or 0) + 1
+        lane["winning_buy_rows" if bool(_mapping(pnl).get("won")) else "losing_buy_rows"] = (
+            int(lane.get("winning_buy_rows" if bool(_mapping(pnl).get("won")) else "losing_buy_rows") or 0) + 1
+        )
+    lane["balance_usd"] = round(balance_after, 4)
+    lane["total_pnl_usd"] = round(float(lane.get("total_pnl_usd") or 0.0) + pnl_usd, 4)
+    lane["total_stake_usd"] = round(float(lane.get("total_stake_usd") or 0.0) + stake_usd, 4)
+    lane["total_payout_usd"] = round(float(lane.get("total_payout_usd") or 0.0) + payout_usd, 4)
+
+    return {
+        "schema_name": "paper_shadow_lane_incremental_pnl_event",
+        "schema_version": PAPER_LANE_INCREMENTAL_PNL_SCHEMA_VERSION,
+        "non_mutating": True,
+        "lane_decision_id": joined.get("lane_decision_id"),
+        "run_id": joined.get("run_id"),
+        "lane_id": lane_id,
+        "shared_candidate_id": joined.get("shared_candidate_id"),
+        "market_id": joined.get("market_id"),
+        "observed_at": joined.get("observed_at"),
+        "action": action,
+        "side": joined.get("side"),
+        "resolution": joined.get("resolution"),
+        "blocker": blocker,
+        "sizing_mode": replay_config.get("sizing_mode"),
+        "balance_before_usd": round(balance_before, 4),
+        "balance_after_usd": round(balance_after, 4),
+        "pnl": pnl,
+    }
+
+
+def _incremental_row_pnl(
+    joined: Mapping[str, Any],
+    *,
+    balance_before: float,
+    replay_config: Mapping[str, Any],
+) -> dict[str, Any]:
+    action = _action_label(joined.get("action"))
+    if _is_skip_action(action):
+        return {"calculable": True, "stake_usd": 0.0, "contracts": 0.0, "payout_usd": 0.0, "pnl_usd": 0.0, "won": None}
+    fill_price = _number(joined.get("fill_price"))
+    side = _optional_text(joined.get("side"))
+    outcome = _optional_text(_mapping(joined.get("resolution")).get("outcome"))
+    recorded_stake = _number(joined.get("notional_usd"))
+    stake = _incremental_stake(
+        recorded_stake=recorded_stake,
+        balance_before=balance_before,
+        joined=joined,
+        replay_config=replay_config,
+    )
+    if fill_price is None or fill_price <= 0 or stake <= 0 or side not in {"YES", "NO"} or outcome not in {"YES", "NO"}:
+        return {"calculable": False, "stake_usd": round(stake, 4), "contracts": 0.0, "payout_usd": 0.0, "pnl_usd": 0.0, "won": None}
+    contracts = stake / fill_price
+    won = side == outcome
+    payout = contracts if won else 0.0
+    return {
+        "calculable": True,
+        "stake_usd": round(stake, 4),
+        "contracts": round(contracts, 4),
+        "payout_usd": round(payout, 4),
+        "pnl_usd": round(payout - stake, 4),
+        "won": won,
+    }
+
+
+def _incremental_stake(
+    *,
+    recorded_stake: float | None,
+    balance_before: float,
+    joined: Mapping[str, Any],
+    replay_config: Mapping[str, Any],
+) -> float:
+    mode = str(replay_config.get("sizing_mode") or "recorded_notional")
+    if mode == "balance_fraction":
+        fraction = max(0.0, float(replay_config.get("balance_fraction") or 0.0))
+        return round(max(0.0, balance_before) * fraction, 4)
+    if mode == "balance_scaled":
+        base_balance = _number(_mapping(joined.get("replay_sizing")).get("starting_balance_usd"), replay_config.get("starting_balance_usd")) or 0.0
+        if not recorded_stake or base_balance <= 0:
+            return 0.0
+        return round(max(0.0, float(recorded_stake) * (balance_before / base_balance)), 4)
+    return round(max(0.0, float(recorded_stake or 0.0)), 4)
+
+
+def _finalize_incremental_lanes(lanes: Mapping[str, Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {str(lane_id): _finalize_incremental_lane(lane) for lane_id, lane in sorted(lanes.items())}
+
+
+def _finalize_incremental_lane(lane: Mapping[str, Any]) -> dict[str, Any]:
+    stake = float(lane.get("total_stake_usd") or 0.0)
+    starting = float(lane.get("starting_balance_usd") or 0.0)
+    pnl = float(lane.get("total_pnl_usd") or 0.0)
+    return {
+        **dict(lane),
+        "starting_balance_usd": round(starting, 4),
+        "balance_usd": round(float(lane.get("balance_usd") or 0.0), 4),
+        "total_pnl_usd": round(pnl, 4),
+        "total_stake_usd": round(stake, 4),
+        "total_payout_usd": round(float(lane.get("total_payout_usd") or 0.0), 4),
+        "roi_pct": round((pnl / stake) * 100.0, 2) if stake else None,
+        "balance_return_pct": round((pnl / starting) * 100.0, 2) if starting else None,
+        "blocker_counts": {str(k): int(v) for k, v in sorted(_mapping(lane.get("blocker_counts")).items()) if int(v)},
+    }
+
+
+def _incremental_summary(lanes: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    finalized = _finalize_incremental_lanes(lanes)
+    return {
+        "lane_count": len(finalized),
+        "total_applied_rows": sum(int(lane.get("applied_rows") or 0) for lane in finalized.values()),
+        "total_buy_rows": sum(int(lane.get("buy_rows") or 0) for lane in finalized.values()),
+        "total_pnl_usd": round(sum(float(lane.get("total_pnl_usd") or 0.0) for lane in finalized.values()), 4),
+        "lanes": finalized,
+    }
+
+
+def _money(value: Any, default: float) -> float:
+    number = _number(value)
+    return round(float(default if number is None else number), 4)
 
 
 def build_paper_shadow_lane_resolution_rows(
@@ -2868,5 +3239,6 @@ __all__ = [
     "paper_shadow_lanes_enabled",
     "summarize_paper_shadow_lane_report",
     "summarize_paper_shadow_lane_resolved_pnl",
+    "update_paper_shadow_lane_incremental_pnl",
     "write_paper_shadow_lane_decisions",
 ]

@@ -19,6 +19,7 @@ from bot.paper_shadow_lanes import (
     paper_shadow_lanes_enabled,
     summarize_paper_shadow_lane_report,
     summarize_paper_shadow_lane_resolved_pnl,
+    update_paper_shadow_lane_incremental_pnl,
     write_paper_shadow_lane_decisions,
 )
 from bot.paper_wallet_runner import run_shared_candidate_paper_evaluation
@@ -2543,6 +2544,108 @@ parameters:
         self.assertEqual(report["total_pnl_usd"], 25.0)
         self.assertEqual(report["by_lane"]["shadow_source_scoreboard"]["total_pnl_usd"], 25.0)
         self.assertEqual(report["blocker_counts"], {})
+
+    def test_incremental_pnl_replay_advances_cursor_and_resolves_pending_rows(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            ledger_path = root / "lane_decisions.jsonl"
+            resolution_path = root / "resolutions.jsonl"
+            state_path = root / "state.json"
+            events_path = root / "events.jsonl"
+
+            append_jsonl(
+                ledger_path,
+                {
+                    "decision_id": "decision-win",
+                    "policy": "shadow_source_scoreboard",
+                    "shared_candidate_id": "candidate-win",
+                    "market_id": "KXWIN",
+                    "action": "BUY_YES",
+                    "approved_position_size_usd": 10.0,
+                    "provenance": {
+                        "future_pnl_inputs": {
+                            "shared_candidate_id": "candidate-win",
+                            "market_id": "KXWIN",
+                            "recommended_action": "BUY_YES",
+                            "side": "YES",
+                            "estimated_fill_price": 0.5,
+                            "starting_balance_usd": 100.0,
+                            "approved_position_size_usd": 10.0,
+                        }
+                    },
+                },
+            )
+            append_jsonl(
+                ledger_path,
+                {
+                    "decision_id": "decision-later",
+                    "policy": "shadow_source_scoreboard",
+                    "shared_candidate_id": "candidate-later",
+                    "market_id": "KXLATER",
+                    "action": "BUY_YES",
+                    "approved_position_size_usd": 10.0,
+                    "provenance": {
+                        "future_pnl_inputs": {
+                            "shared_candidate_id": "candidate-later",
+                            "market_id": "KXLATER",
+                            "recommended_action": "BUY_YES",
+                            "side": "YES",
+                            "estimated_fill_price": 0.5,
+                            "starting_balance_usd": 100.0,
+                            "approved_position_size_usd": 10.0,
+                        }
+                    },
+                },
+            )
+            append_jsonl(resolution_path, {"shared_candidate_id": "candidate-win", "market_id": "KXWIN", "outcome": "YES"})
+
+            state = update_paper_shadow_lane_incremental_pnl(
+                lane_decision_path=ledger_path,
+                resolution_path=resolution_path,
+                state_path=state_path,
+                event_output_path=events_path,
+                starting_balance_usd=100.0,
+                sizing_mode="balance_scaled",
+                max_new_rows=1,
+            )
+
+            lane = state["lanes"]["shadow_source_scoreboard"]
+            self.assertEqual(state["last_run"]["new_rows_read"], 1)
+            self.assertEqual(lane["balance_usd"], 110.0)
+            self.assertEqual(lane["total_pnl_usd"], 10.0)
+            self.assertEqual(state["pending_count"], 0)
+
+            state = update_paper_shadow_lane_incremental_pnl(
+                lane_decision_path=ledger_path,
+                resolution_path=resolution_path,
+                state_path=state_path,
+                event_output_path=events_path,
+                starting_balance_usd=100.0,
+                sizing_mode="balance_scaled",
+                max_new_rows=10,
+            )
+
+            self.assertEqual(state["pending_count"], 1)
+            self.assertEqual(state["lanes"]["shadow_source_scoreboard"]["balance_usd"], 110.0)
+
+            append_jsonl(resolution_path, {"shared_candidate_id": "candidate-later", "market_id": "KXLATER", "outcome": "NO"})
+            state = update_paper_shadow_lane_incremental_pnl(
+                lane_decision_path=ledger_path,
+                resolution_path=resolution_path,
+                state_path=state_path,
+                event_output_path=events_path,
+                starting_balance_usd=100.0,
+                sizing_mode="balance_scaled",
+                max_new_rows=0,
+            )
+
+            lane = state["lanes"]["shadow_source_scoreboard"]
+            self.assertEqual(state["last_run"]["resolved_pending_rows"], 1)
+            self.assertEqual(state["pending_count"], 0)
+            self.assertEqual(lane["total_stake_usd"], 21.0)
+            self.assertEqual(lane["total_pnl_usd"], -1.0)
+            self.assertEqual(lane["balance_usd"], 99.0)
+            self.assertEqual(len(load_jsonl(events_path)), 2)
 
     def test_source_router_resolved_pnl_reports_raw_win_rate_and_standardized_pnl(self):
         lane_rows = [
