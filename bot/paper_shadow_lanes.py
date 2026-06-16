@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+import json
 import re
 from typing import Any, Iterable, Mapping
 
@@ -1218,6 +1219,18 @@ def summarize_paper_shadow_lane_resolved_pnl(
     outcomes are known.
     """
 
+    if lane_rows is None and lane_decision_path not in (None, ""):
+        resolutions = (
+            [dict(row) for row in resolution_rows]
+            if resolution_rows is not None
+            else (load_jsonl(Path(resolution_path)) if resolution_path not in (None, "") else [])
+        )
+        resolution_index = _resolution_index(resolutions, resolution_path=resolution_path)
+        return _summarize_paper_shadow_lane_resolution_stream(
+            _iter_jsonl_mappings(Path(lane_decision_path or "")),
+            resolution_index=resolution_index,
+        )
+
     joined_rows = build_paper_shadow_lane_resolution_rows(
         lane_rows=lane_rows,
         lane_decision_path=lane_decision_path,
@@ -1238,50 +1251,93 @@ def summarize_paper_shadow_lane_resolution_rows(
     joined_rows = [dict(row) for row in rows]
 
     for joined in joined_rows:
-        lane_id = str(joined.get("lane_id") or "unknown")
-        bucket = by_lane.setdefault(lane_id, _empty_pnl_bucket())
-        _increment_pnl_bucket(totals, "evaluated_rows")
-        _increment_pnl_bucket(bucket, "evaluated_rows")
-
-        blocker = _optional_text(joined.get("blocker"))
-        resolution = _mapping(joined.get("resolution"))
-        if resolution.get("outcome") is not None:
-            _increment_pnl_bucket(totals, "resolved_rows")
-            _increment_pnl_bucket(bucket, "resolved_rows")
-        if blocker:
-            _add_blocker(blocker_counts, blocker)
-            _add_blocker(bucket["blocker_counts"], blocker)
-            continue
-
-        action = _action_label(joined.get("action"))
-        if _is_skip_action(action):
-            _increment_pnl_bucket(totals, "skip_rows")
-            _increment_pnl_bucket(bucket, "skip_rows")
-            _increment_pnl_bucket(totals, "pnl_calculable_rows")
-            _increment_pnl_bucket(bucket, "pnl_calculable_rows")
-            continue
-
-        pnl = _mapping(joined.get("pnl"))
-        stake_f = float(_number(pnl.get("stake_usd")) or 0.0)
-        payout = float(_number(pnl.get("payout_usd")) or 0.0)
-        pnl_value = float(_number(pnl.get("pnl_usd")) or 0.0)
-        won = bool(pnl.get("won"))
-
-        _increment_pnl_bucket(totals, "buy_rows")
-        _increment_pnl_bucket(bucket, "buy_rows")
-        _increment_pnl_bucket(totals, "pnl_calculable_rows")
-        _increment_pnl_bucket(bucket, "pnl_calculable_rows")
-        _increment_pnl_bucket(totals, "winning_buy_rows" if won else "losing_buy_rows")
-        _increment_pnl_bucket(bucket, "winning_buy_rows" if won else "losing_buy_rows")
-        for target in (totals, bucket):
-            target["total_stake_usd"] += stake_f
-            target["total_payout_usd"] += payout
-            target["total_pnl_usd"] += pnl_value
+        _accumulate_paper_shadow_lane_resolution_row(
+            joined,
+            totals=totals,
+            by_lane=by_lane,
+            blocker_counts=blocker_counts,
+        )
 
     source_router = _summarize_source_router_resolution_rows(joined_rows)
     return _finalize_pnl_bucket(
         {**totals, "by_lane": by_lane, "blocker_counts": blocker_counts, "source_router": source_router}
     )
+
+
+def _summarize_paper_shadow_lane_resolution_stream(
+    lane_rows: Iterable[Mapping[str, Any]],
+    *,
+    resolution_index: Mapping[str, Any],
+) -> dict[str, Any]:
+    totals = _empty_pnl_bucket()
+    by_lane: dict[str, dict[str, Any]] = {}
+    blocker_counts: dict[str, int] = {}
+
+    for row in lane_rows:
+        joined = _build_lane_resolution_row(row, resolution_index)
+        _accumulate_paper_shadow_lane_resolution_row(
+            joined,
+            totals=totals,
+            by_lane=by_lane,
+            blocker_counts=blocker_counts,
+        )
+
+    return _finalize_pnl_bucket(
+        {
+            **totals,
+            "by_lane": by_lane,
+            "blocker_counts": blocker_counts,
+            "source_router": _finalize_pnl_bucket(_empty_pnl_bucket()),
+        }
+    )
+
+
+def _accumulate_paper_shadow_lane_resolution_row(
+    joined: Mapping[str, Any],
+    *,
+    totals: dict[str, Any],
+    by_lane: dict[str, dict[str, Any]],
+    blocker_counts: dict[str, int],
+) -> None:
+    lane_id = str(joined.get("lane_id") or "unknown")
+    bucket = by_lane.setdefault(lane_id, _empty_pnl_bucket())
+    _increment_pnl_bucket(totals, "evaluated_rows")
+    _increment_pnl_bucket(bucket, "evaluated_rows")
+
+    blocker = _optional_text(joined.get("blocker"))
+    resolution = _mapping(joined.get("resolution"))
+    if resolution.get("outcome") is not None:
+        _increment_pnl_bucket(totals, "resolved_rows")
+        _increment_pnl_bucket(bucket, "resolved_rows")
+    if blocker:
+        _add_blocker(blocker_counts, blocker)
+        _add_blocker(bucket["blocker_counts"], blocker)
+        return
+
+    action = _action_label(joined.get("action"))
+    if _is_skip_action(action):
+        _increment_pnl_bucket(totals, "skip_rows")
+        _increment_pnl_bucket(bucket, "skip_rows")
+        _increment_pnl_bucket(totals, "pnl_calculable_rows")
+        _increment_pnl_bucket(bucket, "pnl_calculable_rows")
+        return
+
+    pnl = _mapping(joined.get("pnl"))
+    stake_f = float(_number(pnl.get("stake_usd")) or 0.0)
+    payout = float(_number(pnl.get("payout_usd")) or 0.0)
+    pnl_value = float(_number(pnl.get("pnl_usd")) or 0.0)
+    won = bool(pnl.get("won"))
+
+    _increment_pnl_bucket(totals, "buy_rows")
+    _increment_pnl_bucket(bucket, "buy_rows")
+    _increment_pnl_bucket(totals, "pnl_calculable_rows")
+    _increment_pnl_bucket(bucket, "pnl_calculable_rows")
+    _increment_pnl_bucket(totals, "winning_buy_rows" if won else "losing_buy_rows")
+    _increment_pnl_bucket(bucket, "winning_buy_rows" if won else "losing_buy_rows")
+    for target in (totals, bucket):
+        target["total_stake_usd"] += stake_f
+        target["total_payout_usd"] += payout
+        target["total_pnl_usd"] += pnl_value
 
 
 def build_paper_shadow_lane_resolution_rows(
@@ -1472,6 +1528,19 @@ def _resolution_index(
         "by_run_market": by_run_market,
         "by_market_id": by_market_id,
     }
+
+
+def _iter_jsonl_mappings(path: Path) -> Iterable[Mapping[str, Any]]:
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(row, Mapping):
+                yield row
 
 
 def _find_resolution(
