@@ -23,7 +23,7 @@ class PredictionLabMonitorTests(unittest.TestCase):
                     "  max_markets_per_run: 1000",
                     "  continue_collecting: true",
                     f"  collector_interval_seconds: {interval}",
-                    "  collection_storage_cap_gb: 25",
+                    "  collection_storage_cap_gb: 100",
                     "  groups: [weather]",
                     "trading:",
                     "  enabled: false",

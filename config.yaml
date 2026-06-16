@@ -225,7 +225,7 @@ prediction_lab:
   collector_fetch_mode: direct_markets
   collector_direct_page_size: 200
   collector_max_pages: 10
-  collection_storage_cap_gb: 25
+  collection_storage_cap_gb: 100
   collection_warning_threshold_pct: 90
   auto_pause_collection_on_storage_cap: true
   # Default audit/replay window: newest two available monthly shards.

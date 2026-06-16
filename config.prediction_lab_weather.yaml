@@ -25,7 +25,7 @@ prediction_lab:
   collector_record_market_snapshots: true
   collector_record_predictions: true
 
-  collection_storage_cap_gb: 5
+  collection_storage_cap_gb: 100
   collection_warning_threshold_pct: 90
   auto_pause_collection_on_storage_cap: true
 
