@@ -180,7 +180,7 @@ BUILTIN_OVERLAYS: dict[str, dict[str, Any]] = {
             "collector_max_pages": 10,
             "collector_record_market_snapshots": True,
             "collector_record_predictions": True,
-            "collection_storage_cap_gb": 25,
+            "collection_storage_cap_gb": 100,
             "collection_warning_threshold_pct": 90,
             "auto_pause_collection_on_storage_cap": True,
             "resolve_interval_seconds": 1800,

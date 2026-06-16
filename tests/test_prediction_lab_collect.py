@@ -2385,7 +2385,7 @@ class PredictionLabCollectorTests(unittest.TestCase):
             self.assertEqual(prediction_lab["mode"], "collector")
             self.assertEqual(prediction_lab["max_markets_per_run"], 1000)
             self.assertEqual(prediction_lab["collector_interval_seconds"], 900)
-            self.assertEqual(prediction_lab["collection_storage_cap_gb"], 25)
+            self.assertEqual(prediction_lab["collection_storage_cap_gb"], 100)
             self.assertEqual(prediction_lab["collector_fetch_mode"], "direct_markets")
             self.assertEqual(prediction_lab["hypothetical_notional_mode"], "fresh_kelly")
             self.assertEqual(prediction_lab["fresh_wallet_bankroll_usd"], 100.0)

@@ -222,7 +222,7 @@ def evaluate_health(
     expected_cfg = {
         "observer_mode": True,
         "max_markets_per_run": 1000,
-        "collection_storage_cap_gb": 25,
+        "collection_storage_cap_gb": 100,
     }
     for key, expected in expected_cfg.items():
         actual = lab_cfg.get(key)
