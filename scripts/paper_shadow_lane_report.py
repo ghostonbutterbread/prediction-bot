@@ -17,6 +17,7 @@ from bot.paper_shadow_lanes import (  # noqa: E402
     build_paper_shadow_lane_resolution_rows,
     summarize_paper_shadow_lane_report,
     summarize_paper_shadow_lane_resolved_pnl,
+    update_paper_shadow_lane_incremental_pnl,
 )
 
 
@@ -37,7 +38,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--section",
-        choices=["source_scoreboard_readiness", "resolved_pnl", "full"],
+        choices=["source_scoreboard_readiness", "resolved_pnl", "incremental_pnl", "full"],
         default="source_scoreboard_readiness",
         help="Which section of the report to print.",
     )
@@ -62,24 +63,66 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Optional path to write per-row resolved lane artifacts as JSONL. Must be under a derived-report directory.",
     )
+    parser.add_argument(
+        "--incremental-state",
+        default=None,
+        help="State path for incremental_pnl. Must be under a derived-report directory.",
+    )
+    parser.add_argument(
+        "--incremental-events-output",
+        default=None,
+        help="Optional JSONL event output for incremental_pnl. Must be under a derived-report directory.",
+    )
+    parser.add_argument("--starting-balance-usd", type=float, default=100.0)
+    parser.add_argument(
+        "--sizing-mode",
+        choices=["recorded_notional", "balance_scaled", "balance_fraction"],
+        default="recorded_notional",
+        help="How incremental replay sizes buys against the synthetic balance.",
+    )
+    parser.add_argument("--balance-fraction", type=float, default=0.1)
+    parser.add_argument("--max-new-rows", type=int, default=10000)
+    parser.add_argument("--max-pending-rows", type=int, default=50000)
+    parser.add_argument("--reset-incremental", action="store_true")
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     config = load_config(ROOT / args.config) if args.config else None
-    report = summarize_paper_shadow_lane_report(
-        lane_decision_path=ROOT / args.lane_decision_path,
-        config=config,
-    )
     if args.section == "full":
+        report = summarize_paper_shadow_lane_report(
+            lane_decision_path=ROOT / args.lane_decision_path,
+            config=config,
+        )
         payload = report
     elif args.section == "resolved_pnl":
         payload = summarize_paper_shadow_lane_resolved_pnl(
             lane_decision_path=ROOT / args.lane_decision_path,
             resolution_path=ROOT / args.resolution_path if args.resolution_path else None,
         )
+    elif args.section == "incremental_pnl":
+        if not args.resolution_path:
+            raise SystemExit("--resolution-path is required for incremental_pnl")
+        if not args.incremental_state:
+            raise SystemExit("--incremental-state is required for incremental_pnl")
+        payload = update_paper_shadow_lane_incremental_pnl(
+            lane_decision_path=ROOT / args.lane_decision_path,
+            resolution_path=ROOT / args.resolution_path,
+            state_path=_safe_derived_output_path(args.incremental_state),
+            event_output_path=_safe_derived_output_path(args.incremental_events_output) if args.incremental_events_output else None,
+            starting_balance_usd=args.starting_balance_usd,
+            sizing_mode=args.sizing_mode,
+            balance_fraction=args.balance_fraction,
+            max_new_rows=args.max_new_rows,
+            max_pending_rows=args.max_pending_rows,
+            reset=args.reset_incremental,
+        )
     else:
+        report = summarize_paper_shadow_lane_report(
+            lane_decision_path=ROOT / args.lane_decision_path,
+            config=config,
+        )
         payload = report["source_scoreboard_readiness"]
 
     if args.output:
@@ -103,6 +146,8 @@ def main(argv: list[str] | None = None) -> int:
     else:
         if args.section == "resolved_pnl":
             print(_format_resolved_pnl(payload))
+        elif args.section == "incremental_pnl":
+            print(_format_incremental_pnl(payload))
         else:
             print(_format_source_scoreboard_readiness(payload))
     return 0
@@ -187,6 +232,38 @@ def _format_resolved_pnl(payload: dict[str, object]) -> str:
                 },
                 sort_keys=True,
             ),
+        ]
+    )
+
+
+def _format_incremental_pnl(payload: dict[str, object]) -> str:
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    last_run = payload.get("last_run") if isinstance(payload.get("last_run"), dict) else {}
+    lanes = summary.get("lanes") if isinstance(summary.get("lanes"), dict) else {}
+    lane_summary = {
+        lane_id: {
+            "balance": lane.get("balance_usd"),
+            "pnl": lane.get("total_pnl_usd"),
+            "stake": lane.get("total_stake_usd"),
+            "roi_pct": lane.get("roi_pct"),
+            "balance_return_pct": lane.get("balance_return_pct"),
+            "buys": lane.get("buy_rows"),
+            "wins": lane.get("winning_buy_rows"),
+            "losses": lane.get("losing_buy_rows"),
+            "blockers": lane.get("blocker_counts"),
+        }
+        for lane_id, lane in lanes.items()
+        if isinstance(lane, dict)
+    }
+    return "\n".join(
+        [
+            "Incremental paper shadow lane PnL "
+            f"new_rows={last_run.get('new_rows_read', 0)} "
+            f"applied={last_run.get('applied_rows', 0)} "
+            f"pending={payload.get('pending_count', 0)} "
+            f"total_pnl=${summary.get('total_pnl_usd', 0)}",
+            f"cursor={payload.get('cursor_offset', 0)} / {payload.get('cursor_file_size', 0)}",
+            f"by_lane={json.dumps(lane_summary, sort_keys=True)}",
         ]
     )
 
