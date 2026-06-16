@@ -21,15 +21,25 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from bot.paper_shadow_lanes import paper_shadow_lanes_enabled, summarize_paper_shadow_lane_report  # noqa: E402
+from bot.paper_shadow_lanes import summarize_paper_shadow_lane_resolved_pnl  # noqa: E402
 from scripts import analyze as paper_analyze  # noqa: E402
 from scripts import prediction_lab_monitor as lab_monitor  # noqa: E402
 
 PAPER_LOOP_SCRIPT = "paper_loop.py"
 PREDICTION_LAB_COLLECT_SCRIPT = "prediction_lab_collect.py"
 DEFAULT_PREDICTION_LAB_CONFIG = "config.prediction_lab_weather_overnight.yaml"
+DEFAULT_SHADOW_CONFIG_PATHS = (
+    "data/runtime_configs/paper_source_router_shared_shadow_collect_only_20260614.yaml",
+    "data/runtime_configs/paper_source_router_shared_shadow_20260608.yaml",
+    "data/runtime_configs/paper_source_router_low_sample_shadow_20260522.yaml",
+    "data/runtime_configs/paper_source_scoreboard_shadow_20260516.yaml",
+)
+DEFAULT_RESOLUTION_PATH = "data/beta_shadow/resolutions/latest_resolutions.jsonl"
+DEFAULT_INLINE_PNL_MAX_BYTES = 200 * 1024 * 1024
 LIVE_MODE_NAME = "Live Trading"
 PAPER_MODE_NAME = "Paper Trading"
 COLLECTOR_MODE_NAME = "Prediction Lab Collector"
+SHADOW_ARTIFACT_MODE_NAME = "Paper Shadow Lane Artifacts"
 ALL_MODE_NAMES = (PAPER_MODE_NAME, COLLECTOR_MODE_NAME, LIVE_MODE_NAME)
 
 
@@ -246,6 +256,182 @@ def _paper_shadow_lane_status_from_processes(processes: list[dict[str, Any]]) ->
     return disabled_status
 
 
+def _repo_path(path_value: str | Path | None) -> Path | None:
+    if path_value in (None, ""):
+        return None
+    path = Path(str(path_value))
+    return path if path.is_absolute() else REPO_ROOT / path
+
+
+def _path_age_seconds(path: Path, *, now: datetime) -> float | None:
+    try:
+        return max(0.0, (now - datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)).total_seconds())
+    except OSError:
+        return None
+
+
+def _format_file_size(num_bytes: int) -> str:
+    if num_bytes >= 1024 ** 3:
+        return f"{num_bytes / (1024 ** 3):.2f} GB"
+    if num_bytes >= 1024 ** 2:
+        return f"{num_bytes / (1024 ** 2):.1f} MB"
+    if num_bytes >= 1024:
+        return f"{num_bytes / 1024:.1f} KB"
+    return f"{num_bytes} B"
+
+
+def _format_age(age_seconds: float | None) -> str:
+    if age_seconds is None:
+        return "unknown"
+    seconds = int(age_seconds)
+    if seconds < 120:
+        return f"{seconds}s"
+    minutes = seconds // 60
+    if minutes < 120:
+        return f"{minutes}m"
+    hours = minutes // 60
+    if hours < 72:
+        return f"{hours}h"
+    return f"{hours // 24}d"
+
+
+def _resolution_path_from_config(config: dict[str, Any]) -> Path | None:
+    feed = config.get("resolution_feed") if isinstance(config.get("resolution_feed"), dict) else {}
+    central_dir = feed.get("central_output_dir") or feed.get("canonical_output_dir")
+    if central_dir:
+        candidate = _repo_path(Path(str(central_dir)) / "latest_resolutions.jsonl")
+        if candidate and candidate.exists():
+            return candidate
+    candidate = _repo_path(DEFAULT_RESOLUTION_PATH)
+    if candidate and candidate.exists():
+        return candidate
+    return None
+
+
+def _enabled_lanes_from_config(config: dict[str, Any]) -> list[str]:
+    lane_config = config.get("paper_shadow_lanes") or config.get("paper_decision_lanes") or {}
+    lane_ids = lane_config.get("enabled_lanes") or []
+    if isinstance(lane_ids, str):
+        return [part.strip() for part in lane_ids.split(",") if part.strip()]
+    if isinstance(lane_ids, dict):
+        return [str(lane_id) for lane_id, enabled in lane_ids.items() if enabled]
+    return [str(lane_id) for lane_id in lane_ids if str(lane_id).strip()]
+
+
+def _lane_decision_path_from_config(config: dict[str, Any]) -> Path | None:
+    lane_config = config.get("paper_shadow_lanes") or config.get("paper_decision_lanes") or {}
+    raw_path = lane_config.get("decision_ledger_path") or lane_config.get("ledger_path")
+    if raw_path:
+        return _repo_path(raw_path)
+    data_dir = config.get("data_dir")
+    return _repo_path(Path(str(data_dir)) / "paper_shadow_lane_decisions.jsonl") if data_dir else None
+
+
+def _shadow_lane_artifact_statuses(
+    *,
+    config_paths: list[Path] | None = None,
+    now: datetime,
+    include_pnl: bool = True,
+    max_inline_pnl_bytes: int | None = None,
+) -> list[dict[str, Any]]:
+    statuses: list[dict[str, Any]] = []
+    if max_inline_pnl_bytes is None:
+        max_inline_pnl_bytes = int(os.environ.get("MORNING_LANE_PNL_MAX_BYTES") or DEFAULT_INLINE_PNL_MAX_BYTES)
+    candidates = config_paths or [REPO_ROOT / path for path in DEFAULT_SHADOW_CONFIG_PATHS]
+    seen_ledgers: set[Path] = set()
+    for config_path in candidates:
+        if not config_path.exists():
+            continue
+        try:
+            config = paper_analyze.load_config(config_path)
+        except Exception as exc:
+            statuses.append({"config_path": str(config_path), "error": str(exc)})
+            continue
+        if not paper_shadow_lanes_enabled(config):
+            continue
+        decision_path = _lane_decision_path_from_config(config)
+        if decision_path is None or decision_path in seen_ledgers:
+            continue
+        seen_ledgers.add(decision_path)
+        stat = None
+        try:
+            stat = decision_path.stat()
+        except OSError:
+            pass
+        status: dict[str, Any] = {
+            "config_path": str(config_path),
+            "enabled_lanes": _enabled_lanes_from_config(config),
+            "decision_path": str(decision_path),
+            "decision_exists": decision_path.exists(),
+            "decision_size_bytes": int(stat.st_size) if stat else 0,
+            "decision_age_seconds": _path_age_seconds(decision_path, now=now) if stat else None,
+        }
+        resolution_path = _resolution_path_from_config(config)
+        if resolution_path:
+            status["resolution_path"] = str(resolution_path)
+            status["resolution_age_seconds"] = _path_age_seconds(resolution_path, now=now)
+        if include_pnl and stat and resolution_path and int(stat.st_size) <= max_inline_pnl_bytes:
+            try:
+                status["resolved_pnl"] = summarize_paper_shadow_lane_resolved_pnl(
+                    lane_decision_path=decision_path,
+                    resolution_path=resolution_path,
+                )
+            except Exception as exc:
+                status["resolved_pnl_error"] = str(exc)
+        elif include_pnl and stat and resolution_path:
+            status["resolved_pnl_skipped"] = f"ledger larger than inline limit ({_format_file_size(max_inline_pnl_bytes)})"
+        statuses.append(status)
+    return statuses
+
+
+def _format_shadow_lane_artifact_statuses(statuses: list[dict[str, Any]]) -> str:
+    lines = ["🧪 **Paper Shadow Lane Artifacts**"]
+    if not statuses:
+        lines.append("• ⚪ No configured shadow lane artifacts found.")
+        return "\n".join(lines)
+    for status in statuses:
+        if status.get("error"):
+            lines.append(f"• ⚠️ Config error: {status.get('config_path')} — {status.get('error')}")
+            continue
+        lane_label = ", ".join(status.get("enabled_lanes") or []) or "enabled"
+        exists_label = "present" if status.get("decision_exists") else "missing"
+        lines.append(
+            "• "
+            f"{lane_label}: ledger {exists_label}, "
+            f"size={_format_file_size(int(status.get('decision_size_bytes') or 0))}, "
+            f"age={_format_age(status.get('decision_age_seconds'))}"
+        )
+        lines.append(f"  ledger={status.get('decision_path')}")
+        if status.get("resolution_path"):
+            lines.append(f"  resolutions={status.get('resolution_path')} age={_format_age(status.get('resolution_age_seconds'))}")
+        pnl = status.get("resolved_pnl") if isinstance(status.get("resolved_pnl"), dict) else None
+        if pnl:
+            lines.append(
+                "  PnL: "
+                f"resolved={pnl.get('resolved_rows', 0)} "
+                f"buys={pnl.get('buy_rows', 0)} "
+                f"stake=${pnl.get('total_stake_usd', 0)} "
+                f"pnl=${pnl.get('total_pnl_usd', 0)} "
+                f"roi={pnl.get('roi_pct')}%"
+            )
+            by_lane = pnl.get("by_lane") if isinstance(pnl.get("by_lane"), dict) else {}
+            for lane_id, lane_pnl in sorted(by_lane.items()):
+                if not isinstance(lane_pnl, dict):
+                    continue
+                lines.append(
+                    "  "
+                    f"{lane_id}: resolved={lane_pnl.get('resolved_rows', 0)} "
+                    f"buys={lane_pnl.get('buy_rows', 0)} "
+                    f"pnl=${lane_pnl.get('total_pnl_usd', 0)} "
+                    f"roi={lane_pnl.get('roi_pct')}%"
+                )
+        elif status.get("resolved_pnl_error"):
+            lines.append(f"  PnL unavailable: {status.get('resolved_pnl_error')}")
+        elif status.get("resolved_pnl_skipped"):
+            lines.append(f"  PnL not inlined: {status.get('resolved_pnl_skipped')}")
+    return "\n".join(lines)
+
+
 def format_paper_section(processes: list[dict[str, Any]], report: str | None, lane_status: dict[str, Any] | None = None) -> str:
     lines = [
         "📄 **Paper Trading**",
@@ -286,7 +472,7 @@ def format_prediction_lab_section(result: lab_monitor.MonitorResult) -> str:
     if processes:
         lines.append(f"• Process: active (PID(s): {_format_pids(processes)})")
     else:
-        lines.append("• Process: active")
+        lines.append("• Process: not matched for monitored config")
 
     if details.get("last_collect_age_seconds") is not None:
         lines.append(f"• Last collect age: {int(details['last_collect_age_seconds'])}s")
@@ -312,9 +498,13 @@ def build_report(
     cmdlines: list[tuple[int, list[str]]] | None = None,
     prediction_lab_config: Path | None = None,
     now: datetime | None = None,
+    include_shadow_artifacts: bool | None = None,
 ) -> str:
+    cmdlines_was_none = cmdlines is None
     if cmdlines is None:
         cmdlines = lab_monitor.read_proc_cmdlines()
+    if include_shadow_artifacts is None:
+        include_shadow_artifacts = cmdlines_was_none
     now = now or datetime.now(timezone.utc)
 
     paper_processes = find_script_processes(PAPER_LOOP_SCRIPT, cmdlines)
@@ -335,6 +525,11 @@ def build_report(
         lab_config = prediction_lab_config or _collector_config_from_processes(collector_processes)
         lab_result = lab_monitor.evaluate_health(lab_config, now=now, cmdlines=cmdlines)
         sections.append(format_prediction_lab_section(lab_result))
+
+    shadow_artifacts = _shadow_lane_artifact_statuses(now=now, include_pnl=True) if include_shadow_artifacts else []
+    if shadow_artifacts:
+        active_modes.append(SHADOW_ARTIFACT_MODE_NAME)
+        sections.append(_format_shadow_lane_artifact_statuses(shadow_artifacts))
 
     if live_processes:
         active_modes.append(LIVE_MODE_NAME)
@@ -363,9 +558,13 @@ def build_json(
     cmdlines: list[tuple[int, list[str]]] | None = None,
     prediction_lab_config: Path | None = None,
     now: datetime | None = None,
+    include_shadow_artifacts: bool | None = None,
 ) -> dict[str, Any]:
+    cmdlines_was_none = cmdlines is None
     if cmdlines is None:
         cmdlines = lab_monitor.read_proc_cmdlines()
+    if include_shadow_artifacts is None:
+        include_shadow_artifacts = cmdlines_was_none
     now = now or datetime.now(timezone.utc)
     paper_processes = find_script_processes(PAPER_LOOP_SCRIPT, cmdlines)
     collector_processes = find_script_processes(PREDICTION_LAB_COLLECT_SCRIPT, cmdlines)
@@ -374,6 +573,7 @@ def build_json(
     if collector_processes:
         lab_config = prediction_lab_config or _collector_config_from_processes(collector_processes)
         lab_result = lab_monitor.evaluate_health(lab_config, now=now, cmdlines=cmdlines)
+    shadow_artifacts = _shadow_lane_artifact_statuses(now=now, include_pnl=True) if include_shadow_artifacts else []
     return {
         "timestamp": now.isoformat(),
         "paper_trading_active": bool(paper_processes),
@@ -383,6 +583,8 @@ def build_json(
         "prediction_lab_processes": collector_processes,
         "live_trading_active": bool(live_processes),
         "live_processes": live_processes,
+        "paper_shadow_lane_artifacts_active": bool(shadow_artifacts),
+        "paper_shadow_lane_artifacts": shadow_artifacts,
         "prediction_lab_health": None
         if lab_result is None
         else {

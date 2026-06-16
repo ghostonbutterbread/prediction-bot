@@ -1,4 +1,6 @@
 import unittest
+import json
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -180,9 +182,66 @@ class MorningBotStatusReportTests(unittest.TestCase):
             )
 
         self.assertIn("**Prediction Lab Collector**", text)
-        self.assertIn("Process: active", text)
+        self.assertIn("Process: not matched for monitored config", text)
         self.assertNotIn("PID(s): 22", text)
         self.assertIn("collector_not_running: collector process is not running", text)
+
+    def test_build_report_includes_shadow_artifacts_without_paper_process(self):
+        now = datetime(2026, 6, 16, 17, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            ledger = root / "paper_shadow_lane_decisions.jsonl"
+            ledger.write_text(
+                json.dumps(
+                    {
+                        "policy": "shadow_test_lane",
+                        "selected_lane": "shadow_test_lane",
+                        "market_id": "KXTEST",
+                        "action": "BUY_YES",
+                        "side": "YES",
+                        "price": 0.25,
+                        "approved_position_size_usd": 10.0,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            resolution_dir = root / "resolutions"
+            resolution_dir.mkdir()
+            (resolution_dir / "latest_resolutions.jsonl").write_text(
+                json.dumps({"market_id": "KXTEST", "outcome": "YES"}) + "\n",
+                encoding="utf-8",
+            )
+            config = root / "shadow.yaml"
+            config.write_text(
+                "\n".join(
+                    [
+                        "paper_shadow_lanes:",
+                        "  enabled: true",
+                        "  enabled_lanes:",
+                        "    - shadow_test_lane",
+                        f"  decision_ledger_path: {ledger}",
+                        "resolution_feed:",
+                        f"  central_output_dir: {resolution_dir}",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            statuses = morning._shadow_lane_artifact_statuses(config_paths=[config], now=now, include_pnl=True)
+            with patch.object(morning, "_shadow_lane_artifact_statuses", return_value=statuses):
+                text = morning.build_report(
+                    cmdlines=[],
+                    now=now,
+                    include_shadow_artifacts=True,
+                )
+
+            section = morning._format_shadow_lane_artifact_statuses(statuses)
+
+        self.assertIn("Active modes: Paper Shadow Lane Artifacts", text)
+        self.assertIn("Paper Shadow Lane Artifacts", section)
+        self.assertIn("shadow_test_lane", section)
+        self.assertIn("PnL: resolved=1 buys=1 stake=$10.0 pnl=$30.0 roi=300.0%", section)
 
     def test_build_report_includes_only_active_live_section_and_inactive_others(self):
         now = datetime(2026, 4, 30, 15, 0, tzinfo=timezone.utc)
