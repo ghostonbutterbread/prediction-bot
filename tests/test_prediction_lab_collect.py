@@ -335,6 +335,45 @@ class PredictionLabCollectorTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertTrue(calls[0][0]["resolution_feed"]["enabled"])
 
+    def test_collector_successful_cycle_clears_stale_last_error(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            config_path = tmp_path / "config.yaml"
+            self._write_config(config_path, data_dir=tmp_path, paused=False)
+            state_path = PredictionLab(load_config(config_path)).state_path
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "mode": "collector",
+                        "run_state": "errored",
+                        "pause_reason": "none",
+                        "paused_reason": "none",
+                        "paused": False,
+                        "last_collect_at": datetime.now(timezone.utc).isoformat(),
+                        "last_resolve_at": datetime.now(timezone.utc).isoformat(),
+                        "last_error": "cannot record snapshot metadata without an active publisher lease",
+                        "open_prediction_count": 0,
+                        "observer_mode": True,
+                        "trading_enabled": False,
+                        "order_execution_enabled": False,
+                    }
+                )
+            )
+            daemon = PredictionLabCollectorDaemon(
+                config_path,
+                config_loader=load_config,
+                exchange_builder=lambda config, demo=False: (_FakeBot(), _DirectExchange()),
+                sleep_fn=lambda seconds: None,
+                monotonic_fn=lambda: 0.0,
+            )
+
+            status = daemon.run(max_cycles=1, idle_sleep_seconds=0)
+
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(status.exit_reason, "max_cycles")
+        self.assertIsNone(state["last_error"])
+
     def test_observer_patch_refreshes_runtime_paths_after_env_trading_mode_override(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "shadow.yaml"
@@ -559,6 +598,51 @@ class PredictionLabCollectorTests(unittest.TestCase):
             self.assertEqual(state["latest_snapshot"], latest)
             self.assertEqual(state["consumers"], {})
             self.assertIsNone(state["publisher"])
+
+    def test_collector_shared_runtime_reacquires_expired_lease_before_publish(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            runtime_root = tmp_path / "shared-runtime"
+            config = {
+                "prediction_lab": {
+                    "collector_interval_seconds": 900,
+                },
+                "shared_market": {
+                    "enabled": True,
+                    "runtime_root": str(runtime_root),
+                    "publisher_lease_timeout_seconds": 1,
+                },
+            }
+            manager = SharedMarketRuntimeManager(config=config)
+            start = datetime(2026, 5, 14, 12, 0, tzinfo=timezone.utc)
+            manager.attach(
+                runtime_kind="collector",
+                instance_id="collector-test",
+                can_publish=True,
+                can_consume=True,
+                desired_interval_seconds=900,
+                now=start,
+            )
+            manager.acquire_publisher_lease(
+                runtime_kind="collector",
+                instance_id="collector-test",
+                now=start,
+            )
+
+            daemon = PredictionLabCollectorDaemon(tmp_path / "config.yaml")
+            daemon._record_shared_market_snapshot_metadata(
+                manager=manager,
+                instance_id="collector-test",
+                lab=SimpleNamespace(state={"last_collect_at": "2026-05-14T12:00:00+00:00"}),
+                run_result=SimpleNamespace(run_id="run-after-long-collect", scanned_markets=7),
+                exchange=SimpleNamespace(name="kalshi"),
+                config=config,
+            )
+
+            latest = json.loads((runtime_root / "latest_snapshot.json").read_text())
+            self.assertEqual(latest["snapshot_id"], "run-after-long-collect")
+            self.assertEqual(latest["publisher_instance_id"], "collector-test")
+            self.assertEqual(latest["candidate_count"], 7)
 
     def test_collector_shared_runtime_skips_collect_when_other_publisher_owns_feed(self):
         with tempfile.TemporaryDirectory() as tmpdir:

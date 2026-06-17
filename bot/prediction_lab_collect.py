@@ -158,6 +158,26 @@ class PredictionLabCollectorDaemon:
             ttl_seconds=int(ttl_seconds) if ttl_seconds not in (None, "") else None,
             source_exchange=self._shared_market_source_exchange(exchange),
         )
+        manager.attach(
+            runtime_kind="collector",
+            instance_id=instance_id,
+            can_publish=True,
+            can_consume=True,
+            desired_interval_seconds=int(lab_cfg.get("collector_interval_seconds", 900) or 900),
+        )
+        state = manager.acquire_publisher_lease(
+            runtime_kind="collector",
+            instance_id=instance_id,
+        )
+        if not self._shared_market_publisher_is_self(
+            state,
+            runtime_kind="collector",
+            instance_id=instance_id,
+        ):
+            logger.warning(
+                "collector: shared market snapshot metadata skipped; publisher lease is no longer owned by this collector"
+            )
+            return
         manager.record_snapshot_metadata(metadata)
 
     @staticmethod
@@ -345,6 +365,7 @@ class PredictionLabCollectorDaemon:
                         active_group=lab.groups[0] if lab.groups else None,
                         experiment_id=lab.experiment_id,
                         strategy_version=lab.strategy_version,
+                        last_error=None,
                     )
 
                     if resolve_due and open_prediction_count > 0 and exchange is not None:
@@ -416,6 +437,7 @@ class PredictionLabCollectorDaemon:
                             storage_usage_gb=storage["gb"],
                             warning_emitted=bool(warning_emitted or storage["warning_threshold_reached"]),
                             seed_complete=lab.mode == "seed_and_watch",
+                            last_error=None,
                         )
                         if (
                             post_pause_reason != "none"
