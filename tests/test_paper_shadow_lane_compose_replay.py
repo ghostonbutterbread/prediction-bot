@@ -505,6 +505,90 @@ class PaperShadowLaneComposeReplayTests(unittest.TestCase):
         self.assertEqual(result["summary"]["diagnostics"]["exposure_dropped_rows"], 1)
         self.assertEqual(result["summary"]["pnl"]["winning_buy_rows"], 1)
 
+    def test_low_edge_composition_filters_router_edge_below_threshold(self):
+        low_edge = _source_router_row(
+            candidate_id="candidate-11",
+            market_id="KXCOMPOSE-11",
+            action="BUY_YES",
+            observed_at="2026-06-01T00:00:00+00:00",
+            yes_price=0.40,
+        )
+        low_edge["edge"] = 0.04
+        low_edge["provenance"]["future_pnl_inputs"]["edge"] = 0.04
+        high_edge = _source_router_row(
+            candidate_id="candidate-12",
+            market_id="KXCOMPOSE-12",
+            action="BUY_YES",
+            observed_at="2026-06-01T00:00:00+00:00",
+            yes_price=0.40,
+        )
+        high_edge["edge"] = 0.14
+        high_edge["provenance"]["future_pnl_inputs"]["edge"] = 0.14
+        lane_rows = [
+            _lane_row(
+                policy="control_stable",
+                candidate_id="candidate-11",
+                market_id="KXCOMPOSE-11",
+                action="BUY_YES",
+                size=5.0,
+                yes_price=0.50,
+            ),
+            low_edge,
+            _lane_row(
+                policy="control_stable",
+                candidate_id="candidate-12",
+                market_id="KXCOMPOSE-12",
+                action="BUY_YES",
+                size=5.0,
+                yes_price=0.50,
+            ),
+            high_edge,
+        ]
+
+        result = compose_lane_replay(
+            lane_rows=lane_rows,
+            resolution_rows=[
+                {"shared_candidate_id": "candidate-11", "market_id": "KXCOMPOSE-11", "outcome": "YES"},
+                {"shared_candidate_id": "candidate-12", "market_id": "KXCOMPOSE-12", "outcome": "YES"},
+            ],
+            config=_load_composition("source_router_low_edge_lt_010"),
+        )
+
+        self.assertEqual([row["shared_candidate_id"] for row in result["composition_rows"]], ["candidate-11"])
+        self.assertEqual(result["summary"]["diagnostics"]["composed_buy"], 1)
+        self.assertEqual(result["summary"]["diagnostics"]["gate_failed:low_edge_lt_010"], 1)
+        self.assertEqual(result["summary"]["pnl"]["winning_buy_rows"], 1)
+
+    def test_low_edge_composition_rejects_skip_rows_even_when_edge_is_low(self):
+        skip_row = _source_router_row(
+            candidate_id="candidate-13",
+            market_id="KXCOMPOSE-13",
+            action="SKIP",
+            observed_at="2026-06-01T00:00:00+00:00",
+        )
+        skip_row["edge"] = 0.04
+        skip_row["provenance"]["future_pnl_inputs"]["edge"] = 0.04
+        lane_rows = [
+            _lane_row(
+                policy="control_stable",
+                candidate_id="candidate-13",
+                market_id="KXCOMPOSE-13",
+                action="BUY_YES",
+                size=5.0,
+                yes_price=0.50,
+            ),
+            skip_row,
+        ]
+
+        result = compose_lane_replay(
+            lane_rows=lane_rows,
+            resolution_rows=[{"shared_candidate_id": "candidate-13", "market_id": "KXCOMPOSE-13", "outcome": "YES"}],
+            config=_load_composition("source_router_low_edge_lt_010"),
+        )
+
+        self.assertEqual(result["composition_rows"], [])
+        self.assertEqual(result["summary"]["diagnostics"], {"gate_failed:router_buy_action": 1})
+
 
 if __name__ == "__main__":
     unittest.main()
