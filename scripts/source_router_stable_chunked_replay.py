@@ -23,6 +23,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from bot.resolution_feed import run_resolution_feed_once  # noqa: E402
+from scripts.paper_shadow_lane_compose_replay import _load_config  # noqa: E402
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -95,7 +96,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
 
-    aggregate = _aggregate(summaries)
+    composition_name = _composition_name(_root_path(args.composition_config))
+    aggregate = _aggregate(summaries, composition_name=composition_name)
     (output_root / "aggregate_summary.json").write_text(json.dumps(aggregate, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     (output_root / "aggregate_report.md").write_text(_report(aggregate), encoding="utf-8")
     print(json.dumps(aggregate, indent=2, sort_keys=True))
@@ -182,14 +184,14 @@ def _refresh_resolution_path(args: argparse.Namespace, *, input_path: Path, outp
     return latest_resolution
 
 
-def _aggregate(summaries: list[Mapping[str, Any]]) -> dict[str, Any]:
+def _aggregate(summaries: list[Mapping[str, Any]], *, composition_name: str) -> dict[str, Any]:
     diagnostics: Counter[str] = Counter()
     blockers: Counter[str] = Counter()
     aggregate: dict[str, Any] = {
         "schema_name": "paper_shadow_lane_composition_chunked_aggregate",
         "schema_version": 1,
         "non_mutating": True,
-        "composition": "source_router_side_stable_size",
+        "composition": composition_name,
         "chunk_count": len(summaries),
         "candidate_groups": 0,
         "composed_rows": 0,
@@ -218,9 +220,10 @@ def _aggregate(summaries: list[Mapping[str, Any]]) -> dict[str, Any]:
 
 
 def _report(aggregate: Mapping[str, Any]) -> str:
+    composition_name = str(aggregate.get("composition") or "lane_composition")
     return "\n".join(
         [
-            "# source_router_side_stable_size Latest Chunked Replay",
+            f"# {composition_name} Latest Chunked Replay",
             "",
             f"chunks={aggregate['chunk_count']} candidates={aggregate['candidate_groups']} rows={aggregate['composed_rows']}",
             f"buys={aggregate['buy_rows']} skips={aggregate['skip_rows']} resolved={aggregate['resolved_rows']} calculable={aggregate['pnl_calculable_rows']}",
@@ -229,6 +232,12 @@ def _report(aggregate: Mapping[str, Any]) -> str:
             "",
         ]
     )
+
+
+def _composition_name(config_path: Path) -> str:
+    config = _load_config(config_path)
+    raw = config.get("composition") if isinstance(config.get("composition"), Mapping) else config
+    return str(raw.get("name") or config_path.stem)
 
 
 def _root_path(raw: str | Path) -> Path:
