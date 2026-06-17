@@ -1,0 +1,23 @@
+composition:
+  name: source_router_low_edge_lt_010
+  base_lane: control_stable
+  action_lane: shadow_source_router
+  sizing_lane: control_stable
+  price_lane: shadow_source_router
+  fallback_to_base: true
+  fixed_notional_usd: 10.0
+  gates:
+    - name: router_buy_action
+      field: action
+      op: in
+      value:
+        - BUY_YES
+        - BUY_NO
+    - name: low_edge_lt_010
+      field: edge
+      op: lt
+      value: 0.10
+  exposure:
+    max_rows_per_market: 1
+    selector: latest
+    per_side: false
