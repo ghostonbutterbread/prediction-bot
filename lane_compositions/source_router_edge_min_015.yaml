@@ -1,0 +1,17 @@
+composition:
+  name: source_router_edge_min_015
+  base_lane: control_stable
+  action_lane: shadow_source_router
+  sizing_lane: control_stable
+  price_lane: shadow_source_router
+  fallback_to_base: true
+  fixed_notional_usd: 10.0
+  gates:
+    - name: min_edge_015
+      field: edge
+      op: gte
+      value: 0.15
+  exposure:
+    max_rows_per_market: 1
+    selector: latest
+    per_side: false
