@@ -422,5 +422,13 @@ class SimulatorSharedMarketRuntimeTests(unittest.TestCase):
         self.assertIn("def publisher_snapshot_due_for(", source)
 
 
+    def test_shared_snapshot_row_selection_fails_closed_on_snapshot_id_mismatch(self):
+        rows = [{"run_id": "different-snapshot", "market_id": "KXMISMATCH-1"}]
+
+        selected = Simulator._rows_for_shared_snapshot(rows, snapshot_id="requested-snapshot")
+
+        self.assertEqual(selected, [])
+
+
 if __name__ == "__main__":
     unittest.main()

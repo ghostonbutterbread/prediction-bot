@@ -2936,5 +2936,30 @@ parameters:
         self.assertEqual(rows[0]["resolution"]["candidate_match_count"], 1)
 
 
+    def test_lane_resolution_requires_independent_resolution_not_future_outcome(self):
+        lane_rows = [
+            {
+                "policy": "shadow_source_scoreboard",
+                "market_id": "KXLEAK-1",
+                "action": "BUY_YES",
+                "approved_position_size_usd": 10.0,
+                "provenance": {
+                    "future_pnl_inputs": {
+                        "market_id": "KXLEAK-1",
+                        "side": "YES",
+                        "estimated_fill_price": 0.25,
+                        "actual_outcome": "YES",
+                    }
+                },
+            }
+        ]
+
+        rows = build_paper_shadow_lane_resolution_rows(lane_rows=lane_rows, resolution_rows=[])
+
+        self.assertEqual(rows[0]["blocker"], "missing_resolution")
+        self.assertFalse(rows[0]["resolution"]["matched"])
+        self.assertIsNone(rows[0]["pnl"])
+
+
 if __name__ == "__main__":
     unittest.main()

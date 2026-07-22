@@ -1750,7 +1750,7 @@ def _build_lane_resolution_row(
     )
     resolution = resolution_match.get("row") if isinstance(resolution_match.get("row"), Mapping) else None
     resolution_blocker = _optional_text(resolution_match.get("blocker"))
-    outcome = _normalized_resolution_outcome(resolution) or _normalized_resolution_outcome(future_inputs)
+    outcome = _normalized_resolution_outcome(resolution)
     action = _action_label(_optional_text(future_inputs.get("recommended_action"), row.get("action"), row.get("side")))
     side = _side_from_action(action) or _optional_text(future_inputs.get("side"))
     fill_price = _number(future_inputs.get("estimated_fill_price"), future_inputs.get("entry_price"), row.get("entry_price"), row.get("price"))
