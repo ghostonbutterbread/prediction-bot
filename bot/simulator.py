@@ -1008,7 +1008,7 @@ class Simulator:
             row_run_id = row.get("run_id") or shared.get("run_id") or row.get("snapshot_id") or shared.get("snapshot_id")
             if str(row_run_id or "") == snapshot_id:
                 matched.append(row)
-        return matched or list(rows)
+        return matched
 
     @staticmethod
     def _load_recent_jsonl_rows(path: Path, limit: int) -> list[dict[str, Any]]:
