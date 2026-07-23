@@ -2549,6 +2549,38 @@ parameters:
         self.assertEqual(report["by_lane"]["shadow_source_scoreboard"]["total_pnl_usd"], 25.0)
         self.assertEqual(report["blocker_counts"], {})
 
+    def test_void_resolution_is_excluded_from_buy_pnl(self):
+        lane_rows = [
+            {
+                "policy": "shadow_source_scoreboard",
+                "shared_candidate_id": "candidate-void",
+                "action": "BUY_YES",
+                "approved_position_size_usd": 10.0,
+                "provenance": {
+                    "future_pnl_inputs": {
+                        "shared_candidate_id": "candidate-void",
+                        "market_id": "KXVOID-1",
+                        "side": "YES",
+                        "estimated_fill_price": 0.25,
+                    }
+                },
+            }
+        ]
+        resolution_rows = [
+            {"shared_candidate_id": "candidate-void", "market_id": "KXVOID-1", "outcome": "VOID"}
+        ]
+
+        rows = build_paper_shadow_lane_resolution_rows(lane_rows=lane_rows, resolution_rows=resolution_rows)
+        report = summarize_paper_shadow_lane_resolved_pnl(lane_rows=lane_rows, resolution_rows=resolution_rows)
+
+        self.assertEqual(rows[0]["resolution"]["outcome"], "VOID")
+        self.assertEqual(rows[0]["blocker"], "void_resolution")
+        self.assertIsNone(rows[0]["pnl"])
+        self.assertEqual(report["resolved_rows"], 1)
+        self.assertEqual(report["losing_buy_rows"], 0)
+        self.assertEqual(report["total_pnl_usd"], 0.0)
+        self.assertEqual(report["blocker_counts"], {"void_resolution": 1})
+
     def test_incremental_pnl_replay_advances_cursor_and_resolves_pending_rows(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
