@@ -30,11 +30,19 @@ PREMIUM_CITY_LANE_ID = "shadow_premium_city"
 SOURCE_RELIABILITY_LANE_ID = "shadow_source_reliability"
 SOURCE_SCOREBOARD_LANE_ID = "shadow_source_scoreboard"
 SOURCE_ROUTER_LANE_ID = "shadow_source_router"
+SOURCE_ROUTER_NO_PRICE_GUARD_LANE_ID = "shadow_source_router_no_price_guard"
 SOURCE_RELIABILITY_EVALUATOR_LANE_IDS = frozenset({SOURCE_RELIABILITY_LANE_ID, SOURCE_SCOREBOARD_LANE_ID})
 SOURCE_SCOREBOARD_LANE_IDS = frozenset({SOURCE_SCOREBOARD_LANE_ID})
-SOURCE_COLLECTION_LANE_IDS = frozenset({SOURCE_SCOREBOARD_LANE_ID, SOURCE_ROUTER_LANE_ID})
+SOURCE_COLLECTION_LANE_IDS = frozenset(
+    {SOURCE_SCOREBOARD_LANE_ID, SOURCE_ROUTER_LANE_ID, SOURCE_ROUTER_NO_PRICE_GUARD_LANE_ID}
+)
 SOURCE_SCOREBOARD_CONFIG_LANE_IDS = frozenset(
-    {SOURCE_RELIABILITY_LANE_ID, SOURCE_SCOREBOARD_LANE_ID, SOURCE_ROUTER_LANE_ID}
+    {
+        SOURCE_RELIABILITY_LANE_ID,
+        SOURCE_SCOREBOARD_LANE_ID,
+        SOURCE_ROUTER_LANE_ID,
+        SOURCE_ROUTER_NO_PRICE_GUARD_LANE_ID,
+    }
 )
 KNOWN_LANE_IDS = (
     *DEFAULT_LANE_IDS,
@@ -42,6 +50,7 @@ KNOWN_LANE_IDS = (
     SOURCE_RELIABILITY_LANE_ID,
     SOURCE_SCOREBOARD_LANE_ID,
     SOURCE_ROUTER_LANE_ID,
+    SOURCE_ROUTER_NO_PRICE_GUARD_LANE_ID,
 )
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MAX_COMPACT_FUTURE_PNL_QUESTION_CHARS = 200
@@ -516,6 +525,37 @@ def _source_reliability_decision(
     return baseline
 
 
+def _source_router_price_guard(
+    signal: Mapping[str, Any],
+    action: str,
+    parameters: Mapping[str, Any],
+) -> str | None:
+    """Return a fail-closed reason when an optional router action/price guard rejects."""
+    allowed_actions = {
+        str(value).strip().upper()
+        for value in (parameters.get("allowed_actions") or [])
+        if str(value).strip()
+    }
+    normalized_action = str(action or "").strip().upper()
+    if allowed_actions and normalized_action not in allowed_actions:
+        return "source_router_action_not_allowed"
+
+    configured_ranges = parameters.get("allowed_entry_price_ranges") or []
+    if not configured_ranges:
+        return None
+    price_key = "best_yes_ask" if normalized_action == "BUY_YES" else "best_no_ask"
+    price = _number(signal.get(price_key))
+    if price is None:
+        return "source_router_price_unavailable"
+    for candidate_range in configured_ranges:
+        if not isinstance(candidate_range, (list, tuple)) or len(candidate_range) != 2:
+            continue
+        lower, upper = _number(candidate_range[0]), _number(candidate_range[1])
+        if lower is not None and upper is not None and lower <= price < upper:
+            return None
+    return "source_router_price_outside_allowed_ranges"
+
+
 def _source_router_decision(
     lane: _LaneDefinition,
     signal: Mapping[str, Any],
@@ -546,28 +586,36 @@ def _source_router_decision(
         requested = 0.0
         approved = 0.0
     else:
-        reason_code = f"source_router_{source_direction.lower()}"
-        reason = "Source router shadow lane selected the source-implied market side"
-        requested = _source_router_notional(lane, baseline)
-        approved = requested
-        min_edge = _number(lane.parameters.get("min_edge")) or 0.0
-        if min_edge > 0:
-            edge = _compute_source_router_edge(signal, action)
-            if edge is None:
-                action = "SKIP"
-                reason_code = "source_router_edge_unavailable"
-                reason = "Source router selected a side but edge could not be computed"
-                requested = 0.0
-                approved = 0.0
-            elif edge < min_edge:
-                action = "SKIP"
-                reason_code = "source_router_insufficient_edge"
-                reason = (
-                    f"Source router selected {source_direction} but edge "
-                    f"{edge:.4f} < minimum {min_edge:.4f}"
-                )
-                requested = 0.0
-                approved = 0.0
+        guard_reason = _source_router_price_guard(signal, action, lane.parameters)
+        if guard_reason:
+            action = "SKIP"
+            reason_code = guard_reason
+            reason = "Source router decision did not satisfy this lane's action/price guard"
+            requested = 0.0
+            approved = 0.0
+        else:
+            reason_code = f"source_router_{source_direction.lower()}"
+            reason = "Source router shadow lane selected the source-implied market side"
+            requested = _source_router_notional(lane, baseline)
+            approved = requested
+            min_edge = _number(lane.parameters.get("min_edge")) or 0.0
+            if min_edge > 0:
+                edge = _compute_source_router_edge(signal, action)
+                if edge is None:
+                    action = "SKIP"
+                    reason_code = "source_router_edge_unavailable"
+                    reason = "Source router selected a side but edge could not be computed"
+                    requested = 0.0
+                    approved = 0.0
+                elif edge < min_edge:
+                    action = "SKIP"
+                    reason_code = "source_router_insufficient_edge"
+                    reason = (
+                        f"Source router selected {source_direction} but edge "
+                        f"{edge:.4f} < minimum {min_edge:.4f}"
+                    )
+                    requested = 0.0
+                    approved = 0.0
     return {
         "source_row": source_row,
         "action": action,
