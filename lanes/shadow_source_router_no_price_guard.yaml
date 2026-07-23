@@ -1,0 +1,18 @@
+id: shadow_source_router_no_price_guard
+type: source_router
+source_wallet: stable_paper
+source_role: baseline
+input_source: shared_candidate_dataset
+input_market_source: shared_market
+enabled: false
+description: >-
+  Forward-only, non-mutating hypothesis: retain source-router BUY_NO decisions only
+  when the recorded executable NO ask is in historically diagnostic mid-price bands.
+  This is a shadow comparator, not a promotion or live-trading policy.
+parameters:
+  hypothetical_notional_usd: 10.0
+  allowed_actions:
+    - BUY_NO
+  allowed_entry_price_ranges:
+    - [0.60, 0.70]
+    - [0.80, 0.90]

@@ -1511,6 +1511,40 @@ parameters:
         self.assertEqual(router["source_observations"][0]["source_id"], "local_station_98101")
         self.assertEqual(router["future_pnl_inputs"]["recommended_action"], "SKIP")
 
+    # ── source router price guard tests ──
+
+    def test_source_router_price_guard_requires_no_side_and_configured_price_band(self):
+        from bot.paper_shadow_lanes import _source_router_price_guard
+
+        parameters = {
+            "allowed_actions": ["BUY_NO"],
+            "allowed_entry_price_ranges": [[0.60, 0.70], [0.80, 0.90]],
+        }
+
+        self.assertIsNone(
+            _source_router_price_guard(
+                {"best_no_ask": 0.65},
+                "BUY_NO",
+                parameters,
+            )
+        )
+        self.assertEqual(
+            _source_router_price_guard(
+                {"best_no_ask": 0.58},
+                "BUY_NO",
+                parameters,
+            ),
+            "source_router_price_outside_allowed_ranges",
+        )
+        self.assertEqual(
+            _source_router_price_guard(
+                {"best_yes_ask": 0.65},
+                "BUY_YES",
+                parameters,
+            ),
+            "source_router_action_not_allowed",
+        )
+
     # ── source router edge gate tests ──
 
     def test_compute_source_router_edge_buy_yes(self):
