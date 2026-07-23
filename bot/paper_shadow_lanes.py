@@ -1861,13 +1861,43 @@ def _notional_source(row: Mapping[str, Any], future_inputs: Mapping[str, Any]) -
             return source
     return None
 
+_FUTURE_PNL_NON_DECISION_TIME_KEYS = frozenset(
+    {
+        "actual_temp_used",
+        "actual_outcome",
+        "actual_source",
+        "known_after",
+        "label_target",
+        "resolved_at",
+        "resolved_outcome",
+        "settled_side",
+        "settlement_source",
+    }
+)
+
+
 def _row_future_pnl_inputs(row: Mapping[str, Any]) -> dict[str, Any]:
     provenance = _mapping(row.get("provenance"))
     direct = _mapping(provenance.get("future_pnl_inputs"))
     if direct:
-        return direct
+        return _decision_time_pnl_inputs(direct)
     scoreboard = _mapping(provenance.get("source_scoreboard"))
-    return _mapping(scoreboard.get("future_pnl_inputs"))
+    return _decision_time_pnl_inputs(_mapping(scoreboard.get("future_pnl_inputs")))
+
+
+def _decision_time_pnl_inputs(inputs: Mapping[str, Any]) -> dict[str, Any]:
+    """Drop settlement/outcome metadata when reading legacy lane records.
+
+    New lane decisions never emit these fields.  The defensive read-side filter
+    keeps derived resolution/replay artifacts from re-propagating them when a
+    historical raw ledger is inspected.
+    """
+
+    return {
+        str(key): value
+        for key, value in inputs.items()
+        if str(key).strip().lower() not in _FUTURE_PNL_NON_DECISION_TIME_KEYS
+    }
 
 
 def _resolution_index(

@@ -2959,7 +2959,10 @@ parameters:
         self.assertEqual(rows[0]["blocker"], "missing_resolution")
         self.assertFalse(rows[0]["resolution"]["matched"])
         self.assertIsNone(rows[0]["pnl"])
-
+        self.assertNotIn(
+            "actual_outcome",
+            rows[0]["source_inputs"]["future_pnl_inputs"],
+        )
 
 if __name__ == "__main__":
     unittest.main()
