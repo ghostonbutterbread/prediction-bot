@@ -219,8 +219,16 @@ def _build_lane_row(
         "confidence": confidence_after,
         "edge": _number(signal.get("edge"), (source_row or {}).get("edge")),
         "model_probability": _number(signal.get("model_probability"), (source_row or {}).get("model_probability")),
-        "entry_price": _number(signal.get("market_price"), (source_row or {}).get("entry_price")),
-        "price": _number(signal.get("market_price"), (source_row or {}).get("price"), (source_row or {}).get("entry_price")),
+        "entry_price": _shadow_entry_price_for_side(
+            _side_from_action(action),
+            signal,
+            source_row or {},
+        ),
+        "price": _shadow_entry_price_for_side(
+            _side_from_action(action),
+            signal,
+            source_row or {},
+        ),
         "accounting_ref": {
             "wallet_id": "paper_shadow_lanes",
             "policy_id": policy,
@@ -288,6 +296,10 @@ def _build_lane_row(
             row["provenance"]["source_scoreboard"] = source_scoreboard
             if isinstance(source_scoreboard.get("future_pnl_inputs"), Mapping):
                 row["provenance"]["future_pnl_inputs"] = dict(source_scoreboard["future_pnl_inputs"])
+                side_price = _price_number(source_scoreboard["future_pnl_inputs"].get("estimated_fill_price"))
+                if side_price is not None and _is_buy_action(action):
+                    row["entry_price"] = side_price
+                    row["price"] = side_price
     if isinstance(decision.get("source_router"), Mapping):
         source_router = _source_router_provenance(
             lane,
@@ -301,10 +313,13 @@ def _build_lane_row(
         row["provenance"]["source_router"] = source_router
         if isinstance(source_router.get("future_pnl_inputs"), Mapping):
             row["provenance"]["future_pnl_inputs"] = dict(source_router["future_pnl_inputs"])
-            side_price = _number(source_router["future_pnl_inputs"].get("estimated_fill_price"))
+            side_price = _price_number(source_router["future_pnl_inputs"].get("estimated_fill_price"))
             if side_price is not None:
                 row["entry_price"] = side_price
                 row["price"] = side_price
+            elif _is_buy_action(action):
+                row["entry_price"] = _price_number(row.get("entry_price"))
+                row["price"] = _price_number(row.get("price"))
     if lane.definition_path:
         row["lane_definition_path"] = lane.definition_path
         row["provenance"]["lane_definition_path"] = lane.definition_path
@@ -2429,6 +2444,35 @@ def _future_pnl_inputs(
         question=question,
         question_side=question_side,
     )
+    initial_side = _side_from_action(str(source_row.get("action") or signal.get("direction") or ""))
+    entry_price = _shadow_entry_price_for_side(initial_side, signal, source_row)
+    estimated_fill_price = _price_number(
+        signal.get("estimated_fill_price"),
+        execution_snapshot.get("estimated_fill_price"),
+        order_book_data.get("estimated_fill_price"),
+        artifact_order_book.get("estimated_fill_price"),
+    )
+    if estimated_fill_price is None:
+        estimated_fill_price = _side_price_from_book(
+            initial_side,
+            {
+                "best_yes_ask": _price_number(
+                    signal.get("best_yes_ask"),
+                    execution_snapshot.get("best_yes_ask"),
+                    order_book_data.get("best_yes_ask"),
+                    artifact_order_book.get("best_yes_ask"),
+                ),
+                "best_no_ask": _price_number(
+                    signal.get("best_no_ask"),
+                    execution_snapshot.get("best_no_ask"),
+                    order_book_data.get("best_no_ask"),
+                    artifact_order_book.get("best_no_ask"),
+                ),
+            },
+        )
+    if entry_price is None:
+        entry_price = estimated_fill_price
+
     payload = {
         "shared_candidate_id": _optional_text(
             signal.get("shared_candidate_id"),
@@ -2452,38 +2496,28 @@ def _future_pnl_inputs(
         "recommended_side": _side_from_action(str(source_reliability.get("recommended_action") or "")),
         "recommendation_reason_code": _optional_text(source_reliability.get("reason_code")),
         "recommendation_reason": _optional_text(source_reliability.get("reason")),
-        "side": _side_from_action(str(source_row.get("action") or signal.get("direction") or "")),
-        "entry_price": _number(
-            signal.get("entry_price"),
-            signal.get("market_price"),
-            source_row.get("entry_price"),
-            source_row.get("price"),
-        ),
-        "estimated_fill_price": _number(
-            signal.get("estimated_fill_price"),
-            execution_snapshot.get("estimated_fill_price"),
-            order_book_data.get("estimated_fill_price"),
-            artifact_order_book.get("estimated_fill_price"),
-        ),
-        "best_yes_ask": _number(
+        "side": initial_side,
+        "entry_price": entry_price,
+        "estimated_fill_price": estimated_fill_price,
+        "best_yes_ask": _price_number(
             signal.get("best_yes_ask"),
             execution_snapshot.get("best_yes_ask"),
             order_book_data.get("best_yes_ask"),
             artifact_order_book.get("best_yes_ask"),
         ),
-        "best_yes_bid": _number(
+        "best_yes_bid": _price_number(
             signal.get("best_yes_bid"),
             execution_snapshot.get("best_yes_bid"),
             order_book_data.get("best_yes_bid"),
             artifact_order_book.get("best_yes_bid"),
         ),
-        "best_no_ask": _number(
+        "best_no_ask": _price_number(
             signal.get("best_no_ask"),
             execution_snapshot.get("best_no_ask"),
             order_book_data.get("best_no_ask"),
             artifact_order_book.get("best_no_ask"),
         ),
-        "best_no_bid": _number(
+        "best_no_bid": _price_number(
             signal.get("best_no_bid"),
             execution_snapshot.get("best_no_bid"),
             order_book_data.get("best_no_bid"),
@@ -2559,7 +2593,7 @@ def _compute_source_router_edge(
     if model_prob is None:
         return None
     if action == "BUY_YES":
-        price = _number(
+        price = _price_number(
             signal.get("best_yes_ask"),
             signal.get("market_price"),
         )
@@ -2567,12 +2601,12 @@ def _compute_source_router_edge(
             return None
         return model_prob - price
     # BUY_NO
-    price = _number(
+    price = _price_number(
         signal.get("best_no_ask"),
     )
     if price is None:
         # Fallback: approximate NO price from YES midpoint
-        mp = _number(signal.get("market_price"))
+        mp = _price_number(signal.get("market_price"))
         if mp is None:
             return None
         price = 1.0 - mp
@@ -2581,16 +2615,48 @@ def _compute_source_router_edge(
 
 def _side_specific_price(future_pnl_inputs: Mapping[str, Any], side: str | None) -> float | None:
     if side == "YES":
-        return _number(
+        return _price_number(
             future_pnl_inputs.get("best_yes_ask"),
-            future_pnl_inputs.get("entry_price"),
-            future_pnl_inputs.get("estimated_fill_price"),
+            future_pnl_inputs.get("entry_price") if future_pnl_inputs.get("side") == "YES" else None,
+            future_pnl_inputs.get("estimated_fill_price") if future_pnl_inputs.get("side") == "YES" else None,
         )
     if side == "NO":
-        return _number(
+        return _price_number(
             future_pnl_inputs.get("best_no_ask"),
             future_pnl_inputs.get("entry_price") if future_pnl_inputs.get("side") == "NO" else None,
             future_pnl_inputs.get("estimated_fill_price") if future_pnl_inputs.get("side") == "NO" else None,
+        )
+    return None
+
+
+def _shadow_entry_price_for_side(
+    side: str | None,
+    signal: Mapping[str, Any],
+    source_row: Mapping[str, Any],
+) -> float | int | None:
+    side_price = _side_price_from_book(side, signal)
+    if side_price is not None:
+        return side_price
+    return _price_number(
+        signal.get("entry_price"),
+        signal.get("market_price"),
+        source_row.get("entry_price"),
+        source_row.get("price"),
+    )
+
+
+def _side_price_from_book(side: str | None, values: Mapping[str, Any]) -> float | int | None:
+    if side == "YES":
+        return _price_number(
+            values.get("best_yes_ask"),
+            values.get("yes_market_price"),
+            values.get("yes_price"),
+        )
+    if side == "NO":
+        return _price_number(
+            values.get("best_no_ask"),
+            values.get("no_market_price"),
+            values.get("no_price"),
         )
     return None
 
@@ -3165,6 +3231,17 @@ def _number(*values: Any) -> float | int | None:
             return float(value)
         except (TypeError, ValueError):
             continue
+    return None
+
+
+def _price_number(*values: Any) -> float | int | None:
+    for value in values:
+        number = _number(value)
+        if number is None:
+            continue
+        if number <= 0:
+            continue
+        return number
     return None
 
 

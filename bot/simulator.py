@@ -1687,12 +1687,46 @@ class Simulator:
                 except (TypeError, ValueError):
                     return None
 
+            def _shadow_price(value):
+                price = _shadow_float(value)
+                if price is None or price <= 0:
+                    return None
+                return price
+
             observed_at = datetime.now(timezone.utc).isoformat()
             direction = str(signal.get("direction") or "BUY_YES").upper()
+            shadow_order_book = {
+                "best_yes_ask": _shadow_price(order_book.get("best_yes_ask")),
+                "best_yes_bid": _shadow_price(order_book.get("best_yes_bid")),
+                "best_no_ask": _shadow_price(order_book.get("best_no_ask")),
+                "best_no_bid": _shadow_price(order_book.get("best_no_bid")),
+            }
+            shadow_signal = dict(signal)
+            for signal_key, book_key in (
+                ("best_yes_ask", "best_yes_ask"),
+                ("best_yes_bid", "best_yes_bid"),
+                ("best_no_ask", "best_no_ask"),
+                ("best_no_bid", "best_no_bid"),
+                ("yes_market_price", "best_yes_ask"),
+                ("no_market_price", "best_no_ask"),
+            ):
+                price = _shadow_price(shadow_signal.get(signal_key))
+                if price is None:
+                    price = shadow_order_book.get(book_key)
+                if price is not None:
+                    shadow_signal[signal_key] = price
+            if _shadow_price(shadow_signal.get("market_price")) is None:
+                side_price = (
+                    shadow_signal.get("no_market_price")
+                    if direction == "BUY_NO"
+                    else shadow_signal.get("yes_market_price")
+                )
+                if side_price is not None:
+                    shadow_signal["market_price"] = side_price
             execution_snapshot = build_execution_snapshot(
-                signal,
+                shadow_signal,
                 direction=direction,
-                bid_ask=order_book,
+                bid_ask=shadow_order_book,
                 fallback_to_signal_prices=True,
             )
             # This is not an executed paper/live fill. It is the observed book
@@ -1705,7 +1739,7 @@ class Simulator:
                     "hypothetical": True,
                 }
             )
-            writer_signal = dict(signal)
+            writer_signal = dict(shadow_signal)
             writer_signal.update(
                 {
                     "execution_snapshot_source": execution_snapshot.get("source"),
