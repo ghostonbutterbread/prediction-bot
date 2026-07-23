@@ -1,0 +1,329 @@
+:root {
+  color-scheme: dark;
+  --bg: #111311;
+  --panel: #1b1d1b;
+  --panel-soft: #222520;
+  --line: #343833;
+  --text: #f1f5ec;
+  --muted: #9da697;
+  --green: #65d46e;
+  --red: #ff644f;
+  --yellow: #f0b935;
+  --blue: #37a4ff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.shell {
+  width: min(1480px, calc(100vw - 32px));
+  margin: 0 auto;
+  padding: 24px 0 40px;
+}
+
+.topbar,
+.section-title,
+.table-title,
+.top-actions,
+.table-controls {
+  display: flex;
+  align-items: center;
+}
+
+.topbar,
+.section-title,
+.table-title {
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.topbar {
+  margin-bottom: 20px;
+}
+
+.eyebrow,
+.label,
+.muted,
+small,
+.section-title p {
+  color: var(--muted);
+}
+
+.eyebrow {
+  margin: 0 0 4px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+h1 {
+  font-size: 32px;
+}
+
+h2 {
+  font-size: 18px;
+}
+
+.top-actions,
+.table-controls {
+  gap: 10px;
+}
+
+.button,
+.chip,
+select,
+input {
+  border: 1px solid var(--line);
+  background: var(--panel-soft);
+  color: var(--text);
+  border-radius: 6px;
+  min-height: 38px;
+}
+
+.button,
+.chip {
+  cursor: pointer;
+}
+
+.button {
+  padding: 0 14px;
+  font-weight: 700;
+}
+
+.primary {
+  background: var(--yellow);
+  color: #17160f;
+  border-color: var(--yellow);
+}
+
+.status-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid #252923;
+  border-radius: 8px;
+}
+
+.metric {
+  padding: 18px;
+}
+
+.metric strong {
+  display: block;
+  margin: 8px 0 6px;
+  font-size: 24px;
+}
+
+.chart-panel,
+.table-panel {
+  padding: 18px;
+  margin-top: 12px;
+}
+
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 16px 0;
+}
+
+.chip {
+  padding: 0 12px;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chip.active {
+  border-color: var(--yellow);
+  color: var(--yellow);
+}
+
+.lane-chart {
+  display: grid;
+  gap: 8px;
+}
+
+.bar-row {
+  display: grid;
+  grid-template-columns: minmax(160px, 250px) minmax(140px, 1fr) 110px;
+  align-items: center;
+  gap: 12px;
+}
+
+.bar-label {
+  color: #d8ded2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bar-track {
+  height: 14px;
+  background: #101210;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.bar {
+  height: 100%;
+}
+
+.bar.positive {
+  background: var(--green);
+}
+
+.bar.negative {
+  background: var(--red);
+}
+
+.bar-value {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.good {
+  color: var(--green);
+}
+
+.bad {
+  color: var(--red);
+}
+
+select,
+input {
+  padding: 0 10px;
+}
+
+input {
+  width: min(310px, 42vw);
+}
+
+.table-wrap {
+  margin-top: 14px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+table {
+  width: 100%;
+  min-width: 1050px;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  padding: 10px 12px;
+  border-bottom: 1px solid #2a2e29;
+  text-align: left;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+th {
+  position: sticky;
+  top: 0;
+  background: #181a18;
+  color: var(--muted);
+  z-index: 1;
+}
+
+td:nth-child(2) {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: #282c27;
+  color: var(--muted);
+}
+
+.status.won {
+  color: var(--green);
+}
+
+.status.lost,
+.status.blocked {
+  color: var(--red);
+}
+
+.empty {
+  color: var(--muted);
+  padding: 20px 0;
+}
+
+@media (max-width: 920px) {
+  .topbar,
+  .section-title,
+  .table-title {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .status-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .bar-row {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+
+  .bar-value {
+    text-align: left;
+  }
+}
+
+@media (max-width: 560px) {
+  .shell {
+    width: min(100vw - 20px, 1480px);
+    padding-top: 14px;
+  }
+
+  .status-grid {
+    grid-template-columns: 1fr;
+  }
+
+  h1 {
+    font-size: 26px;
+  }
+
+  .table-controls {
+    width: 100%;
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  input,
+  select {
+    width: 100%;
+  }
+}

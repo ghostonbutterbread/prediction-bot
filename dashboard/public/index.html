@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Prediction Bot Dashboard</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Prediction Bot</p>
+          <h1>Lane Dashboard</h1>
+        </div>
+        <div class="top-actions">
+          <button id="refreshButton" class="button primary" type="button">Refresh</button>
+          <span id="lastUpdated" class="muted">Loading...</span>
+        </div>
+      </header>
+
+      <section class="status-grid" aria-label="Runtime status">
+        <article class="panel metric">
+          <span class="label">Collector</span>
+          <strong id="collectorState">...</strong>
+          <small id="collectorDetail">...</small>
+        </article>
+        <article class="panel metric">
+          <span class="label">Storage</span>
+          <strong id="storageMetric">...</strong>
+          <small id="storageDetail">...</small>
+        </article>
+        <article class="panel metric">
+          <span class="label">Current P&amp;L</span>
+          <strong id="pnlMetric">...</strong>
+          <small id="roiMetric">...</small>
+        </article>
+        <article class="panel metric">
+          <span class="label">Blockers</span>
+          <strong id="blockerMetric">...</strong>
+          <small id="blockerDetail">...</small>
+        </article>
+      </section>
+
+      <section class="panel chart-panel">
+        <div class="section-title">
+          <div>
+            <h2>Lane P&amp;L</h2>
+            <p>Click lane chips or presets to change the view.</p>
+          </div>
+          <div id="summaryCounts" class="summary-counts"></div>
+        </div>
+        <div id="laneChips" class="chip-row"></div>
+        <div id="laneChart" class="lane-chart"></div>
+      </section>
+
+      <section class="panel table-panel">
+        <div class="section-title table-title">
+          <div>
+            <h2>Resolved Row Table</h2>
+            <p id="tableSource">Server-side filtered from resolved P&amp;L rows.</p>
+          </div>
+          <div class="table-controls">
+            <select id="rowPreset" aria-label="Row preset">
+              <option value="latest">Latest</option>
+              <option value="top-earners">Top earners</option>
+              <option value="lowest-earners">Lowest earners</option>
+              <option value="best-roi">Best ROI</option>
+              <option value="worst-roi">Worst ROI</option>
+              <option value="winners">Winners</option>
+              <option value="losers">Losers</option>
+              <option value="blockers">Blockers</option>
+              <option value="buys">Buy decisions</option>
+              <option value="skips">Skips</option>
+            </select>
+            <input id="rowSearch" type="search" placeholder="Search lane, market, outcome" />
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Lane</th>
+                <th>Market</th>
+                <th>Action</th>
+                <th>Side</th>
+                <th>Fill</th>
+                <th>Stake</th>
+                <th>Outcome</th>
+                <th>P&amp;L</th>
+                <th>ROI</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="rowTable">
+              <tr><td colspan="10">Loading...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
