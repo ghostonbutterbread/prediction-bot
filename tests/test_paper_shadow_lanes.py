@@ -1141,6 +1141,93 @@ parameters:
             0.445,
         )
 
+    def test_shadow_source_scoreboard_uses_side_ask_when_signal_market_price_is_zero(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dataset_path = Path(tmpdir) / "shared" / "prediction_lab" / "market_snapshots.jsonl"
+            decision_path = Path(tmpdir) / "lanes.jsonl"
+            scoreboard_path = Path(tmpdir) / "source_scoreboard_by_slice.jsonl"
+            append_jsonl(
+                scoreboard_path,
+                {
+                    "source_id": "nws",
+                    "source_name": "nws",
+                    "city_id": "seattle_wa",
+                    "market_kind": "high",
+                    "contract_shape": "tail",
+                    "sample_count": 100,
+                    "threshold_direction_accuracy": 0.95,
+                },
+            )
+            candidate_id = "candidate-scoreboard-zero-market-price"
+            stable_decision = {
+                "shared_candidate_id": candidate_id,
+                "wallet_id": "stable_paper",
+                "run_id": "stable-run",
+                "candidate_dataset_path": str(dataset_path),
+                "decision_role": "paper_shadow",
+                "decision_id": "stable-source-decision-zero-market-price",
+                "policy": "normal",
+                "market_id": "KXHIGHSEA-260515-T70",
+                "observed_at": "2026-05-14T12:00:00+00:00",
+                "action": "BUY_NO",
+                "reason_code": "approved",
+                "reason": "stable approved",
+                "confidence": 0.88,
+                "requested_position_size_usd": 10.0,
+                "approved_position_size_usd": 10.0,
+            }
+
+            result = write_paper_shadow_lane_decisions(
+                config={
+                    "paper_shadow_lanes": {
+                        "enabled": True,
+                        "decision_ledger_path": str(decision_path),
+                        "enabled_lanes": ["shadow_source_scoreboard"],
+                        "shadow_source_scoreboard": {"scoreboard_path": str(scoreboard_path), "enabled": True},
+                    }
+                },
+                candidate_dataset_path=dataset_path,
+                inputs_by_shared_candidate_id={
+                    candidate_id: {
+                        "stable": SimpleNamespace(
+                            signal={
+                                "shared_candidate_id": candidate_id,
+                                "market_id": "KXHIGHSEA-260515-T70",
+                                "question": "Will Seattle high temperature be above 70 degrees on May 15, 2026?",
+                                "city_id": "seattle_wa",
+                                "threshold": 70.0,
+                                "question_side": "above",
+                                "direction": "BUY_NO",
+                                "confidence": 0.88,
+                                "market_price": 0.0,
+                                "candidate_observed_at": "2026-05-14T12:00:00+00:00",
+                                "best_yes_ask": 0.0,
+                                "best_no_ask": 0.58,
+                                "source_details": [{"source_name": "nws", "forecast_high": 68.0}],
+                            },
+                            shared_candidate={
+                                "candidate_id": candidate_id,
+                                "market_id": "KXHIGHSEA-260515-T70",
+                            },
+                        ),
+                    }
+                },
+                wallet_decision_rows={"stable_paper": [stable_decision], "beta_paper": []},
+                wallet_runs={"stable_paper": SimpleNamespace(session_id="stable-run")},
+                ledger_root=tmpdir,
+            )
+            lane_row = load_jsonl(Path(result.decision_path))[0]
+
+        self.assertEqual(lane_row["policy"], "shadow_source_scoreboard")
+        self.assertEqual(lane_row["action"], "BUY_NO")
+        self.assertEqual(lane_row["entry_price"], 0.58)
+        self.assertEqual(lane_row["price"], 0.58)
+        future_pnl_inputs = lane_row["provenance"]["future_pnl_inputs"]
+        self.assertEqual(future_pnl_inputs["entry_price"], 0.58)
+        self.assertEqual(future_pnl_inputs["estimated_fill_price"], 0.58)
+        self.assertEqual(future_pnl_inputs["best_no_ask"], 0.58)
+        self.assertNotIn("best_yes_ask", future_pnl_inputs)
+
     def test_shadow_source_scoreboard_future_pnl_inputs_capture_resolution_metadata_from_shared_weather_context(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             dataset_path = Path(tmpdir) / "shared" / "prediction_lab" / "market_snapshots.jsonl"
@@ -1489,6 +1576,97 @@ parameters:
         self.assertIsNone(
             _compute_source_router_edge({"model_probability": 0.50}, "BUY_NO")
         )
+
+    def test_compute_source_router_edge_ignores_zero_price(self):
+        from bot.paper_shadow_lanes import _compute_source_router_edge
+
+        self.assertIsNone(
+            _compute_source_router_edge(
+                {"model_probability": 0.60, "best_yes_ask": 0.0, "market_price": 0.0},
+                "BUY_YES",
+            )
+        )
+        self.assertIsNone(
+            _compute_source_router_edge(
+                {"model_probability": 0.40, "best_no_ask": 0.0, "market_price": 0.0},
+                "BUY_NO",
+            )
+        )
+
+    def test_shadow_source_router_uses_side_ask_when_signal_market_price_is_zero(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dataset_path = Path(tmpdir) / "shared" / "prediction_lab" / "market_snapshots.jsonl"
+            decision_path = Path(tmpdir) / "lanes.jsonl"
+            scoreboard_path = Path(tmpdir) / "source_scoreboard_by_slice.jsonl"
+            append_jsonl(
+                scoreboard_path,
+                {
+                    "source_id": "nws",
+                    "source_name": "nws",
+                    "city_id": "seattle_wa",
+                    "market_kind": "high",
+                    "contract_shape": "tail",
+                    "sample_count": 200,
+                    "threshold_direction_accuracy": 0.95,
+                },
+            )
+            candidate_id = "candidate-router-zero-market-price"
+            result = write_paper_shadow_lane_decisions(
+                config={
+                    "paper_shadow_lanes": {
+                        "enabled": True,
+                        "decision_ledger_path": str(decision_path),
+                        "enabled_lanes": ["shadow_source_router"],
+                        "source_scoreboard_path": str(scoreboard_path),
+                        "shadow_source_router": {
+                            "enabled": True,
+                            "parameters": {"hypothetical_notional_usd": 12.5},
+                        },
+                    }
+                },
+                candidate_dataset_path=dataset_path,
+                inputs_by_shared_candidate_id={
+                    candidate_id: {
+                        "stable": SimpleNamespace(
+                            signal={
+                                "shared_candidate_id": candidate_id,
+                                "market_id": "KXHIGHSEA-260515-T70",
+                                "question": "Will Seattle high temperature be above 70 degrees on May 15, 2026?",
+                                "city_id": "seattle_wa",
+                                "threshold": 70.0,
+                                "question_side": "above",
+                                "direction": "BUY_YES",
+                                "confidence": 0.88,
+                                "market_price": 0.0,
+                                "candidate_observed_at": "2026-05-14T12:00:00+00:00",
+                                "best_yes_ask": 0.0,
+                                "best_no_ask": 0.58,
+                                "source_details": [
+                                    {
+                                        "source_id": "nws",
+                                        "source_name": "nws",
+                                        "forecast_high": 68.0,
+                                    },
+                                ],
+                            },
+                            shared_candidate={
+                                "candidate_id": candidate_id,
+                                "market_id": "KXHIGHSEA-260515-T70",
+                            },
+                        ),
+                    }
+                },
+                wallet_decision_rows={"stable_paper": [], "beta_paper": []},
+                wallet_runs={"stable_paper": SimpleNamespace(session_id="stable-run")},
+                ledger_root=tmpdir,
+            )
+            lane_row = load_jsonl(Path(result.decision_path))[0]
+
+        self.assertEqual(lane_row["action"], "BUY_NO")
+        self.assertEqual(lane_row["side"], "NO")
+        self.assertEqual(lane_row["entry_price"], 0.58)
+        self.assertEqual(lane_row["price"], 0.58)
+        self.assertEqual(lane_row["provenance"]["source_router"]["future_pnl_inputs"]["estimated_fill_price"], 0.58)
 
     def test_source_router_edge_gate_skips_when_edge_below_minimum(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -41,6 +41,13 @@ def fake_weather_market():
     )
 
 
+def fake_zero_yes_weather_market():
+    market = fake_weather_market()
+    market.yes_price = 0.0
+    market.no_price = 0.58
+    return market
+
+
 def shadow_config(tmpdir, scoreboard_path, decision_path):
     return {
         "data_dir": str(Path(tmpdir) / "paper"),
@@ -101,6 +108,35 @@ class StableSkipWeatherTraceStrategy:
                         "source_id": "nws",
                         "source_name": "nws",
                         "forecast_high": 68.0,
+                    }
+                ],
+            },
+        }
+        return None, StrategyTrace(
+            raw_signals={"live": dict(live_signal)},
+            accepted_signals={"live": dict(live_signal)},
+            skip_reason_code="confidence_below_threshold",
+        )
+
+
+class StableSkipYesSourceWeatherTraceStrategy:
+    def analyze_market(self, market, order_book=None):
+        return None
+
+    def analyze_market_with_trace(self, market, order_book=None):
+        live_signal = {
+            "signal_type": "weather",
+            "predicted_prob": 0.20,
+            "confidence": 0.82,
+            "data": {
+                "city": "seattle_wa",
+                "threshold": 70.0,
+                "question_side": "above",
+                "source_details": [
+                    {
+                        "source_id": "nws",
+                        "source_name": "nws",
+                        "forecast_high": 72.0,
                     }
                 ],
             },
@@ -254,6 +290,45 @@ class SimulatorSourceScoreboardShadowTests(unittest.TestCase):
         self.assertEqual(router_rows[0]["provenance"]["baseline_action"], "SKIP")
         self.assertEqual(router_rows[0]["provenance"]["source_router"]["source_direction"], "NO")
         self.assertFalse(router_rows[0]["mutation_contract"]["mutates_accounting"])
+
+    def test_source_router_shadow_uses_side_specific_fill_when_trace_entry_price_is_zero(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            scoreboard_path = Path(tmpdir) / "source_scoreboard_by_slice.jsonl"
+            decision_path = Path(tmpdir) / "paper_shadow_lane_decisions.jsonl"
+            append_jsonl(
+                scoreboard_path,
+                {
+                    "source_id": "nws",
+                    "source_name": "nws",
+                    "city_id": "seattle_wa",
+                    "market_kind": "high",
+                    "contract_shape": "tail",
+                    "sample_count": 100,
+                    "threshold_direction_accuracy": 0.95,
+                },
+            )
+            sim = Simulator(router_shadow_config(tmpdir, scoreboard_path, decision_path))
+            sim.strategy = StableSkipYesSourceWeatherTraceStrategy()
+
+            result = sim.scan(FakeExchange([fake_zero_yes_weather_market()]))
+
+            router_rows = [
+                row
+                for row in load_jsonl(decision_path)
+                if row.get("policy") == "shadow_source_router"
+            ]
+
+        self.assertEqual(result["signals"], 0)
+        self.assertEqual(result["trades"], 0)
+        self.assertEqual(len(router_rows), 1)
+        self.assertEqual(router_rows[0]["action"], "BUY_YES")
+        self.assertEqual(router_rows[0]["side"], "YES")
+        self.assertEqual(router_rows[0]["entry_price"], 0.42)
+        self.assertEqual(router_rows[0]["price"], 0.42)
+        future_inputs = router_rows[0]["provenance"]["source_router"]["future_pnl_inputs"]
+        self.assertEqual(future_inputs["estimated_fill_price"], 0.42)
+        self.assertEqual(future_inputs["best_yes_ask"], 0.42)
+        self.assertEqual(future_inputs["best_no_ask"], 0.58)
 
 
 if __name__ == "__main__":
