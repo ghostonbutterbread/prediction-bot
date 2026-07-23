@@ -1813,6 +1813,8 @@ def _build_lane_resolution_row(
 def _resolution_row_blocker(*, action: str, outcome: str | None, side: str | None, fill_price: float | None, stake: float | None) -> str | None:
     if not outcome:
         return "missing_resolution"
+    if outcome == "VOID":
+        return "void_resolution"
     if _is_skip_action(action):
         return None
     if not _is_buy_action(action):
