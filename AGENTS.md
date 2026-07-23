@@ -6,7 +6,7 @@ This repository operates paper-only prediction-market research and forward-shado
 
 - **Paper / simulation / observer only.** Never place live orders, mutate wallets, access balances, or enable live trading unless the user explicitly authorizes it for the exact task.
 - A Git merge is **not** a deployment. Do not restart services, alter ignored runtime configs, or enable a lane merely because code has merged.
-- Preserve the operational worktree at `/home/ryushe/projects/prediction-bot`. It can contain intentional runtime-local changes. Do not reset, clean, overwrite, or merge into it casually.
+- Treat the operational worktree at `/home/ryushe/projects/prediction-bot` as a **temporarily protected** state while it is dirty. Do not reset, clean, overwrite, or merge into it until its changes are inspected and classified. Reconcile useful changes into a clean branch; explicitly archive or discard the rest once the user approves.
 - Do not modify historical raw ledgers. Derived reports and replay outputs must be separate, reproducible, and clearly labeled.
 
 ## Canonical worktrees and Git workflow
