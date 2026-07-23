@@ -2334,12 +2334,9 @@ def _future_pnl_inputs(
     execution_snapshot = _mapping(artifact.get("execution_snapshot"))
     weather_snapshot = _candidate_weather_source_snapshot(signal, shared_candidate, artifact)
     weather_forecast = _mapping(weather_snapshot.get("forecast"))
-    signal_resolution = _mapping(signal.get("resolution"))
-    shared_resolution = _mapping(shared_candidate.get("resolution"))
     market = _mapping(shared_candidate.get("market"))
     route_evidence = _candidate_route_evidence(shared_candidate, artifact)
     market_metadata = _candidate_market_metadata(shared_candidate, artifact)
-    label_target = _label_target(signal, shared_candidate, source_row, weather_snapshot)
     question = _compact_question_text(
         signal.get("question"),
         shared_candidate.get("question"),
@@ -2489,70 +2486,11 @@ def _future_pnl_inputs(
         ),
         "execution_snapshot_as_of": _optional_text(execution_snapshot.get("as_of"), execution_snapshot.get("observed_at")),
         "order_book_snapshot_as_of": _optional_text(order_book_snapshot.get("as_of"), order_book_snapshot.get("observed_at")),
-        "actual_temp_used": _number(
-            signal.get("actual_temp_used"),
-            weather_forecast.get("actual_temp_used"),
-            weather_snapshot.get("actual_temp_used"),
-            signal_resolution.get("actual_temp_used"),
-            shared_resolution.get("actual_temp_used"),
-        ),
-        "settlement_source": _optional_text(
-            signal.get("settlement_source"),
-            weather_snapshot.get("settlement_source"),
-            signal_resolution.get("settlement_source"),
-            shared_resolution.get("settlement_source"),
-        ),
-        "actual_source": _optional_text(
-            signal.get("actual_source"),
-            weather_snapshot.get("actual_source"),
-            signal_resolution.get("actual_source"),
-            shared_resolution.get("actual_source"),
-            source_row.get("actual_source"),
-        ),
-        "resolved_at": _optional_text(
-            signal.get("resolved_at"),
-            weather_snapshot.get("resolved_at"),
-            signal_resolution.get("resolved_at"),
-            shared_resolution.get("resolved_at"),
-            source_row.get("resolved_at"),
-        ),
-        "known_after": _optional_text(
-            signal.get("known_after"),
-            weather_snapshot.get("known_after"),
-            signal_resolution.get("known_after"),
-            shared_resolution.get("known_after"),
-            source_row.get("known_after"),
-        ),
         "threshold": threshold,
         "question_side": question_side,
         "market_kind": market_kind,
         "contract_shape": contract_shape,
         "question": question,
-        "resolved_outcome": _optional_text(
-            signal.get("resolved_outcome"),
-            weather_forecast.get("resolved_outcome"),
-            weather_snapshot.get("resolved_outcome"),
-            signal_resolution.get("resolved_outcome"),
-            shared_resolution.get("resolved_outcome"),
-            source_row.get("resolved_outcome"),
-        ),
-        "actual_outcome": _optional_text(
-            signal.get("actual_outcome"),
-            weather_forecast.get("actual_outcome"),
-            weather_snapshot.get("actual_outcome"),
-            signal_resolution.get("actual_outcome"),
-            shared_resolution.get("actual_outcome"),
-            source_row.get("actual_outcome"),
-        ),
-        "settled_side": _optional_text(
-            signal.get("settled_side"),
-            weather_forecast.get("settled_side"),
-            weather_snapshot.get("settled_side"),
-            signal_resolution.get("settled_side"),
-            shared_resolution.get("settled_side"),
-            source_row.get("settled_side"),
-        ),
-        "label_target": label_target,
     }
     return {key: value for key, value in payload.items() if value not in (None, "", [], {})}
 
