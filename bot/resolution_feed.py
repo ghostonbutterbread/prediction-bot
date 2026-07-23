@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from glob import glob
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -71,8 +72,10 @@ def run_resolution_feed_once(
             fetch_error_count=int(state.get("fetch_error_count") or 0),
         )
 
-    decision_ledger_path = Path(str(feed_cfg["decision_ledger_path"]))
-    if not decision_ledger_path.exists():
+    decision_ledger_paths = [Path(str(path)) for path in feed_cfg["decision_ledger_paths"]]
+    existing_decision_ledger_paths = [path for path in decision_ledger_paths if path.exists()]
+    missing_decision_ledger_paths = [path for path in decision_ledger_paths if not path.exists()]
+    if not existing_decision_ledger_paths:
         _write_state(
             state_path,
             {
@@ -80,7 +83,12 @@ def run_resolution_feed_once(
                 "schema_version": 1,
                 "status": "missing_input",
                 "last_refresh_at": _iso(now_dt),
-                "decision_ledger_path": str(decision_ledger_path),
+                "decision_ledger_path": str(decision_ledger_paths[0]) if decision_ledger_paths else "",
+                "decision_ledger_paths": [],
+                "configured_decision_ledger_paths": [str(path) for path in decision_ledger_paths],
+                "used_decision_ledger_paths": [],
+                "missing_decision_ledger_paths": [str(path) for path in missing_decision_ledger_paths],
+                "decision_ledger_globs": list(feed_cfg["decision_ledger_globs"]),
             },
         )
         return ResolutionFeedResult(
@@ -98,7 +106,7 @@ def run_resolution_feed_once(
     central_latest_resolution = central_output_dir / "latest_resolutions.jsonl"
     _seed_central_resolutions_from_lane_latest(central_latest_resolution, lane_latest_resolution)
     market_ref_path = _market_ref_path_for_refresh(
-        decision_ledger_path,
+        existing_decision_ledger_paths,
         output_dir=output_dir,
         existing_latest_path=central_latest_resolution,
         mode=str(feed_cfg["mode"]),
@@ -132,7 +140,12 @@ def run_resolution_feed_once(
         "status": "refreshed",
         "mode": feed_cfg["mode"],
         "last_refresh_at": _iso(now_dt),
-        "decision_ledger_path": str(decision_ledger_path),
+        "decision_ledger_path": str(existing_decision_ledger_paths[0]) if existing_decision_ledger_paths else "",
+        "decision_ledger_paths": [str(path) for path in existing_decision_ledger_paths],
+        "configured_decision_ledger_paths": [str(path) for path in decision_ledger_paths],
+        "used_decision_ledger_paths": [str(path) for path in existing_decision_ledger_paths],
+        "missing_decision_ledger_paths": [str(path) for path in missing_decision_ledger_paths],
+        "decision_ledger_globs": list(feed_cfg["decision_ledger_globs"]),
         "market_ref_path": str(market_ref_path),
         "latest_resolution_path": str(central_latest_resolution),
         "central_resolution_path": str(central_latest_resolution),
@@ -164,12 +177,14 @@ def normalize_resolution_feed_config(config: Mapping[str, Any]) -> dict[str, Any
     if isinstance(lab.get("resolution_feed"), Mapping):
         raw = {**raw, **dict(lab["resolution_feed"])}
     shadow = config.get("paper_shadow_lanes") if isinstance(config.get("paper_shadow_lanes"), Mapping) else {}
-    decision_ledger_path = raw.get("decision_ledger_path") or shadow.get("decision_ledger_path")
+    decision_ledger_paths = _coerce_decision_ledger_paths(raw, shadow)
     output_dir = raw.get("output_dir") or DEFAULT_OUTPUT_DIR
     central_output_dir = raw.get("central_output_dir") or raw.get("canonical_output_dir") or output_dir
     return {
         "enabled": bool(raw.get("enabled", False)),
-        "decision_ledger_path": str(decision_ledger_path or ""),
+        "decision_ledger_path": str(decision_ledger_paths[0]) if decision_ledger_paths else "",
+        "decision_ledger_paths": [str(path) for path in decision_ledger_paths],
+        "decision_ledger_globs": list(_coerce_decision_ledger_globs(raw)),
         "output_dir": str(output_dir),
         "central_output_dir": str(central_output_dir),
         "mode": _resolution_feed_mode(raw.get("mode")),
@@ -181,19 +196,83 @@ def normalize_resolution_feed_config(config: Mapping[str, Any]) -> dict[str, Any
     }
 
 
-def write_unique_market_refs(input_path: Path, *, output_dir: Path) -> Path:
+def _coerce_decision_ledger_paths(raw: Mapping[str, Any], shadow: Mapping[str, Any]) -> list[str]:
+    values: list[Any] = []
+    for key in ("decision_ledger_paths", "ledger_paths"):
+        configured = raw.get(key)
+        if isinstance(configured, (list, tuple)):
+            values.extend(configured)
+        elif configured not in (None, ""):
+            values.append(configured)
+    for key in ("decision_ledger_path", "ledger_path"):
+        configured = raw.get(key)
+        if configured not in (None, ""):
+            values.append(configured)
+    if not values:
+        for key in ("decision_ledger_path", "ledger_path"):
+            configured = shadow.get(key)
+            if configured not in (None, ""):
+                values.append(configured)
+    values.extend(_expand_decision_ledger_globs(_coerce_decision_ledger_globs(raw)))
+
+    paths: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        paths.append(text)
+    return paths
+
+
+def _coerce_decision_ledger_globs(raw: Mapping[str, Any]) -> list[str]:
+    values: list[Any] = []
+    for key in ("decision_ledger_globs", "decision_ledger_path_globs", "ledger_path_globs"):
+        configured = raw.get(key)
+        if isinstance(configured, (list, tuple)):
+            values.extend(configured)
+        elif configured not in (None, ""):
+            values.append(configured)
+
+    patterns: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        patterns.append(text)
+    return patterns
+
+
+def _expand_decision_ledger_globs(patterns: list[str]) -> list[str]:
+    paths: list[str] = []
+    seen: set[str] = set()
+    for pattern in patterns:
+        for match in sorted(glob(pattern)):
+            if match in seen:
+                continue
+            seen.add(match)
+            paths.append(match)
+    return paths
+
+
+def write_unique_market_refs(input_path: Path | list[Path] | tuple[Path, ...], *, output_dir: Path) -> Path:
     market_ids: set[str] = set()
-    with input_path.open("r", encoding="utf-8") as handle:
-        for line in handle:
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(row, Mapping):
-                continue
-            market_id = row_market_id(row)
-            if market_id:
-                market_ids.add(market_id)
+    input_paths = [input_path] if isinstance(input_path, Path) else list(input_path)
+    for path in input_paths:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(row, Mapping):
+                    continue
+                market_id = row_market_id(row)
+                if market_id:
+                    market_ids.add(market_id)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / "resolution_market_refs.jsonl"
@@ -217,7 +296,7 @@ def row_market_id(row: Mapping[str, Any]) -> str | None:
 
 
 def _market_ref_path_for_refresh(
-    decision_ledger_path: Path,
+    decision_ledger_paths: list[Path],
     *,
     output_dir: Path,
     existing_latest_path: Path,
@@ -225,12 +304,9 @@ def _market_ref_path_for_refresh(
     max_incremental_markets: int | None,
 ) -> Path:
     if mode != "incremental_unresolved":
-        return write_unique_market_refs(decision_ledger_path, output_dir=output_dir)
+        return write_unique_market_refs(decision_ledger_paths, output_dir=output_dir)
 
-    all_refs_path = output_dir / "resolution_market_refs.jsonl"
-    if not all_refs_path.exists():
-        all_refs_path = write_unique_market_refs(decision_ledger_path, output_dir=output_dir)
-
+    all_refs_path = write_unique_market_refs(decision_ledger_paths, output_dir=output_dir)
     resolved_market_ids = {
         market_id
         for row in _load_resolution_rows(existing_latest_path)
