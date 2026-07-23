@@ -1119,12 +1119,15 @@ parameters:
         self.assertEqual(future_pnl_inputs["order_book_source"], "book")
         self.assertEqual(future_pnl_inputs["snapshot_as_of"], "2026-05-14T12:00:00+00:00")
         self.assertEqual(future_pnl_inputs["execution_snapshot_as_of"], "2026-05-14T12:00:00+00:00")
-        self.assertEqual(future_pnl_inputs["actual_temp_used"], 73.0)
-        self.assertEqual(future_pnl_inputs["settlement_source"], "kalshi_settlement")
-        self.assertEqual(future_pnl_inputs["actual_source"], "nws_observed")
-        self.assertEqual(future_pnl_inputs["resolved_at"], "2026-05-16T13:00:00+00:00")
-        self.assertEqual(future_pnl_inputs["known_after"], "2026-05-16T13:00:00+00:00")
-        self.assertEqual(future_pnl_inputs["label_target"], "nws_observed")
+        for forbidden_key in (
+            "actual_temp_used",
+            "settlement_source",
+            "actual_source",
+            "resolved_at",
+            "known_after",
+            "label_target",
+        ):
+            self.assertNotIn(forbidden_key, future_pnl_inputs)
         self.assertEqual(future_pnl_inputs["threshold"], 70.0)
         self.assertEqual(future_pnl_inputs["question_side"], "above")
         self.assertEqual(future_pnl_inputs["market_kind"], "high")
@@ -1243,9 +1246,8 @@ parameters:
             future_pnl_inputs["question"],
             "Will Seattle high temperature be above 70 degrees on May 15, 2026?",
         )
-        self.assertEqual(future_pnl_inputs["actual_outcome"], "YES")
-        self.assertEqual(future_pnl_inputs["resolved_outcome"], "YES")
-        self.assertEqual(future_pnl_inputs["settled_side"], "YES")
+        for forbidden_key in ("actual_outcome", "resolved_outcome", "settled_side"):
+            self.assertNotIn(forbidden_key, future_pnl_inputs)
 
     def test_shadow_source_router_writes_independent_buy_no_with_side_specific_price(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2113,6 +2115,8 @@ parameters:
 
     def test_repo_source_scoreboard_runtime_config_uses_isolated_output_path(self):
         config_path = REPO_ROOT / "data/runtime_configs/paper_source_scoreboard_shadow_20260516.yaml"
+        if not config_path.exists():
+            self.skipTest("ignored runtime-local scoreboard config is not present in this worktree")
 
         with patch.dict(os.environ, {}, clear=True):
             config = load_config(config_path)
