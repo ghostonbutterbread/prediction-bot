@@ -1,0 +1,50 @@
+# Template only: do not start this directly. Copy it to an ignored runtime config,
+# replace the cohort root with a fresh timestamped directory, then start the paired
+# observer collector and paper-shadow consumer together.
+config_composition:
+  base: config.paper_beta_shadow_weather.yaml
+
+runtime:
+  base_dir: data/beta_shadow/forward_router_guard_comparison_TEMPLATE
+  isolated: true
+
+shared_market:
+  runtime_root: data/beta_shadow/forward_router_guard_comparison_TEMPLATE/shared_market_runtime
+
+paper_shadow_lanes:
+  enabled: true
+  definitions_dir: lanes
+  # Lean direct-comparison cohort: unchanged source-router control plus guarded lane.
+  enabled_lanes:
+    - control_stable
+    - shadow_source_router
+    - shadow_source_router_no_price_guard
+  source_scoreboard_path: data/beta_shadow/forward_router_guard_comparison_TEMPLATE/source_scoreboard/source_scoreboard_by_slice.jsonl
+  decision_ledger_path: data/beta_shadow/forward_router_guard_comparison_TEMPLATE/paper/source_router_guard_comparison/paper_shadow_lane_decisions.jsonl
+  shadow_source_router:
+    enabled: true
+    parameters:
+      hypothetical_notional_usd: 10.0
+  shadow_source_router_no_price_guard:
+    enabled: true
+    parameters:
+      hypothetical_notional_usd: 10.0
+      allowed_actions:
+        - BUY_NO
+      allowed_entry_price_ranges:
+        - [0.60, 0.70]
+        - [0.80, 0.90]
+
+resolution_feed:
+  enabled: true
+  mode: incremental_unresolved
+  decision_ledger_path: data/beta_shadow/forward_router_guard_comparison_TEMPLATE/paper/source_router_guard_comparison/paper_shadow_lane_decisions.jsonl
+  decision_ledger_paths:
+    - data/beta_shadow/forward_router_guard_comparison_TEMPLATE/paper/source_router_guard_comparison/paper_shadow_lane_decisions.jsonl
+  decision_ledger_globs: []
+  central_output_dir: data/beta_shadow/forward_router_guard_comparison_TEMPLATE/resolutions
+  output_dir: data/beta_shadow/forward_router_guard_comparison_TEMPLATE/resolution_feed
+  interval_seconds: 1800
+  max_incremental_markets: 250
+  max_fetch_attempts: 4
+  retry_delay_seconds: 3.0

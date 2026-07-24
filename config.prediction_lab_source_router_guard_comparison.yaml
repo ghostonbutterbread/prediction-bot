@@ -1,0 +1,21 @@
+# Template paired with config.paper_source_router_guard_comparison.yaml.
+# Copy to an ignored runtime config and replace TEMPLATE with the same fresh,
+# timestamped cohort root before starting either service.
+config_composition:
+  base: config.prediction_lab_beta_shadow_weather.yaml
+
+runtime:
+  base_dir: data/beta_shadow/forward_router_guard_comparison_TEMPLATE
+  isolated: true
+
+shared_market:
+  runtime_root: data/beta_shadow/forward_router_guard_comparison_TEMPLATE/shared_market_runtime
+
+prediction_lab:
+  observer_mode: true
+  mode: collector
+  score_only: true
+  collector_record_market_snapshots: true
+  collector_record_predictions: false
+  continue_collecting: true
+  collector_interval_seconds: 900
