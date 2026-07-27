@@ -747,6 +747,9 @@ class Simulator:
         )
         return max(1, int(value))
 
+    def _paper_shared_market_consumer_only(self) -> bool:
+        return bool(self._paper_shared_market_config().get("shared_market_consumer_only", False))
+
     def _begin_paper_shared_market_runtime(self) -> dict[str, Any] | None:
         if not self._paper_shared_market_enabled():
             return None
@@ -755,20 +758,25 @@ class Simulator:
         instance_id = self._paper_shared_market_instance_id()
         max_snapshot_age_seconds = self._paper_shared_market_max_snapshot_age_seconds()
         desired_interval_seconds = self._paper_shared_market_desired_interval_seconds()
+        consumer_only = self._paper_shared_market_consumer_only()
         now = datetime.now(timezone.utc)
         manager.attach(
             runtime_kind="paper",
             instance_id=instance_id,
-            can_publish=True,
+            can_publish=not consumer_only,
             can_consume=True,
             desired_interval_seconds=desired_interval_seconds,
             max_snapshot_age_seconds=max_snapshot_age_seconds,
             now=now,
         )
-        state = manager.acquire_publisher_lease(
-            runtime_kind="paper",
-            instance_id=instance_id,
-            now=now,
+        state = (
+            manager.read_state(now=now)
+            if consumer_only
+            else manager.acquire_publisher_lease(
+                runtime_kind="paper",
+                instance_id=instance_id,
+                now=now,
+            )
         )
         publisher = state.get("publisher") if isinstance(state, dict) else None
         latest_snapshot = state.get("latest_snapshot") if isinstance(state, dict) else None
@@ -787,14 +795,18 @@ class Simulator:
                 now=now,
             )
         )
-        # Paper can only skip its direct upstream fetch when the current shared
-        # publisher has a fresh snapshot that matches the active lease. Missing,
-        # stale, or mismatched snapshots must fall back to the legacy direct
-        # paper scan path so paper does not silently stop observing markets.
-        skip_direct_fetch = bool(fresh_shared_snapshot)
+        skip_direct_fetch = bool(fresh_shared_snapshot or consumer_only)
         if fresh_shared_snapshot:
             provenance = "shared"
             skip_reason = "fresh_shared_snapshot_owned_by_other_publisher"
+        elif consumer_only:
+            provenance = "shared_unavailable"
+            if latest_snapshot is None:
+                skip_reason = "shared_snapshot_unavailable"
+            elif not self._shared_market_snapshot_matches_publisher(latest_snapshot, publisher):
+                skip_reason = "shared_snapshot_mismatch"
+            else:
+                skip_reason = "shared_snapshot_stale"
         elif owns_publisher:
             provenance = "direct_publisher"
             skip_reason = None
@@ -854,13 +866,16 @@ class Simulator:
         shadow_emit = self._emit_shadow_lanes_from_shared_market_snapshot(context)
         self.risk.record_blocked_scan({}, trades_taken=0)
         self._save_session()
+        blocked_reasons = {}
+        if context.get("provenance") == "shared_unavailable":
+            blocked_reasons[str(context.get("skip_reason") or "shared_snapshot_unavailable")] = 1
         result = {
             "markets": int(snapshot.get("market_count") or snapshot.get("candidate_count") or 0),
             "signals": 0,
             "trades": 0,
             "balance": self.balance,
             "total_trades": len(self._effective_trades()),
-            "blocked_reasons": {},
+            "blocked_reasons": blocked_reasons,
             "standby": {
                 "active": bool(self.risk.state.standby_active),
                 "reason_codes": list(self.risk.state.standby_reason_codes),
@@ -906,6 +921,7 @@ class Simulator:
         tail_limit = max(1, requested_count) if requested_count > 0 else self._shared_market_snapshot_tail_limit()
         recent_rows = self._load_recent_jsonl_rows(source_path, tail_limit)
         snapshot_rows = self._rows_for_shared_snapshot(recent_rows, snapshot_id=snapshot_id)
+        snapshot_rows = self._bind_shared_snapshot_rows(snapshot_rows, snapshot_id=snapshot_id)
         if not snapshot_rows:
             return {
                 "status": "skipped",
@@ -1009,6 +1025,36 @@ class Simulator:
             if str(row_run_id or "") == snapshot_id:
                 matched.append(row)
         return matched
+
+    @staticmethod
+    def _bind_shared_snapshot_rows(rows: list[dict[str, Any]], *, snapshot_id: str) -> list[dict[str, Any]]:
+        """Bind collector inputs to the exact runtime-selected snapshot."""
+        if not snapshot_id:
+            return []
+        bound_rows: list[dict[str, Any]] = []
+        for raw_row in rows:
+            row = dict(raw_row)
+            shared = row.get("shared_candidate") if isinstance(row.get("shared_candidate"), dict) else {}
+            shared = dict(shared)
+            existing_snapshot_ids = {
+                str(value)
+                for value in (
+                    row.get("shared_snapshot_id"),
+                    row.get("snapshot_id"),
+                    shared.get("shared_snapshot_id"),
+                    shared.get("snapshot_id"),
+                )
+                if value not in (None, "")
+            }
+            if existing_snapshot_ids and existing_snapshot_ids != {snapshot_id}:
+                return []
+            row["shared_snapshot_id"] = snapshot_id
+            row["snapshot_id"] = snapshot_id
+            shared["shared_snapshot_id"] = snapshot_id
+            shared["snapshot_id"] = snapshot_id
+            row["shared_candidate"] = shared
+            bound_rows.append(row)
+        return bound_rows
 
     @staticmethod
     def _load_recent_jsonl_rows(path: Path, limit: int) -> list[dict[str, Any]]:

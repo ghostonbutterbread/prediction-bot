@@ -175,6 +175,7 @@ def _build_lane_row(
         shared_candidate_id=shared_candidate_id,
         candidate_dataset_path=candidate_dataset_path,
     )
+    shared_snapshot_id = _optional_text(shared_candidate_ref.get("shared_snapshot_id"))
     row = {
         "schema_name": "agent_decision",
         "schema_version": 1,
@@ -323,6 +324,9 @@ def _build_lane_row(
     if lane.definition_path:
         row["lane_definition_path"] = lane.definition_path
         row["provenance"]["lane_definition_path"] = lane.definition_path
+    if shared_snapshot_id:
+        row["shared_snapshot_id"] = shared_snapshot_id
+        row["provenance"]["shared_snapshot_id"] = shared_snapshot_id
     return validate_agent_decision_row(row)
 
 
@@ -2243,6 +2247,16 @@ def _shared_candidate_ref(
         "provenance": _optional_text(shared_candidate.get("provenance"), signal.get("candidate_provenance")),
         "observed_at": _optional_text(shared_candidate.get("observed_at"), signal.get("candidate_observed_at"), signal.get("observed_at")),
         "snapshot_as_of": _optional_text(shared_candidate.get("snapshot_as_of"), signal.get("snapshot_as_of"), signal.get("source_as_of")),
+        "shared_snapshot_id": _optional_text(
+            shared_candidate.get("shared_snapshot_id"),
+            shared_candidate.get("snapshot_id"),
+            signal.get("shared_snapshot_id"),
+        ),
+        "snapshot_id": _optional_text(
+            shared_candidate.get("shared_snapshot_id"),
+            shared_candidate.get("snapshot_id"),
+            signal.get("shared_snapshot_id"),
+        ),
         "snapshot_ttl_seconds": _first_present(shared_candidate.get("snapshot_ttl_seconds"), signal.get("snapshot_ttl_seconds")),
     }
 
