@@ -281,6 +281,9 @@ class SimulatorSharedMarketRuntimeTests(unittest.TestCase):
             self.assertEqual(lane_rows[0]["action"], "BUY_YES")
             self.assertEqual(lane_rows[0]["approved_position_size_usd"], 5.0)
             self.assertIn("source_scoreboard_inputs", lane_rows[0]["candidate_dataset_path"])
+            self.assertEqual(lane_rows[0]["shared_snapshot_id"], "collector-snapshot")
+            self.assertEqual(lane_rows[0]["provenance"]["shared_snapshot_id"], "collector-snapshot")
+            self.assertEqual(lane_rows[0]["shared_candidate"]["snapshot_id"], "collector-snapshot")
 
     def test_stale_shared_snapshot_falls_back_to_direct_without_republishing_when_not_owner(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -414,6 +417,32 @@ class SimulatorSharedMarketRuntimeTests(unittest.TestCase):
             self.assertEqual(latest["snapshot_id"], "old-paper-snapshot")
             self.assertEqual(latest["publisher_runtime"], "paper")
             self.assertEqual(latest["publisher_instance_id"], "old-paper-owner")
+
+    def test_strict_shared_consumer_blocks_direct_fetch_without_collector_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime_root = Path(tmpdir) / "shared-runtime"
+            now = datetime.now(timezone.utc)
+            config = simulator_config(tmpdir, runtime_root, enabled=True, instance_id="paper-consumer")
+            config["paper"]["shared_market_consumer_only"] = True
+            manager = SharedMarketRuntimeManager(runtime_root=runtime_root, config=config)
+            manager.attach(
+                runtime_kind="collector",
+                instance_id="collector-owner",
+                can_publish=True,
+                can_consume=True,
+                desired_interval_seconds=60,
+                now=now,
+            )
+            sim = Simulator(config)
+            exchange = FakeExchange([fake_market("KXHIGHNY-26APR29-T84")])
+
+            result = sim.scan(exchange)
+
+            self.assertEqual(exchange.calls, 0)
+            self.assertEqual(result["markets"], 0)
+            self.assertEqual(result["blocked_reasons"], {"shared_snapshot_unavailable": 1})
+            self.assertEqual(result["shared_market"]["source"], "shared_unavailable")
+            self.assertIsNone(result["shared_market"]["snapshot_id"])
 
     def test_public_publisher_snapshot_due_helper_is_not_reintroduced(self):
         source = Path("bot/shared_market_runtime.py").read_text(encoding="utf-8")

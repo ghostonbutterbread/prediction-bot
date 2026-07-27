@@ -32,6 +32,22 @@ paper_shadow_lanes:
     - shadow_confidence_floor
 ```
 
+## Collector-paired comparison cohorts
+
+When a collector owns the shared market feed, run paper lanes as a strict consumer:
+
+```yaml
+paper:
+  shared_market_runtime_enabled: true
+  shared_market_consumer_only: true
+```
+
+In this mode paper never fetches or publishes a separate candidate universe. A
+missing, stale, or publisher-mismatched collector snapshot blocks the scan and
+writes no lane decisions. Every emitted lane row carries the exact collector
+`shared_snapshot_id` at the top level, in provenance, and in the shared-candidate
+reference; use that ID for comparison and resolution joins.
+
 Merge precedence is:
 
 1. built-in lane defaults
