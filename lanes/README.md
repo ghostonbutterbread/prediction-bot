@@ -48,6 +48,32 @@ writes no lane decisions. Every emitted lane row carries the exact collector
 `shared_snapshot_id` at the top level, in provenance, and in the shared-candidate
 reference; use that ID for comparison and resolution joins.
 
+## Offline collector replay and automatic resolution
+
+Collector snapshots are immutable raw evidence. To test lanes later without a
+paper-lane service, create a derived ledger under `data/derived_reports`:
+
+```bash
+python scripts/collector_lane_replay.py \
+  --snapshot-path /absolute/path/to/market_snapshots.jsonl \
+  --output-dir data/derived_reports/my_lane_replay \
+  --lane control_stable --lane shadow_source_router
+```
+
+The replay strips outcome-like fields before lane evaluation, stamps each row
+with the collector run as `shared_snapshot_id`, and writes both all decisions
+and a BUY-only ledger. Refresh independently authoritative outcomes only for
+that BUY-only ledger with:
+
+```bash
+python scripts/collector_lane_auto_resolve.py \
+  --output-dir data/derived_reports/my_lane_replay
+```
+
+Both commands are non-mutating: they never modify collector snapshots, wallets,
+orders, accounting, or source decision ledgers. The resolver may be scheduled
+periodically after the derived replay exists.
+
 Merge precedence is:
 
 1. built-in lane defaults
