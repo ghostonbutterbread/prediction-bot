@@ -269,7 +269,17 @@ def _prepare_snapshot(
     observed_at = _text(raw_row.get("observed_at"), raw_row.get("timestamp"))
     if not candidate_id or not market_id or not snapshot_id or not observed_at:
         return None
+    artifact = _mapping(raw_row.get("decision_artifact"))
+    artifact_signal = _mapping(artifact.get("strategy_signal"))
+    source_context = _scrub_outcome_like_fields(_mapping(artifact.get("source_context")))
+    source_snapshots = _scrub_outcome_like_fields(artifact.get("source_snapshots"))
     shared_candidate = _scrub_outcome_like_fields(_mapping(raw_row.get("shared_candidate")))
+    evidence = _mapping(shared_candidate.get("evidence"))
+    if source_context:
+        evidence["source_context"] = source_context
+        evidence.setdefault("source_details", source_context.get("source_details", []))
+    if source_snapshots:
+        evidence["source_snapshots"] = source_snapshots
     shared_candidate.update(
         {
             "candidate_id": candidate_id,
@@ -279,28 +289,42 @@ def _prepare_snapshot(
             "shared_snapshot_id": snapshot_id,
             "source_runtime": "collector_snapshot_replay",
             "provenance": "collector_recorded_as_of",
+            "evidence": evidence,
         }
     )
+    execution_snapshot = _mapping(artifact.get("execution_snapshot"))
+    yes_price = raw_row.get("yes_price", execution_snapshot.get("yes_price"))
+    no_price = raw_row.get("no_price", execution_snapshot.get("no_price"))
+    shared_decision = _mapping(shared_candidate.get("decision"))
     signal = _scrub_outcome_like_fields(
         {
-            **_mapping(shared_candidate.get("decision")),
+            **artifact_signal,
+            **shared_decision,
             "shared_candidate_id": candidate_id,
             "market_id": market_id,
             "observed_at": observed_at,
             "shared_snapshot_id": snapshot_id,
             "snapshot_id": snapshot_id,
             "question": _text(raw_row.get("question"), _mapping(shared_candidate.get("market")).get("question")),
-            "confidence": raw_row.get("confidence", _mapping(shared_candidate.get("decision")).get("confidence")),
-            "edge": raw_row.get("edge", _mapping(shared_candidate.get("decision")).get("edge")),
-            "model_probability": _mapping(shared_candidate.get("decision")).get("model_probability"),
-            "yes_price": raw_row.get("yes_price"),
-            "no_price": raw_row.get("no_price"),
-            "market_price": raw_row.get("yes_price"),
-            "source_details": _mapping(shared_candidate.get("evidence")).get("source_details", []),
+            "confidence": raw_row.get("confidence", artifact_signal.get("confidence", shared_decision.get("confidence"))),
+            "edge": raw_row.get("edge", artifact_signal.get("edge", shared_decision.get("edge"))),
+            "model_probability": artifact_signal.get("model_probability", shared_decision.get("model_probability")),
+            "yes_price": yes_price,
+            "no_price": no_price,
+            "market_price": yes_price,
+            "price_assumption": "collector_recorded_reference_price",
+            "source_details": evidence.get("source_details", []),
         }
     )
-    action = _action(_mapping(raw_row.get("main_decision")).get("action"), _mapping(shared_candidate.get("decision")).get("final_action"))
-    size = _number(_mapping(raw_row.get("main_decision")).get("size"))
+    artifact_decision = {
+        **_mapping(artifact.get("shared_core_decision")),
+        "action": artifact.get("final_action", _mapping(artifact.get("shared_core_decision")).get("action")),
+        "reason_code": artifact.get("final_reason_code", _mapping(artifact.get("shared_core_decision")).get("reason_code")),
+        "reason": artifact.get("final_reason", _mapping(artifact.get("shared_core_decision")).get("reason")),
+    }
+    stable_decision = {**artifact_decision, **_mapping(raw_row.get("main_decision"))}
+    action = _action(stable_decision.get("action"), shared_decision.get("final_action"))
+    size = _number(stable_decision.get("size"))
     stable = _source_decision(
         wallet_id=STABLE_PAPER_WALLET_ID,
         candidate_id=candidate_id,
@@ -310,18 +334,21 @@ def _prepare_snapshot(
         size=size if action.startswith("BUY_") and size is not None else (default_notional_usd if action.startswith("BUY_") else 0.0),
         candidate_dataset_path=candidate_dataset_path,
         replay_run_id=replay_run_id,
-        decision=_mapping(raw_row.get("main_decision")),
+        decision=stable_decision,
     )
+    beta_decision = _mapping(raw_row.get("normal_decision"))
+    beta_action = _action(beta_decision.get("action"))
+    beta_size = _number(beta_decision.get("size"))
     beta = _source_decision(
         wallet_id=BETA_PAPER_WALLET_ID,
         candidate_id=candidate_id,
         market_id=market_id,
         observed_at=observed_at,
-        action="SKIP",
-        size=0.0,
+        action=beta_action,
+        size=beta_size if beta_action.startswith("BUY_") and beta_size is not None else (default_notional_usd if beta_action.startswith("BUY_") else 0.0),
         candidate_dataset_path=candidate_dataset_path,
         replay_run_id=replay_run_id,
-        decision={"reason_code": "beta_decision_not_recorded", "reason": "Collector snapshot did not include a beta decision"},
+        decision=beta_decision or {"reason_code": "beta_decision_not_recorded", "reason": "Collector snapshot did not include a beta decision"},
     )
     return candidate_id, SimpleNamespace(signal=signal, shared_candidate=shared_candidate), stable, beta
 
