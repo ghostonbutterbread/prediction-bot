@@ -11,7 +11,7 @@ import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any, Collection, Iterator, Mapping
 
 INDEX_SCHEMA_NAME = "collector_replay_index"
 INDEX_SCHEMA_VERSION = 1
@@ -74,6 +74,8 @@ def build_collector_replay_index(
         "indexed_source_bytes": source_path.stat().st_size,
         "source_rows_seen": row_number,
         "source_sha256": source_digest.hexdigest(),
+        "append_chain_base_sha256": source_digest.hexdigest(),
+        "append_chain_sha256": source_digest.hexdigest(),
         "index_path": str(index_path),
         "indexed_rows": indexed_rows,
         "invalid_rows": invalid_rows,
@@ -104,6 +106,8 @@ def update_collector_replay_index(source_path: Path, index_path: Path, manifest_
     if source_size < start_offset:
         raise ValueError("raw collector archive was truncated; rebuild the replay index")
     row_number = int(manifest.get("source_rows_seen") or 0)
+    last_complete_offset = start_offset
+    chain = bytes.fromhex(str(manifest.get("append_chain_sha256") or manifest.get("source_sha256") or "00" * 32))
     new_indexed = new_invalid = 0
     with source_path.open("rb") as source, index_path.open("a", encoding="utf-8") as index:
         source.seek(start_offset)
@@ -112,6 +116,11 @@ def update_collector_replay_index(source_path: Path, index_path: Path, manifest_
             payload = source.readline()
             if not payload:
                 break
+            if not payload.endswith(b"\n"):
+                # Leave an incomplete trailing record for the next pass.
+                break
+            last_complete_offset = source.tell()
+            chain = hashlib.sha256(chain + hashlib.sha256(payload).digest()).digest()
             row_number += 1
             try:
                 row = json.loads(payload)
@@ -129,29 +138,50 @@ def update_collector_replay_index(source_path: Path, index_path: Path, manifest_
             new_indexed += 1
     manifest["updated_at"] = datetime.now(timezone.utc).isoformat()
     manifest["source_size_bytes"] = source_size
-    manifest["indexed_source_bytes"] = source_size
+    manifest["indexed_source_bytes"] = last_complete_offset
     manifest["source_rows_seen"] = row_number
     manifest["indexed_rows"] = int(manifest.get("indexed_rows") or 0) + new_indexed
     manifest["invalid_rows"] = int(manifest.get("invalid_rows") or 0) + new_invalid
+    manifest["append_chain_sha256"] = chain.hex()
+    manifest["unindexed_trailing_bytes"] = source_size - last_complete_offset
     manifest["source_sha256"] = None
     manifest["source_integrity"] = "per_indexed_row_payload_sha256"
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return {**manifest, "new_indexed_rows": new_indexed, "new_invalid_rows": new_invalid, "manifest_path": str(manifest_path)}
 
 
-def load_indexed_collector_rows(index_path: Path, manifest_path: Path) -> Iterator[dict[str, Any]]:
-    """Yield original raw rows referenced by an index after provenance checks."""
+def load_indexed_collector_rows(
+    index_path: Path,
+    manifest_path: Path,
+    *,
+    market_ids: Collection[str] | None = None,
+    max_rows: int | None = None,
+) -> Iterator[dict[str, Any]]:
+    """Yield selected original rows after compact-index provenance checks.
+
+    Filtering occurs on compact index metadata before the corresponding raw
+    payload is read, so callers can hydrate a bounded replay without copying or
+    scanning a second raw archive.
+    """
+    if max_rows is not None and max_rows <= 0:
+        raise ValueError("max_rows must be positive")
+    selected_market_ids = {str(market_id) for market_id in market_ids or () if str(market_id)}
     manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
     if manifest.get("index_schema_name") != INDEX_SCHEMA_NAME:
         raise ValueError("unsupported replay index schema")
     source_path = Path(str(manifest.get("source_path") or ""))
     if not source_path.is_file():
         raise FileNotFoundError(source_path)
+    yielded = 0
     with source_path.open("rb") as source, Path(index_path).open(encoding="utf-8") as index:
         for line in index:
             entry = json.loads(line)
             if entry.get("schema_name") != INDEX_SCHEMA_NAME:
                 raise ValueError("invalid replay index row")
+            if selected_market_ids and str(entry.get("market_id") or "") not in selected_market_ids:
+                continue
+            if max_rows is not None and yielded >= max_rows:
+                break
             source.seek(int(entry["byte_offset"]))
             payload = source.read(int(entry["byte_length"]))
             if hashlib.sha256(payload).hexdigest() != entry.get("payload_sha256"):
@@ -159,6 +189,7 @@ def load_indexed_collector_rows(index_path: Path, manifest_path: Path) -> Iterat
             row = json.loads(payload)
             if str(row.get("market_id") or "") != entry.get("market_id"):
                 raise ValueError("raw collector row does not match replay index market identity")
+            yielded += 1
             yield dict(row)
 
 

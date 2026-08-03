@@ -23,6 +23,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from bot.file_ops import load_jsonl
+from bot.collector_replay_index import load_indexed_collector_rows
 from bot.paper_shadow_lanes import (
     build_paper_shadow_lane_resolution_rows,
     summarize_paper_shadow_lane_resolution_rows,
@@ -59,7 +60,12 @@ class CollectorLaneReplayResult:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--snapshot-path", required=True)
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument("--snapshot-path")
+    input_group.add_argument("--index-path")
+    parser.add_argument("--manifest-path")
+    parser.add_argument("--market-id", action="append", dest="market_ids", default=[])
+    parser.add_argument("--max-rows", type=int)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--lane", action="append", dest="lanes", required=True)
     parser.add_argument("--resolution-path", action="append", default=[])
@@ -70,12 +76,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.index_path and not args.manifest_path:
+        raise ValueError("--manifest-path is required with --index-path")
+    if args.manifest_path and not args.index_path:
+        raise ValueError("--manifest-path requires --index-path")
+    if args.snapshot_path and (args.market_ids or args.max_rows is not None):
+        raise ValueError("--market-id and --max-rows require --index-path")
     result = build_collector_lane_replay(
-        snapshot_path=_root_path(args.snapshot_path),
+        snapshot_path=_root_path(args.snapshot_path) if args.snapshot_path else None,
+        index_path=_root_path(args.index_path) if args.index_path else None,
+        manifest_path=_root_path(args.manifest_path) if args.manifest_path else None,
         output_dir=_safe_output_dir(_root_path(args.output_dir)),
         enabled_lanes=args.lanes,
         resolution_paths=[_root_path(path) for path in args.resolution_path],
         default_notional_usd=args.default_notional_usd,
+        market_ids=args.market_ids,
+        max_rows=args.max_rows,
     )
     if args.format == "json":
         print(json.dumps(result.summary, indent=2, sort_keys=True))
@@ -97,16 +113,28 @@ def main(argv: list[str] | None = None) -> int:
 
 def build_collector_lane_replay(
     *,
-    snapshot_path: Path,
+    snapshot_path: Path | None = None,
+    index_path: Path | None = None,
+    manifest_path: Path | None = None,
     output_dir: Path,
     enabled_lanes: Iterable[str],
     resolution_paths: Iterable[Path] = (),
     default_notional_usd: float = DEFAULT_NOTIONAL_USD,
+    market_ids: Iterable[str] = (),
+    max_rows: int | None = None,
 ) -> CollectorLaneReplayResult:
     """Evaluate configured lanes over stored snapshots and optionally score known resolutions."""
     if default_notional_usd <= 0:
         raise ValueError("default_notional_usd must be positive")
-    if not snapshot_path.exists():
+    if (snapshot_path is None) == (index_path is None):
+        raise ValueError("provide exactly one of snapshot_path or index_path")
+    if index_path is None and (manifest_path is not None or tuple(market_ids) or max_rows is not None):
+        raise ValueError("manifest_path, market_ids, and max_rows require index_path")
+    if index_path is not None and manifest_path is None:
+        raise ValueError("manifest_path is required with index_path")
+    if max_rows is not None and max_rows <= 0:
+        raise ValueError("max_rows must be positive")
+    if snapshot_path is not None and not snapshot_path.exists():
         raise FileNotFoundError(snapshot_path)
     lane_ids = _normalized_lanes(enabled_lanes)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -118,9 +146,26 @@ def build_collector_lane_replay(
         if path.exists():
             raise FileExistsError(f"derived replay output already exists: {path}")
 
-    rows = _load_jsonl(snapshot_path)
-    source_digest = _file_sha256(snapshot_path)
-    replay_run_id = f"collector_replay:{source_digest[:16]}"
+    normalized_market_ids = _normalized_market_ids(market_ids)
+    if index_path is not None:
+        assert manifest_path is not None
+        rows, index_entries, replay_index = _load_selected_indexed_rows(
+            index_path=index_path,
+            manifest_path=manifest_path,
+            market_ids=normalized_market_ids,
+            max_rows=max_rows,
+        )
+        snapshot_path = Path(str(replay_index["source_path"]))
+        source_sha256 = replay_index.get("source_sha256")
+        replay_identity_digest = str(source_sha256 or replay_index["manifest_sha256"])
+    else:
+        assert snapshot_path is not None
+        rows = _load_jsonl(snapshot_path)
+        index_entries = []
+        replay_index = None
+        source_sha256 = _file_sha256(snapshot_path)
+        replay_identity_digest = source_sha256
+    replay_run_id = f"collector_replay:{replay_identity_digest[:16]}"
     candidate_dataset_path = str(snapshot_path)
     inputs: dict[str, dict[str, Any]] = {}
     collector_identity: dict[str, dict[str, Any]] = {}
@@ -128,7 +173,7 @@ def build_collector_lane_replay(
     beta_rows: list[dict[str, Any]] = []
     invalid = 0
     duplicate = 0
-    for row_index, raw_row in enumerate(rows, start=1):
+    for ordinal, raw_row in enumerate(rows, start=1):
         prepared = _prepare_snapshot(
             raw_row,
             candidate_dataset_path=candidate_dataset_path,
@@ -145,8 +190,16 @@ def build_collector_lane_replay(
         collector_identity[candidate_id] = {
             "collector_run_id": str(raw_row.get("run_id") or raw_row.get("snapshot_key")),
             "collector_snapshot_id": str(raw_row.get("run_id") or raw_row.get("snapshot_key")),
-            "collector_source_row_index": row_index,
+            "collector_source_row_index": int(index_entries[ordinal - 1]["row_number"]) if index_entries else ordinal,
         }
+        if replay_index is not None:
+            collector_identity[candidate_id].update(
+                {
+                    "collector_replay_index_path": str(index_path),
+                    "collector_replay_index_manifest_path": str(manifest_path),
+                    "collector_replay_index_manifest_sha256": replay_index["manifest_sha256"],
+                }
+            )
         inputs[candidate_id] = {
             STABLE_PAPER_WALLET_ID: wallet_input,
             BETA_PAPER_WALLET_ID: wallet_input,
@@ -182,7 +235,7 @@ def build_collector_lane_replay(
             raise ValueError("derived lane row is missing immutable collector identity")
         row.update(identity)
         row["collector_dataset_path"] = candidate_dataset_path
-        row["collector_dataset_sha256"] = source_digest
+        row["collector_dataset_sha256"] = source_sha256
         row["derived_replay_run_id"] = replay_run_id
         row["lane_definition_digest"] = lane_definition_digest
     _write_jsonl(lane_decision_path, lane_rows)
@@ -198,7 +251,7 @@ def build_collector_lane_replay(
         "non_mutating": True,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "snapshot_path": str(snapshot_path),
-        "snapshot_sha256": _file_sha256(snapshot_path),
+        "snapshot_sha256": source_sha256,
         "output_dir": str(output_dir),
         "replay_run_id": replay_run_id,
         "enabled_lanes": lane_ids,
@@ -214,6 +267,9 @@ def build_collector_lane_replay(
         "buy_decision_path": str(buy_decision_path),
         "resolved_row_path": str(resolved_row_path),
     }
+    if replay_index is not None:
+        summary["replay_index"] = replay_index
+        summary["index_selection"] = {"market_ids": normalized_market_ids, "max_rows": max_rows}
     summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return CollectorLaneReplayResult(lane_decision_path, buy_decision_path, resolved_row_path, summary_path, summary)
 
@@ -389,6 +445,35 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
     return [dict(row) for row in load_jsonl(path) if isinstance(row, Mapping)]
 
 
+def _load_selected_indexed_rows(
+    *, index_path: Path, manifest_path: Path, market_ids: list[str], max_rows: int | None
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    """Select compact index entries, then hydrate only their referenced raw rows."""
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    selected_entries: list[dict[str, Any]] = []
+    for line in index_path.read_text(encoding="utf-8").splitlines():
+        entry = json.loads(line)
+        if market_ids and str(entry.get("market_id") or "") not in market_ids:
+            continue
+        selected_entries.append(entry)
+        if max_rows is not None and len(selected_entries) >= max_rows:
+            break
+    rows = list(load_indexed_collector_rows(index_path, manifest_path, market_ids=market_ids, max_rows=max_rows))
+    if len(rows) != len(selected_entries):
+        raise ValueError("hydrated raw-row count does not match compact index selection")
+    for entry, row in zip(selected_entries, rows):
+        if str(row.get("market_id") or "") != str(entry.get("market_id") or ""):
+            raise ValueError("hydrated raw row does not match selected compact index entry")
+    return rows, selected_entries, {
+        "index_path": str(index_path),
+        "manifest_path": str(manifest_path),
+        "manifest_sha256": _file_sha256(manifest_path),
+        "source_path": str(manifest.get("source_path") or ""),
+        "source_sha256": manifest.get("source_sha256"),
+        "storage_contract": manifest.get("storage_contract"),
+    }
+
+
 def _write_jsonl(path: Path, rows: Iterable[Mapping[str, Any]]) -> None:
     path.write_text("".join(json.dumps(dict(row), sort_keys=True) + "\n" for row in rows), encoding="utf-8")
 
@@ -415,6 +500,15 @@ def _normalized_lanes(values: Iterable[str]) -> list[str]:
     if not lane_ids:
         raise ValueError("at least one lane is required")
     return lane_ids
+
+
+def _normalized_market_ids(values: Iterable[str]) -> list[str]:
+    market_ids: list[str] = []
+    for value in values:
+        market_id = str(value).strip()
+        if market_id and market_id not in market_ids:
+            market_ids.append(market_id)
+    return market_ids
 
 
 def _mapping(value: Any) -> dict[str, Any]:

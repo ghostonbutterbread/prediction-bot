@@ -1,8 +1,10 @@
+import hashlib
 import json
 import tempfile
 import unittest
 from pathlib import Path
 
+from bot.collector_replay_index import build_collector_replay_index
 from scripts.collector_lane_replay import auto_resolve_collector_lane_replay, build_collector_lane_replay
 
 
@@ -12,6 +14,59 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
 
 
 class CollectorLaneReplayTests(unittest.TestCase):
+    def test_replays_selected_index_rows_with_index_and_manifest_provenance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshots = root / "collector_snapshots.jsonl"
+            index_path = root / "collector_replay_index.jsonl"
+            manifest_path = root / "collector_replay_index.manifest.json"
+            output = root / "data" / "derived_reports" / "indexed_replay"
+            _write_jsonl(
+                snapshots,
+                [
+                    {
+                        "run_id": "collector-001",
+                        "shared_candidate_id": "candidate-001",
+                        "market_id": "KXONE",
+                        "observed_at": "2026-07-01T12:00:00+00:00",
+                        "yes_price": 0.30,
+                        "no_price": 0.70,
+                        "main_decision": {"action": "BUY_NO", "size": 5.0},
+                    },
+                    {
+                        "run_id": "collector-002",
+                        "shared_candidate_id": "candidate-002",
+                        "market_id": "KXTWO",
+                        "observed_at": "2026-07-02T12:00:00+00:00",
+                        "yes_price": 0.40,
+                        "no_price": 0.60,
+                        "main_decision": {"action": "BUY_YES", "size": 5.0},
+                    },
+                ],
+            )
+            build_collector_replay_index(snapshots, index_path, manifest_path)
+
+            result = build_collector_lane_replay(
+                index_path=index_path,
+                manifest_path=manifest_path,
+                output_dir=output,
+                enabled_lanes=["control_stable"],
+                market_ids=["KXTWO"],
+                max_rows=1,
+            )
+
+            rows = [json.loads(line) for line in result.lane_decision_path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["market_id"], "KXTWO")
+            self.assertEqual(rows[0]["collector_source_row_index"], 2)
+            self.assertEqual(rows[0]["collector_replay_index_path"], str(index_path))
+            self.assertEqual(rows[0]["collector_replay_index_manifest_path"], str(manifest_path))
+            self.assertEqual(result.summary["collector_rows"], 1)
+            self.assertEqual(result.summary["index_selection"]["market_ids"], ["KXTWO"])
+            self.assertEqual(result.summary["index_selection"]["max_rows"], 1)
+            self.assertEqual(result.summary["replay_index"]["manifest_sha256"], hashlib.sha256(manifest_path.read_bytes()).hexdigest())
+            self.assertNotIn("decision_artifact", index_path.read_text(encoding="utf-8"))
+
     def test_derives_non_mutating_lane_rows_from_collector_snapshot_and_scores_independently(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
