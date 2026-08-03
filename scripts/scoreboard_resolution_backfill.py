@@ -59,6 +59,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=1.0,
         help="Delay between retry passes when Kalshi does not return Retry-After.",
     )
+    parser.add_argument(
+        "--request-interval-seconds",
+        type=float,
+        default=1.0,
+        help="Minimum delay between normal read-only market requests (default: 1 second).",
+    )
     parser.add_argument("--format", choices=["text", "json"], default="text", help="Console output format.")
     return parser.parse_args(argv)
 
@@ -77,6 +83,7 @@ def main(argv: list[str] | None = None) -> int:
         max_markets=args.max_markets,
         max_fetch_attempts=args.max_fetch_attempts,
         retry_delay_seconds=args.retry_delay_seconds,
+        request_interval_seconds=args.request_interval_seconds,
     )
     if args.format == "json":
         print(json.dumps(result.report, indent=2, sort_keys=True))

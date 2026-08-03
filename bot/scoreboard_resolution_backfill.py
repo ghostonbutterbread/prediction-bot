@@ -63,6 +63,7 @@ def backfill_scoreboard_resolutions(
     fetched_at: str | datetime | None = None,
     max_fetch_attempts: int = 3,
     retry_delay_seconds: float = 1.0,
+    request_interval_seconds: float = 1.0,
     sleep_fn: SleepFn | None = None,
 ) -> ScoreboardResolutionBackfillResult:
     """Fetch finalized outcomes for market ids found in historical scoreboard inputs.
@@ -96,11 +97,14 @@ def backfill_scoreboard_resolutions(
     sleep = sleep_fn or time.sleep
     max_attempts = max(1, int(max_fetch_attempts or 1))
     base_retry_delay = max(0.0, float(retry_delay_seconds or 0.0))
+    request_interval = max(0.0, float(request_interval_seconds or 0.0))
 
     while pending_refs:
         retry_refs: list[MarketRef] = []
         retry_after_values: list[float] = []
-        for ref in pending_refs:
+        for index, ref in enumerate(pending_refs):
+            if index and request_interval > 0:
+                sleep(request_interval)
             attempts_by_market[ref.market_id] += 1
             attempt = attempts_by_market[ref.market_id]
             try:
@@ -182,6 +186,7 @@ def backfill_scoreboard_resolutions(
         "retryable_fetch_error_count": len(retryable_fetch_errors),
         "retryable_fetch_error_samples": retryable_fetch_errors[:10],
         "max_fetch_attempts": max_attempts,
+        "request_interval_seconds": request_interval,
         "by_status": dict(sorted(status_counts.items())),
         "by_outcome": dict(sorted(outcome_counts.items())),
         "by_resolution_source": dict(sorted(source_counts.items())),
