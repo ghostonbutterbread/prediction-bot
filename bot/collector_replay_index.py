@@ -155,6 +155,7 @@ def load_indexed_collector_rows(
     manifest_path: Path,
     *,
     market_ids: Collection[str] | None = None,
+    row_numbers: Collection[int] | None = None,
     max_rows: int | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Yield selected original rows after compact-index provenance checks.
@@ -166,6 +167,7 @@ def load_indexed_collector_rows(
     if max_rows is not None and max_rows <= 0:
         raise ValueError("max_rows must be positive")
     selected_market_ids = {str(market_id) for market_id in market_ids or () if str(market_id)}
+    selected_row_numbers = {int(row_number) for row_number in row_numbers or () if int(row_number) > 0}
     manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
     if manifest.get("index_schema_name") != INDEX_SCHEMA_NAME:
         raise ValueError("unsupported replay index schema")
@@ -179,6 +181,8 @@ def load_indexed_collector_rows(
             if entry.get("schema_name") != INDEX_SCHEMA_NAME:
                 raise ValueError("invalid replay index row")
             if selected_market_ids and str(entry.get("market_id") or "") not in selected_market_ids:
+                continue
+            if selected_row_numbers and int(entry.get("row_number") or 0) not in selected_row_numbers:
                 continue
             if max_rows is not None and yielded >= max_rows:
                 break

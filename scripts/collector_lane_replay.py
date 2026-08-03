@@ -65,6 +65,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     input_group.add_argument("--index-path")
     parser.add_argument("--manifest-path")
     parser.add_argument("--market-id", action="append", dest="market_ids", default=[])
+    parser.add_argument("--row-number", action="append", dest="row_numbers", type=int, default=[])
     parser.add_argument("--max-rows", type=int)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--lane", action="append", dest="lanes", required=True)
@@ -80,8 +81,8 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("--manifest-path is required with --index-path")
     if args.manifest_path and not args.index_path:
         raise ValueError("--manifest-path requires --index-path")
-    if args.snapshot_path and (args.market_ids or args.max_rows is not None):
-        raise ValueError("--market-id and --max-rows require --index-path")
+    if args.snapshot_path and (args.market_ids or args.row_numbers or args.max_rows is not None):
+        raise ValueError("--market-id, --row-number, and --max-rows require --index-path")
     result = build_collector_lane_replay(
         snapshot_path=_root_path(args.snapshot_path) if args.snapshot_path else None,
         index_path=_root_path(args.index_path) if args.index_path else None,
@@ -91,6 +92,7 @@ def main(argv: list[str] | None = None) -> int:
         resolution_paths=[_root_path(path) for path in args.resolution_path],
         default_notional_usd=args.default_notional_usd,
         market_ids=args.market_ids,
+        row_numbers=args.row_numbers,
         max_rows=args.max_rows,
     )
     if args.format == "json":
@@ -121,15 +123,17 @@ def build_collector_lane_replay(
     resolution_paths: Iterable[Path] = (),
     default_notional_usd: float = DEFAULT_NOTIONAL_USD,
     market_ids: Iterable[str] = (),
+    row_numbers: Iterable[int] = (),
     max_rows: int | None = None,
+    definitions_dir: Path | None = None,
 ) -> CollectorLaneReplayResult:
     """Evaluate configured lanes over stored snapshots and optionally score known resolutions."""
     if default_notional_usd <= 0:
         raise ValueError("default_notional_usd must be positive")
     if (snapshot_path is None) == (index_path is None):
         raise ValueError("provide exactly one of snapshot_path or index_path")
-    if index_path is None and (manifest_path is not None or tuple(market_ids) or max_rows is not None):
-        raise ValueError("manifest_path, market_ids, and max_rows require index_path")
+    if index_path is None and (manifest_path is not None or tuple(market_ids) or tuple(row_numbers) or max_rows is not None):
+        raise ValueError("manifest_path, market_ids, row_numbers, and max_rows require index_path")
     if index_path is not None and manifest_path is None:
         raise ValueError("manifest_path is required with index_path")
     if max_rows is not None and max_rows <= 0:
@@ -153,6 +157,7 @@ def build_collector_lane_replay(
             index_path=index_path,
             manifest_path=manifest_path,
             market_ids=normalized_market_ids,
+            row_numbers=tuple(row_numbers),
             max_rows=max_rows,
         )
         snapshot_path = Path(str(replay_index["source_path"]))
@@ -211,7 +216,7 @@ def build_collector_lane_replay(
         "paper_shadow_lanes": {
             "enabled": True,
             "enabled_lanes": lane_ids,
-            "definitions_dir": str(ROOT / "lanes"),
+            "definitions_dir": str(definitions_dir or (ROOT / "lanes")),
             "decision_ledger_path": str(lane_decision_path),
         }
     }
@@ -269,7 +274,11 @@ def build_collector_lane_replay(
     }
     if replay_index is not None:
         summary["replay_index"] = replay_index
-        summary["index_selection"] = {"market_ids": normalized_market_ids, "max_rows": max_rows}
+        summary["index_selection"] = {
+            "market_ids": normalized_market_ids,
+            "row_numbers": sorted({int(value) for value in row_numbers if int(value) > 0}),
+            "max_rows": max_rows,
+        }
     summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return CollectorLaneReplayResult(lane_decision_path, buy_decision_path, resolved_row_path, summary_path, summary)
 
@@ -446,19 +455,26 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def _load_selected_indexed_rows(
-    *, index_path: Path, manifest_path: Path, market_ids: list[str], max_rows: int | None
+    *, index_path: Path, manifest_path: Path, market_ids: list[str], row_numbers: tuple[int, ...], max_rows: int | None
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     """Select compact index entries, then hydrate only their referenced raw rows."""
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     selected_entries: list[dict[str, Any]] = []
+    selected_row_numbers = {int(value) for value in row_numbers if int(value) > 0}
     for line in index_path.read_text(encoding="utf-8").splitlines():
         entry = json.loads(line)
         if market_ids and str(entry.get("market_id") or "") not in market_ids:
             continue
+        if selected_row_numbers and int(entry.get("row_number") or 0) not in selected_row_numbers:
+            continue
         selected_entries.append(entry)
         if max_rows is not None and len(selected_entries) >= max_rows:
             break
-    rows = list(load_indexed_collector_rows(index_path, manifest_path, market_ids=market_ids, max_rows=max_rows))
+    rows = list(
+        load_indexed_collector_rows(
+            index_path, manifest_path, market_ids=market_ids, row_numbers=selected_row_numbers, max_rows=max_rows
+        )
+    )
     if len(rows) != len(selected_entries):
         raise ValueError("hydrated raw-row count does not match compact index selection")
     for entry, row in zip(selected_entries, rows):
