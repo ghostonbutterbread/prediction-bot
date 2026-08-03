@@ -134,6 +134,19 @@ def backfill_scoreboard_resolutions(
                 )
                 continue
 
+            returned_market_id = str(market.get("ticker") or market.get("market_id") or "")
+            if returned_market_id != ref.market_id:
+                fetch_errors.append(
+                    {
+                        "market_id": ref.market_id,
+                        "error": "returned_market_id_mismatch",
+                        "requested_market_id": ref.market_id,
+                        "returned_market_id": returned_market_id or None,
+                        "attempts": attempt,
+                        "retryable": False,
+                    }
+                )
+                continue
             outcome, source, metadata = normalized_market_outcome(market)
             source_counts[source] += 1
             status_counts[str(market.get("status") or "unknown")] += 1
@@ -295,12 +308,18 @@ def build_backfill_resolution_row(
     metadata: Mapping[str, Any] | None,
     resolved_at: str,
 ) -> dict[str, Any]:
-    market_id = str(market.get("ticker") or market.get("market_id") or ref.market_id)
+    requested_market_id = ref.market_id
+    returned_market_id = str(market.get("ticker") or market.get("market_id") or requested_market_id)
+    if returned_market_id != requested_market_id:
+        raise ValueError("resolution row requires exact requested/returned market identity")
+    market_id = requested_market_id
     row = {
         "schema_name": SCHEMA_NAME,
         "schema_version": SCHEMA_VERSION,
         "resolution_id": _resolution_id(ref, outcome=outcome, source=source),
         "market_id": market_id,
+        "requested_market_id": requested_market_id,
+        "returned_market_id": returned_market_id,
         "backfill_source_path": ref.source_path,
         "backfill_source_line_number": ref.line_number,
         "backfill_source_key": ref.source_key,

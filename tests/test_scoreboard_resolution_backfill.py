@@ -60,6 +60,18 @@ class ScoreboardResolutionBackfillTests(unittest.TestCase):
         self.assertEqual(normalized_market_outcome({"settlement_value_dollars": "0.0000"})[0], "NO")
         self.assertEqual(normalized_market_outcome({"status": "closed"})[0], None)
 
+    def test_backfill_rejects_returned_ticker_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_path = Path(tmpdir) / "lane.jsonl"; output_path = Path(tmpdir) / "out.jsonl"
+            self._write_jsonl(input_path, [{"market_id": "KXHIGHSEA-26MAY17-T70"}])
+            result = backfill_scoreboard_resolutions(
+                [input_path], output_path=output_path,
+                fetch_market=lambda _: {"ticker": "KXLOWSEA-26MAY17-B55.5", "status": "finalized", "result": "yes"},
+            )
+        self.assertEqual(result.report["resolved_market_count"], 0)
+        self.assertEqual(result.report["fetch_error_count"], 1)
+        self.assertEqual(result.report["fetch_error_samples"][0]["error"], "returned_market_id_mismatch")
+
     def test_backfill_applies_request_interval_between_market_fetches(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             input_path = Path(tmpdir) / "lane.jsonl"
