@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from bot.config import ensure_mode_storage_dir, get_runtime_mode, load_config
+from bot.collector_replay_index import update_collector_replay_index
 from bot.prediction_lab import PredictionLab
 from bot.prediction_lab_support import build_prediction_lab_exchange
 from bot.resolution_feed import run_resolution_feed_once
@@ -93,6 +94,26 @@ class PredictionLabCollectorDaemon:
     @staticmethod
     def _iso_now() -> str:
         return datetime.now(timezone.utc).isoformat()
+
+    @staticmethod
+    def _update_replay_index(config: dict[str, Any], lab: PredictionLab) -> dict[str, Any] | None:
+        """Append compact replay locators after raw collector writes complete."""
+        index_cfg = (config.get("prediction_lab", {}) or {}).get("replay_index", {}) or {}
+        if not bool(index_cfg.get("enabled", False)):
+            return None
+        index_root = Path(index_cfg.get("root_dir") or (lab.root_dir / "replay_index"))
+        result = update_collector_replay_index(
+            lab.market_snapshots_path,
+            index_root / "collector_replay_index.jsonl",
+            index_root / "collector_replay_index.manifest.json",
+        )
+        logger.info(
+            "collector: replay index updated indexed=%s new=%s path=%s",
+            result.get("indexed_rows"),
+            result.get("new_indexed_rows", result.get("indexed_rows")),
+            result.get("index_path"),
+        )
+        return result
 
     @staticmethod
     def _shared_market_runtime_enabled(config: dict[str, Any]) -> bool:
@@ -409,6 +430,7 @@ class PredictionLabCollectorDaemon:
                             logger.info('collector: collect pass starting cycle=%s max_markets_per_run=%s', cycle, getattr(lab, 'max_markets_per_run', None))
                         lab.update_runtime_state(run_state="active_collect", paused=False, pause_reason="none")
                         run_result = lab.run(exchange)
+                        self._update_replay_index(config, lab)
                         self.status.collect_runs += 1
                         if (
                             shared_market_enabled

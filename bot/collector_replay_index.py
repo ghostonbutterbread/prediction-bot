@@ -56,7 +56,7 @@ def build_collector_replay_index(
             if not isinstance(row, Mapping):
                 invalid_rows += 1
                 continue
-            entry = _index_entry(row, row_number=row_number, byte_offset=byte_offset, byte_length=len(payload))
+            entry = _index_entry(row, row_number=row_number, byte_offset=byte_offset, payload=payload)
             if entry is None:
                 invalid_rows += 1
                 continue
@@ -71,6 +71,8 @@ def build_collector_replay_index(
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "source_path": str(source_path),
         "source_size_bytes": source_path.stat().st_size,
+        "indexed_source_bytes": source_path.stat().st_size,
+        "source_rows_seen": row_number,
         "source_sha256": source_digest.hexdigest(),
         "index_path": str(index_path),
         "indexed_rows": indexed_rows,
@@ -82,14 +84,69 @@ def build_collector_replay_index(
     return {**manifest, "manifest_path": str(manifest_path)}
 
 
+def update_collector_replay_index(source_path: Path, index_path: Path, manifest_path: Path) -> dict[str, Any]:
+    """Append locators for newly appended raw JSONL rows without rescanning payloads.
+
+    The raw archive is append-only. Each index entry has its own payload digest,
+    so replay validates selected source rows without making a second full archive
+    copy or re-hashing gigabytes on every collector pass.
+    """
+    source_path = Path(source_path)
+    index_path = Path(index_path)
+    manifest_path = Path(manifest_path)
+    if not index_path.exists() or not manifest_path.exists():
+        return build_collector_replay_index(source_path, index_path, manifest_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if Path(str(manifest.get("source_path") or "")) != source_path:
+        raise ValueError("replay-index manifest refers to a different raw archive")
+    start_offset = int(manifest.get("indexed_source_bytes") or 0)
+    source_size = source_path.stat().st_size
+    if source_size < start_offset:
+        raise ValueError("raw collector archive was truncated; rebuild the replay index")
+    row_number = int(manifest.get("source_rows_seen") or 0)
+    new_indexed = new_invalid = 0
+    with source_path.open("rb") as source, index_path.open("a", encoding="utf-8") as index:
+        source.seek(start_offset)
+        while True:
+            byte_offset = source.tell()
+            payload = source.readline()
+            if not payload:
+                break
+            row_number += 1
+            try:
+                row = json.loads(payload)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                new_invalid += 1
+                continue
+            if not isinstance(row, Mapping):
+                new_invalid += 1
+                continue
+            entry = _index_entry(row, row_number=row_number, byte_offset=byte_offset, payload=payload)
+            if entry is None:
+                new_invalid += 1
+                continue
+            index.write(json.dumps(entry, sort_keys=True, separators=(",", ":")) + "\n")
+            new_indexed += 1
+    manifest["updated_at"] = datetime.now(timezone.utc).isoformat()
+    manifest["source_size_bytes"] = source_size
+    manifest["indexed_source_bytes"] = source_size
+    manifest["source_rows_seen"] = row_number
+    manifest["indexed_rows"] = int(manifest.get("indexed_rows") or 0) + new_indexed
+    manifest["invalid_rows"] = int(manifest.get("invalid_rows") or 0) + new_invalid
+    manifest["source_sha256"] = None
+    manifest["source_integrity"] = "per_indexed_row_payload_sha256"
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return {**manifest, "new_indexed_rows": new_indexed, "new_invalid_rows": new_invalid, "manifest_path": str(manifest_path)}
+
+
 def load_indexed_collector_rows(index_path: Path, manifest_path: Path) -> Iterator[dict[str, Any]]:
     """Yield original raw rows referenced by an index after provenance checks."""
     manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
     if manifest.get("index_schema_name") != INDEX_SCHEMA_NAME:
         raise ValueError("unsupported replay index schema")
     source_path = Path(str(manifest.get("source_path") or ""))
-    if _sha256_file(source_path) != manifest.get("source_sha256"):
-        raise ValueError("raw collector archive digest differs from replay-index manifest")
+    if not source_path.is_file():
+        raise FileNotFoundError(source_path)
     with source_path.open("rb") as source, Path(index_path).open(encoding="utf-8") as index:
         for line in index:
             entry = json.loads(line)
@@ -97,13 +154,15 @@ def load_indexed_collector_rows(index_path: Path, manifest_path: Path) -> Iterat
                 raise ValueError("invalid replay index row")
             source.seek(int(entry["byte_offset"]))
             payload = source.read(int(entry["byte_length"]))
+            if hashlib.sha256(payload).hexdigest() != entry.get("payload_sha256"):
+                raise ValueError("raw collector payload differs from replay index")
             row = json.loads(payload)
             if str(row.get("market_id") or "") != entry.get("market_id"):
                 raise ValueError("raw collector row does not match replay index market identity")
             yield dict(row)
 
 
-def _index_entry(row: Mapping[str, Any], *, row_number: int, byte_offset: int, byte_length: int) -> dict[str, Any] | None:
+def _index_entry(row: Mapping[str, Any], *, row_number: int, byte_offset: int, payload: bytes) -> dict[str, Any] | None:
     market_id = str(row.get("market_id") or "")
     observed_at = str(row.get("observed_at") or row.get("timestamp") or "")
     snapshot_id = str(row.get("run_id") or row.get("snapshot_key") or "")
@@ -117,7 +176,8 @@ def _index_entry(row: Mapping[str, Any], *, row_number: int, byte_offset: int, b
         "schema_version": INDEX_SCHEMA_VERSION,
         "row_number": row_number,
         "byte_offset": byte_offset,
-        "byte_length": byte_length,
+        "byte_length": len(payload),
+        "payload_sha256": hashlib.sha256(payload).hexdigest(),
         "shared_candidate_id": candidate_id,
         "shared_snapshot_id": snapshot_id,
         "market_id": market_id,
