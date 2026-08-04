@@ -330,6 +330,7 @@ def build_backfill_resolution_row(
         "settlement_value_dollars": market.get("settlement_value_dollars"),
         "close_time": market.get("close_time"),
         "expiration_time": market.get("expiration_time"),
+        "settlement_ts": market.get("settlement_ts"),
         "resolved_at": resolved_at,
         "resolution": {
             "outcome": outcome,
