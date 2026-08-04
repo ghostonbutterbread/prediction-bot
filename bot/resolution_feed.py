@@ -72,10 +72,10 @@ def run_resolution_feed_once(
             fetch_error_count=int(state.get("fetch_error_count") or 0),
         )
 
-    decision_ledger_paths = [Path(str(path)) for path in feed_cfg["decision_ledger_paths"]]
-    existing_decision_ledger_paths = [path for path in decision_ledger_paths if path.exists()]
-    missing_decision_ledger_paths = [path for path in decision_ledger_paths if not path.exists()]
-    if not existing_decision_ledger_paths:
+    market_ref_paths = [Path(str(path)) for path in feed_cfg["market_ref_paths"]]
+    existing_market_ref_paths = [path for path in market_ref_paths if path.exists()]
+    missing_market_ref_paths = [path for path in market_ref_paths if not path.exists()]
+    if not existing_market_ref_paths:
         _write_state(
             state_path,
             {
@@ -83,11 +83,12 @@ def run_resolution_feed_once(
                 "schema_version": 1,
                 "status": "missing_input",
                 "last_refresh_at": _iso(now_dt),
-                "decision_ledger_path": str(decision_ledger_paths[0]) if decision_ledger_paths else "",
-                "decision_ledger_paths": [],
-                "configured_decision_ledger_paths": [str(path) for path in decision_ledger_paths],
+                "decision_ledger_path": str(market_ref_paths[0]) if market_ref_paths else "",
+                "decision_ledger_paths": [str(path) for path in existing_market_ref_paths],
+                "market_ref_paths": [str(path) for path in market_ref_paths],
+                "configured_decision_ledger_paths": [str(path) for path in market_ref_paths],
                 "used_decision_ledger_paths": [],
-                "missing_decision_ledger_paths": [str(path) for path in missing_decision_ledger_paths],
+                "missing_decision_ledger_paths": [str(path) for path in missing_market_ref_paths],
                 "decision_ledger_globs": list(feed_cfg["decision_ledger_globs"]),
             },
         )
@@ -106,7 +107,7 @@ def run_resolution_feed_once(
     central_latest_resolution = central_output_dir / "latest_resolutions.jsonl"
     _seed_central_resolutions_from_lane_latest(central_latest_resolution, lane_latest_resolution)
     market_ref_path = _market_ref_path_for_refresh(
-        existing_decision_ledger_paths,
+        existing_market_ref_paths,
         output_dir=output_dir,
         existing_latest_path=central_latest_resolution,
         mode=str(feed_cfg["mode"]),
@@ -140,11 +141,12 @@ def run_resolution_feed_once(
         "status": "refreshed",
         "mode": feed_cfg["mode"],
         "last_refresh_at": _iso(now_dt),
-        "decision_ledger_path": str(existing_decision_ledger_paths[0]) if existing_decision_ledger_paths else "",
-        "decision_ledger_paths": [str(path) for path in existing_decision_ledger_paths],
-        "configured_decision_ledger_paths": [str(path) for path in decision_ledger_paths],
-        "used_decision_ledger_paths": [str(path) for path in existing_decision_ledger_paths],
-        "missing_decision_ledger_paths": [str(path) for path in missing_decision_ledger_paths],
+        "decision_ledger_path": str(existing_market_ref_paths[0]) if existing_market_ref_paths else "",
+        "decision_ledger_paths": [str(path) for path in existing_market_ref_paths],
+        "market_ref_paths": [str(path) for path in market_ref_paths],
+        "configured_decision_ledger_paths": [str(path) for path in market_ref_paths],
+        "used_decision_ledger_paths": [str(path) for path in existing_market_ref_paths],
+        "missing_decision_ledger_paths": [str(path) for path in missing_market_ref_paths],
         "decision_ledger_globs": list(feed_cfg["decision_ledger_globs"]),
         "market_ref_path": str(market_ref_path),
         "latest_resolution_path": str(central_latest_resolution),
@@ -178,12 +180,17 @@ def normalize_resolution_feed_config(config: Mapping[str, Any]) -> dict[str, Any
         raw = {**raw, **dict(lab["resolution_feed"])}
     shadow = config.get("paper_shadow_lanes") if isinstance(config.get("paper_shadow_lanes"), Mapping) else {}
     decision_ledger_paths = _coerce_decision_ledger_paths(raw, shadow)
+    configured_market_refs = raw.get("market_ref_paths") or raw.get("collector_market_paths") or []
+    if not isinstance(configured_market_refs, (list, tuple)):
+        configured_market_refs = [configured_market_refs]
+    market_ref_paths = [str(path) for path in configured_market_refs if path not in (None, "")] or decision_ledger_paths
     output_dir = raw.get("output_dir") or DEFAULT_OUTPUT_DIR
     central_output_dir = raw.get("central_output_dir") or raw.get("canonical_output_dir") or output_dir
     return {
         "enabled": bool(raw.get("enabled", False)),
         "decision_ledger_path": str(decision_ledger_paths[0]) if decision_ledger_paths else "",
         "decision_ledger_paths": [str(path) for path in decision_ledger_paths],
+        "market_ref_paths": market_ref_paths,
         "decision_ledger_globs": list(_coerce_decision_ledger_globs(raw)),
         "output_dir": str(output_dir),
         "central_output_dir": str(central_output_dir),
