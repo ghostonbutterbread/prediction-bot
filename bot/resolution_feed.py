@@ -176,8 +176,10 @@ def run_resolution_feed_once(
 def normalize_resolution_feed_config(config: Mapping[str, Any]) -> dict[str, Any]:
     raw = config.get("resolution_feed") if isinstance(config.get("resolution_feed"), Mapping) else {}
     lab = config.get("prediction_lab") if isinstance(config.get("prediction_lab"), Mapping) else {}
+    # A runtime config's explicit resolver block wins; a nested prediction-lab
+    # block is only a base/default for collector-driven deployments.
     if isinstance(lab.get("resolution_feed"), Mapping):
-        raw = {**raw, **dict(lab["resolution_feed"])}
+        raw = {**dict(lab["resolution_feed"]), **raw}
     shadow = config.get("paper_shadow_lanes") if isinstance(config.get("paper_shadow_lanes"), Mapping) else {}
     decision_ledger_paths = _coerce_decision_ledger_paths(raw, shadow)
     configured_market_refs = raw.get("market_ref_paths") or raw.get("collector_market_paths") or []
