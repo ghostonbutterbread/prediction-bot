@@ -136,8 +136,9 @@ def update_collector_replay_index(source_path: Path, index_path: Path, manifest_
                 continue
             index.write(json.dumps(entry, sort_keys=True, separators=(",", ":")) + "\n")
             new_indexed += 1
+    final_source_size = source_path.stat().st_size
     manifest["updated_at"] = datetime.now(timezone.utc).isoformat()
-    manifest["source_size_bytes"] = source_size
+    manifest["source_size_bytes"] = final_source_size
     manifest["indexed_source_bytes"] = last_complete_offset
     manifest["source_rows_seen"] = row_number
     manifest["indexed_rows"] = int(manifest.get("indexed_rows") or 0) + new_indexed
