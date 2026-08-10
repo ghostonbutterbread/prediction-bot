@@ -27,7 +27,7 @@ def build_collector_replay_index(
     Neither the source archive nor its rows are changed. Existing outputs are
     rejected so a replay index is always attributable to one source digest.
     """
-    source_path = Path(source_path)
+    source_path = Path(source_path).resolve()
     index_path = Path(index_path)
     manifest_path = Path(manifest_path)
     if not source_path.is_file():
@@ -93,7 +93,7 @@ def update_collector_replay_index(source_path: Path, index_path: Path, manifest_
     so replay validates selected source rows without making a second full archive
     copy or re-hashing gigabytes on every collector pass.
     """
-    source_path = Path(source_path)
+    source_path = Path(source_path).resolve()
     index_path = Path(index_path)
     manifest_path = Path(manifest_path)
     if not index_path.exists() or not manifest_path.exists():

@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -67,6 +68,29 @@ class CollectorReplayIndexTests(unittest.TestCase):
 
             self.assertEqual(result["new_indexed_rows"], 1)
             self.assertEqual(result["indexed_rows"], 2)
+            self.assertEqual(list(load_indexed_collector_rows(index_path, manifest_path)), [first, second])
+
+    def test_update_accepts_equivalent_relative_source_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            absolute_raw_path = root / "market_snapshots.jsonl"
+            relative_raw_path = Path("market_snapshots.jsonl")
+            index_path = root / "replay_index.jsonl"
+            manifest_path = root / "replay_index.manifest.json"
+            first = {"run_id": "run-001", "market_id": "KXONE", "observed_at": "2026-07-01T12:00:00+00:00"}
+            second = {"run_id": "run-002", "market_id": "KXTWO", "observed_at": "2026-07-02T12:00:00+00:00"}
+            absolute_raw_path.write_text(json.dumps(first) + "\n", encoding="utf-8")
+            build_collector_replay_index(absolute_raw_path, index_path, manifest_path)
+            with absolute_raw_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(second) + "\n")
+            previous_cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                result = update_collector_replay_index(relative_raw_path, index_path, manifest_path)
+            finally:
+                os.chdir(previous_cwd)
+
+            self.assertEqual(result["new_indexed_rows"], 1)
             self.assertEqual(list(load_indexed_collector_rows(index_path, manifest_path)), [first, second])
 
     def test_update_retries_unterminated_trailing_jsonl_record(self):
