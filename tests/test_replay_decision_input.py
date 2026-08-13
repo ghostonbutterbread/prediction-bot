@@ -274,7 +274,12 @@ class ReplayDecisionInputTests(unittest.TestCase):
         self.assertEqual(result.record["canonical_input_sha256"], original_hash)
         self.assertFalse(verify_replay_decision_input_v1(result.record, result.canonical_input_json))
 
-    def test_real_archive_weather_shape_smoke_reports_honest_v1_blockers(self):
+    def test_real_archive_weather_shape_smoke_reports_v1_contract_and_copied_subtree_blockers(self):
+        """The legacy archive is intentionally non-replayable without conversion.
+
+        Its compatibility report must retain both absent v1 contract data and
+        legacy copied-subtree fields rejected by the strict v1 allowlist.
+        """
         archive_path = Path(
             "/mnt/data-collection/prediction-bot/data/beta_shadow/forward_20260726T1810Z_all_lanes/"
             "paper/prediction_lab/market_snapshots.jsonl"
@@ -286,9 +291,34 @@ class ReplayDecisionInputTests(unittest.TestCase):
 
         result = build_replay_decision_input_v1(row)
         blockers = [error.to_dict() for error in result.errors]
+        blocker_keys = {(blocker["code"], blocker["path"]) for blocker in blockers}
 
         self.assertFalse(result.ok, blockers)
-        self.assertTrue(any(blocker["path"] == "replay_decision_context" for blocker in blockers), blockers)
+        self.assertEqual(len(blockers), 42, blockers)
+        self.assertTrue(
+            {
+                ("missing_required_field", "shared_snapshot_id"),
+                ("missing_required_field", "collector_provenance"),
+                ("missing_required_field", "replay_decision_context"),
+            }.issubset(blocker_keys),
+            blockers,
+        )
+        self.assertIn(
+            ("forbidden_outcome_or_future_field", "decision_artifact.source_context.data.market_metadata.outcome"),
+            blocker_keys,
+        )
+        self.assertIn(
+            ("forbidden_recorded_decision_field", "decision_artifact.source_context.data.weather_source_snapshot.veto.final_action"),
+            blocker_keys,
+        )
+        self.assertIn(
+            ("unknown_unallowlisted_input_field", "decision_artifact.source_context.data.market_metadata.status"),
+            blocker_keys,
+        )
+        self.assertIn(
+            ("unknown_unallowlisted_input_field", "decision_artifact.execution_snapshot.market_price"),
+            blocker_keys,
+        )
         self.assertFalse(any(blocker["path"].startswith("main_decision") for blocker in blockers), blockers)
         self.assertFalse(any(blocker["path"].endswith("settlement_source") for blocker in blockers), blockers)
 
