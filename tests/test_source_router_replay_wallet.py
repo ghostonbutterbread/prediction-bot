@@ -70,7 +70,8 @@ class SourceRouterReplayWalletTests(unittest.TestCase):
                 "source_name": "Open-Meteo", "city_id": "miami_fl", "market_kind": "high",
                 "contract_shape": "threshold", "question_side": "above", "observed_at": "2026-07-01T12:00:00+00:00",
                 "source_implied_side": "YES", "source_side_price": 0.5, "actual_outcome": "YES",
-                "eligible_for_reliability": True, "known_after": "2026-07-02T12:00:00+00:00",
+                "eligible_for_reliability": True, "source_correctness_eligibility": "eligible_exact_target_proof",
+                "known_after": "2026-07-02T12:00:00+00:00",
             }) + "\n", encoding="utf-8")
             ledger = tmp / "ledger.jsonl"
             ledger.write_text(json.dumps({

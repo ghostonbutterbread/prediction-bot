@@ -22,9 +22,12 @@ from bot.weather.source_reliability import (
     build_source_edge_evaluation_row,
     build_source_outcome_ledger_rows_for_row,
 )
+from bot.weather.source_observation_ledger import source_correctness_target_proof
 from bot.weather.source_history_manifest import load_source_history_manifest
 from bot.weather.source_correctness_cohorts import DEFAULT_PER_SHAPE_TARGET, select_source_correctness_cohort
-from bot.weather.source_router import BUY_NO, BUY_YES, SKIP, select_source_for_candidate
+from bot.weather.source_router import (
+    BUY_NO, BUY_YES, SKIP, source_history_target_proof_rejection_key, select_source_for_candidate,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -310,6 +313,18 @@ def run_collector_source_router_replay(
         records, outcomes, history_ledger=history_ledger, min_sample_count=min_sample_count,
     )
     report = resolve_sealed_source_probability_decisions(control + candidate, outcomes)
+    report["source_correctness"]["historical_source_quality"] = {
+        "interpretation": decision_stats["selector_history"]["source_quality_interpretation"],
+        "target_proof_rejections": {
+            key: decision_stats["selector_history"].get(key, 0)
+            for key in (
+                "source_history_rows_rejected_missing_exact_target_proof_marker",
+                "source_history_rows_rejected_target_mismatch",
+                "source_history_rows_rejected_target_unproven",
+                "source_history_rows_rejected_v1_forecast_not_scoreable",
+            )
+        },
+    }
     cohort_report = select_source_correctness_cohort(
         candidate, report["source_correctness"]["observations"], per_shape_target=cohort_per_shape_target,
     )
@@ -501,10 +516,24 @@ def _source_edge_rows(record: Mapping[str, Any]) -> list[dict[str, Any]]:
     if adapter is None:
         return []
     rows = build_source_outcome_ledger_rows_for_row(adapter)
-    return [build_source_edge_evaluation_row(row) for row in rows]
+    snapshot = _weather_snapshot(record) or {}
+    source_records = {
+        str(source.get("source_id") or source.get("source_name") or "").strip().lower(): source
+        for source in snapshot.get("sources", []) if isinstance(source, Mapping)
+    }
+    edges: list[dict[str, Any]] = []
+    for row in rows:
+        source = source_records.get(str(row.get("source_id") or "").strip().lower(), {})
+        proof = source_correctness_target_proof(
+            source_record=source, snapshot=snapshot, market_date=row.get("market_date"),
+        )
+        row["source_correctness_eligibility"] = proof["status"]
+        row["source_target_proof"] = proof
+        edges.append(build_source_edge_evaluation_row(row))
+    return edges
 
 
-def _source_history_edge_rows(rows: Iterable[Mapping[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, int]]:
+def _source_history_edge_rows(rows: Iterable[Mapping[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Create selector-only edges from pre-existing settled source history."""
     stats: Counter[str] = Counter()
     edges: list[dict[str, Any]] = []
@@ -513,6 +542,10 @@ def _source_history_edge_rows(rows: Iterable[Mapping[str, Any]]) -> tuple[list[d
             stats["invalid_rows"] += 1
             continue
         stats["rows_seen"] += 1
+        rejection_key = source_history_target_proof_rejection_key(row)
+        if rejection_key is not None:
+            stats["source_" + rejection_key] += 1
+            continue
         if row.get("eligible_for_reliability") is not True:
             stats["ineligible_for_reliability"] += 1
             continue
@@ -530,12 +563,23 @@ def _source_history_edge_rows(rows: Iterable[Mapping[str, Any]]) -> tuple[list[d
         edge = build_source_edge_evaluation_row(historical)
         # The source ledger's hash-verified settlement timestamp is the sole
         # availability time for this selector-only history.
+        edge["settlement_ts"] = historical["settlement_ts"]
         edge["outcome_known_at"] = historical["settlement_ts"]
         if edge.get("eligible_for_edge_validation") is not True:
             stats["ineligible_for_selector"] += 1
             continue
         edges.append(edge)
         stats["selector_edges_accepted"] += 1
+    stats["source_quality_interpretation"] = (
+        "quarantined_rows_without_exact_target_proof"
+        if any(stats[key] for key in (
+            "source_history_rows_rejected_missing_exact_target_proof_marker",
+            "source_history_rows_rejected_target_mismatch",
+            "source_history_rows_rejected_target_unproven",
+            "source_history_rows_rejected_v1_forecast_not_scoreable",
+        ))
+        else "exact_target_proof_only"
+    )
     return edges, dict(stats)
 
 

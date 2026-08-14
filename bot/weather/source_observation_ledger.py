@@ -12,7 +12,7 @@ import json
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -29,6 +29,8 @@ _IDENTITY_FIELDS = (
     "shared_snapshot_id", "shared_candidate_id", "market_id", "observed_at_utc", "raw_row_sha256",
 )
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$", re.IGNORECASE)
+_ELIGIBLE_TARGET_PROOF = "eligible_exact_target_proof"
+_TARGET_ALIASES = ("source_target_date", "target_forecast_date", "forecast_target", "forecast_date")
 
 
 class SourceObservationLedgerError(ValueError):
@@ -89,6 +91,12 @@ def materialize_source_observation_ledger(
     settled_rows: list[dict[str, Any]] = []
     unusable_rows: list[dict[str, Any]] = []
     for pending in pending_rows:
+        eligibility = pending.get("source_correctness_eligibility")
+        if eligibility != _ELIGIBLE_TARGET_PROOF:
+            reason = str(eligibility or "unusable_legacy_target_unproven")
+            counters[reason] += 1
+            unusable_rows.append(_unusable_row(pending, reason))
+            continue
         identity_key = _identity_key(pending["canonical_input_sha256"], pending["decision_key"])
         if identity_key in conflicting_outcomes:
             unusable_rows.append(_unusable_row(pending, "conflicting_exact_authoritative_outcome"))
@@ -145,6 +153,9 @@ def materialize_source_observation_ledger(
                 "input_records_seen", "invalid_input_records", "inputs_without_source_observations",
                 "source_observations_seen", "duplicate_input_source_observations", "outcome_records_seen",
                 "invalid_outcomes", "duplicate_outcomes", "conflicting_outcomes",
+                "unusable_legacy_target_mismatch", "unusable_legacy_target_unproven",
+                "unusable_v1_target_mismatch", "unusable_v1_target_unproven",
+                "unusable_v1_forecast_not_scoreable",
             )},
             "pending": len(pending_rows), "settled": len(settled_rows), "unsettled_or_unusable": len(unusable_rows),
         },
@@ -166,7 +177,7 @@ def is_eligible_for_future_history(row: Mapping[str, Any], future_decision_time:
     contribute only after its authoritative settlement timestamp, strictly.
     """
 
-    if row.get("eligible_for_source_history") is not True:
+    if row.get("eligible_for_source_history") is not True or row.get("source_correctness_eligibility") != _ELIGIBLE_TARGET_PROOF:
         return False
     settlement, future = _parse_time(row.get("settlement_ts")), _parse_time(future_decision_time)
     return settlement is not None and future is not None and settlement < future
@@ -194,6 +205,9 @@ def _pending_rows_for_input(row: Mapping[str, Any], identity: Mapping[str, Any])
         source_snapshot = _snapshot_with_only_source(snapshot, source_record)
         observations = extract_source_forecast_observations({**context_row, "weather_source_snapshot": source_snapshot})
         for observation in observations:
+            target_proof = source_correctness_target_proof(
+                source_record=source_record, snapshot=snapshot, market_date=observation.market.market_date,
+            )
             source_as_of = _first_text(
                 _mapping_text(source_record, "source_as_of", "as_of", "observed_at"),
                 _mapping_text(snapshot, "source_as_of", "as_of", "source_timestamp", "fetched_at"),
@@ -206,8 +220,8 @@ def _pending_rows_for_input(row: Mapping[str, Any], identity: Mapping[str, Any])
             target_identity = {
                 "market_date": observation.market.market_date,
                 "source_target": _first_text(
-                    _mapping_text(source_record, "forecast_target", "target_forecast_date", "target_date", "forecast_date"),
-                    _mapping_text(snapshot, "target_forecast_date", "target_date", "forecast_date", "market_date"),
+                    _nested_text(source_record, "target_mapping", "source_target_date"),
+                    _mapping_text(source_record, *_TARGET_ALIASES),
                 ),
                 "forecast_start": _mapping_text(source_record, "forecast_start", "forecast_period_start", "period_start"),
                 "forecast_end": _mapping_text(source_record, "forecast_end", "forecast_period_end", "period_end"),
@@ -235,6 +249,8 @@ def _pending_rows_for_input(row: Mapping[str, Any], identity: Mapping[str, Any])
                 "source_id": observation.source_id, "source_name": observation.source_name,
                 "source_as_of": source_as_of, "source_fetched_at": source_fetched_at,
                 "canonical_source_payload_sha256": source_payload_sha256, "target_identity": target_identity,
+                "source_correctness_eligibility": target_proof["status"],
+                "source_target_proof": target_proof,
                 "forecast_temp_f": observation.forecast_temp_f, "threshold": observation.market.threshold,
                 "question_side": observation.market.question_side, "city_id": observation.market.city_id or "unknown",
                 "market_kind": observation.market.market_kind or "unknown", "contract_shape": observation.market.contract_shape or "unknown",
@@ -242,6 +258,76 @@ def _pending_rows_for_input(row: Mapping[str, Any], identity: Mapping[str, Any])
                 "source_missing_reasons": list(observation.missing_reasons) or None,
             })
     return rows
+
+
+def source_correctness_target_proof(
+    *, source_record: Mapping[str, Any], snapshot: Mapping[str, Any], market_date: Any,
+) -> dict[str, Any]:
+    """Classify recorded forecast target proof without rejecting the raw record.
+
+    Legacy aliases can establish a narrow exact-date proof, but any retained
+    conflicting target fails closed.  V1 evidence additionally requires its
+    explicit forecast typing and source-local target mapping.
+    """
+
+    normalized_market_date = _normalized_date(market_date)
+    version = source_record.get("source_evidence_version")
+    mapping = source_record.get("target_mapping") if isinstance(source_record.get("target_mapping"), Mapping) else {}
+    if str(version).strip() == "1":
+        evidence_type = str(source_record.get("evidence_type") or "").strip().lower()
+        if evidence_type != "forecast" or source_record.get("scoreable_forecast") is not True:
+            return {"status": "unusable_v1_forecast_not_scoreable", "market_target_date": normalized_market_date, "source_target_date": None}
+        market_targets = _normalized_targets(mapping.get("market_target_date"), source_record.get("market_target_date"))
+        source_targets = _normalized_targets(
+            mapping.get("source_target_date"), source_record.get("source_target_date"),
+            source_record.get("target_forecast_date"), source_record.get("forecast_target"), source_record.get("forecast_date"),
+        )
+        mapped_market_date = market_targets[0] if market_targets else None
+        source_target_date = source_targets[0] if source_targets else None
+        if not mapping or not normalized_market_date or not market_targets or not source_targets:
+            status = "unusable_v1_target_unproven"
+        elif any(value != normalized_market_date for value in (*market_targets, *source_targets)):
+            status = "unusable_v1_target_mismatch"
+        else:
+            status = _ELIGIBLE_TARGET_PROOF
+        return {
+            "status": status, "evidence_version": 1, "market_target_date": mapped_market_date,
+            "source_target_date": source_target_date,
+        }
+
+    # Legacy records may prove only what the source itself attested.  In
+    # particular, market-owned dates (including a snapshot's date and a
+    # target_mapping.market_target_date) establish the market context but are
+    # never evidence that a provider forecast targeted that date.
+    del snapshot
+    aliases = [mapping.get("source_target_date"), *[source_record.get(key) for key in _TARGET_ALIASES]]
+    normalized_aliases = [value for value in (_normalized_date(alias) for alias in aliases) if value]
+    source_target_date = normalized_aliases[0] if normalized_aliases else None
+    if normalized_market_date and any(value != normalized_market_date for value in normalized_aliases):
+        status = "unusable_legacy_target_mismatch"
+    elif normalized_market_date and normalized_aliases:
+        status = _ELIGIBLE_TARGET_PROOF
+    else:
+        status = "unusable_legacy_target_unproven"
+    return {
+        "status": status, "evidence_version": "legacy", "market_target_date": normalized_market_date,
+        "source_target_date": source_target_date,
+    }
+
+
+def _normalized_date(value: Any) -> str | None:
+    if value is None:
+        return None
+    try:
+        return date.fromisoformat(str(value).strip()[:10]).isoformat()
+    except ValueError:
+        return None
+
+
+def _normalized_targets(*values: Any) -> list[str]:
+    texts = [str(value).strip() for value in values if value is not None and str(value).strip()]
+    normalized = [_normalized_date(value) for value in texts]
+    return [] if len(normalized) != len(texts) or any(value is None for value in normalized) else normalized
 
 
 def _outcome_index(path: Path, counters: Counter[str]) -> tuple[dict[tuple[str, ...], dict[str, Any]], set[tuple[str, ...]]]:

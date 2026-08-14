@@ -102,6 +102,7 @@ def source_history_row(*, market_id: str, settlement_ts: str, outcome: str = "YE
         "yes_price": 0.40,
         "no_price": 0.60,
         "eligible_for_reliability": True,
+        "source_correctness_eligibility": "eligible_exact_target_proof",
         "settlement_ts": settlement_ts,
     }
 
@@ -230,6 +231,75 @@ class CollectorSourceRouterReplayTests(unittest.TestCase):
 
         self.assertEqual(candidate["action"], "SKIP")
         self.assertEqual(candidate["skip_reason"], "insufficient_prior_history")
+
+    def test_history_without_exact_target_proof_cannot_meet_minimum_samples(self):
+        record = replay_input(market_id="KXTARGETPROOF", observed_at="2026-01-03T12:00:00+00:00", raw_hash="1" * 64)
+        mismatch = source_history_row(market_id="HIST-MISMATCH", settlement_ts="2026-01-02T00:00:00+00:00")
+        mismatch["source_correctness_eligibility"] = "unusable_legacy_target_mismatch"
+        unproven = source_history_row(market_id="HIST-UNPROVEN", settlement_ts="2026-01-02T00:00:00+00:00")
+        unproven["source_correctness_eligibility"] = "unusable_legacy_target_unproven"
+        missing_marker = source_history_row(market_id="HIST-MISSING", settlement_ts="2026-01-02T00:00:00+00:00")
+        missing_marker.pop("source_correctness_eligibility")
+
+        _, candidates, stats = build_sealed_source_probability_decisions(
+            [record], [], history_ledger=[mismatch, unproven, missing_marker], min_sample_count=1,
+        )
+
+        self.assertEqual(candidates[0]["action"], "SKIP")
+        self.assertEqual(candidates[0]["skip_reason"], "insufficient_prior_history")
+        history = stats["selector_history"]
+        self.assertEqual(history["source_history_rows_rejected_target_mismatch"], 1)
+        self.assertEqual(history["source_history_rows_rejected_target_unproven"], 1)
+        self.assertEqual(history["source_history_rows_rejected_missing_exact_target_proof_marker"], 1)
+        self.assertEqual(history["source_quality_interpretation"], "quarantined_rows_without_exact_target_proof")
+
+    def test_v1_target_mismatch_is_reported_as_target_mismatch(self):
+        record = replay_input(market_id="KXV1MISMATCH", observed_at="2026-01-03T12:00:00+00:00", raw_hash="3" * 64)
+        v1_mismatch = source_history_row(market_id="HIST-V1-MISMATCH", settlement_ts="2026-01-02T00:00:00+00:00")
+        v1_mismatch["source_correctness_eligibility"] = "unusable_v1_target_mismatch"
+        legacy_mismatch = source_history_row(market_id="HIST-LEGACY-MISMATCH", settlement_ts="2026-01-02T00:00:00+00:00")
+        legacy_mismatch["source_correctness_eligibility"] = "unusable_legacy_target_mismatch"
+        v1_unproven = source_history_row(market_id="HIST-V1-UNPROVEN", settlement_ts="2026-01-02T00:00:00+00:00")
+        v1_unproven["source_correctness_eligibility"] = "unusable_v1_target_unproven"
+        v1_not_scoreable = source_history_row(market_id="HIST-V1-NOT-SCOREABLE", settlement_ts="2026-01-02T00:00:00+00:00")
+        v1_not_scoreable["source_correctness_eligibility"] = "unusable_v1_forecast_not_scoreable"
+
+        _, candidates, stats = build_sealed_source_probability_decisions(
+            [record], [], history_ledger=[v1_mismatch, legacy_mismatch, v1_unproven, v1_not_scoreable], min_sample_count=1,
+        )
+
+        self.assertEqual(candidates[0]["action"], "SKIP")
+        history = stats["selector_history"]
+        self.assertEqual(history["source_history_rows_rejected_target_mismatch"], 2)
+        self.assertEqual(history["source_history_rows_rejected_target_unproven"], 1)
+        self.assertEqual(history["source_history_rows_rejected_v1_forecast_not_scoreable"], 1)
+
+    def test_quarantine_label_is_emitted_in_source_correctness_diagnostic(self):
+        record = replay_input(market_id="KXQUARANTINE", observed_at="2026-01-03T12:00:00+00:00", raw_hash="2" * 64)
+        inputs_path = Path(self.tempdir.name) / "replay_inputs.jsonl"
+        outcomes_path = Path(self.tempdir.name) / "outcomes.jsonl"
+        history_path = Path(self.tempdir.name) / "legacy_history.jsonl"
+        inputs_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+        outcomes_path.write_text("", encoding="utf-8")
+        history = source_history_row(market_id="HIST-LEGACY", settlement_ts="2026-01-02T00:00:00+00:00")
+        history.pop("source_correctness_eligibility")
+        history_path.write_text(json.dumps(history) + "\n", encoding="utf-8")
+
+        result = run_collector_source_router_replay(
+            replay_inputs_path=inputs_path, finalized_outcomes_path=outcomes_path,
+            output_dir=self.output_dir, min_sample_count=1, history_ledger_path=history_path,
+        )
+
+        diagnostic = json.loads(result.resolution_report_path.read_text(encoding="utf-8"))["source_correctness"]
+        self.assertEqual(
+            diagnostic["historical_source_quality"]["interpretation"],
+            "quarantined_rows_without_exact_target_proof",
+        )
+        self.assertEqual(
+            diagnostic["historical_source_quality"]["target_proof_rejections"]
+            ["source_history_rows_rejected_missing_exact_target_proof_marker"],
+            1,
+        )
 
     def test_manifest_sha_validation_failure_blocks_run_before_writing_artifacts(self):
         record = replay_input(market_id="KXMANIFEST", observed_at="2026-01-03T12:00:00+00:00", raw_hash="7" * 64)

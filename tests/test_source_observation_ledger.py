@@ -107,7 +107,7 @@ class SourceObservationLedgerTests(unittest.TestCase):
         self.assertEqual([row["source_id"] for row in pending], ["nws", "open_meteo", "station"])
         self.assertEqual({row["source_id"]: row["direction_correct"] for row in settled}, {"nws": True, "open_meteo": False})
         self.assertEqual(unusable[0]["source_id"], "station")
-        self.assertEqual(unusable[0]["disposition_reason"], "unavailable_source_implied_side")
+        self.assertEqual(unusable[0]["disposition_reason"], "unusable_legacy_target_unproven")
         self.assertTrue(all(row["eligible_for_reliability"] for row in settled))
         self.assertTrue(all(row["known_after"] == row["settlement_ts"] for row in settled))
         self.assertEqual(metadata["counts"]["pending"], 3)
@@ -116,7 +116,7 @@ class SourceObservationLedgerTests(unittest.TestCase):
 
     def test_pending_has_no_outcomes_or_action_price_stake_data(self) -> None:
         record = _input()
-        _, artifacts = self._run([record], [_outcome(record)])
+        metadata, artifacts = self._run([record], [_outcome(record)])
 
         encoded = json.dumps(artifacts["pending_source_observations"], sort_keys=True).lower()
         for forbidden in ("official_outcome", "settlement", "resolved", "action", "price", "stake", "wallet"):
@@ -132,7 +132,7 @@ class SourceObservationLedgerTests(unittest.TestCase):
         self.assertEqual(len(artifacts["unsettled_or_unusable_source_observations"]), 3)
         self.assertEqual(
             {row["disposition_reason"] for row in artifacts["unsettled_or_unusable_source_observations"]},
-            {"missing_exact_authoritative_outcome"},
+            {"missing_exact_authoritative_outcome", "unusable_legacy_target_unproven"},
         )
 
     def test_duplicate_inputs_and_identical_outcomes_do_not_inflate_history(self) -> None:
@@ -158,6 +158,132 @@ class SourceObservationLedgerTests(unittest.TestCase):
         self.assertEqual(len(nws_rows), 2)
         self.assertEqual(len({row["source_observation_id"] for row in nws_rows}), 2)
 
+    def test_explicit_unavailable_and_observation_evidence_never_settle_as_forecasts(self) -> None:
+        record = _input()
+        sources = record["source_inputs"]["source_context"]["data"]["weather_source_snapshot"]["sources"]
+        sources[0].update({
+            "source_evidence_version": 1, "evidence_type": "forecast", "scoreable_forecast": True,
+            "target_mapping": {"market_target_date": "2026-08-03", "source_target_date": "2026-08-03"},
+        })
+        sources[1].update({
+            "source_evidence_version": 1, "evidence_type": "forecast_unavailable", "scoreable_forecast": False,
+            "availability_reason": "target_date_not_in_source_forecast",
+        })
+        sources[2].update({
+            "source_evidence_version": 1, "evidence_type": "observation", "scoreable_forecast": False,
+            "availability_reason": "current_observation_not_future_forecast",
+        })
+
+        metadata, artifacts = self._run([record], [_outcome(record)])
+
+        self.assertEqual([row["source_id"] for row in artifacts["settled_source_correctness"]], ["nws"])
+        unusable = {row["source_id"]: row for row in artifacts["unsettled_or_unusable_source_observations"]}
+        self.assertIn("source_forecast_unavailable:target_date_not_in_source_forecast", unusable["open_meteo"]["source_missing_reasons"])
+        self.assertIn("source_evidence_not_forecast", unusable["station"]["source_missing_reasons"])
+        self.assertEqual(metadata["counts"]["unusable_v1_forecast_not_scoreable"], 2)
+
+    def test_legacy_mismatched_target_is_retained_but_never_settles(self) -> None:
+        record = _input()
+        snapshot = record["source_inputs"]["source_context"]["data"]["weather_source_snapshot"]
+        snapshot["market_date"] = "2026-08-02"
+        snapshot["sources"] = [{
+            "source_id": "nws", "source_name": "NWS", "forecast_high": 75.0,
+            "target_forecast_date": "2026-08-01",
+        }]
+
+        metadata, artifacts = self._run([record], [_outcome(record)])
+
+        self.assertEqual(artifacts["settled_source_correctness"], [])
+        [unusable] = artifacts["unsettled_or_unusable_source_observations"]
+        self.assertEqual(unusable["disposition_reason"], "unusable_legacy_target_mismatch")
+        self.assertEqual(unusable["source_correctness_eligibility"], "unusable_legacy_target_mismatch")
+        self.assertEqual(metadata["counts"]["unusable_legacy_target_mismatch"], 1)
+
+    def test_legacy_without_exact_target_proof_is_retained_but_never_settles(self) -> None:
+        record = _input()
+        snapshot = record["source_inputs"]["source_context"]["data"]["weather_source_snapshot"]
+        snapshot["sources"] = [{"source_id": "nws", "source_name": "NWS", "forecast_high": 75.0}]
+
+        metadata, artifacts = self._run([record], [_outcome(record)])
+
+        self.assertEqual(artifacts["settled_source_correctness"], [])
+        [unusable] = artifacts["unsettled_or_unusable_source_observations"]
+        self.assertEqual(unusable["disposition_reason"], "unusable_legacy_target_unproven")
+        self.assertEqual(unusable["source_correctness_eligibility"], "unusable_legacy_target_unproven")
+        self.assertEqual(metadata["counts"]["unusable_legacy_target_unproven"], 1)
+
+    def test_legacy_market_owned_target_dates_never_prove_source_forecast_target(self) -> None:
+        record = _input()
+        snapshot = record["source_inputs"]["source_context"]["data"]["weather_source_snapshot"]
+        snapshot["sources"] = [
+            {
+                "source_id": "nws", "source_name": "NWS", "forecast_high": 75.0,
+                "market_target_date": "2026-08-03",
+            },
+            {
+                "source_id": "open_meteo", "source_name": "Open-Meteo", "forecast_high": 65.0,
+                "target_mapping": {"market_target_date": "2026-08-03"},
+            },
+        ]
+        snapshot["market_target_date"] = "2026-08-03"
+
+        metadata, artifacts = self._run([record], [_outcome(record)])
+
+        self.assertEqual(artifacts["settled_source_correctness"], [])
+        self.assertEqual(
+            {row["disposition_reason"] for row in artifacts["unsettled_or_unusable_source_observations"]},
+            {"unusable_legacy_target_unproven"},
+        )
+        self.assertEqual(metadata["counts"]["unusable_legacy_target_unproven"], 2)
+
+    def test_v1_target_mismatch_has_its_own_metadata_count(self) -> None:
+        record = _input()
+        snapshot = record["source_inputs"]["source_context"]["data"]["weather_source_snapshot"]
+        snapshot["sources"] = [{
+            "source_id": "nws", "source_name": "NWS", "forecast_high": 75.0,
+            "source_evidence_version": 1, "evidence_type": "forecast", "scoreable_forecast": True,
+            "target_mapping": {"market_target_date": "2026-08-03", "source_target_date": "2026-08-02"},
+        }]
+
+        metadata, artifacts = self._run([record], [_outcome(record)])
+
+        [unusable] = artifacts["unsettled_or_unusable_source_observations"]
+        self.assertEqual(unusable["disposition_reason"], "unusable_v1_target_mismatch")
+        self.assertEqual(metadata["counts"]["unusable_v1_target_mismatch"], 1)
+        self.assertEqual(metadata["counts"]["unusable_v1_target_unproven"], 0)
+        self.assertEqual(metadata["counts"]["unusable_v1_forecast_not_scoreable"], 0)
+
+    def test_v1_exact_target_proof_settles_after_strict_outcome(self) -> None:
+        record = _input()
+        snapshot = record["source_inputs"]["source_context"]["data"]["weather_source_snapshot"]
+        snapshot["sources"] = [{
+            "source_id": "nws", "source_name": "NWS", "forecast_high": 75.0,
+            "source_evidence_version": 1, "evidence_type": "forecast", "scoreable_forecast": True,
+            "target_mapping": {"market_target_date": "2026-08-03", "source_target_date": "2026-08-03"},
+        }]
+
+        _, artifacts = self._run([record], [_outcome(record)])
+
+        [settled] = artifacts["settled_source_correctness"]
+        self.assertEqual(settled["source_correctness_eligibility"], "eligible_exact_target_proof")
+        self.assertTrue(settled["eligible_for_source_history"])
+
+    def test_v1_conflicting_retained_target_aliases_fail_closed(self) -> None:
+        record = _input()
+        snapshot = record["source_inputs"]["source_context"]["data"]["weather_source_snapshot"]
+        snapshot["sources"] = [{
+            "source_id": "nws", "source_name": "NWS", "forecast_high": 75.0,
+            "source_evidence_version": "1", "evidence_type": "forecast", "scoreable_forecast": True,
+            "source_target_date": "2026-08-01",
+            "target_mapping": {"market_target_date": "2026-08-03", "source_target_date": "2026-08-03"},
+        }]
+
+        _, artifacts = self._run([record], [_outcome(record)])
+
+        self.assertEqual(artifacts["settled_source_correctness"], [])
+        [unusable] = artifacts["unsettled_or_unusable_source_observations"]
+        self.assertEqual(unusable["disposition_reason"], "unusable_v1_target_mismatch")
+
     def test_conflicting_exact_outcomes_fail_closed_to_unusable(self) -> None:
         record = _input()
         _, artifacts = self._run([record], [_outcome(record, outcome="YES"), _outcome(record, outcome="NO")])
@@ -165,12 +291,13 @@ class SourceObservationLedgerTests(unittest.TestCase):
         self.assertEqual(artifacts["settled_source_correctness"], [])
         self.assertEqual(
             {row["disposition_reason"] for row in artifacts["unsettled_or_unusable_source_observations"]},
-            {"conflicting_exact_authoritative_outcome"},
+            {"conflicting_exact_authoritative_outcome", "unusable_legacy_target_unproven"},
         )
 
     def test_history_eligibility_uses_settlement_time_strictly_not_retrieval_time(self) -> None:
         settled = {
             "eligible_for_source_history": True,
+            "source_correctness_eligibility": "eligible_exact_target_proof",
             "settlement_ts": "2026-08-04T00:00:00+00:00",
             "resolution_resolved_at": "2026-08-07T00:00:00+00:00",
         }

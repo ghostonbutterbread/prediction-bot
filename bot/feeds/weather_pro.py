@@ -12,7 +12,7 @@ Cross-validates multiple sources for higher confidence.
 import logging
 import httpx
 from typing import Optional
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
@@ -25,9 +25,9 @@ TEMP_MAX_F = 130
 class WeatherSnapshot:
     """Unified weather data from any source."""
     city: str
-    high_temp_f: float
-    low_temp_f: float
-    current_temp_f: float
+    high_temp_f: float | None
+    low_temp_f: float | None
+    current_temp_f: float | None
     source: str
     fetched_at: datetime
     forecast_hours_ahead: float
@@ -46,15 +46,17 @@ class WeatherSnapshot:
     forecast_period_start: str | None = None
     forecast_period_end: str | None = None
     source_details: dict = field(default_factory=dict)
+    scoreable_forecast: bool = True
+    availability_reason: str | None = None
 
 
 @dataclass 
 class MultiSourceForecast:
     """Cross-validated forecast from multiple sources."""
     city: str
-    high_temp_f: float
-    low_temp_f: float
-    current_temp_f: float
+    high_temp_f: float | None
+    low_temp_f: float | None
+    current_temp_f: float | None
     sources_used: list
     confidence: float
     fetched_at: datetime
@@ -127,6 +129,49 @@ def _c_to_f(c: float) -> float:
     return c * 9/5 + 32
 
 
+def _target_date_text(target_date: str | None) -> str | None:
+    if not isinstance(target_date, str):
+        return None
+    try:
+        return date.fromisoformat(target_date[:10]).isoformat()
+    except ValueError:
+        return None
+
+
+def _market_target_date(question: str, *, category: str = "") -> str | None:
+    # Keep this import lazy: bot.weather's package initializer imports the
+    # historical provider, which in turn reuses this feed's constants.
+    from bot.weather.date_matcher import derive_market_date
+
+    return derive_market_date({"question": question, "market_ticker": category, "market_id": category}).isoformat
+
+
+def _unavailable_snapshot(
+    *, city: str, source: str, target_date: str | None, reason: str, fetched_at: datetime | None = None,
+    source_details: dict | None = None,
+) -> WeatherSnapshot:
+    fetched_at = fetched_at or datetime.now(timezone.utc)
+    target = _target_date_text(target_date)
+    return WeatherSnapshot(
+        city=city.lower(), high_temp_f=None, low_temp_f=None, current_temp_f=None, source=source,
+        fetched_at=fetched_at, forecast_hours_ahead=0, confidence=0, as_of=fetched_at,
+        source_details={
+            **(source_details or {}),
+            "source_evidence_version": 1,
+            "evidence_type": "forecast_unavailable",
+            "forecast_availability": "unavailable",
+            "availability_reason": reason,
+            "source_as_of": fetched_at.isoformat(),
+            "target_mapping": {
+                "market_target_date": target,
+                "source_target_date": None,
+                "mapping": "no_exact_source_local_forecast_period",
+            },
+        },
+        scoreable_forecast=False, availability_reason=reason,
+    )
+
+
 class OpenMeteoFeed:
     """
     Open-Meteo: free, no API key, hourly updates.
@@ -137,7 +182,7 @@ class OpenMeteoFeed:
     def __init__(self):
         self.http = httpx.Client(timeout=10)
 
-    def get_forecast(self, city: str) -> Optional[WeatherSnapshot]:
+    def get_forecast(self, city: str, *, target_date: str | None = None) -> Optional[WeatherSnapshot]:
         coords = CITY_COORDS.get(city.lower())
         if not coords:
             return None
@@ -162,34 +207,43 @@ class OpenMeteoFeed:
             temps = hourly.get("temperature_2m", [])
             times = hourly.get("time", [])
 
+            fetched_at = datetime.now(timezone.utc)
             if not temps:
-                return None
+                return _unavailable_snapshot(
+                    city=city, source="open-meteo", target_date=target_date,
+                    reason="source_forecast_missing_hourly_temperatures", fetched_at=fetched_at,
+                )
 
-            # Find today's high/low from next 24 hours
-            now = datetime.now()
-            today_temps = []
-            today_times = []
+            target = _target_date_text(target_date)
+            if target_date is not None and target is None:
+                return _unavailable_snapshot(
+                    city=city, source="open-meteo", target_date=target_date,
+                    reason="invalid_market_target_date", fetched_at=fetched_at,
+                )
+            selected_temps = []
+            selected_times = []
             for i, t in enumerate(times):
                 try:
                     dt = datetime.fromisoformat(t)
-                    if 0 <= (dt - now).total_seconds() / 3600 <= 24:
-                        today_temps.append(temps[i])
-                        today_times.append(t)
-                except:
+                    if target is None or dt.date().isoformat() == target:
+                        selected_temps.append(temps[i])
+                        selected_times.append(t)
+                except (TypeError, ValueError, IndexError):
                     continue
+            if not selected_temps:
+                return _unavailable_snapshot(
+                    city=city, source="open-meteo", target_date=target,
+                    reason="target_date_not_in_source_forecast", fetched_at=fetched_at,
+                    source_details={"timezone": data.get("timezone"), "utc_offset_seconds": data.get("utc_offset_seconds")},
+                )
 
-            if not today_temps:
-                today_temps = temps[:24]
-                today_times = times[: len(today_temps)]
-
-            fetched_at = datetime.now(timezone.utc)
-            forecast_start = today_times[0] if today_times else None
-            forecast_end = today_times[-1] if today_times else None
+            forecast_start = selected_times[0]
+            forecast_end = selected_times[-1]
 
             return WeatherSnapshot(
                 city=city.lower(),
-                high_temp_f=max(today_temps) if today_temps else 0,
-                low_temp_f=min(today_temps) if today_temps else 0,
+                high_temp_f=max(selected_temps),
+                low_temp_f=min(selected_temps),
                 current_temp_f=current.get("temperature_2m", 0),
                 source="open-meteo",
                 fetched_at=fetched_at,
@@ -198,19 +252,36 @@ class OpenMeteoFeed:
                 humidity=current.get("relative_humidity_2m", 0),
                 wind_mph=current.get("wind_speed_10m", 0) * 0.621371,  # km/h to mph
                 as_of=fetched_at,
+                weather_date=target,
+                forecast_date=target,
                 forecast_start=forecast_start,
                 forecast_end=forecast_end,
-                forecast_times=list(today_times),
+                forecast_times=list(selected_times),
                 source_details={
+                    "source_evidence_version": 1 if target else None,
+                    "evidence_type": "forecast" if target else None,
+                    "forecast_availability": "available" if target else None,
+                    "source_as_of": fetched_at.isoformat(),
+                    "target_mapping": {
+                        "market_target_date": target,
+                        "source_target_date": target,
+                        "mapping": "exact_source_local_hourly_date" if target else None,
+                        "source_timezone": data.get("timezone"),
+                        "source_period_start": forecast_start,
+                        "source_period_end": forecast_end,
+                    },
                     "timezone": data.get("timezone"),
                     "utc_offset_seconds": data.get("utc_offset_seconds"),
                     "current_time": current.get("time"),
-                    "forecast_times_used": list(today_times),
+                    "forecast_times_used": list(selected_times),
                 },
             )
         except Exception as e:
             logger.debug(f"Open-Meteo error for {city}: {e}")
-            return None
+            return _unavailable_snapshot(
+                city=city, source="open-meteo", target_date=target_date,
+                reason="source_forecast_request_failed",
+            )
 
     def close(self):
         self.http.close()
@@ -302,7 +373,7 @@ class NWSFeed:
             logger.debug(f"NWS observation error for {station}: {e}")
             return None
 
-    def get_forecast(self, city: str) -> Optional[WeatherSnapshot]:
+    def get_forecast(self, city: str, *, target_date: str | None = None) -> Optional[WeatherSnapshot]:
         grid = self._resolve_forecast_grid(city)
         if not grid:
             return None
@@ -315,30 +386,39 @@ class NWSFeed:
             data = resp.json()
 
             periods = data.get("properties", {}).get("periods", [])
-            if not periods:
-                return None
-
-            today = periods[0]
-            temp = today.get("temperature", 0)
-            is_daytime = today.get("isDaytime", True)
-
-            if is_daytime and len(periods) > 1:
-                high = temp
-                high_period = today
-                low_period = periods[1]
-                low = low_period.get("temperature", temp)
-            elif len(periods) > 1:
-                low = temp
-                low_period = today
-                high_period = periods[1]
-                high = high_period.get("temperature", temp)
-            else:
-                high = temp
-                low = temp
-                high_period = today
-                low_period = today
-
             fetched_at = datetime.now(timezone.utc)
+            target = _target_date_text(target_date)
+            if target_date is not None and target is None:
+                return _unavailable_snapshot(city=city, source="nws", target_date=target_date, reason="invalid_market_target_date", fetched_at=fetched_at)
+            if not periods:
+                return _unavailable_snapshot(city=city, source="nws", target_date=target, reason="source_forecast_missing_periods", fetched_at=fetched_at)
+            if target:
+                dated_periods: list[dict] = []
+                for period in periods:
+                    start = period.get("startTime")
+                    if not isinstance(start, str) or not start:
+                        return _unavailable_snapshot(city=city, source="nws", target_date=target, reason="source_forecast_period_timezone_ambiguous", fetched_at=fetched_at)
+                    parsed = datetime.fromisoformat(start.replace("Z", "+00:00"))
+                    if parsed.tzinfo is None:
+                        return _unavailable_snapshot(city=city, source="nws", target_date=target, reason="source_forecast_period_timezone_ambiguous", fetched_at=fetched_at)
+                    if parsed.date().isoformat() == target:
+                        dated_periods.append(period)
+                if not dated_periods:
+                    return _unavailable_snapshot(city=city, source="nws", target_date=target, reason="target_date_not_in_source_forecast", fetched_at=fetched_at)
+                high_period = next((p for p in dated_periods if p.get("isDaytime") is True), None)
+                if high_period is None:
+                    return _unavailable_snapshot(city=city, source="nws", target_date=target, reason="target_date_missing_daytime_forecast_period", fetched_at=fetched_at)
+                low_period = next((p for p in dated_periods if p.get("isDaytime") is False), high_period)
+            else:
+                high_period = next((p for p in periods if p.get("isDaytime") is True), periods[0])
+                low_period = next((p for p in periods if p.get("isDaytime") is False), high_period)
+            high = high_period.get("temperature")
+            low = low_period.get("temperature")
+            if high is None or low is None:
+                return _unavailable_snapshot(city=city, source="nws", target_date=target, reason="source_forecast_missing_temperature", fetched_at=fetched_at)
+            today = high_period
+            temp = high
+            is_daytime = bool(today.get("isDaytime", True))
             period_name = today.get("name")
             period_start = today.get("startTime")
             period_end = today.get("endTime")
@@ -355,12 +435,25 @@ class NWSFeed:
                 confidence=0.85,
                 conditions=today.get("shortForecast", ""),
                 as_of=fetched_at,
+                weather_date=target,
+                forecast_date=target,
                 forecast_start=period_start,
                 forecast_end=period_end,
                 forecast_period_name=period_name,
                 forecast_period_start=period_start,
                 forecast_period_end=period_end,
                 source_details={
+                    "source_evidence_version": 1 if target else None,
+                    "evidence_type": "forecast" if target else None,
+                    "forecast_availability": "available" if target else None,
+                    "source_as_of": fetched_at.isoformat(),
+                    "target_mapping": {
+                        "market_target_date": target,
+                        "source_target_date": target,
+                        "mapping": "exact_source_local_nws_period" if target else None,
+                        "source_period_start": period_start,
+                        "source_period_end": period_end,
+                    },
                     "office": office,
                     "grid_x": grid_x,
                     "grid_y": grid_y,
@@ -377,7 +470,7 @@ class NWSFeed:
             )
         except Exception as e:
             logger.debug(f"NWS error for {city}: {e}")
-            return None
+            return _unavailable_snapshot(city=city, source="nws", target_date=target_date, reason="source_forecast_request_failed")
 
     @staticmethod
     def _period_ref(period: dict) -> dict:
@@ -486,45 +579,81 @@ class ProWeatherEngine:
         self._cache_ttl = 600  # 10 min
 
     def _snapshot_is_plausible(self, snapshot: WeatherSnapshot) -> bool:
+        if not snapshot.scoreable_forecast:
+            return False
         temps = [snapshot.high_temp_f, snapshot.low_temp_f, snapshot.current_temp_f]
-        return all(TEMP_MIN_F <= temp <= TEMP_MAX_F for temp in temps)
+        return all(isinstance(temp, (int, float)) and TEMP_MIN_F <= temp <= TEMP_MAX_F for temp in temps)
 
-    def get_forecast(self, city: str) -> Optional[MultiSourceForecast]:
+    def get_forecast(
+        self, city: str, *, target_date: str | None = None, require_target: bool = False,
+    ) -> Optional[MultiSourceForecast]:
         """Get cross-validated forecast from all sources."""
         city_lower = city.lower().strip()
+        target = _target_date_text(target_date)
 
         # Check cache
-        if city_lower in self._cache:
-            cached, ts = self._cache[city_lower]
+        cache_key = (city_lower, target, require_target)
+        if cache_key in self._cache:
+            cached, ts = self._cache[cache_key]
             if (datetime.now(timezone.utc) - ts).total_seconds() < self._cache_ttl:
                 return cached
 
+        if require_target and target is None:
+            source_snapshots = [
+                _unavailable_snapshot(city=city_lower, source=source, target_date=target_date, reason="missing_market_target_date")
+                for source in ("open-meteo", "nws", "openweathermap")
+            ]
+            result = MultiSourceForecast(
+                city=city_lower, high_temp_f=None, low_temp_f=None, current_temp_f=None,
+                sources_used=[], confidence=0, fetched_at=datetime.now(timezone.utc),
+                details={"source_snapshots": source_snapshots, "settlement_source": "nws"},
+            )
+            self._cache[cache_key] = (result, datetime.now(timezone.utc))
+            return result
+
         snapshots = []
+        source_snapshots = []
 
         # Fetch from all sources
-        om = self.open_meteo.get_forecast(city_lower)
+        om = self.open_meteo.get_forecast(city_lower, target_date=target)
         if om:
+            source_snapshots.append(om)
             if self._snapshot_is_plausible(om):
                 snapshots.append(om)
             else:
-                logger.warning(f"Discarding implausible Open-Meteo forecast for {city_lower}")
+                logger.warning(f"Open-Meteo forecast unavailable for {city_lower}: {om.availability_reason or 'implausible_forecast'}")
 
-        nws = self.nws.get_forecast(city_lower)
+        nws = self.nws.get_forecast(city_lower, target_date=target)
         if nws:
+            source_snapshots.append(nws)
             if self._snapshot_is_plausible(nws):
                 snapshots.append(nws)
             else:
-                logger.warning(f"Discarding implausible NWS forecast for {city_lower}")
+                logger.warning(f"NWS forecast unavailable for {city_lower}: {nws.availability_reason or 'implausible_forecast'}")
 
-        owm = self.owm.get_forecast(city_lower)
+        owm = (
+            _unavailable_snapshot(
+                city=city_lower, source="openweathermap", target_date=target,
+                reason="source_forecast_period_timezone_ambiguous",
+            )
+            if target else self.owm.get_forecast(city_lower)
+        )
         if owm:
+            source_snapshots.append(owm)
             if self._snapshot_is_plausible(owm):
                 snapshots.append(owm)
             else:
-                logger.warning(f"Discarding implausible OpenWeatherMap forecast for {city_lower}")
+                logger.warning(f"OpenWeatherMap forecast unavailable for {city_lower}: {owm.availability_reason or 'implausible_forecast'}")
 
         if not snapshots:
-            return None
+            local_station_observation = self.nws.get_station_observation(city_lower) if nws else None
+            result = MultiSourceForecast(
+                city=city_lower, high_temp_f=None, low_temp_f=None, current_temp_f=None,
+                sources_used=[], confidence=0, fetched_at=datetime.now(timezone.utc),
+                details={"source_snapshots": source_snapshots, "local_station_observation": local_station_observation, "settlement_source": "nws"},
+            )
+            self._cache[cache_key] = (result, datetime.now(timezone.utc))
+            return result
 
         local_station_observation = None
         if nws:
@@ -619,10 +748,22 @@ class ProWeatherEngine:
             }
         )
 
-        self._cache[city_lower] = (result, datetime.now(timezone.utc))
+        result.details["source_snapshots"] = source_snapshots
+        self._cache[cache_key] = (result, datetime.now(timezone.utc))
         return result
 
     def score_temperature_market(self, question: str, yes_price: float) -> Optional[dict]:
+        return self.score_temperature_market_with_context(question, yes_price)
+
+    def score_temperature_market_with_context(
+        self, question: str, yes_price: float, *, category: str = "",
+    ) -> Optional[dict]:
+        market_date = _market_target_date(question, category=category)
+        return self._score_temperature_market(question, yes_price, market_date=market_date)
+
+    def _score_temperature_market(
+        self, question: str, yes_price: float, *, market_date: str | None,
+    ) -> Optional[dict]:
         """Score a temperature market using multi-source data."""
         import re
 
@@ -635,8 +776,8 @@ class ProWeatherEngine:
         if not city:
             return None
 
-        forecast = self.get_forecast(city)
-        if not forecast:
+        forecast = self.get_forecast(city, target_date=market_date, require_target=True)
+        if not forecast or not forecast.sources_used:
             return None
 
         q = question.lower()
@@ -650,15 +791,17 @@ class ProWeatherEngine:
         is_high = "high" in q or "maximum" in q or "max" in q
         actual_temp = forecast.high_temp_f if is_high else forecast.low_temp_f
 
-        if not (TEMP_MIN_F <= actual_temp <= TEMP_MAX_F):
+        if actual_temp is not None and not (TEMP_MIN_F <= actual_temp <= TEMP_MAX_F):
             logger.warning(f"Rejecting implausible temperature forecast for {city}: {actual_temp:.1f}F")
-            return None
+            actual_temp = None
 
         is_above = ">" in q or "above" in q or "over" in q
         is_below = "<" in q or "below" in q or "under" in q
         is_range = re.search(r'(\d+)-(\d+)', q)
 
-        if is_range:
+        if actual_temp is None:
+            predicted_prob = yes_price
+        elif is_range:
             low_r = float(is_range.group(1))
             high_r = float(is_range.group(2))
             mid = (low_r + high_r) / 2
@@ -720,6 +863,7 @@ class ProWeatherEngine:
                 "predicted_temp": actual_temp,
                 "threshold": threshold,
                 "city": city,
+                "market_target_date": market_date,
                 "sources": forecast.sources_used,
                 "agreement": forecast.source_agreement,
                 "source_details": self._source_contribution_details(forecast),
@@ -737,6 +881,10 @@ class ProWeatherEngine:
         has_settlement_source = settlement_source in sources
         equal_weight = round(1.0 / len(sources), 6) if sources else None
         details = []
+        source_snapshots = forecast.details.get("source_snapshots", [])
+        snapshot_by_source = {
+            snapshot.source: snapshot for snapshot in source_snapshots if isinstance(snapshot, WeatherSnapshot)
+        }
         for source in sources:
             if has_settlement_source:
                 drives_forecast = source == settlement_source
@@ -745,10 +893,18 @@ class ProWeatherEngine:
             else:
                 weight = equal_weight
                 note = "equal_weight_average_no_settlement_source"
-            details.append(
-                _drop_none(
-                {
+            snapshot = snapshot_by_source.get(source)
+            target_mapping = snapshot.source_details.get("target_mapping") if snapshot else None
+            details.append(_drop_none({
                     "source_name": source,
+                    "source_evidence_version": snapshot.source_details.get("source_evidence_version") if snapshot else None,
+                    "evidence_type": snapshot.source_details.get("evidence_type") if snapshot else None,
+                    "forecast_availability": snapshot.source_details.get("forecast_availability") if snapshot else None,
+                    "scoreable_forecast": snapshot.scoreable_forecast if snapshot else None,
+                    "availability_reason": snapshot.availability_reason if snapshot else None,
+                    "market_target_date": target_mapping.get("market_target_date") if isinstance(target_mapping, dict) else None,
+                    "source_target_date": target_mapping.get("source_target_date") if isinstance(target_mapping, dict) else None,
+                    "target_mapping": target_mapping,
                     "role": "settlement_primary" if source == settlement_source else "forecast_contributor" if not has_settlement_source else "cross_validation",
                     "weight": weight,
                     "contribution": weight,
@@ -768,9 +924,26 @@ class ProWeatherEngine:
                     "forecast_period_start": forecast.details.get("source_forecast_period_starts", {}).get(source),
                     "forecast_period_end": forecast.details.get("source_forecast_period_ends", {}).get(source),
                     "source_metadata": forecast.details.get("source_metadata", {}).get(source),
-                }
-                )
-            )
+            }))
+        for snapshot in source_snapshots:
+            if not isinstance(snapshot, WeatherSnapshot) or snapshot.scoreable_forecast or snapshot.source in sources:
+                continue
+            target_mapping = snapshot.source_details.get("target_mapping")
+            details.append(_drop_none({
+                "source_name": snapshot.source,
+                "source_evidence_version": snapshot.source_details.get("source_evidence_version"),
+                "evidence_type": snapshot.source_details.get("evidence_type"),
+                "forecast_availability": snapshot.source_details.get("forecast_availability"),
+                "scoreable_forecast": False,
+                "availability_reason": snapshot.availability_reason,
+                "market_target_date": target_mapping.get("market_target_date") if isinstance(target_mapping, dict) else None,
+                "source_target_date": target_mapping.get("source_target_date") if isinstance(target_mapping, dict) else None,
+                "target_mapping": target_mapping,
+                "as_of": snapshot.as_of.isoformat() if isinstance(snapshot.as_of, datetime) else snapshot.as_of,
+                "fetched_at": snapshot.fetched_at.isoformat(),
+                "source_as_of": snapshot.source_details.get("source_as_of"),
+                "source_metadata": snapshot.source_details,
+            }))
         local_station = forecast.details.get("local_station_observation")
         if isinstance(local_station, dict):
             station_id = str(local_station.get("station") or "").strip().upper()
@@ -783,6 +956,11 @@ class ProWeatherEngine:
                         "source_name": f"Local station {station_cli}" if station_cli else "Local station",
                         "source_family": "local_station",
                         "source_location_basis": "station",
+                        "source_evidence_version": 1,
+                        "evidence_type": "observation",
+                        "forecast_availability": "not_applicable",
+                        "scoreable_forecast": False,
+                        "availability_reason": "current_observation_not_future_forecast",
                         "role": "local_station_observation",
                         "forecast_target": "current_observation",
                         "current_forecast": local_station.get("current_temp_f"),

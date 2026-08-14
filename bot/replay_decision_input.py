@@ -68,6 +68,10 @@ _PERIOD_REF_V1 = {
     "number": _SCALAR, "name": _SCALAR, "startTime": _SCALAR, "endTime": _SCALAR,
     "isDaytime": _SCALAR, "temperature": _SCALAR, "temperatureUnit": _SCALAR,
 }
+_FORECAST_TARGET_MAPPING_V1 = {
+    "market_target_date": _SCALAR, "source_target_date": _SCALAR, "mapping": _SCALAR,
+    "source_timezone": _SCALAR, "source_period_start": _SCALAR, "source_period_end": _SCALAR,
+}
 _SOURCE_METADATA_V1 = {
     "timezone": _SCALAR, "utc_offset_seconds": _SCALAR, "current_time": _SCALAR,
     "forecast_times_used": [_SCALAR], "office": _SCALAR, "grid_x": _SCALAR,
@@ -80,6 +84,10 @@ _SOURCE_METADATA_V1 = {
 _WEATHER_SOURCE_V1 = {
     "source_id": _SCALAR, "source_name": _SCALAR, "source_family": _SCALAR,
     "source_location_basis": _SCALAR, "role": _SCALAR, "forecast_target": _SCALAR,
+    "source_evidence_version": _SCALAR, "evidence_type": _SCALAR,
+    "forecast_availability": _SCALAR, "scoreable_forecast": _SCALAR,
+    "availability_reason": _SCALAR, "market_target_date": _SCALAR,
+    "source_target_date": _SCALAR, "target_mapping": _FORECAST_TARGET_MAPPING_V1,
     "weight": _SCALAR, "contribution": _SCALAR, "weight_note": _SCALAR,
     "forecast_high": _SCALAR, "forecast_low": _SCALAR, "current_forecast": _SCALAR,
     "current_temp": _SCALAR, "confidence": _SCALAR, "market_date": _SCALAR,
@@ -103,6 +111,7 @@ _WEATHER_SIGNAL_DATA_V1 = {
     "settlement_source": _SCALAR, "nws_high": _SCALAR, "nws_low": _SCALAR,
     "nws_open_meteo_gap": _SCALAR, "weather_date": _SCALAR, "forecast_date": _SCALAR,
     "target_forecast_date": _SCALAR, "fetched_at": _SCALAR, "as_of": _SCALAR,
+    "market_target_date": _SCALAR,
     "station_id": _SCALAR, "station_cli": _SCALAR, "station_mapping": _SCALAR,
     "station_resolution": _STATION_RESOLUTION_V1, "date_validation": _DATE_VALIDATION_V1,
     "source_details": [_WEATHER_SOURCE_V1],

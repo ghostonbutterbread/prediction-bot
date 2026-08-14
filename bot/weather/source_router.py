@@ -30,6 +30,23 @@ DEFAULT_MIN_SAMPLE_COUNT = 5
 BUY_YES = "BUY_YES"
 BUY_NO = "BUY_NO"
 SKIP = "SKIP"
+ELIGIBLE_EXACT_TARGET_PROOF = "eligible_exact_target_proof"
+
+
+def source_history_target_proof_rejection_key(row: Mapping[str, Any]) -> str | None:
+    """Return the audit counter for a row barred from source history."""
+
+    status = row.get("source_correctness_eligibility")
+    if status == ELIGIBLE_EXACT_TARGET_PROOF:
+        return None
+    if status is None:
+        return "history_rows_rejected_missing_exact_target_proof_marker"
+    normalized = str(status)
+    if normalized.endswith("_target_mismatch"):
+        return "history_rows_rejected_target_mismatch"
+    if normalized.endswith("_forecast_not_scoreable"):
+        return "history_rows_rejected_v1_forecast_not_scoreable"
+    return "history_rows_rejected_target_unproven"
 
 
 def build_source_router_replay_rows(
@@ -53,9 +70,10 @@ def build_source_router_replay_rows(
             continue
         ledger = dict(row)
         edge = build_source_edge_evaluation_row(ledger, outcome_lookup=lookup)
+        edge["settlement_ts"] = _optional_text(ledger.get("settlement_ts"))
         if ledger.get("source_router_history_only") is True:
             _allow_history_actual_outcome(edge, ledger)
-        if edge.get("outcome_known_at") in (None, ""):
+        elif edge.get("outcome_known_at") in (None, ""):
             edge["outcome_known_at"] = _optional_text(ledger.get("outcome_known_at"), ledger.get("known_after"))
         paired_rows.append({"ledger": ledger, "edge": edge})
 
@@ -71,6 +89,7 @@ def build_source_router_replay_rows(
     current_group_key: tuple[str, str] | None = None
     current_group: list[dict[str, Any]] = []
     history: list[dict[str, Any]] = []
+    history_exclusions: Counter[str] = Counter()
 
     def flush_group() -> None:
         if not current_group:
@@ -82,6 +101,7 @@ def build_source_router_replay_rows(
                 [pair["ledger"] for pair in current_group],
                 edge_rows=[pair["edge"] for pair in current_group],
                 history_edge_rows=history,
+                history_exclusion_counts=history_exclusions,
                 min_sample_count=min_sample_count,
             )
         )
@@ -93,7 +113,12 @@ def build_source_router_replay_rows(
             current_group_key = key
         if key != current_group_key:
             flush_group()
-            history.extend(pair_["edge"] for pair_ in current_group)
+            for pair_ in current_group:
+                rejection_key = source_history_target_proof_rejection_key(pair_["edge"])
+                if rejection_key is not None:
+                    history_exclusions[rejection_key] += 1
+                    continue
+                history.append(pair_["edge"])
             current_group = []
             current_group_key = key
         current_group.append(pair)
@@ -148,6 +173,7 @@ def build_source_router_replay_row(
     *,
     edge_rows: Iterable[Mapping[str, Any]],
     history_edge_rows: Iterable[Mapping[str, Any]],
+    history_exclusion_counts: Mapping[str, int] | None = None,
     min_sample_count: int = DEFAULT_MIN_SAMPLE_COUNT,
 ) -> dict[str, Any]:
     """Build one source-router replay row for a stable candidate."""
@@ -182,6 +208,7 @@ def build_source_router_replay_row(
         history_edge_rows,
         min_sample_count=min_sample_count,
         history_cutoff=history_cutoff,
+        history_exclusion_counts=history_exclusion_counts,
     )
     current_by_source = {
         _source_key(edge.get("source_id")): edge
@@ -301,22 +328,30 @@ def select_source_for_candidate(
     *,
     min_sample_count: int = DEFAULT_MIN_SAMPLE_COUNT,
     history_cutoff: Any = None,
+    history_exclusion_counts: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
     """Choose the best prior/as-of source for a candidate slice."""
 
     cutoff_dt = _parse_dt(history_cutoff or candidate_edge_row.get("observed_at"))
     slice_key = _slice_key(candidate_edge_row)
     candidates: dict[str, list[dict[str, Any]]] = {}
-    history_stats: Counter[str] = Counter()
+    history_stats: Counter[str] = Counter(history_exclusion_counts or {})
     for row in history_edge_rows:
         if not isinstance(row, Mapping):
             continue
         history_stats["history_rows_seen"] += 1
+        rejection_key = source_history_target_proof_rejection_key(row)
+        if rejection_key is not None:
+            history_stats[rejection_key] += 1
+            continue
         if row.get("eligible_for_edge_validation") is not True:
             continue
         history_stats["history_rows_eligible"] += 1
-        known_dt = _parse_dt(row.get("outcome_known_at") or row.get("known_after") or row.get("observed_at"))
-        if cutoff_dt is None or known_dt is None or known_dt >= cutoff_dt:
+        settlement_dt = _parse_dt(row.get("settlement_ts"))
+        if settlement_dt is None:
+            history_stats["history_rows_missing_or_invalid_settlement_ts"] += 1
+            continue
+        if cutoff_dt is None or settlement_dt >= cutoff_dt:
             continue
         history_stats["history_rows_settled_before_cutoff"] += 1
         if _slice_key(row) != slice_key:
@@ -341,6 +376,11 @@ def select_source_for_candidate(
         "history_independent_rows_used": history_stats["history_independent_rows_used"],
         "history_reobservation_excluded": history_stats["history_reobservation_excluded"],
         "history_conservative_identity_fallback_rows": history_stats["history_conservative_identity_fallback_rows"],
+        "history_rows_rejected_missing_exact_target_proof_marker": history_stats["history_rows_rejected_missing_exact_target_proof_marker"],
+        "history_rows_rejected_target_mismatch": history_stats["history_rows_rejected_target_mismatch"],
+        "history_rows_rejected_target_unproven": history_stats["history_rows_rejected_target_unproven"],
+        "history_rows_rejected_v1_forecast_not_scoreable": history_stats["history_rows_rejected_v1_forecast_not_scoreable"],
+        "history_rows_missing_or_invalid_settlement_ts": history_stats["history_rows_missing_or_invalid_settlement_ts"],
         "history_representative_selection": "newest_recorded_forecast_observation_v1",
     }
     ranked = [_source_stats(source_id, rows) for source_id, rows in independent_candidates.items()]
@@ -666,18 +706,11 @@ def _allow_history_actual_outcome(edge: dict[str, Any], ledger: Mapping[str, Any
         return
     edge["official_outcome"] = official
     edge["outcome_source"] = "source_outcome_ledger_actual"
-    # Backfill may occur long after the market settled.  Historical replay
-    # admits the outcome at the authoritative settlement time, not retrieval.
-    edge["outcome_known_at"] = _optional_text(
-        ledger.get("outcome_known_at"),
-        ledger.get("settlement_ts"),
-        ledger.get("settled_at"),
-        # ``known_after`` may be backfill provenance rather than market-time
-        # availability. It is a fallback only when settlement is unavailable.
-        ledger.get("known_after"),
-        ledger.get("resolved_at"),
-        edge.get("outcome_known_at"),
-    )
+    # Source-router history is available only at an authoritative settlement
+    # timestamp.  Outcome/retrieval timestamps stay provenance, never clocks.
+    settlement_ts = _optional_text(ledger.get("settlement_ts"))
+    edge["settlement_ts"] = settlement_ts if _parse_dt(settlement_ts) is not None else None
+    edge["outcome_known_at"] = edge["settlement_ts"]
     if source_side in {"YES", "NO"}:
         win = source_side == official
         edge["win"] = win

@@ -41,6 +41,7 @@ def ledger_row(
         "question_side": "above",
         "observed_at": observed_at,
         "outcome_known_at": outcome_known_at,
+        "settlement_ts": outcome_known_at,
         "predicted_outcome": source_side,
         "official_outcome": official,
         "best_yes_ask": price_yes,
@@ -48,6 +49,7 @@ def ledger_row(
         "stable_action": stable_action,
         "stable_approved_position_size_usd": 100.0,
         "stable_reason_code": "approved",
+        "source_correctness_eligibility": "eligible_exact_target_proof",
     }
 
 
@@ -127,8 +129,9 @@ class WeatherSourceRouterTests(unittest.TestCase):
             {
                 "market_id": "KXONE", "event_ticker": "KXEVENTONE", "market_date": "2026-08-01",
                 "source_id": "nws", "city_id": "miami_fl", "market_kind": "high", "contract_shape": "range",
-                "question_side": "above", "observed_at": observed_at, "outcome_known_at": "2026-08-05T00:00:00+00:00",
-                "eligible_for_edge_validation": True, "win": win, "binary_edge_realized": edge,
+                "question_side": "above", "observed_at": observed_at, "outcome_known_at": "2026-08-05T00:00:00+00:00", "settlement_ts": "2026-08-05T00:00:00+00:00",
+                "eligible_for_edge_validation": True, "source_correctness_eligibility": "eligible_exact_target_proof",
+                "win": win, "binary_edge_realized": edge,
             }
             for observed_at, win, edge in (
                 ("2026-08-01T08:00:00+00:00", True, 0.5),
@@ -157,8 +160,9 @@ class WeatherSourceRouterTests(unittest.TestCase):
             {
                 "market_id": market_id, "event_ticker": event_ticker, "market_date": market_date,
                 "source_id": "nws", "city_id": "miami_fl", "market_kind": "high", "contract_shape": "range",
-                "question_side": "above", "observed_at": observed_at, "outcome_known_at": "2026-08-05T00:00:00+00:00",
-                "eligible_for_edge_validation": True, "win": True, "binary_edge_realized": 0.5,
+                "question_side": "above", "observed_at": observed_at, "outcome_known_at": "2026-08-05T00:00:00+00:00", "settlement_ts": "2026-08-05T00:00:00+00:00",
+                "eligible_for_edge_validation": True, "source_correctness_eligibility": "eligible_exact_target_proof",
+                "win": True, "binary_edge_realized": 0.5,
             }
             for market_id, event_ticker, market_date, observed_at in (
                 ("KXONE", "KXEVENTONE", "2026-08-01", "2026-08-01T12:00:00+00:00"),
@@ -190,7 +194,9 @@ class WeatherSourceRouterTests(unittest.TestCase):
                 "contract_shape": "range",
                 "question_side": "above",
                 "eligible_for_edge_validation": True,
+                "source_correctness_eligibility": "eligible_exact_target_proof",
                 "outcome_known_at": "2026-05-02T00:00:00+00:00",
+                "settlement_ts": "2026-05-02T00:00:00+00:00",
                 "win": True,
                 "binary_edge_realized": 0.6,
             },
@@ -201,7 +207,9 @@ class WeatherSourceRouterTests(unittest.TestCase):
                 "contract_shape": "range",
                 "question_side": "above",
                 "eligible_for_edge_validation": True,
+                "source_correctness_eligibility": "eligible_exact_target_proof",
                 "outcome_known_at": "2026-05-04T00:00:00+00:00",
+                "settlement_ts": "2026-05-04T00:00:00+00:00",
                 "win": True,
                 "binary_edge_realized": 0.8,
             },
@@ -212,6 +220,26 @@ class WeatherSourceRouterTests(unittest.TestCase):
         self.assertTrue(selected["routeable"])
         self.assertEqual(selected["chosen_source_id"], "nws")
         self.assertEqual(selected["prior_sample_count"], 1)
+
+    def test_progressive_history_quarantines_target_unproven_rows_before_routing(self):
+        first = ledger_row(
+            source_id="nws", source_side="YES", official="YES",
+            observed_at="2026-05-01T12:00:00+00:00", outcome_known_at="2026-05-01T23:00:00+00:00",
+            shared_candidate_id="unproven", market_id="KXUNPROVEN",
+        )
+        first["source_correctness_eligibility"] = "unusable_legacy_target_unproven"
+        candidate = ledger_row(
+            source_id="nws", source_side="YES", official="YES",
+            observed_at="2026-05-02T12:00:00+00:00", outcome_known_at="2026-05-02T23:00:00+00:00",
+            shared_candidate_id="candidate", market_id="KXCANDIDATE",
+        )
+
+        rows = build_source_router_replay_rows([first, candidate], min_sample_count=1)
+
+        second = next(row for row in rows if row["market_id"] == "KXCANDIDATE")
+        self.assertFalse(second["router"]["routeable"])
+        self.assertEqual(second["router"]["prior_sample_count"], 0)
+        self.assertEqual(second["router"]["history_rows_rejected_target_unproven"], 1)
 
     def test_replay_filters_stable_buy_when_best_source_disagrees(self):
         rows = [
@@ -540,6 +568,40 @@ class WeatherSourceRouterTests(unittest.TestCase):
             self.assertEqual(stats["replay_ledger_rows"], 1)
             self.assertTrue(stats["limit_reached"])
 
+    def test_history_loader_quarantines_rows_without_exact_target_proof(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            history_path = Path(tmpdir) / "history.jsonl"
+            mismatch = ledger_row(
+                source_id="open_meteo", source_side="YES", official="YES",
+                observed_at="2026-05-01T12:00:00+00:00", outcome_known_at="2026-05-01T23:00:00+00:00",
+                shared_candidate_id="mismatch", market_id="KXMISMATCH",
+            )
+            mismatch["source_correctness_eligibility"] = "unusable_legacy_target_mismatch"
+            unproven = ledger_row(
+                source_id="open_meteo", source_side="YES", official="YES",
+                observed_at="2026-05-02T12:00:00+00:00", outcome_known_at="2026-05-02T23:00:00+00:00",
+                shared_candidate_id="unproven", market_id="KXUNPROVEN",
+            )
+            unproven["source_correctness_eligibility"] = "unusable_legacy_target_unproven"
+            missing = ledger_row(
+                source_id="open_meteo", source_side="YES", official="YES",
+                observed_at="2026-05-03T12:00:00+00:00", outcome_known_at="2026-05-03T23:00:00+00:00",
+                shared_candidate_id="missing", market_id="KXMISSING",
+            )
+            missing.pop("source_correctness_eligibility")
+            history_path.write_text("".join(__import__("json").dumps(row) + "\n" for row in (mismatch, unproven, missing)))
+
+            rows, stats = _load_router_ledger_rows(
+                [], history_ledger_paths=[history_path], source_paths=[], decision_paths=[],
+            )
+
+            self.assertEqual(rows, [])
+            self.assertEqual(stats["history_ledger_rows"], 0)
+            self.assertEqual(stats["source_history_rows_rejected_target_mismatch"], 1)
+            self.assertEqual(stats["source_history_rows_rejected_target_unproven"], 1)
+            self.assertEqual(stats["source_history_rows_rejected_missing_exact_target_proof_marker"], 1)
+            self.assertEqual(stats["source_quality_interpretation"], "quarantined_rows_without_exact_target_proof")
+
     def test_settlement_timestamp_makes_history_available_before_later_candidate(self):
         history = ledger_row(
             source_id="open_meteo", source_side="YES", official="YES",
@@ -565,6 +627,92 @@ class WeatherSourceRouterTests(unittest.TestCase):
 
         self.assertEqual(replay[0]["router"]["chosen_source_id"], "open_meteo")
         self.assertEqual(replay[0]["router"]["prior_sample_count"], 1)
+
+    def test_history_outcome_known_before_settlement_does_not_admit_before_settlement(self):
+        history = ledger_row(
+            source_id="open_meteo", source_side="YES", official="YES",
+            observed_at="2026-07-26T12:00:00+00:00", outcome_known_at="2026-07-27T12:00:00+00:00",
+            shared_candidate_id="history-1", market_id="KXHISTORY1",
+        )
+        history.update({
+            "source_router_history_only": True,
+            "actual_outcome": "YES",
+            "settlement_ts": "2026-07-29T12:00:00+00:00",
+        })
+        candidate = ledger_row(
+            source_id="open_meteo", source_side="YES", official="YES",
+            observed_at="2026-07-28T12:00:00+00:00", outcome_known_at="2026-07-30T00:00:00+00:00",
+            shared_candidate_id="candidate-1", market_id="KXCURRENT1",
+        )
+
+        replay = build_source_router_replay_rows([history, candidate], min_sample_count=1)
+
+        self.assertIsNone(replay[0]["router"]["chosen_source_id"])
+        self.assertEqual(replay[0]["router"]["prior_sample_count"], 0)
+
+    def test_history_outcome_known_before_settlement_admits_after_settlement(self):
+        history = ledger_row(
+            source_id="open_meteo", source_side="YES", official="YES",
+            observed_at="2026-07-26T12:00:00+00:00", outcome_known_at="2026-07-27T12:00:00+00:00",
+            shared_candidate_id="history-1", market_id="KXHISTORY1",
+        )
+        history.update({
+            "source_router_history_only": True,
+            "actual_outcome": "YES",
+            "settlement_ts": "2026-07-29T12:00:00+00:00",
+        })
+        candidate = ledger_row(
+            source_id="open_meteo", source_side="YES", official="YES",
+            observed_at="2026-07-30T12:00:00+00:00", outcome_known_at="2026-07-31T00:00:00+00:00",
+            shared_candidate_id="candidate-1", market_id="KXCURRENT1",
+        )
+
+        replay = build_source_router_replay_rows([history, candidate], min_sample_count=1)
+
+        self.assertEqual(replay[0]["router"]["chosen_source_id"], "open_meteo")
+        self.assertEqual(replay[0]["router"]["prior_sample_count"], 1)
+
+    def test_history_without_settlement_is_excluded_despite_outcome_known_at(self):
+        history = ledger_row(
+            source_id="open_meteo", source_side="YES", official="YES",
+            observed_at="2026-07-26T12:00:00+00:00", outcome_known_at="2026-07-27T12:00:00+00:00",
+            shared_candidate_id="history-1", market_id="KXHISTORY1",
+        )
+        history.update({"source_router_history_only": True, "actual_outcome": "YES"})
+        history.pop("settlement_ts")
+        candidate = ledger_row(
+            source_id="open_meteo", source_side="YES", official="YES",
+            observed_at="2026-07-30T12:00:00+00:00", outcome_known_at="2026-07-31T00:00:00+00:00",
+            shared_candidate_id="candidate-1", market_id="KXCURRENT1",
+        )
+
+        replay = build_source_router_replay_rows([history, candidate], min_sample_count=1)
+
+        self.assertIsNone(replay[0]["router"]["chosen_source_id"])
+        self.assertEqual(replay[0]["router"]["prior_sample_count"], 0)
+
+    def test_target_ineligible_history_remains_excluded_after_settlement(self):
+        history = ledger_row(
+            source_id="open_meteo", source_side="YES", official="YES",
+            observed_at="2026-07-26T12:00:00+00:00", outcome_known_at="2026-07-27T12:00:00+00:00",
+            shared_candidate_id="history-1", market_id="KXHISTORY1",
+        )
+        history.update({
+            "source_router_history_only": True,
+            "actual_outcome": "YES",
+            "settlement_ts": "2026-07-27T12:00:00+00:00",
+            "source_correctness_eligibility": "unusable_legacy_target_mismatch",
+        })
+        candidate = ledger_row(
+            source_id="open_meteo", source_side="YES", official="YES",
+            observed_at="2026-07-30T12:00:00+00:00", outcome_known_at="2026-07-31T00:00:00+00:00",
+            shared_candidate_id="candidate-1", market_id="KXCURRENT1",
+        )
+
+        replay = build_source_router_replay_rows([history, candidate], min_sample_count=1)
+
+        self.assertIsNone(replay[0]["router"]["chosen_source_id"])
+        self.assertEqual(replay[0]["router"]["prior_sample_count"], 0)
 
 
 if __name__ == "__main__":

@@ -116,6 +116,32 @@ class CollectorReplayInputExportTests(unittest.TestCase):
             hashlib.sha256(result.records_path.read_bytes()).hexdigest(),
         )
 
+    def test_sanitized_export_preserves_explicit_forecast_target_mapping(self):
+        row = _legacy_collector_row()
+        snapshot = row["decision_artifact"]["source_context"]["data"]["weather_source_snapshot"]
+        snapshot["sources"] = [{
+            "source_id": "nws", "source_name": "NWS", "forecast_high": 84.0,
+            "source_evidence_version": 1, "evidence_type": "forecast",
+            "forecast_availability": "available", "scoreable_forecast": True,
+            "market_target_date": "2026-08-12", "source_target_date": "2026-08-12",
+            "source_as_of": "2026-08-12T15:00:00+00:00",
+            "target_mapping": {
+                "market_target_date": "2026-08-12", "source_target_date": "2026-08-12",
+                "mapping": "exact_source_local_nws_period",
+                "source_period_start": "2026-08-12T06:00:00-04:00",
+                "source_period_end": "2026-08-12T18:00:00-04:00",
+            },
+        }]
+        self._write_archive([row])
+
+        result = export_collector_replay_inputs(source_archive=self.archive_path, output_dir=self.output_dir)
+
+        record = json.loads(result.records_path.read_text(encoding="utf-8").strip())
+        source = record["source_inputs"]["source_context"]["data"]["weather_source_snapshot"]["sources"][0]
+        self.assertEqual(source["source_target_date"], "2026-08-12")
+        self.assertEqual(source["target_mapping"]["mapping"], "exact_source_local_nws_period")
+        self.assertEqual(source["source_as_of"], "2026-08-12T15:00:00+00:00")
+
     def test_refuses_nonempty_derived_output_directory(self):
         self._write_archive([_legacy_collector_row()])
         (self.output_dir / "existing.json").write_text("{}", encoding="utf-8")

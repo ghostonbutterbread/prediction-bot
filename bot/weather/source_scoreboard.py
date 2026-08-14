@@ -13,7 +13,7 @@ import math
 import re
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -477,7 +477,8 @@ def extract_source_forecast_observations(
             continue
         source_name = source_name or source_id or "unknown"
         source_id = source_id or _slug(source_name) or "unknown"
-        forecast_temp = _forecast_temp_for_source(source, market.market_kind)
+        evidence_problem = _explicit_forecast_evidence_problem(source, market.market_date)
+        forecast_temp = None if evidence_problem else _forecast_temp_for_source(source, market.market_kind)
         key = (source_id, source_name, forecast_temp)
         if key in seen:
             continue
@@ -489,6 +490,8 @@ def extract_source_forecast_observations(
             missing.append("missing_market_kind")
         if date_validation_problem:
             missing.append(date_validation_problem)
+        if evidence_problem:
+            missing.append(evidence_problem)
         observations.append(
             SourceForecastObservation(
                 source_id=source_id,
@@ -500,6 +503,51 @@ def extract_source_forecast_observations(
             )
         )
     return observations
+
+
+def _explicit_forecast_evidence_problem(source: dict[str, Any], market_date: str | None) -> str | None:
+    """Validate only the explicit forward-capture schema; legacy rows stay readable.
+
+    New collector evidence has a source-local target mapping.  A current
+    observation or an unavailable/ambiguous period remains visible to derived
+    audits but cannot become a scoreable forecast observation.
+    """
+
+    if str(source.get("source_evidence_version") or "").strip() != "1":
+        return None
+    evidence_type = str(source.get("evidence_type") or "").strip().lower()
+    if evidence_type == "observation":
+        return "source_evidence_not_forecast"
+    if evidence_type != "forecast" or source.get("scoreable_forecast") is not True:
+        reason = _string_or_none(source.get("availability_reason")) or "missing_exact_source_forecast"
+        return f"source_forecast_unavailable:{reason}"
+    mapping = source.get("target_mapping")
+    if not isinstance(mapping, dict) or not mapping:
+        return "source_forecast_target_mapping_missing"
+    normalized_market_date = _normalized_date_text(market_date)
+    market_targets = _normalized_target_values(mapping.get("market_target_date"), source.get("market_target_date"))
+    source_targets = _normalized_target_values(
+        mapping.get("source_target_date"), source.get("source_target_date"),
+        source.get("target_forecast_date"), source.get("forecast_target"),
+    )
+    if not normalized_market_date or not market_targets or not source_targets:
+        return "source_forecast_target_mapping_missing"
+    if any(value != normalized_market_date for value in (*market_targets, *source_targets)):
+        return "source_forecast_target_mapping_mismatch"
+    return None
+
+
+def _normalized_target_values(*values: Any) -> list[str]:
+    texts = [str(value).strip() for value in values if value is not None and str(value).strip()]
+    normalized = [_normalized_date_text(value) for value in texts]
+    return [] if len(normalized) != len(texts) or any(value is None for value in normalized) else normalized
+
+
+def _normalized_date_text(value: Any) -> str | None:
+    try:
+        return date.fromisoformat(str(value).strip()[:10]).isoformat()
+    except ValueError:
+        return None
 
 
 def extract_market_context(row: dict[str, Any]) -> MarketContext:

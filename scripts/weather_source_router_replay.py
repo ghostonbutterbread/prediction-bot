@@ -25,6 +25,7 @@ from bot.weather.source_router_replay_wallet import simulate_legacy_unbound_imme
 from bot.weather.source_router import (  # noqa: E402
     build_joined_source_router_ledger_rows,
     build_source_router_replay_rows,
+    source_history_target_proof_rejection_key,
     summarize_source_router_replay_rows,
 )
 from bot.weather.source_scoreboard import load_jsonl_rows  # noqa: E402
@@ -167,6 +168,14 @@ def render_source_router_report_markdown(
         f"- network_access: {_markdown_cell(run.get('network_access'))}",
         f"- min_sample_count: {_markdown_cell(run.get('min_sample_count'))}",
         "",
+        "## Historical Source-quality Integrity",
+        "",
+        f"- interpretation: {_markdown_cell(_history_quality(run).get('source_quality_interpretation'))}",
+        f"- rejected missing exact-target marker: {_history_quality(run).get('source_history_rows_rejected_missing_exact_target_proof_marker', 0)}",
+        f"- rejected target mismatch: {_history_quality(run).get('source_history_rows_rejected_target_mismatch', 0)}",
+        f"- rejected target unproven: {_history_quality(run).get('source_history_rows_rejected_target_unproven', 0)}",
+        f"- rejected v1 forecast not scoreable: {_history_quality(run).get('source_history_rows_rejected_v1_forecast_not_scoreable', 0)}",
+        "",
         "## Legacy Diagnostic Notice",
         "",
         "`legacy_unbound_immediate_settlement_diagnostic` is not a wallet, Kelly/risk, executable P&L, capacity/drawdown viability, or promotion-evidence report. It uses a market-level legacy outcome join, settles immediately, has no pending-position/capital reservation, and has no executable quote guarantee.",
@@ -224,6 +233,11 @@ def render_source_router_report_markdown(
     return "\n".join(lines)
 
 
+def _history_quality(metadata: Mapping[str, Any]) -> Mapping[str, Any]:
+    stats = metadata.get("input_load_stats")
+    return stats if isinstance(stats, Mapping) else {}
+
+
 def _load_router_ledger_rows(
     ledger_paths: Iterable[Path],
     *,
@@ -233,15 +247,34 @@ def _load_router_ledger_rows(
     limit: int | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    stats: dict[str, Any] = {"mode": "ledger_input"}
+    stats: dict[str, Any] = {
+        "mode": "ledger_input",
+        "source_history_rows_rejected_missing_exact_target_proof_marker": 0,
+        "source_history_rows_rejected_target_mismatch": 0,
+        "source_history_rows_rejected_target_unproven": 0,
+        "source_history_rows_rejected_v1_forecast_not_scoreable": 0,
+    }
     replay_row_count = 0
     for path in history_ledger_paths:
         for row in load_source_outcome_ledger_rows(path):
+            rejection_key = source_history_target_proof_rejection_key(row)
+            if rejection_key is not None:
+                stats["source_" + rejection_key] += 1
+                continue
             copied = dict(row)
             copied["source_router_history_only"] = True
             rows.append(copied)
-    if rows:
-        stats["history_ledger_rows"] = len(rows)
+    stats["history_ledger_rows"] = len(rows)
+    stats["source_quality_interpretation"] = (
+        "quarantined_rows_without_exact_target_proof"
+        if any(stats[key] for key in (
+            "source_history_rows_rejected_missing_exact_target_proof_marker",
+            "source_history_rows_rejected_target_mismatch",
+            "source_history_rows_rejected_target_unproven",
+            "source_history_rows_rejected_v1_forecast_not_scoreable",
+        ))
+        else "exact_target_proof_only"
+    )
     for path in ledger_paths:
         for row in load_source_outcome_ledger_rows(path):
             if limit is not None and replay_row_count >= limit:
@@ -258,12 +291,12 @@ def _load_router_ledger_rows(
         decision_rows, decision_stats = load_jsonl_rows(decision_paths)
         joined_rows, join_stats = build_joined_source_router_ledger_rows(source_rows, decision_rows)
         rows.extend(joined_rows)
-        stats = {
+        stats.update({
             "mode": "joined_source_and_decision_inputs",
             "source_load_stats": source_stats,
             "decision_load_stats": decision_stats,
             "join_stats": join_stats,
-        }
+        })
     return rows, stats
 
 

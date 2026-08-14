@@ -668,6 +668,8 @@ def build_source_edge_evaluation_row(
         "observed_at": _optional_text(ledger_row.get("observed_at")),
         "market_date": _optional_text(ledger_row.get("market_date")),
         "target_identity": dict(_mapping_at(ledger_row, "target_identity")),
+        "source_correctness_eligibility": _optional_text(ledger_row.get("source_correctness_eligibility")),
+        "source_target_proof": dict(_mapping_at(ledger_row, "source_target_proof")),
         "source_as_of": _optional_text(ledger_row.get("source_as_of")),
         "source_fetched_at": _optional_text(ledger_row.get("source_fetched_at")),
         "known_after": _optional_text(ledger_row.get("known_after")),
