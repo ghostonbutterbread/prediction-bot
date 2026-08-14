@@ -1,0 +1,21 @@
+{
+  "schema_name": "source_history_manifest",
+  "schema_version": 1,
+  "historical_counterfactual_only": true,
+  "non_mutating": true,
+  "join_key": "market_id",
+  "eligibility_filter": "eligible_for_reliability == true",
+  "availability_field": "settlement_ts",
+  "source_ledger_path": "/home/ryushe/projects/prediction-bot-source-router-ev-shadow/data/derived_reports/legacy_counterfactual_source_outcome_ledger_with_settlement_ts_20260803.jsonl",
+  "strict_resolution_path": "/home/ryushe/projects/prediction-bot-source-router-ev-shadow/data/derived_reports/legacy_counterfactual_resolutions_strict_with_settlement_ts_20260803.jsonl",
+  "raw_archive_path": "/mnt/data-collection/prediction-bot/data/beta_shadow/forward_20260726T1810Z_all_lanes/paper/prediction_lab/market_snapshots.jsonl",
+  "replay_index_path": "/mnt/data-collection/prediction-bot/data/beta_shadow/forward_20260726T1810Z_all_lanes/replay_index_v2/collector_replay_index.jsonl",
+  "replay_manifest_path": "/mnt/data-collection/prediction-bot/data/beta_shadow/forward_20260726T1810Z_all_lanes/replay_index_v2/collector_replay_index.manifest.json",
+  "sha256": {
+    "source_ledger": "c23213eac06c29c494ed81f88fcd99b34ed020d37a2f0584709d71989ab3d543",
+    "strict_resolution": "44fd8af2f77026046b49c2a1b6d3120b301e3158f81b181877b3fa83cbd31595",
+    "raw_archive": "29dfd72013f5de9dcf784c9dc15c78f22aaf854aa4df326b57c7f1bcfeab0324",
+    "replay_index": "beaf362bc0f80a23a5a3387a234149eec2a1a7f14e42ca17c6b5fb19cf1a457c",
+    "replay_manifest": "0885ed90cc412cd9890dc544c1695233b6b396a3b2c5459caa365803e0237cf7"
+  }
+}

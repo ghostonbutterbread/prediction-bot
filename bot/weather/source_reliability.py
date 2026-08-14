@@ -655,7 +655,10 @@ def build_source_edge_evaluation_row(
         "schema_version": SOURCE_EDGE_EVALUATION_SCHEMA_VERSION,
         "row_type": "source_scoreboard_edge_evaluation",
         "observation_id": _optional_text(ledger_row.get("observation_id")),
+        "source_observation_id": _optional_text(ledger_row.get("source_observation_id")),
         "market_id": market_id,
+        "event_id": _optional_text(ledger_row.get("event_id")),
+        "event_ticker": _optional_text(ledger_row.get("event_ticker")),
         "shared_candidate_id": _optional_text(ledger_row.get("shared_candidate_id")),
         "source_id": _optional_text(ledger_row.get("source_id")) or "unknown",
         "source_name": _optional_text(ledger_row.get("source_name")) or _optional_text(ledger_row.get("source_id")) or "unknown",
@@ -664,6 +667,9 @@ def build_source_edge_evaluation_row(
         "contract_shape": _optional_text(ledger_row.get("contract_shape")) or "unknown",
         "observed_at": _optional_text(ledger_row.get("observed_at")),
         "market_date": _optional_text(ledger_row.get("market_date")),
+        "target_identity": dict(_mapping_at(ledger_row, "target_identity")),
+        "source_as_of": _optional_text(ledger_row.get("source_as_of")),
+        "source_fetched_at": _optional_text(ledger_row.get("source_fetched_at")),
         "known_after": _optional_text(ledger_row.get("known_after")),
         "forecast_temp_f": _number(ledger_row.get("forecast_temp_f")),
         "threshold": _number(ledger_row.get("threshold")),
@@ -1162,10 +1168,15 @@ def _normalize_outcome_payload(value: Any) -> dict[str, Any]:
             "outcome_known_at": _optional_text(
                 value.get("outcome_known_at")
                 or value.get("known_at")
-                or value.get("resolved_at")
+                # Historical backfills may be retrieved long after the market
+                # finalized.  Settlement is the authoritative availability time;
+                # never let a later retrieval timestamp erase it.
+                or value.get("settlement_ts")
                 or value.get("settled_at")
-                or resolution.get("resolved_at")
+                or resolution.get("settlement_ts")
                 or resolution.get("settled_at")
+                or value.get("resolved_at")
+                or resolution.get("resolved_at")
             ),
             "label_independence": _optional_text(value.get("label_independence")) or "independent_kalshi_result",
         }

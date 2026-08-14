@@ -307,22 +307,43 @@ def select_source_for_candidate(
     cutoff_dt = _parse_dt(history_cutoff or candidate_edge_row.get("observed_at"))
     slice_key = _slice_key(candidate_edge_row)
     candidates: dict[str, list[dict[str, Any]]] = {}
+    history_stats: Counter[str] = Counter()
     for row in history_edge_rows:
         if not isinstance(row, Mapping):
             continue
+        history_stats["history_rows_seen"] += 1
         if row.get("eligible_for_edge_validation") is not True:
             continue
+        history_stats["history_rows_eligible"] += 1
         known_dt = _parse_dt(row.get("outcome_known_at") or row.get("known_after") or row.get("observed_at"))
         if cutoff_dt is None or known_dt is None or known_dt >= cutoff_dt:
             continue
+        history_stats["history_rows_settled_before_cutoff"] += 1
         if _slice_key(row) != slice_key:
             continue
+        history_stats["history_rows_matching_slice"] += 1
         source_id = _source_key(row.get("source_id"))
         if not source_id:
             continue
         candidates.setdefault(source_id, []).append(dict(row))
 
-    ranked = [_source_stats(source_id, rows) for source_id, rows in candidates.items()]
+    independent_candidates: dict[str, list[dict[str, Any]]] = {}
+    for source_id, rows in candidates.items():
+        independent_rows, collapse_stats = _collapse_selector_history(rows, source_id=source_id)
+        independent_candidates[source_id] = independent_rows
+        history_stats.update(collapse_stats)
+
+    selector_history_audit = {
+        "history_rows_seen": history_stats["history_rows_seen"],
+        "history_rows_eligible": history_stats["history_rows_eligible"],
+        "history_rows_settled_before_cutoff": history_stats["history_rows_settled_before_cutoff"],
+        "history_rows_matching_slice": history_stats["history_rows_matching_slice"],
+        "history_independent_rows_used": history_stats["history_independent_rows_used"],
+        "history_reobservation_excluded": history_stats["history_reobservation_excluded"],
+        "history_conservative_identity_fallback_rows": history_stats["history_conservative_identity_fallback_rows"],
+        "history_representative_selection": "newest_recorded_forecast_observation_v1",
+    }
+    ranked = [_source_stats(source_id, rows) for source_id, rows in independent_candidates.items()]
     ranked.sort(
         key=lambda row: (
             row["sample_count"] >= min_sample_count,
@@ -347,6 +368,7 @@ def select_source_for_candidate(
             "min_sample_count": min_sample_count,
             "blockers": ["insufficient_prior_history"],
             "candidate_source_count": len(ranked),
+            **selector_history_audit,
         }
     chosen = usable[0]
     return {
@@ -362,6 +384,7 @@ def select_source_for_candidate(
         "min_sample_count": min_sample_count,
         "blockers": [],
         "candidate_source_count": len(ranked),
+        **selector_history_audit,
     }
 
 
@@ -543,6 +566,98 @@ def _source_stats(source_id: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _collapse_selector_history(
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    source_id: str,
+) -> tuple[list[dict[str, Any]], Counter[str]]:
+    """Use one forecast observation per independent settled source outcome.
+
+    Raw observations are deliberately retained by the caller's audit ledger.
+    This is a selector-only view: newest recorded forecast observation wins
+    within an outcome unit, never an observation's correctness or outcome.
+    """
+
+    units: dict[tuple[str, ...], dict[str, Any]] = {}
+    stats: Counter[str] = Counter()
+    for row in rows:
+        unit, used_fallback = _independent_source_outcome_unit(row, source_id=source_id)
+        if used_fallback:
+            stats["history_conservative_identity_fallback_rows"] += 1
+        representative = units.get(unit)
+        if representative is None or _recorded_forecast_sort_key(row) > _recorded_forecast_sort_key(representative):
+            units[unit] = dict(row)
+    stats["history_independent_rows_used"] = len(units)
+    stats["history_reobservation_excluded"] = len(rows) - len(units)
+    return list(units.values()), stats
+
+
+def _independent_source_outcome_unit(row: Mapping[str, Any], *, source_id: str) -> tuple[tuple[str, ...], bool]:
+    """Return the conservative source-outcome unit used only for selection.
+
+    A market or event identity anchors a settled unit. Target/date/shape fields
+    prevent accidental collapse where one upstream identity spans variants. If
+    neither market nor event exists, retain each observation independently.
+    """
+
+    market_identity = _normalized_identity_text(
+        row.get("market_id"), row.get("market_ticker"), row.get("ticker")
+    )
+    event_identity = _normalized_identity_text(row.get("event_id"), row.get("event_ticker"))
+    target = _mapping(row.get("target_identity"))
+    target_identity = _normalized_identity_text(
+        target.get("source_target"), target.get("target_forecast_date"), target.get("target_date"),
+        target.get("forecast_date"), row.get("target_id"),
+        row.get("target_forecast_date"), row.get("target_date"), row.get("forecast_date"), row.get("city_id"),
+    ) or "unknown_target"
+    market_date = _normalized_identity_text(
+        row.get("market_date"), target.get("market_date"), row.get("target_market_date")
+    ) or "unknown_market_date"
+    shape = "|".join(
+        _normalized_identity_text(value) or "unknown"
+        for value in (row.get("market_kind"), row.get("contract_shape"), row.get("question_side"), row.get("threshold"))
+    )
+    if market_identity or event_identity:
+        return (
+            "source", source_id,
+            "market", market_identity or "no_market_id",
+            "event", event_identity or "no_event_id",
+            "target", target_identity,
+            "market_date", market_date,
+            "shape", shape,
+        ), False
+
+    # Without a market/event anchor, collapsing would manufacture independence.
+    # Keep the observation distinct with an explicit, deterministic fallback.
+    fallback_identity = _normalized_identity_text(
+        row.get("source_observation_id"), row.get("observation_id"), row.get("edge_evaluation_id"),
+        row.get("observed_at"), row.get("source_as_of"), row.get("source_fetched_at"), row.get("forecast_temp_f"),
+    ) or "missing_observation_identity"
+    return ("source", source_id, "unanchored_observation", fallback_identity), True
+
+
+def _recorded_forecast_sort_key(row: Mapping[str, Any]) -> tuple[datetime, datetime, datetime, str]:
+    earliest = datetime.min.replace(tzinfo=timezone.utc)
+    recorded_at = _parse_dt(row.get("observed_at")) or earliest
+    source_as_of = _parse_dt(row.get("source_as_of")) or earliest
+    source_fetched_at = _parse_dt(row.get("source_fetched_at")) or earliest
+    identity = _normalized_identity_text(
+        row.get("source_observation_id"), row.get("observation_id"), row.get("edge_evaluation_id"),
+        row.get("forecast_temp_f"), row.get("source_name"),
+    ) or ""
+    return recorded_at, source_as_of, source_fetched_at, identity
+
+
+def _normalized_identity_text(*values: Any) -> str | None:
+    for value in values:
+        if isinstance(value, Mapping):
+            value = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+        text = _optional_text(value)
+        if text:
+            return text.casefold()
+    return None
+
+
 def _allow_history_actual_outcome(edge: dict[str, Any], ledger: Mapping[str, Any]) -> None:
     official = _normalized_side(ledger.get("actual_outcome"))
     source_side = _normalized_side(edge.get("source_implied_side"))
@@ -551,7 +666,18 @@ def _allow_history_actual_outcome(edge: dict[str, Any], ledger: Mapping[str, Any
         return
     edge["official_outcome"] = official
     edge["outcome_source"] = "source_outcome_ledger_actual"
-    edge["outcome_known_at"] = _optional_text(ledger.get("known_after"), ledger.get("resolved_at"), edge.get("outcome_known_at"))
+    # Backfill may occur long after the market settled.  Historical replay
+    # admits the outcome at the authoritative settlement time, not retrieval.
+    edge["outcome_known_at"] = _optional_text(
+        ledger.get("outcome_known_at"),
+        ledger.get("settlement_ts"),
+        ledger.get("settled_at"),
+        # ``known_after`` may be backfill provenance rather than market-time
+        # availability. It is a fallback only when settlement is unavailable.
+        ledger.get("known_after"),
+        ledger.get("resolved_at"),
+        edge.get("outcome_known_at"),
+    )
     if source_side in {"YES", "NO"}:
         win = source_side == official
         edge["win"] = win

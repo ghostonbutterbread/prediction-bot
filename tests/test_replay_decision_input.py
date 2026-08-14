@@ -138,11 +138,11 @@ class ReplayDecisionInputTests(unittest.TestCase):
         self.assertIsInstance(result.canonical_input_json, bytes)
         self.assertTrue(verify_replay_decision_input_v1(record, result.canonical_input_json))
 
-    def test_rejects_nested_outcome_like_fields_without_copying_or_stripping_them(self):
+    def test_strict_rejects_nested_outcome_like_fields_without_copying_or_stripping_them(self):
         row = _snapshot_row()
         row["decision_artifact"]["source_context"]["data"]["future_pnl_inputs"] = {"resolution": "YES"}
 
-        result = build_replay_decision_input_v1(row)
+        result = build_replay_decision_input_v1(row, strict=True)
 
         self.assertFalse(result.ok)
         self.assertIsNone(result.record)
@@ -152,7 +152,7 @@ class ReplayDecisionInputTests(unittest.TestCase):
             "decision_artifact.source_context.data.future_pnl_inputs",
         )
 
-    def test_rejects_normalized_outcome_aliases_in_every_copied_subtree(self):
+    def test_strict_rejects_normalized_outcome_aliases_in_every_copied_subtree(self):
         cases = (
             ("decision_artifact.source_context.data.weather_source_snapshot", "futurePnlInputs"),
             ("decision_artifact.source_snapshots[0]", "settlementTimestamp"),
@@ -171,17 +171,17 @@ class ReplayDecisionInputTests(unittest.TestCase):
                 else:
                     row["decision_artifact"]["source_context"]["data"]["market_metadata"][field] = "2026-08-13T00:00:00Z"
 
-                result = build_replay_decision_input_v1(row)
+                result = build_replay_decision_input_v1(row, strict=True)
 
                 self.assertFalse(result.ok)
                 self.assertTrue(any(error.code == "forbidden_outcome_or_future_field" for error in result.errors))
 
-    def test_rejects_unknown_fields_in_copied_subtrees_but_ignores_unrelated_raw_fields(self):
+    def test_strict_rejects_unknown_fields_in_copied_subtrees_but_ignores_unrelated_raw_fields(self):
         row = _snapshot_row()
         row["legacy_action"] = "BUY_YES"
         row["decision_artifact"]["source_context"]["data"]["weather_source_snapshot"]["provider_debug_blob"] = {"x": 1}
 
-        result = build_replay_decision_input_v1(row)
+        result = build_replay_decision_input_v1(row, strict=True)
 
         self.assertFalse(result.ok)
         self.assertEqual(result.errors[0].code, "unknown_unallowlisted_input_field")
@@ -190,13 +190,13 @@ class ReplayDecisionInputTests(unittest.TestCase):
             "decision_artifact.source_context.data.weather_source_snapshot.provider_debug_blob",
         )
 
-    def test_rejects_recorded_output_aliases_but_keeps_source_predicted_prob(self):
+    def test_strict_rejects_recorded_output_aliases_but_keeps_source_predicted_prob(self):
         aliases = ("action", "finalAction", "modelProbability", "positionSize", "requestedSize", "stake", "notional", "kellyFraction")
         for field in aliases:
             with self.subTest(field=field):
                 row = _snapshot_row()
                 row["decision_artifact"]["source_context"]["data"]["weather_source_snapshot"][field] = 1
-                result = build_replay_decision_input_v1(row)
+                result = build_replay_decision_input_v1(row, strict=True)
                 self.assertFalse(result.ok)
                 self.assertTrue(any(error.code == "forbidden_recorded_decision_field" for error in result.errors))
 
@@ -233,14 +233,14 @@ class ReplayDecisionInputTests(unittest.TestCase):
         self.assertTrue(result.ok)
         assert result.record is not None
         serialized = json.dumps(result.record, sort_keys=True)
-        for forbidden_key in ("main_decision", "normal_decision", "model_probability", "position_size", '"action"'):
+        for forbidden_key in ('"model_probability":', '"position_size":', '"action":'):
             self.assertNotIn(forbidden_key, serialized)
 
-    def test_rejects_recorded_decision_fields_when_they_would_reach_lane_input(self):
+    def test_strict_rejects_recorded_decision_fields_when_they_would_reach_lane_input(self):
         row = _snapshot_row()
         row["decision_artifact"]["source_context"]["data"]["main_decision"] = {"action": "BUY_YES"}
 
-        result = build_replay_decision_input_v1(row)
+        result = build_replay_decision_input_v1(row, strict=True)
 
         self.assertFalse(result.ok)
         self.assertEqual(result.errors[0].code, "forbidden_recorded_decision_field")
@@ -274,12 +274,7 @@ class ReplayDecisionInputTests(unittest.TestCase):
         self.assertEqual(result.record["canonical_input_sha256"], original_hash)
         self.assertFalse(verify_replay_decision_input_v1(result.record, result.canonical_input_json))
 
-    def test_real_archive_weather_shape_smoke_reports_v1_contract_and_copied_subtree_blockers(self):
-        """The legacy archive is intentionally non-replayable without conversion.
-
-        Its compatibility report must retain both absent v1 contract data and
-        legacy copied-subtree fields rejected by the strict v1 allowlist.
-        """
+    def test_real_archive_first_row_builds_in_default_legacy_compatibility_mode(self):
         archive_path = Path(
             "/mnt/data-collection/prediction-bot/data/beta_shadow/forward_20260726T1810Z_all_lanes/"
             "paper/prediction_lab/market_snapshots.jsonl"
@@ -290,37 +285,360 @@ class ReplayDecisionInputTests(unittest.TestCase):
             row = json.loads(next(line for line in handle if line.strip()))
 
         result = build_replay_decision_input_v1(row)
-        blockers = [error.to_dict() for error in result.errors]
-        blocker_keys = {(blocker["code"], blocker["path"]) for blocker in blockers}
 
-        self.assertFalse(result.ok, blockers)
-        self.assertEqual(len(blockers), 42, blockers)
-        self.assertTrue(
+        self.assertTrue(result.ok, [error.to_dict() for error in result.errors])
+        assert result.record is not None
+        self.assertEqual(result.record["input_mode"], "legacy_sanitized_v1")
+        self.assertTrue(result.record["decision_key"]["shared_snapshot_id"].startswith("legacy-snapshot-"))
+        omitted = {
+            (entry["path"], entry["category"])
+            for entry in result.record["sanitization"]["omitted_fields"]
+        }
+        self.assertIn(
+            ("decision_artifact.source_context.data.market_metadata.outcome", "outcome_or_future"),
+            omitted,
+        )
+        self.assertIn(
+            ("decision_artifact.source_context.data.market_metadata.status", "unallowlisted"),
+            omitted,
+        )
+        self.assertIn(
+            ("decision_artifact.source_context.data.weather_source_snapshot.veto.final_action", "recorded_decision"),
+            omitted,
+        )
+
+    def test_default_mode_omits_legacy_decision_and_outcome_fields_from_lane_input(self):
+        row = _snapshot_row()
+        row["main_decision"] = {"action": "BUY_YES", "model_probability": 0.99, "position_size": 12}
+        row["decision_artifact"]["source_context"]["data"]["market_metadata"].update(
+            {"outcome": "YES", "result": "YES", "status": "closed"}
+        )
+        row["decision_artifact"]["source_context"]["data"]["weather_source_snapshot"]["veto"] = {
+            "final_action": "BUY_YES"
+        }
+
+        result = build_replay_decision_input_v1(row)
+
+        self.assertTrue(result.ok)
+        assert result.record is not None
+        serialized = json.dumps(result.record, sort_keys=True)
+        for forbidden_key in ('"outcome":', '"result":', '"final_action":', '"action":', '"model_probability":', '"position_size":'):
+            self.assertNotIn(forbidden_key, serialized)
+        omitted = result.record["sanitization"]["omitted_fields"]
+        self.assertIn({"path": "main_decision", "category": "recorded_decision"}, omitted)
+        self.assertIn(
+            {"path": "decision_artifact.source_context.data.market_metadata.outcome", "category": "outcome_or_future"},
+            omitted,
+        )
+        self.assertIn(
+            {"path": "decision_artifact.source_context.data.weather_source_snapshot.veto.final_action", "category": "recorded_decision"},
+            omitted,
+        )
+
+    def test_default_mode_audits_unallowlisted_top_level_legacy_fields_without_copying_values(self):
+        row = _snapshot_row()
+        row["legacy_debug_blob"] = {"opaque": "do-not-copy"}
+
+        result = build_replay_decision_input_v1(row)
+
+        self.assertTrue(result.ok)
+        assert result.record is not None
+        self.assertIn(
+            {"path": "legacy_debug_blob", "category": "unallowlisted"},
+            result.record["sanitization"]["omitted_fields"],
+        )
+        self.assertNotIn("do-not-copy", json.dumps(result.record, sort_keys=True))
+
+    def test_default_mode_audits_malformed_optional_artifact_fields_without_rejecting_row(self):
+        cases = (
+            ("source_snapshots", {"unexpected": "mapping"}, "decision_artifact.source_snapshots"),
+            ("execution_snapshot", ["unexpected", "list"], "decision_artifact.execution_snapshot"),
+        )
+        for field, value, path in cases:
+            with self.subTest(field=field):
+                row = _snapshot_row()
+                row["decision_artifact"][field] = value
+
+                result = build_replay_decision_input_v1(row)
+
+                self.assertTrue(result.ok)
+                assert result.record is not None
+                self.assertIn(
+                    {"path": path, "category": "unallowlisted"},
+                    result.record["sanitization"]["omitted_fields"],
+                )
+                if field == "source_snapshots":
+                    self.assertNotIn(value, result.record["source_inputs"]["source_snapshots"])
+                else:
+                    self.assertNotIn("execution_snapshot", result.record["market"])
+
+    def test_default_mode_audits_malformed_optional_root_fields_without_rejecting_row(self):
+        cases = (
+            ("collector_provenance", ["malformed-provenance"], "collector_provenance"),
+            ("replay_derived_features", ["malformed-derived-features"], "replay_derived_features"),
+            (
+                "replay_derived_features",
+                {"schema_version": "weather-features-v2", "values": ["malformed-derived-values"]},
+                "replay_derived_features.values",
+            ),
+            (
+                "replay_derived_features",
+                {"schema_version": "weather-features-v2"},
+                "replay_derived_features.values",
+            ),
+            ("replay_decision_context", ["malformed-decision-context"], "replay_decision_context"),
+        )
+        for field, value, path in cases:
+            with self.subTest(field=field, path=path):
+                row = _snapshot_row(patch={field: value})
+
+                result = build_replay_decision_input_v1(row)
+
+                self.assertTrue(result.ok)
+                assert result.record is not None
+                self.assertIn(
+                    {"path": path, "category": "unallowlisted"},
+                    result.record["sanitization"]["omitted_fields"],
+                )
+                self.assertNotIn("malformed", json.dumps(result.record, sort_keys=True))
+                if field == "collector_provenance":
+                    self.assertNotIn("raw_payload_sha256", result.record["snapshot_provenance"])
+                elif path == "replay_derived_features.values":
+                    self.assertNotIn("derived_features", result.record)
+                elif field == "replay_derived_features":
+                    self.assertNotIn("derived_features", result.record)
+                else:
+                    self.assertNotIn("decision_context", result.record)
+
+    def test_default_mode_omits_and_audits_malformed_optional_mapping_members(self):
+        row = _snapshot_row()
+        row["collector_provenance"].update(
             {
-                ("missing_required_field", "shared_snapshot_id"),
-                ("missing_required_field", "collector_provenance"),
-                ("missing_required_field", "replay_decision_context"),
-            }.issubset(blocker_keys),
-            blockers,
+                "raw_payload_sha256": "outcome",
+                "collector_index_entry_sha256": "not-a-sha256",
+            }
+        )
+        row["replay_derived_features"].update(
+            {
+                "schema_version": "finalOutcome",
+                "values": {
+                    "forecast_high_f": "result",
+                    "threshold_f": 80.0,
+                    "station_id": "resolution",
+                    "question_side": "finalAction",
+                    "finalOutcome": "outcome",
+                },
+            }
+        )
+        row["replay_decision_context"].update(
+            {
+                "strategy_input_schema_version": ["future"],
+                "policy_config_sha256": "result",
+                "strategy_logic_sha256": _sha256("valid-logic"),
+                "finalOutcome": "outcome",
+            }
+        )
+
+        result = build_replay_decision_input_v1(row)
+
+        self.assertTrue(result.ok)
+        assert result.record is not None
+        replay_data = {
+            key: result.record.get(key)
+            for key in ("snapshot_provenance", "derived_features", "decision_context")
+        }
+        serialized = json.dumps(replay_data, sort_keys=True)
+        for leaked_value in (
+            "outcome", "result", "resolution", "finalOutcome", "finalAction", "future", "not-a-sha256",
+        ):
+            self.assertNotIn(leaked_value, serialized)
+        self.assertNotIn("raw_payload_sha256", result.record["snapshot_provenance"])
+        self.assertNotIn("collector_index_entry_sha256", result.record["snapshot_provenance"])
+        self.assertEqual(
+            result.record["derived_features"],
+            {"values": {"threshold_f": 80.0}},
+        )
+        self.assertNotIn("strategy_input_schema_version", result.record["decision_context"])
+        self.assertEqual(
+            result.record["decision_context"]["strategy_logic_sha256"],
+            _sha256("valid-logic"),
+        )
+        omitted = result.record["sanitization"]["omitted_fields"]
+        self.assertIn(
+            {"path": "collector_provenance.raw_payload_sha256", "category": "unallowlisted"},
+            omitted,
         )
         self.assertIn(
-            ("forbidden_outcome_or_future_field", "decision_artifact.source_context.data.market_metadata.outcome"),
-            blocker_keys,
+            {"path": "collector_provenance.collector_index_entry_sha256", "category": "unallowlisted"},
+            omitted,
         )
         self.assertIn(
-            ("forbidden_recorded_decision_field", "decision_artifact.source_context.data.weather_source_snapshot.veto.final_action"),
-            blocker_keys,
+            {"path": "replay_derived_features.schema_version", "category": "unallowlisted"},
+            omitted,
         )
         self.assertIn(
-            ("unknown_unallowlisted_input_field", "decision_artifact.source_context.data.market_metadata.status"),
-            blocker_keys,
+            {"path": "replay_derived_features.values.forecast_high_f", "category": "outcome_or_future"},
+            omitted,
         )
         self.assertIn(
-            ("unknown_unallowlisted_input_field", "decision_artifact.execution_snapshot.market_price"),
-            blocker_keys,
+            {"path": "replay_derived_features.values.station_id", "category": "outcome_or_future"},
+            omitted,
         )
-        self.assertFalse(any(blocker["path"].startswith("main_decision") for blocker in blockers), blockers)
-        self.assertFalse(any(blocker["path"].endswith("settlement_source") for blocker in blockers), blockers)
+        self.assertIn(
+            {"path": "replay_derived_features.values.question_side", "category": "recorded_decision"},
+            omitted,
+        )
+        self.assertIn(
+            {"path": "replay_derived_features.values.finalOutcome", "category": "outcome_or_future"},
+            omitted,
+        )
+        self.assertIn(
+            {"path": "replay_decision_context.strategy_input_schema_version", "category": "unallowlisted"},
+            omitted,
+        )
+        self.assertIn(
+            {"path": "replay_decision_context.policy_config_sha256", "category": "unallowlisted"},
+            omitted,
+        )
+        self.assertIn(
+            {"path": "replay_decision_context.finalOutcome", "category": "outcome_or_future"},
+            omitted,
+        )
+
+    def test_default_mode_omits_each_invalid_optional_schema_version_type(self):
+        cases = (
+            ("replay_derived_features", "schema_version", ["future"]),
+            ("replay_derived_features", "schema_version", {"value": "result"}),
+            ("replay_derived_features", "schema_version", 3),
+            ("replay_derived_features", "schema_version", ""),
+            ("replay_decision_context", "strategy_input_schema_version", ["future"]),
+            ("replay_decision_context", "strategy_input_schema_version", {"value": "result"}),
+            ("replay_decision_context", "strategy_input_schema_version", 3),
+            ("replay_decision_context", "strategy_input_schema_version", ""),
+        )
+        for mapping_field, schema_field, invalid_value in cases:
+            with self.subTest(mapping_field=mapping_field, invalid_value=invalid_value):
+                row = _snapshot_row()
+                row[mapping_field][schema_field] = invalid_value
+
+                result = build_replay_decision_input_v1(row)
+
+                self.assertTrue(result.ok)
+                assert result.record is not None
+                record_field = "derived_features" if mapping_field == "replay_derived_features" else "decision_context"
+                self.assertNotIn(schema_field, result.record[record_field])
+                self.assertIn(
+                    {"path": f"{mapping_field}.{schema_field}", "category": "unallowlisted"},
+                    result.record["sanitization"]["omitted_fields"],
+                )
+
+    def test_default_mode_retains_valid_optional_mapping_members(self):
+        row = _snapshot_row()
+
+        result = build_replay_decision_input_v1(row)
+
+        self.assertTrue(result.ok)
+        assert result.record is not None
+        self.assertEqual(
+            result.record["snapshot_provenance"]["raw_payload_sha256"],
+            _sha256("raw-payload"),
+        )
+        self.assertEqual(
+            result.record["derived_features"]["schema_version"],
+            "weather-features-v2",
+        )
+        self.assertEqual(
+            result.record["decision_context"]["strategy_input_schema_version"],
+            "weather-input-v3",
+        )
+        self.assertEqual(
+            result.record["decision_context"]["policy_config_sha256"],
+            _sha256("policy"),
+        )
+
+    def test_default_mode_audits_malformed_ids_and_uses_raw_hash_legacy_identities(self):
+        cases = (
+            ("shared_snapshot_id", ["malformed-snapshot-id"]),
+            ("shared_candidate_id", {"value": "malformed-candidate-id"}),
+        )
+        for field, value in cases:
+            with self.subTest(field=field):
+                row = _snapshot_row(patch={field: value})
+
+                result = build_replay_decision_input_v1(row)
+
+                self.assertTrue(result.ok)
+                assert result.record is not None
+                expected_hash = hashlib.sha256(
+                    json.dumps(row, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+                ).hexdigest()
+                self.assertEqual(result.record["input_mode"], "legacy_sanitized_v1")
+                self.assertEqual(
+                    result.record["decision_key"]["shared_snapshot_id"],
+                    f"legacy-snapshot-{expected_hash}",
+                )
+                self.assertEqual(
+                    result.record["decision_key"]["shared_candidate_id"],
+                    f"legacy-candidate-{expected_hash}",
+                )
+                self.assertIn(
+                    {"path": field, "category": "unallowlisted"},
+                    result.record["sanitization"]["omitted_fields"],
+                )
+                self.assertNotIn("malformed", json.dumps(result.record, sort_keys=True))
+
+    def test_default_mode_requires_source_name_and_weather_source_snapshot(self):
+        cases = (
+            ("empty source", lambda row: row["decision_artifact"]["source_context"].update({"source": ""}), "decision_artifact.source_context.source"),
+            ("missing weather snapshot", lambda row: row["decision_artifact"]["source_context"]["data"].pop("weather_source_snapshot"), "decision_artifact.source_context.data.weather_source_snapshot"),
+        )
+        for name, mutate, path in cases:
+            with self.subTest(name=name):
+                row = _snapshot_row()
+                mutate(row)
+
+                result = build_replay_decision_input_v1(row)
+
+                self.assertFalse(result.ok)
+                self.assertEqual(result.errors[0].code, "missing_required_field")
+                self.assertEqual(result.errors[0].path, path)
+
+    def test_legacy_row_without_v1_context_uses_deterministic_raw_hash_identities(self):
+        row = _snapshot_row()
+        for field in ("shared_snapshot_id", "shared_candidate_id", "collector_provenance", "replay_decision_context", "replay_derived_features"):
+            row.pop(field)
+
+        first = build_replay_decision_input_v1(row)
+        second = build_replay_decision_input_v1(row)
+
+        self.assertTrue(first.ok)
+        self.assertTrue(second.ok)
+        assert first.record is not None
+        assert second.record is not None
+        expected_hash = hashlib.sha256(
+            json.dumps(row, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        ).hexdigest()
+        self.assertEqual(first.record["input_mode"], "legacy_sanitized_v1")
+        self.assertEqual(first.record["decision_key"]["shared_snapshot_id"], f"legacy-snapshot-{expected_hash}")
+        self.assertEqual(first.record["decision_key"]["shared_candidate_id"], f"legacy-candidate-{expected_hash}")
+        self.assertEqual(first.record["decision_key"], second.record["decision_key"])
+        self.assertEqual(first.record["snapshot_provenance"]["raw_row_sha256"], expected_hash)
+
+    def test_default_mode_fails_closed_for_missing_identity_price_or_source_context(self):
+        cases = (
+            ("market_id", {"market_id": ""}, "missing_required_field"),
+            ("price", {"yes_price": None, "no_price": None}, "invalid_decision_time_price"),
+            ("source", {"decision_artifact": {}}, "missing_required_field"),
+        )
+        for name, patch, expected_code in cases:
+            with self.subTest(name=name):
+                row = _snapshot_row(patch=patch)
+                if name == "price":
+                    row["decision_artifact"]["execution_snapshot"].pop("best_yes_ask")
+                    row["decision_artifact"]["execution_snapshot"].pop("best_no_ask")
+                result = build_replay_decision_input_v1(row)
+                self.assertFalse(result.ok)
+                self.assertTrue(any(error.code == expected_code for error in result.errors), result.errors)
 
 
 if __name__ == "__main__":

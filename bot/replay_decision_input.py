@@ -19,7 +19,7 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _FORBIDDEN_INPUT_TOKENS = frozenset(
     {
         "outcome", "outcomes", "settlement", "settled", "resolution", "resolved",
-        "pnl", "payout", "profit", "winner", "won", "void", "future",
+        "pnl", "payout", "profit", "winner", "won", "void", "future", "result",
     }
 )
 _SAFE_PROVENANCE_FIELD_NAMES = frozenset({"settlement_source", "station_resolution"})
@@ -34,6 +34,13 @@ _FORBIDDEN_RECORDED_DECISION_FIELDS = frozenset(
 _REQUIRED_DECISION_CONTEXT_HASHES = (
     "policy_config_sha256", "strategy_logic_sha256", "kelly_config_sha256",
     "risk_config_sha256", "execution_price_policy_sha256",
+)
+_SANITIZED_TOP_LEVEL_CONTRACT_FIELDS = frozenset(
+    {
+        "observed_at", "market_id", "question", "yes_price", "no_price",
+        "decision_artifact", "shared_snapshot_id", "shared_candidate_id",
+        "collector_provenance", "replay_derived_features", "replay_decision_context",
+    }
 )
 
 # This is deliberately a narrow description of the current collector weather
@@ -192,14 +199,28 @@ class ReplayDecisionInputBuildResult:
         return self.record is not None and self.canonical_input_json is not None and not self.errors
 
 
-def build_replay_decision_input_v1(raw_snapshot_row: Mapping[str, Any] | Any) -> ReplayDecisionInputBuildResult:
+def build_replay_decision_input_v1(
+    raw_snapshot_row: Mapping[str, Any] | Any, *, strict: bool = False,
+) -> ReplayDecisionInputBuildResult:
+    """Build a blind replay input from immutable collector evidence.
+
+    The default accepts legacy collector rows after rebuilding only reviewed
+    decision-time fields.  ``strict=True`` retains the original v1 contract
+    for callers that need every v1 provenance and context field present.
+    """
+    if strict:
+        return _build_replay_decision_input_strict_v1(raw_snapshot_row)
+    return _build_replay_decision_input_sanitized_v1(raw_snapshot_row)
+
+
+def _build_replay_decision_input_strict_v1(raw_snapshot_row: Mapping[str, Any] | Any) -> ReplayDecisionInputBuildResult:
     """Build a fresh v1 input using only reviewed decision-time weather fields."""
     if not isinstance(raw_snapshot_row, Mapping):
         return _failure("invalid_snapshot_row", "$", "collector snapshot row must be a mapping")
 
     row = {str(key): value for key, value in raw_snapshot_row.items()}
     errors: list[ReplayDecisionInputError] = []
-    raw_row_sha256 = _canonical_sha256(row, errors)
+    raw_row_sha256 = _canonical_sha256(raw_snapshot_row, errors)
     if errors:
         return ReplayDecisionInputBuildResult(record=None, errors=tuple(errors))
     assert raw_row_sha256 is not None
@@ -227,9 +248,17 @@ def build_replay_decision_input_v1(raw_snapshot_row: Mapping[str, Any] | Any) ->
 
     artifact = _required_mapping(row.get("decision_artifact"), "decision_artifact", errors)
     source_context = _required_mapping(_field(artifact, "source_context"), "decision_artifact.source_context", errors)
+    source_context_source = _required_text(
+        _field(source_context, "source"), "decision_artifact.source_context.source", errors,
+    )
     source_context_as_of = _validated_utc_timestamp(_field(source_context, "as_of"), path="decision_artifact.source_context.as_of", errors=errors)
     source_context_data = _required_mapping(_field(source_context, "data"), "decision_artifact.source_context.data", errors)
     market_metadata = _required_mapping(_field(source_context_data, "market_metadata"), "decision_artifact.source_context.data.market_metadata", errors)
+    weather_source_snapshot = _required_mapping(
+        _field(source_context_data, "weather_source_snapshot"),
+        "decision_artifact.source_context.data.weather_source_snapshot",
+        errors,
+    )
     source_snapshots = _field(artifact, "source_snapshots")
     if not isinstance(source_snapshots, list):
         errors.append(ReplayDecisionInputError("missing_required_field", "decision_artifact.source_snapshots", "source snapshots must be a recorded list"))
@@ -253,12 +282,20 @@ def build_replay_decision_input_v1(raw_snapshot_row: Mapping[str, Any] | Any) ->
     allowed_market_metadata = _allowlisted_mapping(market_metadata, _MARKET_METADATA_V1, "decision_artifact.source_context.data.market_metadata", errors)
     allowed_execution_snapshot = _allowlisted_mapping(execution_snapshot, _EXECUTION_SNAPSHOT_V1, "decision_artifact.execution_snapshot", errors)
 
+    if isinstance(weather_source_snapshot, Mapping) and not _has_useful_source_data(
+        allowed_source_data.get("weather_source_snapshot", {}),
+    ):
+        errors.append(ReplayDecisionInputError(
+            "missing_required_field", "decision_artifact.source_context.data.weather_source_snapshot",
+            "usable allowlisted weather source evidence is required",
+        ))
+
     if errors:
         return ReplayDecisionInputBuildResult(record=None, errors=tuple(errors))
     assert all(value is not None for value in (
         observed_at, shared_snapshot_id, shared_candidate_id, market_id, question, yes_price, no_price,
         provenance, raw_payload_sha256, collector_index_entry_sha256, decision_context,
-        strategy_input_schema_version, derived_schema_version, source_context, source_context_as_of,
+        strategy_input_schema_version, derived_schema_version, source_context, source_context_source, source_context_as_of,
         allowed_source_data, allowed_source_snapshots, allowed_derived_values, allowed_market_metadata,
         allowed_execution_snapshot, best_yes_ask, best_no_ask,
     ))
@@ -284,7 +321,7 @@ def build_replay_decision_input_v1(raw_snapshot_row: Mapping[str, Any] | Any) ->
         "source_inputs": {
             "recorded_as_of": source_context_as_of,
             "source_context": {
-                "source": _json_scalar(_field(source_context, "source")),
+                "source": source_context_source,
                 "mode": _json_scalar(_field(source_context, "mode")), "as_of": source_context_as_of,
                 "data": allowed_source_data,
             },
@@ -302,6 +339,402 @@ def build_replay_decision_input_v1(raw_snapshot_row: Mapping[str, Any] | Any) ->
     assert canonical_input_json is not None
     record["canonical_input_sha256"] = hashlib.sha256(canonical_input_json).hexdigest()
     return ReplayDecisionInputBuildResult(record=record, canonical_input_json=canonical_input_json)
+
+
+def _build_replay_decision_input_sanitized_v1(raw_snapshot_row: Mapping[str, Any] | Any) -> ReplayDecisionInputBuildResult:
+    """Rebuild a usable legacy row without carrying historical outputs forward."""
+    if not isinstance(raw_snapshot_row, Mapping):
+        return _failure("invalid_snapshot_row", "$", "collector snapshot row must be a mapping")
+
+    row = {str(key): value for key, value in raw_snapshot_row.items()}
+    errors: list[ReplayDecisionInputError] = []
+    raw_row_sha256 = _canonical_sha256(raw_snapshot_row, errors)
+    if errors or raw_row_sha256 is None:
+        return ReplayDecisionInputBuildResult(record=None, errors=tuple(errors))
+
+    observed_at = _validated_utc_timestamp(row.get("observed_at"), path="observed_at", errors=errors)
+    market_id = _required_text(row.get("market_id"), "market_id", errors)
+    question = _required_text(row.get("question"), "question", errors)
+    artifact = _required_mapping(row.get("decision_artifact"), "decision_artifact", errors)
+    source_context = _required_mapping(_field(artifact, "source_context"), "decision_artifact.source_context", errors)
+    source_context_source = _required_text(
+        _field(source_context, "source"), "decision_artifact.source_context.source", errors,
+    )
+    source_context_data = _required_mapping(
+        _field(source_context, "data"), "decision_artifact.source_context.data", errors,
+    )
+    if errors:
+        return ReplayDecisionInputBuildResult(record=None, errors=tuple(errors))
+    assert observed_at is not None and market_id is not None and question is not None
+    assert source_context is not None and source_context_source is not None and source_context_data is not None
+
+    omitted_fields: list[dict[str, str]] = []
+    _record_legacy_output_omissions(row, omitted_fields)
+    allowed_source_data = _sanitized_allowlisted_mapping(
+        source_context_data, _SOURCE_CONTEXT_DATA_V1, "decision_artifact.source_context.data", omitted_fields,
+    )
+    source_snapshots = _field(artifact, "source_snapshots")
+    allowed_source_snapshots = _sanitized_allowlisted_list(
+        source_snapshots, _SOURCE_SNAPSHOT_V1, "decision_artifact.source_snapshots", omitted_fields,
+    ) if isinstance(source_snapshots, list) else []
+    if "source_snapshots" in artifact and not isinstance(source_snapshots, list):
+        _add_omitted_field(omitted_fields, "decision_artifact.source_snapshots", "unallowlisted")
+    execution_snapshot = _field(artifact, "execution_snapshot")
+    allowed_execution_snapshot = _sanitized_allowlisted_mapping(
+        execution_snapshot, _EXECUTION_SNAPSHOT_V1, "decision_artifact.execution_snapshot", omitted_fields,
+    ) if isinstance(execution_snapshot, Mapping) else {}
+    if "execution_snapshot" in artifact and not isinstance(execution_snapshot, Mapping):
+        _add_omitted_field(omitted_fields, "decision_artifact.execution_snapshot", "unallowlisted")
+
+    collector_provenance = row.get("collector_provenance")
+    if "collector_provenance" in row and not isinstance(collector_provenance, Mapping):
+        _add_omitted_field(omitted_fields, "collector_provenance", "unallowlisted")
+    derived_features_value = row.get("replay_derived_features")
+    if "replay_derived_features" in row and not isinstance(derived_features_value, Mapping):
+        _add_omitted_field(omitted_fields, "replay_derived_features", "unallowlisted")
+    decision_context_value = row.get("replay_decision_context")
+    if "replay_decision_context" in row and not isinstance(decision_context_value, Mapping):
+        _add_omitted_field(omitted_fields, "replay_decision_context", "unallowlisted")
+
+    derived_features = _sanitized_derived_features(derived_features_value, omitted_fields)
+    decision_context = _sanitized_decision_context(decision_context_value, omitted_fields)
+    weather_source_snapshot = allowed_source_data.get("weather_source_snapshot")
+    if not isinstance(weather_source_snapshot, Mapping) or not _has_useful_source_data(weather_source_snapshot):
+        return _failure(
+            "missing_required_field", "decision_artifact.source_context.data.weather_source_snapshot",
+            "usable allowlisted weather source evidence is required",
+        )
+
+    prices = _available_decision_time_prices(row, execution_snapshot)
+    if not prices:
+        return _failure(
+            "invalid_decision_time_price", "yes_price",
+            "a valid decision-time quote or executable ask is required",
+        )
+
+    shared_snapshot_id = _optional_identity_text(row.get("shared_snapshot_id"))
+    if "shared_snapshot_id" in row and shared_snapshot_id is None:
+        _add_omitted_field(omitted_fields, "shared_snapshot_id", "unallowlisted")
+    shared_candidate_id = _optional_identity_text(row.get("shared_candidate_id"))
+    if "shared_candidate_id" in row and shared_candidate_id is None:
+        _add_omitted_field(omitted_fields, "shared_candidate_id", "unallowlisted")
+    legacy_identity = not shared_snapshot_id or not shared_candidate_id
+    if legacy_identity:
+        shared_snapshot_id = f"legacy-snapshot-{raw_row_sha256}"
+        shared_candidate_id = f"legacy-candidate-{raw_row_sha256}"
+
+    source_context_as_of = _optional_utc_timestamp(_field(source_context, "as_of"))
+    market_metadata = allowed_source_data.get("market_metadata", {})
+    record: dict[str, Any] = {
+        "schema_name": REPLAY_DECISION_INPUT_SCHEMA_NAME,
+        "schema_version": REPLAY_DECISION_INPUT_SCHEMA_VERSION,
+        "input_mode": "legacy_sanitized_v1" if legacy_identity else "sanitized_v1",
+        "decision_key": {
+            "shared_snapshot_id": shared_snapshot_id,
+            "shared_candidate_id": shared_candidate_id,
+            "market_id": market_id,
+            "observed_at_utc": observed_at,
+            "raw_row_sha256": raw_row_sha256,
+        },
+        "shared_snapshot_id": shared_snapshot_id,
+        "shared_candidate_id": shared_candidate_id,
+        "market_id": market_id,
+        "observed_at": observed_at,
+        "snapshot_provenance": _sanitized_provenance(
+            collector_provenance, raw_row_sha256,
+            input_mode="legacy_sanitized_v1" if legacy_identity else "sanitized_v1",
+            omitted_fields=omitted_fields,
+        ),
+        "market": {
+            "question": question,
+            "market_metadata": market_metadata,
+            **prices,
+        },
+        "source_inputs": {
+            "source_context": {
+                "source": source_context_source,
+                "mode": _json_scalar(_field(source_context, "mode")),
+                "data": allowed_source_data,
+            },
+            "source_snapshots": allowed_source_snapshots,
+        },
+        "sanitization": {"omitted_fields": _sorted_omitted_fields(omitted_fields)},
+    }
+    if source_context_as_of is not None:
+        record["source_inputs"]["recorded_as_of"] = source_context_as_of
+        record["source_inputs"]["source_context"]["as_of"] = source_context_as_of
+    if allowed_execution_snapshot:
+        record["market"]["execution_snapshot"] = allowed_execution_snapshot
+    if derived_features is not None:
+        record["derived_features"] = derived_features
+    if decision_context:
+        record["decision_context"] = decision_context
+
+    canonical_input_json = _canonical_json_bytes(record, errors)
+    if errors or canonical_input_json is None:
+        return ReplayDecisionInputBuildResult(record=None, errors=tuple(errors))
+    record["canonical_input_sha256"] = hashlib.sha256(canonical_input_json).hexdigest()
+    return ReplayDecisionInputBuildResult(record=record, canonical_input_json=canonical_input_json)
+
+
+def _sanitized_provenance(
+    value: Any, raw_row_sha256: str, *, input_mode: str, omitted_fields: list[dict[str, str]],
+) -> dict[str, str]:
+    provenance = {"input_mode": input_mode, "raw_row_sha256": raw_row_sha256}
+    if isinstance(value, Mapping):
+        for key in ("raw_payload_sha256", "collector_index_entry_sha256"):
+            candidate = _field(value, key)
+            if isinstance(candidate, str) and _SHA256_RE.fullmatch(candidate):
+                provenance[key] = candidate
+            elif key in value:
+                _add_omitted_field(omitted_fields, f"collector_provenance.{key}", "unallowlisted")
+    return provenance
+
+
+def _available_decision_time_prices(row: Mapping[str, Any], execution_snapshot: Any) -> dict[str, float]:
+    values: dict[str, Any] = {"yes_price": row.get("yes_price"), "no_price": row.get("no_price")}
+    if isinstance(execution_snapshot, Mapping):
+        for key in ("best_yes_ask", "best_no_ask"):
+            values[key] = _field(execution_snapshot, key)
+    prices: dict[str, float] = {}
+    for key, value in values.items():
+        price = _valid_price_or_none(value)
+        if price is not None:
+            prices[key] = price
+    return prices
+
+
+def _has_useful_source_data(value: Mapping[str, Any]) -> bool:
+    for nested_value in value.values():
+        if isinstance(nested_value, Mapping) and _has_useful_source_data(nested_value):
+            return True
+        if isinstance(nested_value, list) and nested_value:
+            return True
+        if nested_value not in ({}, [], None, ""):
+            return True
+    return False
+
+
+def _sanitized_derived_features(value: Any, omitted_fields: list[dict[str, str]]) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    schema_version = _safe_optional_mapping_text(_field(value, "schema_version"))
+    if "schema_version" in value and schema_version is None:
+        _add_omitted_field(omitted_fields, "replay_derived_features.schema_version", "unallowlisted")
+    values = _field(value, "values")
+    if not isinstance(values, Mapping):
+        _add_omitted_field(omitted_fields, "replay_derived_features.values", "unallowlisted")
+        return None
+    copied = _sanitized_allowlisted_mapping(
+        values, _DERIVED_FEATURE_VALUES_V1, "replay_derived_features.values", omitted_fields,
+        reject_sensitive_string_values=True,
+    )
+    if schema_version is None:
+        return {"values": copied}
+    return {"schema_version": schema_version, "values": copied}
+
+
+def _sanitized_decision_context(value: Any, omitted_fields: list[dict[str, str]]) -> dict[str, str]:
+    if not isinstance(value, Mapping):
+        return {}
+    copied: dict[str, str] = {}
+    schema_version = _safe_optional_mapping_text(_field(value, "strategy_input_schema_version"))
+    if "strategy_input_schema_version" in value and schema_version is None:
+        _add_omitted_field(omitted_fields, "replay_decision_context.strategy_input_schema_version", "unallowlisted")
+    if schema_version is not None:
+        copied["strategy_input_schema_version"] = schema_version
+    for field in _REQUIRED_DECISION_CONTEXT_HASHES:
+        candidate = _field(value, field)
+        if isinstance(candidate, str) and _SHA256_RE.fullmatch(candidate):
+            copied[field] = candidate
+        elif candidate is not None:
+            _add_omitted_field(omitted_fields, f"replay_decision_context.{field}", "unallowlisted")
+    for key, nested in value.items():
+        if key not in {"strategy_input_schema_version", *_REQUIRED_DECISION_CONTEXT_HASHES}:
+            _record_omitted_subtree(nested, f"replay_decision_context.{key}", omitted_fields)
+    return copied
+
+
+def _record_legacy_output_omissions(row: Mapping[str, Any], omitted_fields: list[dict[str, str]]) -> None:
+    for key, value in row.items():
+        key_text = str(key)
+        if key_text in {
+            "main_decision", "normal_decision", "shared_pipeline", "decision_type", "direction",
+            "recorded_prediction", "weather_risk", "paper_lab", "opportunity_mode",
+        } or _omission_category(key_text) != "unallowlisted":
+            _record_omitted_subtree(
+                value, key_text, omitted_fields,
+                category="recorded_decision" if _omission_category(key_text) == "recorded_decision" else None,
+            )
+        elif key_text not in _SANITIZED_TOP_LEVEL_CONTRACT_FIELDS:
+            _add_omitted_field(omitted_fields, key_text, "unallowlisted")
+    artifact = _field(row, "decision_artifact")
+    if not isinstance(artifact, Mapping):
+        return
+    retained = {"source_context", "source_snapshots", "execution_snapshot"}
+    for key, value in artifact.items():
+        if key not in retained:
+            _record_omitted_subtree(value, f"decision_artifact.{key}", omitted_fields, category="recorded_decision")
+
+
+def _sanitized_allowlisted_mapping(
+    value: Mapping[str, Any], schema: Mapping[str, Any], path: str, omitted_fields: list[dict[str, str]],
+    *, reject_sensitive_string_values: bool = False,
+) -> dict[str, Any]:
+    copied: dict[str, Any] = {}
+    for key, nested_value in value.items():
+        key_text = str(key)
+        nested_path = f"{path}.{key_text}"
+        spec = schema.get(key_text)
+        if spec is None:
+            _record_omitted_subtree(nested_value, nested_path, omitted_fields)
+            continue
+        copied_value = _sanitized_allowlisted_value(
+            nested_value, spec, nested_path, omitted_fields,
+            reject_sensitive_string_values=reject_sensitive_string_values,
+        )
+        if copied_value is not _UNSET:
+            copied[key_text] = copied_value
+    return copied
+
+
+def _sanitized_allowlisted_list(
+    value: list[Any], item_schema: Any, path: str, omitted_fields: list[dict[str, str]],
+    *, reject_sensitive_string_values: bool = False,
+) -> list[Any]:
+    copied: list[Any] = []
+    for index, item in enumerate(value):
+        copied_value = _sanitized_allowlisted_value(
+            item, item_schema, f"{path}[{index}]", omitted_fields,
+            reject_sensitive_string_values=reject_sensitive_string_values,
+        )
+        if copied_value is not _UNSET:
+            copied.append(copied_value)
+    return copied
+
+
+def _sanitized_allowlisted_value(
+    value: Any, spec: Any, path: str, omitted_fields: list[dict[str, str]],
+    *, reject_sensitive_string_values: bool = False,
+) -> Any:
+    if spec is _SCALAR:
+        sensitive_category = _string_semantics_omission_category(value)
+        if reject_sensitive_string_values and sensitive_category is not None:
+            _add_omitted_field(omitted_fields, path, sensitive_category)
+            return _UNSET
+        if isinstance(value, _JSON_SCALAR_TYPES):
+            return _json_scalar(value)
+        _add_omitted_field(omitted_fields, path, "unallowlisted")
+        return _UNSET
+    if spec is _OPTIONAL_WEATHER_PROVENANCE:
+        if value is None:
+            return None
+        if isinstance(value, Mapping):
+            return _sanitized_allowlisted_mapping(
+                value, _WEATHER_PROVENANCE_V1, path, omitted_fields,
+                reject_sensitive_string_values=reject_sensitive_string_values,
+            )
+        _add_omitted_field(omitted_fields, path, "unallowlisted")
+        return _UNSET
+    if isinstance(spec, Mapping):
+        if isinstance(value, Mapping):
+            return _sanitized_allowlisted_mapping(
+                value, spec, path, omitted_fields,
+                reject_sensitive_string_values=reject_sensitive_string_values,
+            )
+        _add_omitted_field(omitted_fields, path, "unallowlisted")
+        return _UNSET
+    if isinstance(spec, list) and len(spec) == 1:
+        if isinstance(value, list):
+            return _sanitized_allowlisted_list(
+                value, spec[0], path, omitted_fields,
+                reject_sensitive_string_values=reject_sensitive_string_values,
+            )
+        _add_omitted_field(omitted_fields, path, "unallowlisted")
+        return _UNSET
+    raise AssertionError(f"invalid allowlist specification at {path}")
+
+
+def _record_omitted_subtree(
+    value: Any, path: str, omitted_fields: list[dict[str, str]], *, category: str | None = None,
+) -> None:
+    category = category or _omission_category(path.rsplit(".", 1)[-1])
+    if category != "unallowlisted" or not isinstance(value, (Mapping, list)):
+        _add_omitted_field(omitted_fields, path, category)
+        return
+    if isinstance(value, Mapping) and value and _subtree_has_sensitive_field(value):
+        for key, nested_value in value.items():
+            _record_omitted_subtree(nested_value, f"{path}.{key}", omitted_fields)
+        return
+    if isinstance(value, list) and value and _subtree_has_sensitive_field(value):
+        for index, nested_value in enumerate(value):
+            _record_omitted_subtree(nested_value, f"{path}[{index}]", omitted_fields)
+        return
+    _add_omitted_field(omitted_fields, path, category)
+
+
+def _omission_category(name: str) -> str:
+    normalized = _normalized_field_name(name)
+    if _field_name_is_forbidden(name):
+        return "outcome_or_future"
+    if normalized in _FORBIDDEN_RECORDED_DECISION_FIELDS or normalized in {"direction", "side", "entry_price", "win_probability"}:
+        return "recorded_decision"
+    return "unallowlisted"
+
+
+def _subtree_has_sensitive_field(value: Any) -> bool:
+    if isinstance(value, Mapping):
+        for key, nested_value in value.items():
+            if _omission_category(str(key)) != "unallowlisted" or _subtree_has_sensitive_field(nested_value):
+                return True
+    elif isinstance(value, list):
+        return any(_subtree_has_sensitive_field(item) for item in value)
+    return False
+
+
+def _add_omitted_field(omitted_fields: list[dict[str, str]], path: str, category: str) -> None:
+    entry = {"path": path, "category": category}
+    if entry not in omitted_fields:
+        omitted_fields.append(entry)
+
+
+def _sorted_omitted_fields(omitted_fields: list[dict[str, str]]) -> list[dict[str, str]]:
+    return sorted(omitted_fields, key=lambda entry: (entry["path"], entry["category"]))
+
+
+def _optional_text(value: Any) -> str | None:
+    return str(value) if value is not None and str(value).strip() else None
+
+
+def _safe_optional_mapping_text(value: Any) -> str | None:
+    """Accept only ordinary non-empty labels without replay-sensitive semantics."""
+    if type(value) is not str or not value.strip() or _string_semantics_omission_category(value) is not None:
+        return None
+    return value
+
+
+def _string_semantics_omission_category(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    category = _omission_category(value)
+    return category if category != "unallowlisted" else None
+
+
+def _optional_identity_text(value: Any) -> str | None:
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _optional_utc_timestamp(value: Any) -> str | None:
+    errors: list[ReplayDecisionInputError] = []
+    return _validated_utc_timestamp(value, path="optional", errors=errors) if _optional_text(value) else None
+
+
+def _valid_price_or_none(value: Any) -> float | None:
+    try:
+        price = float(value)
+    except (TypeError, ValueError):
+        return None
+    return price if isfinite(price) and 0 <= price <= 1 else None
 
 
 def verify_replay_decision_input_v1(record: Mapping[str, Any] | Any, canonical_input_json: bytes | bytearray | Any) -> bool:

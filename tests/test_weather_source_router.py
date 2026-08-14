@@ -118,6 +118,61 @@ def stable_decision(
 
 
 class WeatherSourceRouterTests(unittest.TestCase):
+    def test_selector_collapses_reobservations_before_minimum_sample_gate(self):
+        candidate = {
+            "city_id": "miami_fl", "market_kind": "high", "contract_shape": "range",
+            "question_side": "above", "observed_at": "2026-08-10T12:00:00+00:00",
+        }
+        reobservations = [
+            {
+                "market_id": "KXONE", "event_ticker": "KXEVENTONE", "market_date": "2026-08-01",
+                "source_id": "nws", "city_id": "miami_fl", "market_kind": "high", "contract_shape": "range",
+                "question_side": "above", "observed_at": observed_at, "outcome_known_at": "2026-08-05T00:00:00+00:00",
+                "eligible_for_edge_validation": True, "win": win, "binary_edge_realized": edge,
+            }
+            for observed_at, win, edge in (
+                ("2026-08-01T08:00:00+00:00", True, 0.5),
+                ("2026-08-01T10:00:00+00:00", True, 0.5),
+                # The newest recorded forecast wins representative selection;
+                # it is not selected for being correct.
+                ("2026-08-01T12:00:00+00:00", False, -0.5),
+            )
+        ]
+
+        selected = select_source_for_candidate(candidate, reobservations, min_sample_count=2)
+
+        self.assertFalse(selected["routeable"])
+        self.assertEqual(selected["prior_sample_count"], 1)
+        self.assertEqual(selected["prior_win_rate"], 0.0)
+        self.assertEqual(selected["history_rows_seen"], 3)
+        self.assertEqual(selected["history_independent_rows_used"], 1)
+        self.assertEqual(selected["history_reobservation_excluded"], 2)
+
+    def test_selector_counts_distinct_settled_markets_as_independent_history(self):
+        candidate = {
+            "city_id": "miami_fl", "market_kind": "high", "contract_shape": "range",
+            "question_side": "above", "observed_at": "2026-08-10T12:00:00+00:00",
+        }
+        history = [
+            {
+                "market_id": market_id, "event_ticker": event_ticker, "market_date": market_date,
+                "source_id": "nws", "city_id": "miami_fl", "market_kind": "high", "contract_shape": "range",
+                "question_side": "above", "observed_at": observed_at, "outcome_known_at": "2026-08-05T00:00:00+00:00",
+                "eligible_for_edge_validation": True, "win": True, "binary_edge_realized": 0.5,
+            }
+            for market_id, event_ticker, market_date, observed_at in (
+                ("KXONE", "KXEVENTONE", "2026-08-01", "2026-08-01T12:00:00+00:00"),
+                ("KXTWO", "KXEVENTTWO", "2026-08-02", "2026-08-02T12:00:00+00:00"),
+            )
+        ]
+
+        selected = select_source_for_candidate(candidate, history, min_sample_count=2)
+
+        self.assertTrue(selected["routeable"])
+        self.assertEqual(selected["prior_sample_count"], 2)
+        self.assertEqual(selected["history_independent_rows_used"], 2)
+        self.assertEqual(selected["history_reobservation_excluded"], 0)
+
     def test_select_source_uses_only_prior_history_for_matching_slice(self):
         candidate = {
             "city_id": "miami_fl",
@@ -484,6 +539,32 @@ class WeatherSourceRouterTests(unittest.TestCase):
             self.assertEqual(stats["history_ledger_rows"], 3)
             self.assertEqual(stats["replay_ledger_rows"], 1)
             self.assertTrue(stats["limit_reached"])
+
+    def test_settlement_timestamp_makes_history_available_before_later_candidate(self):
+        history = ledger_row(
+            source_id="open_meteo", source_side="YES", official="YES",
+            observed_at="2026-07-26T12:00:00+00:00", outcome_known_at="",
+            shared_candidate_id="history-1", market_id="KXHISTORY1",
+        )
+        history.update({
+            "source_router_history_only": True,
+            "actual_outcome": "YES",
+            "settlement_ts": "2026-07-27T12:00:00+00:00",
+            # This provenance field may be populated by a later backfill too;
+            # it must not outrank authoritative settlement chronology.
+            "known_after": "2026-08-04T01:22:35+00:00",
+            "resolved_at": "2026-08-04T01:22:35+00:00",
+        })
+        candidate = ledger_row(
+            source_id="open_meteo", source_side="YES", official="YES",
+            observed_at="2026-07-28T12:00:00+00:00", outcome_known_at="2026-07-29T00:00:00+00:00",
+            shared_candidate_id="candidate-1", market_id="KXCURRENT1",
+        )
+
+        replay = build_source_router_replay_rows([history, candidate], min_sample_count=1)
+
+        self.assertEqual(replay[0]["router"]["chosen_source_id"], "open_meteo")
+        self.assertEqual(replay[0]["router"]["prior_sample_count"], 1)
 
 
 if __name__ == "__main__":

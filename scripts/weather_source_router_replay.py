@@ -20,6 +20,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from bot.weather.source_reliability import load_source_outcome_ledger_rows  # noqa: E402
+from bot.weather.source_history_manifest import load_source_history_manifest  # noqa: E402
+from bot.weather.source_router_replay_wallet import simulate_legacy_unbound_immediate_settlement_diagnostic  # noqa: E402
 from bot.weather.source_router import (  # noqa: E402
     build_joined_source_router_ledger_rows,
     build_source_router_replay_rows,
@@ -33,6 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ledger-input", action="append", default=None, help="Prebuilt source-outcome ledger JSON/JSONL path. Repeatable.")
     parser.add_argument("--history-ledger-input", action="append", default=None, help="Prior source-outcome ledger JSON/JSONL rows used only as selector history. Repeatable.")
+    parser.add_argument("--history-manifest", help="Hash-verified, paper-only source history manifest. Its source ledger is selector history only.")
     parser.add_argument("--source-input", action="append", default=None, help="Raw source snapshot / market snapshot JSONL path. Repeatable.")
     parser.add_argument("--decision-input", action="append", default=None, help="Stable/main decision JSONL path to join against --source-input. Repeatable.")
     parser.add_argument("--outcome-input", action="append", required=True, help="Finalized market outcome JSON/JSONL path. Repeatable.")
@@ -40,6 +43,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-sample-count", type=int, default=5, help="Minimum prior resolved rows required before routing.")
     parser.add_argument("--limit", type=int, default=None, help="Optional maximum ledger rows to replay.")
     parser.add_argument("--report-limit", type=int, default=25, help="Maximum slice rows in markdown report.")
+    parser.add_argument("--fixed-stake-usd", type=float, default=10.0, help="Fixed stake only for the labeled legacy unbound immediate-settlement diagnostic.")
     return parser.parse_args()
 
 
@@ -49,6 +53,8 @@ def main() -> int:
         raise SystemExit("--min-sample-count must be >= 1")
     if args.limit is not None and args.limit < 0:
         raise SystemExit("--limit must be non-negative")
+    if args.fixed_stake_usd <= 0:
+        raise SystemExit("--fixed-stake-usd must be positive")
 
     if not args.ledger_input and not args.source_input:
         raise SystemExit("pass --ledger-input, or pass --source-input with --decision-input")
@@ -56,6 +62,9 @@ def main() -> int:
         raise SystemExit("--decision-input is required when --source-input is used")
     ledger_paths = [_resolve_path(path) for path in args.ledger_input or []]
     history_ledger_paths = [_resolve_path(path) for path in args.history_ledger_input or []]
+    history_manifest = load_source_history_manifest(_resolve_path(args.history_manifest)) if args.history_manifest else None
+    if history_manifest:
+        history_ledger_paths.append(history_manifest.source_ledger_path)
     source_paths = [_resolve_path(path) for path in args.source_input or []]
     decision_paths = [_resolve_path(path) for path in args.decision_input or []]
     outcome_paths = [_resolve_path(path) for path in args.outcome_input]
@@ -76,6 +85,7 @@ def main() -> int:
         min_sample_count=args.min_sample_count,
     )
     summary = summarize_source_router_replay_rows(replay_rows)
+    legacy_diagnostic = simulate_legacy_unbound_immediate_settlement_diagnostic(replay_rows, fixed_stake_usd=args.fixed_stake_usd)
     metadata = {
         "schema_version": 1,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -83,11 +93,18 @@ def main() -> int:
         "network_access": False,
         "ledger_inputs": [str(path) for path in ledger_paths],
         "history_ledger_inputs": [str(path) for path in history_ledger_paths],
+        "history_manifest": _manifest_provenance(history_manifest),
         "source_inputs": [str(path) for path in source_paths],
         "decision_inputs": [str(path) for path in decision_paths],
         "outcome_inputs": [str(path) for path in outcome_paths],
         "output_dir": str(output_dir),
         "min_sample_count": args.min_sample_count,
+        "legacy_unbound_immediate_settlement_diagnostic": {
+            "fixed_stake_usd": args.fixed_stake_usd,
+            "mode": "legacy_unbound_immediate_settlement_diagnostic",
+            "blockers": list(legacy_diagnostic["blockers"]),
+            "not_wallet_or_viability_evidence": True,
+        },
         "limit": args.limit,
         "outcome_load_stats": outcome_stats,
         "input_load_stats": input_stats,
@@ -97,6 +114,7 @@ def main() -> int:
             "source_router_summary.json",
             "source_router_slices.jsonl",
             "source_router_vs_stable.md",
+            "source_router_legacy_unbound_immediate_settlement_diagnostic.json",
             "run_metadata.json",
         ],
     }
@@ -104,6 +122,7 @@ def main() -> int:
     _write_jsonl(output_dir / "source_router_decisions.jsonl", replay_rows)
     _write_json(output_dir / "source_router_summary.json", summary)
     _write_jsonl(output_dir / "source_router_slices.jsonl", summary["slices"])
+    _write_json(output_dir / "source_router_legacy_unbound_immediate_settlement_diagnostic.json", legacy_diagnostic)
     (output_dir / "source_router_vs_stable.md").write_text(
         render_source_router_report_markdown(summary, metadata=metadata, limit=args.report_limit),
         encoding="utf-8",
@@ -120,6 +139,7 @@ def main() -> int:
         f"source_router_buys={counts.get('source_router_buy_rows', 0)} "
         f"source_router_pnl={counts.get('source_router_pnl_usd', 0.0)} "
         f"source_filter_pnl={counts.get('source_filter_pnl_usd', 0.0)} "
+        "legacy_diagnostic=unbound_immediate_settlement_not_wallet "
         f"output={output_dir}"
     )
     return 0
@@ -146,6 +166,10 @@ def render_source_router_report_markdown(
         f"- mode: {_markdown_cell(run.get('mode'))}",
         f"- network_access: {_markdown_cell(run.get('network_access'))}",
         f"- min_sample_count: {_markdown_cell(run.get('min_sample_count'))}",
+        "",
+        "## Legacy Diagnostic Notice",
+        "",
+        "`legacy_unbound_immediate_settlement_diagnostic` is not a wallet, Kelly/risk, executable P&L, capacity/drawdown viability, or promotion-evidence report. It uses a market-level legacy outcome join, settles immediately, has no pending-position/capital reservation, and has no executable quote guarantee.",
         "",
         "## Summary",
         "",
@@ -258,6 +282,24 @@ def _resolve_path(value: str) -> Path:
     if path.is_absolute():
         return path
     return PROJECT_ROOT / path
+
+
+def _manifest_provenance(manifest: Any) -> dict[str, Any] | None:
+    if manifest is None:
+        return None
+    return {
+        "manifest_path": str(manifest.manifest_path),
+        "source_ledger_path": str(manifest.source_ledger_path),
+        "strict_resolution_path": str(manifest.strict_resolution_path),
+        "raw_archive_path": str(manifest.raw_archive_path),
+        "replay_index_path": str(manifest.replay_index_path),
+        "replay_manifest_path": str(manifest.replay_manifest_path),
+        "sha256": dict(manifest.sha256),
+        "historical_counterfactual_only": manifest.historical_counterfactual_only,
+        "non_mutating": manifest.non_mutating,
+        "join_key": manifest.join_key,
+        "availability_field": manifest.availability_field,
+    }
 
 
 def _markdown_cell(value: Any) -> str:

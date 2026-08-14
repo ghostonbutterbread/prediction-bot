@@ -53,9 +53,13 @@ def materialize_source_performance_once(*, cohort_id: str, snapshot_paths: Itera
                 unresolved += 1
                 continue
             resolution = resolutions[market_id]
+            known_after = _settlement_ts(resolution) or _resolved_at(resolution)
             augmented = dict(raw)
-            augmented["resolution"] = {"resolved_at": _resolved_at(resolution), "outcome": _outcome(resolution)}
-            augmented["known_after"] = _resolved_at(resolution)
+            augmented["resolution"] = {
+                "resolved_at": _resolved_at(resolution), "settlement_ts": _settlement_ts(resolution),
+                "outcome": _outcome(resolution),
+            }
+            augmented["known_after"] = known_after
             for source_index, base in enumerate(build_source_outcome_ledger_rows_for_row(augmented, source_row_path=str(snapshot_path), source_line_number=line_number)):
                 sources_seen += 1
                 predicted = base.get("predicted_outcome")
@@ -70,7 +74,7 @@ def materialize_source_performance_once(*, cohort_id: str, snapshot_paths: Itera
                     "source_observation_id": identity, "market_id": market_id,
                     "official_outcome": official, "actual_outcome": official,
                     "direction_correct": predicted == official,
-                    "eligible_for_reliability": True, "exclusion_reasons": exclusions or None, "known_after": _resolved_at(resolution),
+                    "eligible_for_reliability": True, "exclusion_reasons": exclusions or None, "known_after": known_after,
                     "settlement_ts": resolution.get("settlement_ts"), "resolution_id": resolution.get("resolution_id"),
                     "resolution_source": _resolution_source(resolution), "resolution_resolved_at": _resolved_at(resolution),
                     "resolution_ledger_path": str(resolution_file), "source_snapshot_path": str(snapshot_path),
@@ -130,6 +134,9 @@ def _outcome(row: Mapping[str, Any]) -> str | None:
 
 def _resolved_at(row: Mapping[str, Any]) -> str | None:
     return str((row.get("resolution") or {}).get("resolved_at") or row.get("resolved_at") or "") or None
+
+def _settlement_ts(row: Mapping[str, Any]) -> str | None:
+    return str((row.get("resolution") or {}).get("settlement_ts") or row.get("settlement_ts") or "") or None
 
 def _resolution_source(row: Mapping[str, Any]) -> str | None:
     return str((row.get("resolution") or {}).get("source") or row.get("resolution_source") or "") or None

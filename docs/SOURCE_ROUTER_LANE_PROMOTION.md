@@ -6,6 +6,8 @@
 
 The replay-grade `joined_source_router_rows.jsonl` corpus produced 23 latest-per-market observations: 18 wins, 5 losses, $93.8967 PnL on $230 stake (40.82% ROI). This is hypothesis evidence only: selecting the earliest observation for the same markets produced 3.55% ROI.
 
+The separately emitted `legacy_unbound_immediate_settlement_diagnostic` is not wallet, Kelly/risk, executable-P&L, capacity/drawdown-viability, or promotion evidence. Its legacy market-level outcome join settles immediately, without pending-position/capital reservation or an executable quote guarantee. A true wallet remains deferred until exact decision/resolution identity binding and settlement-time position handling exist.
+
 ## Non-negotiable prerequisites
 
 A promotion candidate must have all of the following:
