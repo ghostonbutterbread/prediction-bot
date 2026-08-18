@@ -16,6 +16,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from bot.replay_decision_input import verify_replay_decision_input_record_v1
 from bot.weather.source_scoreboard import extract_source_forecast_observations
 from bot.weather.thresholds import infer_direction_from_value, infer_predicted_outcome
 
@@ -68,6 +69,9 @@ def materialize_source_observation_ledger(
     pending_by_id: dict[str, dict[str, Any]] = {}
     for _line_number, row in _read_jsonl(inputs_path):
         counters["input_records_seen"] += 1
+        if not verify_replay_decision_input_record_v1(row):
+            counters["invalid_input_records"] += 1
+            continue
         identity = _decision_identity(row)
         if identity is None:
             counters["invalid_input_records"] += 1

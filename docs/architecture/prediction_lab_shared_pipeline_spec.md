@@ -36,6 +36,44 @@ Mode-specific behavior should be adapter-level:
 - whether an approved decision is executed, simulated, or only recorded
 - how resolution/PnL is later attached
 
+### Canonical forward-data ownership
+
+For a forward cohort, **one collector-owned shared-market publisher is the
+canonical producer of market candidates, order-book snapshots, and recorded
+source context.** Paper, shadow lanes, replay preparation, and reporting are
+consumers of that published snapshot stream; they do not independently poll the
+market just because they need an evaluation input.
+
+```text
+market + source APIs
+        |
+        v
+collector (only network market-data owner)
+        |
+        +-- immutable collector archive / replay index
+        |
+        +-- shared-market snapshot metadata + candidate source
+                |
+                +-- paper portfolio consumer
+                +-- control and shadow-lane consumers
+                +-- derived replay/report consumers
+```
+
+This is a data-ownership rule, not merely an optimization. It ensures that
+control and candidate lanes evaluate the same market snapshot and prevents
+paper/collector API-rate competition.
+
+- Paper must set `shared_market_consumer_only: true` for a paired cohort.
+- If the snapshot is missing, stale, or does not match the collector publisher,
+  paper records a blocked scan and does **not** fall back to a direct market
+  fetch.
+- A collector remains observer-only: it records evidence but never reserves
+  paper capital or opens paper positions.
+- A paper consumer owns only its isolated paper account state; it must not
+  mutate collector raw archives or the collector's publisher lease.
+- A new control/candidate comparison starts with a fresh paired cohort. It does
+  not attach a new lane to an older collector archive.
+
 ---
 
 ## Terminology

@@ -763,6 +763,16 @@ def verify_replay_decision_input_v1(record: Mapping[str, Any] | Any, canonical_i
     )
 
 
+def verify_replay_decision_input_record_v1(record: Mapping[str, Any] | Any) -> bool:
+    """Verify the self-contained canonical record emitted by the replay exporter."""
+    if not isinstance(record, Mapping):
+        return False
+    unsigned_record = {str(key): value for key, value in record.items() if key != "canonical_input_sha256"}
+    errors: list[ReplayDecisionInputError] = []
+    canonical_input_json = _canonical_json_bytes(unsigned_record, errors)
+    return canonical_input_json is not None and not errors and verify_replay_decision_input_v1(record, canonical_input_json)
+
+
 def _failure(code: str, path: str, message: str) -> ReplayDecisionInputBuildResult:
     return ReplayDecisionInputBuildResult(record=None, errors=(ReplayDecisionInputError(code, path, message),))
 

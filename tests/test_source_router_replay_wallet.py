@@ -71,6 +71,7 @@ class SourceRouterReplayWalletTests(unittest.TestCase):
                 "contract_shape": "threshold", "question_side": "above", "observed_at": "2026-07-01T12:00:00+00:00",
                 "source_implied_side": "YES", "source_side_price": 0.5, "actual_outcome": "YES",
                 "eligible_for_reliability": True, "source_correctness_eligibility": "eligible_exact_target_proof",
+                "settlement_ts": "2026-07-02T12:00:00+00:00",
                 "known_after": "2026-07-02T12:00:00+00:00",
             }) + "\n", encoding="utf-8")
             ledger = tmp / "ledger.jsonl"

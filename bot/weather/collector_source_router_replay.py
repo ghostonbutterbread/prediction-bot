@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from bot.replay_decision_input import verify_replay_decision_input_record_v1
 from bot.weather.source_reliability import (
     build_source_edge_evaluation_row,
     build_source_outcome_ledger_rows_for_row,
@@ -299,15 +300,20 @@ def run_collector_source_router_replay(
         raise ValueError("max_rows must be non-negative")
     if cohort_per_shape_target < 1:
         raise ValueError("cohort_per_shape_target must be at least 1")
+    if history_ledger_path is not None and history_manifest_path is None:
+        raise ValueError("history manifest is required when providing selector history")
     replay_path = Path(replay_inputs_path).resolve()
     outcomes_path = Path(finalized_outcomes_path).resolve()
     if not replay_path.is_file() or not outcomes_path.is_file():
         raise ValueError("replay inputs and finalized outcomes must be readable files")
+    records = _read_jsonl(replay_path, max_rows=max_rows)
+    invalid_hash_records = sum(not verify_replay_decision_input_record_v1(row) for row in records)
+    if invalid_hash_records:
+        raise ValueError(f"replay input canonical hash verification failed for {invalid_hash_records} record(s)")
     history_ledger, history_provenance = _load_selector_history(
         history_manifest_path=history_manifest_path, history_ledger_path=history_ledger_path,
     )
     target_dir = _prepare_output_dir(output_dir)
-    records = _read_jsonl(replay_path, max_rows=max_rows)
     outcomes = _read_jsonl(outcomes_path)
     control, candidate, decision_stats = build_sealed_source_probability_decisions(
         records, outcomes, history_ledger=history_ledger, min_sample_count=min_sample_count,

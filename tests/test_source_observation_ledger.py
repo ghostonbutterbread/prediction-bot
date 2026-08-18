@@ -13,10 +13,9 @@ from bot.weather.source_performance_materializer import materialize_source_perfo
 
 def _input(*, market_id: str = "KXHIGHSEA-26AUG03-T70", raw_hash: str = "a" * 64) -> dict:
     observed_at = "2026-08-01T12:00:00+00:00"
-    return {
+    record = {
         "schema_name": "replay_decision_input",
         "schema_version": 1,
-        "canonical_input_sha256": hashlib.sha256(f"input:{raw_hash}".encode()).hexdigest(),
         "decision_key": {
             "shared_snapshot_id": f"snapshot-{raw_hash}",
             "shared_candidate_id": f"candidate-{raw_hash}",
@@ -53,6 +52,10 @@ def _input(*, market_id: str = "KXHIGHSEA-26AUG03-T70", raw_hash: str = "a" * 64
             },
         },
     }
+    record["canonical_input_sha256"] = hashlib.sha256(
+        json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+    return record
 
 
 def _outcome(record: dict, *, outcome: str = "YES", settlement_ts: str = "2026-08-04T00:00:00+00:00", resolution_id: str = "resolution-1") -> dict:
@@ -74,6 +77,14 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
     path.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows), encoding="utf-8")
 
 
+def _seal(record: dict) -> dict:
+    sealed = {key: value for key, value in record.items() if key != "canonical_input_sha256"}
+    sealed["canonical_input_sha256"] = hashlib.sha256(
+        json.dumps(sealed, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+    return sealed
+
+
 class SourceObservationLedgerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
@@ -86,8 +97,14 @@ class SourceObservationLedgerTests(unittest.TestCase):
         inputs_path = self.root / "inputs.jsonl"
         outcomes_path = self.root / "outcomes.jsonl"
         output_dir = self.root / "derived"
-        _write_jsonl(inputs_path, inputs)
-        _write_jsonl(outcomes_path, outcomes)
+        sealed_inputs = [_seal(record) for record in inputs]
+        hashes = {str(before.get("canonical_input_sha256")): after["canonical_input_sha256"] for before, after in zip(inputs, sealed_inputs)}
+        sealed_outcomes = [
+            {**outcome, "canonical_input_sha256": hashes.get(str(outcome.get("canonical_input_sha256")), outcome.get("canonical_input_sha256"))}
+            for outcome in outcomes
+        ]
+        _write_jsonl(inputs_path, sealed_inputs)
+        _write_jsonl(outcomes_path, sealed_outcomes)
         result = materialize_source_observation_ledger(
             replay_inputs_path=inputs_path, finalized_outcomes_path=outcomes_path, output_dir=output_dir,
         )
@@ -96,6 +113,23 @@ class SourceObservationLedgerTests(unittest.TestCase):
             for path in (result.pending_path, result.settled_path, result.unsettled_path)
         }
         return result.metadata, artifacts
+
+    def test_tampered_input_is_counted_and_never_materialized(self) -> None:
+        record = _input()
+        record["market"]["yes_price"] = 0.99  # Do not reseal: this is a post-export mutation.
+        inputs_path = self.root / "tampered_inputs.jsonl"
+        outcomes_path = self.root / "outcomes.jsonl"
+        output_dir = self.root / "tampered_derived"
+        _write_jsonl(inputs_path, [record])
+        _write_jsonl(outcomes_path, [_outcome(record)])
+
+        result = materialize_source_observation_ledger(
+            replay_inputs_path=inputs_path, finalized_outcomes_path=outcomes_path, output_dir=output_dir,
+        )
+
+        self.assertEqual(result.metadata["counts"]["invalid_input_records"], 1)
+        for path in (result.pending_path, result.settled_path, result.unsettled_path):
+            self.assertEqual(path.read_text(encoding="utf-8"), "")
 
     def test_records_every_captured_source_without_router_selection_and_scores_later(self) -> None:
         record = _input()

@@ -23,13 +23,16 @@ def replay_input(market_id: str, marker: str) -> dict:
         "observed_at_utc": f"2026-08-0{marker[-1]}T12:00:00+00:00",
         "raw_row_sha256": marker * 64,
     }
-    return {
+    record = {
         "schema_name": "replay_decision_input",
         "schema_version": 1,
-        "canonical_input_sha256": marker * 64,
         "decision_key": decision_key,
         "market_id": market_id,
     }
+    record["canonical_input_sha256"] = hashlib.sha256(
+        json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+    return record
 
 
 def strict_resolution(market_id: str, *, result: str | None = "yes", outcome: str | None = None) -> dict:
@@ -104,6 +107,18 @@ class ReplayOutcomeBindingTests(unittest.TestCase):
             row["provenance"]["raw_resolution_row_sha256"],
             hashlib.sha256(json.dumps(resolution).encode("utf-8")).hexdigest(),
         )
+
+    def test_binding_rejects_an_input_mutated_after_its_canonical_hash_was_recorded(self):
+        record = replay_input("KXMUTATED", "h")
+        record["source_inputs"] = {"source_context": {"source": "edited-after-export"}}
+        self._write([record], [strict_resolution("KXMUTATED")])
+
+        result = bind_replay_finalized_outcomes(
+            replay_inputs_path=self.inputs_path, strict_resolutions_path=self.resolutions_path, output_dir=self.output_dir,
+        )
+
+        self.assertEqual(self._outcomes(result), [])
+        self.assertEqual(result.metadata["binding_counts"]["invalid"], 1)
 
     def test_duplicate_market_resolution_is_ambiguous_and_blocks_every_binding(self):
         first = replay_input("KXDUP", "d")

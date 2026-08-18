@@ -327,6 +327,9 @@ config_composition:
             self.assertNotIn("data/paper_loop.log", include_paths)
             self.assertNotIn("logs/", include_paths)
 
+        self.assertTrue(paper_config["paper"]["shared_market_runtime_enabled"])
+        self.assertTrue(paper_config["paper"]["shared_market_consumer_only"])
+
         self.assertEqual(paper_config["trading"]["mode"], "paper")
         self.assertTrue(paper_config["trading"]["enabled"])
         self.assertEqual(lab_config["trading"]["mode"], "paper")

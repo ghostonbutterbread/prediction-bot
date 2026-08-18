@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from bot.replay_decision_input import verify_replay_decision_input_record_v1
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DERIVED_REPORTS_ROOT = PROJECT_ROOT / "data" / "derived_reports"
@@ -64,6 +66,10 @@ def bind_replay_finalized_outcomes(
     input_stats: Counter[str] = Counter()
     binding_stats: Counter[str] = Counter()
     for _, row, _ in _read_jsonl_with_raw(inputs_path):
+        if not verify_replay_decision_input_record_v1(row):
+            input_stats["invalid_input_records"] += 1
+            binding_stats["invalid"] += 1
+            continue
         identity = _decision_identity(row)
         if identity is None:
             input_stats["invalid_input_records"] += 1

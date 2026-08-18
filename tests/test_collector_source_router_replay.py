@@ -38,10 +38,9 @@ def replay_input(
         "observed_at_utc": observed_at,
         "raw_row_sha256": raw_hash,
     }
-    return {
+    record = {
         "schema_name": "replay_decision_input",
         "schema_version": 1,
-        "canonical_input_sha256": (raw_hash[0] * 64),
         "decision_key": decision_key,
         "shared_snapshot_id": decision_key["shared_snapshot_id"],
         "shared_candidate_id": decision_key["shared_candidate_id"],
@@ -70,6 +69,10 @@ def replay_input(
             },
         },
     }
+    record["canonical_input_sha256"] = hashlib.sha256(
+        json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+    return record
 
 
 def finalized_outcome(record: dict, *, outcome: str, settlement_ts: str) -> dict:
@@ -274,7 +277,7 @@ class CollectorSourceRouterReplayTests(unittest.TestCase):
         self.assertEqual(history["source_history_rows_rejected_target_unproven"], 1)
         self.assertEqual(history["source_history_rows_rejected_v1_forecast_not_scoreable"], 1)
 
-    def test_quarantine_label_is_emitted_in_source_correctness_diagnostic(self):
+    def test_direct_history_ledger_requires_a_verified_manifest(self):
         record = replay_input(market_id="KXQUARANTINE", observed_at="2026-01-03T12:00:00+00:00", raw_hash="2" * 64)
         inputs_path = Path(self.tempdir.name) / "replay_inputs.jsonl"
         outcomes_path = Path(self.tempdir.name) / "outcomes.jsonl"
@@ -285,21 +288,39 @@ class CollectorSourceRouterReplayTests(unittest.TestCase):
         history.pop("source_correctness_eligibility")
         history_path.write_text(json.dumps(history) + "\n", encoding="utf-8")
 
-        result = run_collector_source_router_replay(
-            replay_inputs_path=inputs_path, finalized_outcomes_path=outcomes_path,
-            output_dir=self.output_dir, min_sample_count=1, history_ledger_path=history_path,
-        )
+        with self.assertRaisesRegex(ValueError, "history manifest"):
+            run_collector_source_router_replay(
+                replay_inputs_path=inputs_path, finalized_outcomes_path=outcomes_path,
+                output_dir=self.output_dir, min_sample_count=1, history_ledger_path=history_path,
+            )
 
-        diagnostic = json.loads(result.resolution_report_path.read_text(encoding="utf-8"))["source_correctness"]
-        self.assertEqual(
-            diagnostic["historical_source_quality"]["interpretation"],
-            "quarantined_rows_without_exact_target_proof",
-        )
-        self.assertEqual(
-            diagnostic["historical_source_quality"]["target_proof_rejections"]
-            ["source_history_rows_rejected_missing_exact_target_proof_marker"],
-            1,
-        )
+    def test_direct_history_ledger_is_rejected_without_a_verified_manifest(self):
+        record = replay_input(market_id="KXDIRECT", observed_at="2026-01-03T12:00:00+00:00", raw_hash="4" * 64)
+        inputs_path = Path(self.tempdir.name) / "replay_inputs.jsonl"
+        outcomes_path = Path(self.tempdir.name) / "outcomes.jsonl"
+        history_path = Path(self.tempdir.name) / "history.jsonl"
+        inputs_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+        outcomes_path.write_text("", encoding="utf-8")
+        history_path.write_text(json.dumps(source_history_row(market_id="HIST", settlement_ts="2026-01-02T00:00:00+00:00")) + "\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "history manifest"):
+            run_collector_source_router_replay(
+                replay_inputs_path=inputs_path, finalized_outcomes_path=outcomes_path,
+                output_dir=self.output_dir, history_ledger_path=history_path,
+            )
+
+    def test_replay_rejects_a_collector_input_mutated_after_its_hash_was_recorded(self):
+        record = replay_input(market_id="KXEDIT", observed_at="2026-01-03T12:00:00+00:00", raw_hash="5" * 64)
+        record["market"]["best_yes_ask"] = 0.99
+        inputs_path = Path(self.tempdir.name) / "replay_inputs.jsonl"
+        outcomes_path = Path(self.tempdir.name) / "outcomes.jsonl"
+        inputs_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+        outcomes_path.write_text("", encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "canonical hash"):
+            run_collector_source_router_replay(
+                replay_inputs_path=inputs_path, finalized_outcomes_path=outcomes_path, output_dir=self.output_dir,
+            )
 
     def test_manifest_sha_validation_failure_blocks_run_before_writing_artifacts(self):
         record = replay_input(market_id="KXMANIFEST", observed_at="2026-01-03T12:00:00+00:00", raw_hash="7" * 64)
@@ -519,13 +540,8 @@ class CollectorSourceRouterReplayTests(unittest.TestCase):
         records, outcomes = self._records_and_outcomes()
         inputs_path = Path(self.tempdir.name) / "replay_decision_inputs.jsonl"
         outcomes_path = Path(self.tempdir.name) / "finalized_outcomes.jsonl"
-        history_path = Path(self.tempdir.name) / "source_history.jsonl"
         inputs_path.write_text("".join(json.dumps(row) + "\n" for row in records), encoding="utf-8")
         outcomes_path.write_text("".join(json.dumps(row) + "\n" for row in outcomes), encoding="utf-8")
-        history_path.write_text(
-            json.dumps(source_history_row(market_id="CLI-HISTORY", settlement_ts="2026-01-02T00:00:00+00:00")) + "\n",
-            encoding="utf-8",
-        )
 
         result = run_collector_source_router_replay(
             replay_inputs_path=inputs_path, finalized_outcomes_path=outcomes_path,
@@ -546,7 +562,6 @@ class CollectorSourceRouterReplayTests(unittest.TestCase):
                 sys.executable, "scripts/collector_source_router_replay.py",
                 "--replay-inputs", str(inputs_path), "--finalized-outcomes", str(outcomes_path),
                 "--output-dir", str(cli_output), "--min-sample-count", "1",
-                "--history-ledger", str(history_path),
             ], cwd=ROOT, check=True, capture_output=True, text=True,
         )
         self.assertIn("source_probability_control_v1", completed.stdout)

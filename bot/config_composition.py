@@ -104,6 +104,7 @@ BUILTIN_OVERLAYS: dict[str, dict[str, Any]] = {
         "alerts": _SHADOW_ALERTS_DISABLED,
         "paper": {
             "shared_market_runtime_enabled": True,
+            "shared_market_consumer_only": True,
             "shared_market_runtime_instance_id": "paper-beta-shadow-weather",
             "shared_market_max_snapshot_age_seconds": 1200,
             "shared_market_desired_interval_seconds": 900,

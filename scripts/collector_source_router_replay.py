@@ -21,8 +21,8 @@ def main() -> int:
     parser.add_argument("--output-dir", required=True, help="new/empty directory beneath data/derived_reports")
     parser.add_argument("--min-sample-count", type=int, default=5)
     parser.add_argument("--max-rows", type=int, default=None)
-    parser.add_argument("--history-manifest", default=None, help="hash-verified source_history_manifest JSON (preferred selector-only history)")
-    parser.add_argument("--history-ledger", default=None, help="source outcome ledger JSONL for selector-only history")
+    parser.add_argument("--history-manifest", default=None, help="hash-verified source_history_manifest JSON for selector-only history")
+    parser.add_argument("--history-ledger", default=None, help="must match the source ledger declared by --history-manifest")
     parser.add_argument("--cohort-per-shape-target", type=int, default=30, help="outcome-blind event cohort target per contract shape")
     args = parser.parse_args()
     result = run_collector_source_router_replay(

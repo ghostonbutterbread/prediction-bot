@@ -67,11 +67,48 @@ Paper beta-shadow also records `shadow_intents.jsonl` for stable-skip candidates
 when beta lane metadata differs, so old `SKIP -> beta candidate` cases are not
 invisible during later PnL/replay review.
 
-## Stop Normal Runtimes
+## Shared-market ownership (required)
 
-Do not start shadow alongside the normal paper loop or normal Prediction Lab
-collector unless you intentionally want two independent collectors competing
-for API quota.
+For a paired forward-paper cohort, the **collector is the only market-data
+publisher**. It fetches market candidates, order books, and source evidence,
+then publishes a shared snapshot and immutable collector archive. Paper and
+shadow lanes consume that snapshot; they must not poll markets directly.
+
+```text
+collector fetches once -> shared snapshot -> paper account + lane consumers
+```
+
+The paired paper runtime must explicitly set:
+
+```yaml
+paper:
+  shared_market_runtime_enabled: true
+  shared_market_consumer_only: true
+shared_market:
+  enabled: true
+  runtime_root: <the exact collector cohort>/shared_market_runtime
+```
+
+`shared_market_consumer_only: true` is important: on a missing, stale, or
+publisher-mismatched snapshot, paper must record a blocked scan rather than
+fall back to a direct market fetch. A blocked scan is evidence of collector
+health; a fallback fetch would create a different candidate universe and can
+compete for API quota.
+
+Paper still owns its own isolated simulated account, positions, Kelly/risk
+state, and resolution handling. The collector remains observer-only and never
+mutates paper account state.
+
+## Start and ownership checks
+
+Do not start a generic shadow paper loop beside the collector. A generic paper
+profile may acquire the publisher lease or use direct fallback behavior. Start
+only a named paired consumer profile whose `runtime.base_dir` and
+`shared_market.runtime_root` point at the same fresh cohort as its collector.
+
+The source-router guard-comparison template documents that shape in
+`config.paper_source_router_guard_comparison.yaml`; it must be copied to a
+timestamped ignored runtime config before use, never run directly.
 
 Inspect current ownership:
 
@@ -85,7 +122,12 @@ separate shell unless you have confirmed ownership and state.
 
 ## Start Shadow Paper
 
-Run from the repo root:
+The historical commands below are retained as examples of paper-only startup,
+but are **not** the paired collector-consumer command. Do not use them against
+an active collector unless their resolved config has the consumer-only settings
+above and points at that collector's exact shared-market root.
+
+Run from the repo root only after verifying the resolved paired config:
 
 ```bash
 PAPER_MODE=true \
