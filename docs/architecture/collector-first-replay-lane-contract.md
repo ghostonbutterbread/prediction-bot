@@ -1,9 +1,13 @@
 # Collector-First Replay Lane Contract
 
-**Status:** proposed for design review — no runtime activation
+**Status:** canonical design contract — implementation slice pending; no runtime activation
 **Branch:** `feature/source-router-ev-shadow`
-**Date:** 2026-08-12
-**Supersedes:** nothing; complements `source_router_beta_paper_pipeline.md`
+**Date:** 2026-08-18
+**Supersedes:** no implementation; the blind-replay validator and fixed-stake
+diagnostics remain subordinate compatibility/reporting references
+**Related:** `prediction_lab_shared_pipeline_spec.md` owns forward shared-market
+data ownership; `source_router_beta_paper_pipeline.md` remains the bounded
+source-router research workflow
 
 ## Decision we are making
 
@@ -15,6 +19,30 @@ Paper trading is a **forward validation** layer, not the primary way to discover
 collector snapshots → blind deterministic replay lanes → choose candidate
                    → fresh shared-snapshot paper comparison → promotion evidence
 ```
+
+## Current implementation status
+
+The repository already has the pieces this contract is meant to connect:
+
+- the observer collector publishes immutable snapshots and shared candidate
+  identities;
+- collector-derived replay inputs are sanitized, content-hashed, and bound to
+  exact later outcomes separately;
+- paper owns real account state, open positions, reservation, risk, Kelly, and
+  same-event re-entry behavior;
+- shared-market paper consumers can emit non-mutating source-router lane
+  receipts from collector snapshots.
+
+What does **not** exist yet is the derived-only chronological adapter that feeds
+sanitized collector inputs through the paper-account decision seam and settles
+its synthetic positions only at authoritative historical settlement time. The
+current source-router wallet and incremental lane reports remain explicitly
+labelled diagnostics; they are not evidence of paper-parity account replay.
+
+For a forward cohort, the collector is the only market-data publisher. Paper is
+a shared-market consumer with its own isolated simulated account; it must not
+poll a competing market universe or mutate collector evidence. The operational
+configuration details live in the shared-pipeline spec and beta-shadow runbook.
 
 ## Problem this fixes
 
