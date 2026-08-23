@@ -127,6 +127,8 @@ class CollectorLaneReplayTests(unittest.TestCase):
             buy_rows = [json.loads(line) for line in result.buy_decision_path.read_text(encoding="utf-8").splitlines()]
             self.assertEqual(len(buy_rows), 2)
             self.assertEqual(result.summary["collector_rows"], 1)
+            self.assertEqual(result.summary["methodology"], "recorded_decision_fixed_notional_diagnostic")
+            self.assertFalse(result.summary["paper_parity_claim"])
             self.assertEqual(result.summary["invalid_snapshot_rows"], 0)
             refreshed = auto_resolve_collector_lane_replay(
                 output_dir=output,

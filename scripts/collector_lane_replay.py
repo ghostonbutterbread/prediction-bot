@@ -253,7 +253,10 @@ def build_collector_lane_replay(
     summary = {
         "schema_name": "collector_lane_replay_summary",
         "schema_version": 1,
+        "methodology": "recorded_decision_fixed_notional_diagnostic",
         "non_mutating": True,
+        "paper_parity_claim": False,
+        "promotion_eligible": False,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "snapshot_path": str(snapshot_path),
         "snapshot_sha256": source_sha256,
