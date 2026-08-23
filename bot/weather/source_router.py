@@ -703,7 +703,7 @@ def _recorded_forecast_sort_key(row: Mapping[str, Any]) -> tuple[datetime, datet
         row.get("source_observation_id"), row.get("observation_id"), row.get("edge_evaluation_id"),
         row.get("forecast_temp_f"), row.get("source_name"),
     ) or ""
-    return recorded_at, source_as_of, source_fetched_at, identity
+    return source_as_of, recorded_at, source_fetched_at, identity
 
 
 def _is_sha256(value: Any) -> bool:
