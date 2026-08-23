@@ -259,7 +259,8 @@ def _load_router_ledger_rows(
         for row in load_source_outcome_ledger_rows(path):
             rejection_key = source_history_target_proof_rejection_key(row)
             if rejection_key is not None:
-                stats["source_" + rejection_key] += 1
+                stat_key = "source_" + rejection_key
+                stats[stat_key] = int(stats.get(stat_key, 0)) + 1
                 continue
             copied = dict(row)
             copied["source_router_history_only"] = True
