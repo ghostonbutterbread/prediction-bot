@@ -614,7 +614,7 @@ def _collapse_selector_history(
     """Use one forecast observation per independent settled source outcome.
 
     Raw observations are deliberately retained by the caller's audit ledger.
-    This is a selector-only view: newest recorded forecast observation wins
+    This is a selector-only view: the earliest valid recorded forecast wins
     within an outcome unit, never an observation's correctness or outcome.
     """
 
@@ -625,7 +625,7 @@ def _collapse_selector_history(
         if used_fallback:
             stats["history_conservative_identity_fallback_rows"] += 1
         representative = units.get(unit)
-        if representative is None or _recorded_forecast_sort_key(row) > _recorded_forecast_sort_key(representative):
+        if representative is None or _recorded_forecast_sort_key(row) < _recorded_forecast_sort_key(representative):
             units[unit] = dict(row)
     stats["history_independent_rows_used"] = len(units)
     stats["history_reobservation_excluded"] = len(rows) - len(units)

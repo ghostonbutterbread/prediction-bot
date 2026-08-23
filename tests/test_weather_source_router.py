@@ -136,8 +136,8 @@ class WeatherSourceRouterTests(unittest.TestCase):
             for observed_at, win, edge in (
                 ("2026-08-01T08:00:00+00:00", True, 0.5),
                 ("2026-08-01T10:00:00+00:00", True, 0.5),
-                # The newest recorded forecast wins representative selection;
-                # it is not selected for being correct.
+                # The earliest valid recorded forecast is the representative;
+                # selection never uses the eventual correctness outcome.
                 ("2026-08-01T12:00:00+00:00", False, -0.5),
             )
         ]
@@ -146,7 +146,7 @@ class WeatherSourceRouterTests(unittest.TestCase):
 
         self.assertFalse(selected["routeable"])
         self.assertEqual(selected["prior_sample_count"], 1)
-        self.assertEqual(selected["prior_win_rate"], 0.0)
+        self.assertEqual(selected["prior_win_rate"], 1.0)
         self.assertEqual(selected["history_rows_seen"], 3)
         self.assertEqual(selected["history_independent_rows_used"], 1)
         self.assertEqual(selected["history_reobservation_excluded"], 2)
