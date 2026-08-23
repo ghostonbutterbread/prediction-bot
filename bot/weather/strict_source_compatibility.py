@@ -31,6 +31,12 @@ def summarize_strict_source_replay_compatibility(records: Iterable[Mapping[str, 
         raw_hash = _mapping(record.get("snapshot_provenance")).get("raw_row_sha256")
         for source in sources:
             report["source_rows_seen"] += 1
+            non_strict_reason = _non_strict_source_reason(source)
+            if non_strict_reason:
+                report["non_strict_source_rows"] += 1
+                report[f"non_strict_source_{non_strict_reason}"] += 1
+                continue
+            report["strict_candidate_source_rows"] += 1
             values = {
                 "source_id": source.get("source_id"),
                 "source_as_of": source.get("source_as_of"),
@@ -62,6 +68,16 @@ def _sources(record: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     snapshot = _mapping(data.get("weather_source_snapshot"))
     sources = snapshot.get("sources")
     return [source for source in sources if isinstance(source, Mapping)] if isinstance(sources, list) else []
+
+
+def _non_strict_source_reason(source: Mapping[str, Any]) -> str | None:
+    """Classify explicitly non-forecast/support sources outside strict history."""
+    evidence_type = str(source.get("evidence_type") or "").strip().lower()
+    if evidence_type == "observation":
+        return "observation_only"
+    if evidence_type == "forecast_unavailable":
+        return "forecast_unavailable"
+    return None
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:

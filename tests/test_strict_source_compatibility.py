@@ -32,6 +32,17 @@ class StrictSourceReplayCompatibilityTests(unittest.TestCase):
         self.assertEqual(report["strict_contract_incomplete"], 1)
         self.assertEqual(report["missing_field_counts"]["source_location_city"], 1)
 
+    def test_excludes_explicit_observation_and_unavailable_sources_from_strict_contract(self):
+        report = summarize_strict_source_replay_compatibility([
+            _sealed_record({"evidence_type": "observation", "source_id": "station"}),
+            _sealed_record({"evidence_type": "forecast_unavailable", "source_name": "fallback"}),
+        ])
+
+        self.assertEqual(report["non_strict_source_rows"], 2)
+        self.assertEqual(report["non_strict_source_observation_only"], 1)
+        self.assertEqual(report["non_strict_source_forecast_unavailable"], 1)
+        self.assertNotIn("strict_contract_incomplete", report)
+
 
 if __name__ == "__main__":
     unittest.main()
