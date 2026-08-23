@@ -80,6 +80,21 @@ class SourceHistoryManifestTests(unittest.TestCase):
         self.assertEqual(metadata["collapsed_repeat_polls"], 1)
         self.assertEqual(metadata["independent_rows"], 1)
 
+    def test_collapse_uses_nested_source_provenance_hash_for_tied_times(self):
+        base = {
+            "eligible_for_source_history": True, "source_correctness_eligibility": "eligible_strict_source_proof",
+            "source_id": "nws", "event_ticker": "KXHIGHMIA-26AUG02", "market_id": "KXHIGHMIA-26AUG02-T80",
+            "city_id": "miami_fl", "market_kind": "high", "contract_shape": "threshold", "question_side": "above",
+            "market_date": "2026-08-02", "source_as_of": "2026-08-01T08:00:00+00:00", "observed_at": "2026-08-01T08:01:00+00:00",
+        }
+        later_hash = {**base, "source_provenance": {"source_record_sha256": "b" * 64}}
+        earlier_hash = {**base, "source_provenance": {"source_record_sha256": "a" * 64}}
+
+        collapsed, metadata = collapse_strict_source_history_rows([later_hash, earlier_hash])
+
+        self.assertEqual(collapsed, [earlier_hash])
+        self.assertEqual(metadata["collapsed_repeat_polls"], 1)
+
     def test_collapse_materialization_writes_hash_bound_derived_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

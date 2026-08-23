@@ -194,7 +194,8 @@ def _strict_recorded_sort_key(row: Mapping[str, Any]) -> tuple[datetime, datetim
     earliest = datetime.min.replace(tzinfo=timezone.utc)
     source_as_of = _parse_time(row.get("source_as_of")) or earliest
     observed_at = _parse_time(row.get("observed_at")) or earliest
-    raw_hash = str(row.get("source_record_sha256") or "")
+    provenance = row.get("source_provenance")
+    raw_hash = str(provenance.get("source_record_sha256") if isinstance(provenance, Mapping) else "")
     return source_as_of, observed_at, raw_hash
 
 
