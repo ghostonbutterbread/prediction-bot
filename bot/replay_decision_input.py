@@ -84,7 +84,7 @@ _SOURCE_METADATA_V1 = {
 _WEATHER_SOURCE_V1 = {
     "source_id": _SCALAR, "source_name": _SCALAR, "source_family": _SCALAR,
     "source_location_basis": _SCALAR, "source_location_city": _SCALAR,
-    "forecast_measurement_kind": _SCALAR, "contract_shape": _SCALAR,
+    "forecast_measurement_kind": _SCALAR, "contract_shape": _SCALAR, "question_side": _SCALAR,
     "role": _SCALAR, "forecast_target": _SCALAR,
     "source_evidence_version": _SCALAR, "evidence_type": _SCALAR,
     "forecast_availability": _SCALAR, "scoreable_forecast": _SCALAR,

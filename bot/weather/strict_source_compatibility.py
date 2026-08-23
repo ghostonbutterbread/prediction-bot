@@ -14,7 +14,7 @@ _REQUIRED_SOURCE_FIELDS = (
     "forecast_measurement_kind",
     "contract_shape",
     "question_side",
-    "raw_payload_sha256",
+    "raw_row_sha256",
 )
 
 
@@ -28,7 +28,7 @@ def summarize_strict_source_replay_compatibility(records: Iterable[Mapping[str, 
         if not sources:
             report["records_without_weather_sources"] += 1
             continue
-        raw_hash = _mapping(record.get("collector_provenance")).get("raw_payload_sha256")
+        raw_hash = _mapping(record.get("snapshot_provenance")).get("raw_row_sha256")
         for source in sources:
             report["source_rows_seen"] += 1
             values = {
@@ -40,7 +40,7 @@ def summarize_strict_source_replay_compatibility(records: Iterable[Mapping[str, 
                 "forecast_measurement_kind": source.get("forecast_measurement_kind"),
                 "contract_shape": source.get("contract_shape"),
                 "question_side": source.get("question_side"),
-                "raw_payload_sha256": raw_hash,
+                "raw_row_sha256": raw_hash,
             }
             absent = [field for field in _REQUIRED_SOURCE_FIELDS if not _present(values[field])]
             if absent:
@@ -56,8 +56,8 @@ def summarize_strict_source_replay_compatibility(records: Iterable[Mapping[str, 
 
 
 def _sources(record: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-    artifact = _mapping(record.get("decision_artifact"))
-    context = _mapping(artifact.get("source_context"))
+    source_inputs = _mapping(record.get("source_inputs"))
+    context = _mapping(source_inputs.get("source_context"))
     data = _mapping(context.get("data"))
     snapshot = _mapping(data.get("weather_source_snapshot"))
     sources = snapshot.get("sources")
