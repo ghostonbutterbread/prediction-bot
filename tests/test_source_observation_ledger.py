@@ -296,11 +296,41 @@ class SourceObservationLedgerTests(unittest.TestCase):
             "target_mapping": {"market_target_date": "2026-08-03", "source_target_date": "2026-08-03"},
         }]
 
-        _, artifacts = self._run([record], [_outcome(record)])
+        metadata, artifacts = self._run([record], [_outcome(record)])
 
         [settled] = artifacts["settled_source_correctness"]
         self.assertEqual(settled["source_correctness_eligibility"], "eligible_exact_target_proof")
+        self.assertFalse(settled["eligible_for_source_history"])
+        self.assertEqual(settled["strict_source_proof"]["status"], "unusable_strict_source_proof")
+        self.assertEqual(metadata["counts"]["strict_proof_rejection_counts"]["missing_source_location_city"], 1)
+
+    def test_strict_v2_source_contract_requires_complete_recorded_dimensions(self) -> None:
+        record = _input()
+        snapshot = record["source_inputs"]["source_context"]["data"]["weather_source_snapshot"]
+        snapshot["station_resolution"] = {"city_id": "seattle_wa", "city": "Seattle"}
+        record["market"]["market_metadata"].update({
+            "city_id": "seattle_wa", "market_kind": "high", "contract_shape": "threshold",
+        })
+        snapshot["sources"] = [{
+            "source_id": "nws", "source_name": "NWS", "source_location_city": "Seattle",
+            "forecast_measurement_kind": "high", "contract_shape": "tail", "question_side": "above",
+            "forecast_high": 75.0, "source_as_of": "2026-08-01T11:54:00+00:00",
+            "source_evidence_version": 1, "evidence_type": "forecast", "scoreable_forecast": True,
+            "target_mapping": {
+                "market_target_date": "2026-08-03", "source_target_date": "2026-08-03",
+                "source_timezone": "America/Los_Angeles",
+            },
+        }]
+
+        _, artifacts = self._run([record], [_outcome(record)])
+
+        [settled] = artifacts["settled_source_correctness"]
+        self.assertEqual(settled["strict_source_proof"], {"status": "eligible", "reasons": [], "source_id": "nws", "source_as_of": "2026-08-01T11:54:00+00:00", "source_timezone": "America/Los_Angeles", "source_location_city": "seattle", "recorded_market_city": "seattle", "market_kind": "high", "contract_shape": "tail", "question_side": "above"})
+        self.assertEqual(settled["source_correctness_eligibility"], "eligible_strict_source_proof")
         self.assertTrue(settled["eligible_for_source_history"])
+        self.assertEqual(settled["source_provenance"]["source_record_sha256"], hashlib.sha256(
+            json.dumps(snapshot["sources"][0], sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        ).hexdigest())
 
     def test_v1_conflicting_retained_target_aliases_fail_closed(self) -> None:
         record = _input()

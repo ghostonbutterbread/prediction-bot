@@ -117,6 +117,8 @@ class ForecastTargetingTests(unittest.TestCase):
     def test_collector_normalization_preserves_exact_target_and_source_provenance(self):
         source = {
             "source_name": "nws", "forecast_high": 84.0, "as_of": "2026-08-01T12:00:00Z",
+            "source_id": "nws", "source_location_city": "Austin", "forecast_measurement_kind": "high",
+            "contract_shape": "tail", "question_side": "above",
             "source_evidence_version": 1, "evidence_type": "forecast", "forecast_availability": "available",
             "scoreable_forecast": True, "market_target_date": "2026-08-02", "source_target_date": "2026-08-02",
             "target_mapping": {"market_target_date": "2026-08-02", "source_target_date": "2026-08-02", "mapping": "exact_source_local_nws_period"},
@@ -130,6 +132,11 @@ class ForecastTargetingTests(unittest.TestCase):
         self.assertEqual(emitted["source_target_date"], "2026-08-02")
         self.assertEqual(emitted["source_as_of"], "2026-08-01T12:00:00Z")
         self.assertEqual(emitted["target_mapping"]["mapping"], "exact_source_local_nws_period")
+        self.assertEqual(emitted["source_id"], "nws")
+        self.assertEqual(emitted["source_location_city"], "Austin")
+        self.assertEqual(emitted["forecast_measurement_kind"], "high")
+        self.assertEqual(emitted["contract_shape"], "tail")
+        self.assertEqual(emitted["question_side"], "above")
 
     def test_sanitized_observations_score_only_exact_forecasts(self):
         row = {

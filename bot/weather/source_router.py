@@ -30,14 +30,14 @@ DEFAULT_MIN_SAMPLE_COUNT = 5
 BUY_YES = "BUY_YES"
 BUY_NO = "BUY_NO"
 SKIP = "SKIP"
-ELIGIBLE_EXACT_TARGET_PROOF = "eligible_exact_target_proof"
+ELIGIBLE_STRICT_SOURCE_PROOF = "eligible_strict_source_proof"
 
 
 def source_history_target_proof_rejection_key(row: Mapping[str, Any]) -> str | None:
     """Return the audit counter for a row barred from source history."""
 
     status = row.get("source_correctness_eligibility")
-    if status == ELIGIBLE_EXACT_TARGET_PROOF:
+    if status == ELIGIBLE_STRICT_SOURCE_PROOF:
         return None
     if status is None:
         return "history_rows_rejected_missing_exact_target_proof_marker"

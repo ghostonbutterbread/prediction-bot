@@ -866,7 +866,13 @@ class ProWeatherEngine:
                 "market_target_date": market_date,
                 "sources": forecast.sources_used,
                 "agreement": forecast.source_agreement,
-                "source_details": self._source_contribution_details(forecast),
+                "source_details": self._source_contribution_details(
+                    forecast,
+                    city=city,
+                    forecast_measurement_kind="high" if is_high else "low",
+                    contract_shape="range" if is_range else "tail",
+                    question_side="range" if is_range else "above" if is_above else "below" if is_below else None,
+                ),
                 "settlement_source": forecast.details.get("settlement_source"),
                 "nws_high": forecast.details.get("nws_high"),
                 "nws_low": forecast.details.get("nws_low"),
@@ -875,7 +881,14 @@ class ProWeatherEngine:
         }
 
     @staticmethod
-    def _source_contribution_details(forecast: MultiSourceForecast) -> list[dict]:
+    def _source_contribution_details(
+        forecast: MultiSourceForecast,
+        *,
+        city: str | None = None,
+        forecast_measurement_kind: str | None = None,
+        contract_shape: str | None = None,
+        question_side: str | None = None,
+    ) -> list[dict]:
         settlement_source = forecast.details.get("settlement_source")
         sources = list(forecast.sources_used or [])
         has_settlement_source = settlement_source in sources
@@ -896,7 +909,12 @@ class ProWeatherEngine:
             snapshot = snapshot_by_source.get(source)
             target_mapping = snapshot.source_details.get("target_mapping") if snapshot else None
             details.append(_drop_none({
+                    "source_id": source.lower().replace("-", "_").replace(" ", "_"),
                     "source_name": source,
+                    "source_location_city": city,
+                    "forecast_measurement_kind": forecast_measurement_kind,
+                    "contract_shape": contract_shape,
+                    "question_side": question_side,
                     "source_evidence_version": snapshot.source_details.get("source_evidence_version") if snapshot else None,
                     "evidence_type": snapshot.source_details.get("evidence_type") if snapshot else None,
                     "forecast_availability": snapshot.source_details.get("forecast_availability") if snapshot else None,

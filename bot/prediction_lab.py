@@ -1315,7 +1315,12 @@ class PredictionLab:
             elif not weight_note:
                 weight_note = "recorded_by_weather_engine"
             source = {
+                "source_id": detail.get("source_id"),
                 "source_name": source_name,
+                "source_location_city": detail.get("source_location_city"),
+                "forecast_measurement_kind": detail.get("forecast_measurement_kind"),
+                "contract_shape": detail.get("contract_shape"),
+                "question_side": detail.get("question_side"),
                 "role": role,
                 "weight": weight,
                 "contribution": contribution,

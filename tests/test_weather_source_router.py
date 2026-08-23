@@ -49,7 +49,7 @@ def ledger_row(
         "stable_action": stable_action,
         "stable_approved_position_size_usd": 100.0,
         "stable_reason_code": "approved",
-        "source_correctness_eligibility": "eligible_exact_target_proof",
+        "source_correctness_eligibility": "eligible_strict_source_proof",
     }
 
 
@@ -130,7 +130,7 @@ class WeatherSourceRouterTests(unittest.TestCase):
                 "market_id": "KXONE", "event_ticker": "KXEVENTONE", "market_date": "2026-08-01",
                 "source_id": "nws", "city_id": "miami_fl", "market_kind": "high", "contract_shape": "range",
                 "question_side": "above", "observed_at": observed_at, "outcome_known_at": "2026-08-05T00:00:00+00:00", "settlement_ts": "2026-08-05T00:00:00+00:00",
-                "eligible_for_edge_validation": True, "source_correctness_eligibility": "eligible_exact_target_proof",
+                "eligible_for_edge_validation": True, "source_correctness_eligibility": "eligible_strict_source_proof",
                 "win": win, "binary_edge_realized": edge,
             }
             for observed_at, win, edge in (
@@ -161,7 +161,7 @@ class WeatherSourceRouterTests(unittest.TestCase):
                 "market_id": market_id, "event_ticker": event_ticker, "market_date": market_date,
                 "source_id": "nws", "city_id": "miami_fl", "market_kind": "high", "contract_shape": "range",
                 "question_side": "above", "observed_at": observed_at, "outcome_known_at": "2026-08-05T00:00:00+00:00", "settlement_ts": "2026-08-05T00:00:00+00:00",
-                "eligible_for_edge_validation": True, "source_correctness_eligibility": "eligible_exact_target_proof",
+                "eligible_for_edge_validation": True, "source_correctness_eligibility": "eligible_strict_source_proof",
                 "win": True, "binary_edge_realized": 0.5,
             }
             for market_id, event_ticker, market_date, observed_at in (
@@ -194,7 +194,7 @@ class WeatherSourceRouterTests(unittest.TestCase):
                 "contract_shape": "range",
                 "question_side": "above",
                 "eligible_for_edge_validation": True,
-                "source_correctness_eligibility": "eligible_exact_target_proof",
+                "source_correctness_eligibility": "eligible_strict_source_proof",
                 "outcome_known_at": "2026-05-02T00:00:00+00:00",
                 "settlement_ts": "2026-05-02T00:00:00+00:00",
                 "win": True,
@@ -207,7 +207,7 @@ class WeatherSourceRouterTests(unittest.TestCase):
                 "contract_shape": "range",
                 "question_side": "above",
                 "eligible_for_edge_validation": True,
-                "source_correctness_eligibility": "eligible_exact_target_proof",
+                "source_correctness_eligibility": "eligible_strict_source_proof",
                 "outcome_known_at": "2026-05-04T00:00:00+00:00",
                 "settlement_ts": "2026-05-04T00:00:00+00:00",
                 "win": True,

@@ -105,7 +105,7 @@ def source_history_row(*, market_id: str, settlement_ts: str, outcome: str = "YE
         "yes_price": 0.40,
         "no_price": 0.60,
         "eligible_for_reliability": True,
-        "source_correctness_eligibility": "eligible_exact_target_proof",
+        "source_correctness_eligibility": "eligible_strict_source_proof",
         "settlement_ts": settlement_ts,
     }
 
