@@ -71,6 +71,9 @@ class SourceRouterReplayWalletTests(unittest.TestCase):
                 "contract_shape": "threshold", "question_side": "above", "observed_at": "2026-07-01T12:00:00+00:00",
                 "source_implied_side": "YES", "source_side_price": 0.5, "actual_outcome": "YES",
                 "eligible_for_reliability": True, "source_correctness_eligibility": "eligible_strict_source_proof",
+                "eligible_for_source_history": True,
+                "strict_source_proof": {"status": "eligible", "reasons": []},
+                "source_provenance": {"source_record_sha256": "a" * 64, "canonical_input_sha256": "b" * 64},
                 "settlement_ts": "2026-07-02T12:00:00+00:00",
                 "known_after": "2026-07-02T12:00:00+00:00",
             }) + "\n", encoding="utf-8")
