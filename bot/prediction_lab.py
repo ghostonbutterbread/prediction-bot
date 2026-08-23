@@ -674,6 +674,11 @@ class PredictionLab:
         metadata = dict(getattr(market, "metadata", {}) or {})
         timestamp = observed_at or datetime.now(timezone.utc).isoformat()
         row = {
+            # The collector run is the shared snapshot identity published by
+            # the shared-market runtime. Persist it with every raw row rather
+            # than requiring a replay consumer to infer cohort membership.
+            "collector_artifact_schema_version": 2,
+            "shared_snapshot_id": run_id,
             "timestamp": timestamp,
             "observed_at": timestamp,
             "run_id": run_id,

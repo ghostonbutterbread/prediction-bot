@@ -229,6 +229,7 @@ def _build_replay_decision_input_strict_v1(raw_snapshot_row: Mapping[str, Any] |
 
     row = {str(key): value for key, value in raw_snapshot_row.items()}
     errors: list[ReplayDecisionInputError] = []
+    is_collector_v2 = row.get("collector_artifact_schema_version") == 2
     raw_row_sha256 = _canonical_sha256(raw_snapshot_row, errors)
     if errors:
         return ReplayDecisionInputBuildResult(record=None, errors=tuple(errors))
@@ -298,6 +299,8 @@ def _build_replay_decision_input_strict_v1(raw_snapshot_row: Mapping[str, Any] |
             "missing_required_field", "decision_artifact.source_context.data.weather_source_snapshot",
             "usable allowlisted weather source evidence is required",
         ))
+    if is_collector_v2 and isinstance(weather_source_snapshot, Mapping):
+        _validate_collector_v2_source_evidence(weather_source_snapshot, errors)
 
     if errors:
         return ReplayDecisionInputBuildResult(record=None, errors=tuple(errors))
@@ -357,6 +360,7 @@ def _build_replay_decision_input_sanitized_v1(raw_snapshot_row: Mapping[str, Any
 
     row = {str(key): value for key, value in raw_snapshot_row.items()}
     errors: list[ReplayDecisionInputError] = []
+    is_collector_v2 = row.get("collector_artifact_schema_version") == 2
     raw_row_sha256 = _canonical_sha256(raw_snapshot_row, errors)
     if errors or raw_row_sha256 is None:
         return ReplayDecisionInputBuildResult(record=None, errors=tuple(errors))
@@ -413,6 +417,10 @@ def _build_replay_decision_input_sanitized_v1(raw_snapshot_row: Mapping[str, Any
             "missing_required_field", "decision_artifact.source_context.data.weather_source_snapshot",
             "usable allowlisted weather source evidence is required",
         )
+    if is_collector_v2:
+        _validate_collector_v2_source_evidence(weather_source_snapshot, errors)
+    if errors:
+        return ReplayDecisionInputBuildResult(record=None, errors=tuple(errors))
 
     prices = _available_decision_time_prices(row, execution_snapshot)
     if not prices:
@@ -427,6 +435,19 @@ def _build_replay_decision_input_sanitized_v1(raw_snapshot_row: Mapping[str, Any
     shared_candidate_id = _optional_identity_text(row.get("shared_candidate_id"))
     if "shared_candidate_id" in row and shared_candidate_id is None:
         _add_omitted_field(omitted_fields, "shared_candidate_id", "unallowlisted")
+    if is_collector_v2 and shared_snapshot_id is None:
+        errors.append(ReplayDecisionInputError(
+            "missing_required_field", "shared_snapshot_id",
+            "collector artifact schema v2 requires its recorded shared snapshot identity",
+        ))
+    if is_collector_v2 and shared_candidate_id is None:
+        errors.append(ReplayDecisionInputError(
+            "missing_required_field", "shared_candidate_id",
+            "collector artifact schema v2 requires its recorded shared candidate identity",
+        ))
+    if errors:
+        return ReplayDecisionInputBuildResult(record=None, errors=tuple(errors))
+
     legacy_identity = not shared_snapshot_id or not shared_candidate_id
     if legacy_identity:
         shared_snapshot_id = f"legacy-snapshot-{raw_row_sha256}"
@@ -434,10 +455,17 @@ def _build_replay_decision_input_sanitized_v1(raw_snapshot_row: Mapping[str, Any
 
     source_context_as_of = _optional_utc_timestamp(_field(source_context, "as_of"))
     market_metadata = allowed_source_data.get("market_metadata", {})
+    input_mode = (
+        "legacy_sanitized_v1"
+        if legacy_identity
+        else "collector_v2_sanitized_v1"
+        if is_collector_v2
+        else "sanitized_v1"
+    )
     record: dict[str, Any] = {
         "schema_name": REPLAY_DECISION_INPUT_SCHEMA_NAME,
         "schema_version": REPLAY_DECISION_INPUT_SCHEMA_VERSION,
-        "input_mode": "legacy_sanitized_v1" if legacy_identity else "sanitized_v1",
+        "input_mode": input_mode,
         "decision_key": {
             "shared_snapshot_id": shared_snapshot_id,
             "shared_candidate_id": shared_candidate_id,
@@ -451,7 +479,7 @@ def _build_replay_decision_input_sanitized_v1(raw_snapshot_row: Mapping[str, Any
         "observed_at": observed_at,
         "snapshot_provenance": _sanitized_provenance(
             collector_provenance, raw_row_sha256,
-            input_mode="legacy_sanitized_v1" if legacy_identity else "sanitized_v1",
+            input_mode=input_mode,
             omitted_fields=omitted_fields,
         ),
         "market": {
@@ -511,6 +539,49 @@ def _available_decision_time_prices(row: Mapping[str, Any], execution_snapshot: 
         if price is not None:
             prices[key] = price
     return prices
+
+
+def _validate_collector_v2_source_evidence(
+    weather_source_snapshot: Mapping[str, Any], errors: list[ReplayDecisionInputError],
+) -> None:
+    """Require new collector rows to classify each retained source honestly."""
+    sources = weather_source_snapshot.get("sources")
+    base_path = "decision_artifact.source_context.data.weather_source_snapshot.sources"
+    if not isinstance(sources, list) or not sources:
+        errors.append(ReplayDecisionInputError(
+            "missing_required_field", base_path,
+            "collector artifact schema v2 requires recorded source evidence",
+        ))
+        return
+    for index, source in enumerate(sources):
+        path = f"{base_path}[{index}]"
+        if not isinstance(source, Mapping):
+            errors.append(ReplayDecisionInputError("invalid_source_evidence", path, "source evidence must be a mapping"))
+            continue
+        if source.get("source_evidence_version") != 1:
+            errors.append(ReplayDecisionInputError(
+                "missing_required_field", f"{path}.source_evidence_version",
+                "collector artifact schema v2 requires source evidence version 1",
+            ))
+        evidence_type = source.get("evidence_type")
+        if evidence_type not in {"forecast", "forecast_unavailable", "observation"}:
+            errors.append(ReplayDecisionInputError(
+                "invalid_source_evidence", f"{path}.evidence_type",
+                "source evidence type must classify forecast, unavailable forecast, or observation",
+            ))
+        scoreable = source.get("scoreable_forecast")
+        if not isinstance(scoreable, bool):
+            errors.append(ReplayDecisionInputError(
+                "missing_required_field", f"{path}.scoreable_forecast",
+                "source evidence must state whether the record is a scoreable forecast",
+            ))
+        if evidence_type == "forecast" and scoreable is True:
+            mapping = source.get("target_mapping")
+            if not isinstance(mapping, Mapping) or not mapping.get("market_target_date") or not mapping.get("source_target_date"):
+                errors.append(ReplayDecisionInputError(
+                    "missing_required_field", f"{path}.target_mapping",
+                    "scoreable forecasts require recorded market and source target dates",
+                ))
 
 
 def _has_useful_source_data(value: Mapping[str, Any]) -> bool:

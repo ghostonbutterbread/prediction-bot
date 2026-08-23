@@ -299,6 +299,37 @@ class PredictionLabCollectorTests(unittest.TestCase):
             self.assertTrue(config["prediction_lab"]["paused"])
             self.assertFalse(config["prediction_lab"]["observer_mode"])
 
+    def test_new_market_snapshot_records_v2_collector_and_shared_snapshot_identity(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lab = PredictionLab(
+                {
+                    "data_dir": tmpdir,
+                    "prediction_lab": {"enabled": True, "mode": "collector", "groups": ["weather"]},
+                    "strategy": {"enable_news": False, "enable_social": False, "enable_ai": False},
+                }
+            )
+            market = SimpleNamespace(
+                id="KXHIGHNY-26AUG12-T80",
+                category="KXHIGHNY",
+                question="Will NYC high temperature exceed 80F?",
+                yes_price=0.42,
+                no_price=0.58,
+                metadata={"market_group": "weather", "series": "daily_temperature"},
+            )
+
+            row = lab._build_market_snapshot_row(
+                "plab_20260812T150405Z",
+                market,
+                {"confidence": 0.8, "edge": 0.2, "direction": "BUY_YES"},
+                decision_type="buy_yes",
+                prediction_recorded=False,
+                observed_at="2026-08-12T15:04:05+00:00",
+            )
+
+        self.assertEqual(row["collector_artifact_schema_version"], 2)
+        self.assertEqual(row["shared_snapshot_id"], "plab_20260812T150405Z")
+        self.assertTrue(row["shared_candidate_id"])
+
     def test_collector_runs_resolution_feed_runner_each_cycle(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)

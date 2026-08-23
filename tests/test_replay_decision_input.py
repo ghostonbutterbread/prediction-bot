@@ -78,6 +78,19 @@ def _snapshot_row(*, patch: dict | None = None) -> dict:
                         "sources": [
                             {
                                 "source_name": "nws",
+                                "source_evidence_version": 1,
+                                "evidence_type": "forecast",
+                                "forecast_availability": "available",
+                                "scoreable_forecast": True,
+                                "market_target_date": "2026-08-12",
+                                "source_target_date": "2026-08-12",
+                                "target_mapping": {
+                                    "market_target_date": "2026-08-12",
+                                    "source_target_date": "2026-08-12",
+                                    "mapping": "exact_source_local_nws_period",
+                                    "source_period_start": "2026-08-12T06:00:00-04:00",
+                                    "source_period_end": "2026-08-12T18:00:00-04:00",
+                                },
                                 "role": "settlement_primary",
                                 "forecast_high": 84.0,
                                 "forecast_low": 65.0,
@@ -107,6 +120,55 @@ def _snapshot_row(*, patch: dict | None = None) -> dict:
 
 
 class ReplayDecisionInputTests(unittest.TestCase):
+    def test_v2_collector_row_requires_recorded_shared_identity(self):
+        row = _snapshot_row(patch={"collector_artifact_schema_version": 2})
+        del row["shared_snapshot_id"]
+
+        result = build_replay_decision_input_v1(row)
+
+        self.assertFalse(result.ok)
+        self.assertIn(
+            ("missing_required_field", "shared_snapshot_id"),
+            {(error.code, error.path) for error in result.errors},
+        )
+
+    def test_v2_collector_row_uses_recorded_identity_without_requiring_replay_run_metadata(self):
+        row = _snapshot_row(patch={"collector_artifact_schema_version": 2})
+        del row["collector_provenance"]
+        del row["replay_decision_context"]
+        del row["replay_derived_features"]
+
+        result = build_replay_decision_input_v1(row)
+
+        self.assertTrue(result.ok, [error.to_dict() for error in result.errors])
+        assert result.record is not None
+        self.assertEqual(result.record["input_mode"], "collector_v2_sanitized_v1")
+        self.assertEqual(result.record["decision_key"]["shared_snapshot_id"], "snapshot-20260812-001")
+
+    def test_v2_collector_row_requires_source_evidence_classification(self):
+        row = _snapshot_row(patch={"collector_artifact_schema_version": 2})
+        del row["decision_artifact"]["source_context"]["data"]["weather_source_snapshot"]["sources"][0]["source_evidence_version"]
+
+        result = build_replay_decision_input_v1(row)
+
+        self.assertFalse(result.ok)
+        self.assertIn(
+            ("missing_required_field", "decision_artifact.source_context.data.weather_source_snapshot.sources[0].source_evidence_version"),
+            {(error.code, error.path) for error in result.errors},
+        )
+
+    def test_strict_v2_collector_row_requires_source_evidence_classification(self):
+        row = _snapshot_row(patch={"collector_artifact_schema_version": 2})
+        del row["decision_artifact"]["source_context"]["data"]["weather_source_snapshot"]["sources"][0]["source_evidence_version"]
+
+        result = build_replay_decision_input_v1(row, strict=True)
+
+        self.assertFalse(result.ok)
+        self.assertIn(
+            ("missing_required_field", "decision_artifact.source_context.data.weather_source_snapshot.sources[0].source_evidence_version"),
+            {(error.code, error.path) for error in result.errors},
+        )
+
     def test_builds_fresh_allowlisted_input_with_canonical_provenance_and_key(self):
         row = _snapshot_row()
 
