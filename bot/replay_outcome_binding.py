@@ -193,11 +193,11 @@ def _normalize_strict_resolution(row: Mapping[str, Any] | None, market_id: str) 
         return None
     values: set[str] = set()
     kalshi = row.get("kalshi_result")
-    if isinstance(kalshi, str) and kalshi.lower() in {"yes", "no"}:
+    if isinstance(kalshi, str) and kalshi.lower() in {"yes", "no", "void"}:
         values.add(kalshi.upper())
     resolution = row.get("resolution")
     outcome = resolution.get("outcome") if isinstance(resolution, Mapping) else None
-    if isinstance(outcome, str) and outcome.upper() in {"YES", "NO"}:
+    if isinstance(outcome, str) and outcome.upper() in {"YES", "NO", "VOID"}:
         values.add(outcome.upper())
     if len(values) != 1:
         return None
@@ -226,7 +226,7 @@ def _bound_outcome_row(
     return {
         "schema_name": "replay_finalized_outcome_binding",
         "schema_version": 1,
-        "market_status": "finalized",
+        "market_status": "void_resolution" if resolution["official_outcome"] == "VOID" else "finalized",
         "canonical_input_sha256": identity["canonical_input_sha256"],
         "decision_key": identity["decision_key"],
         "market_id": identity["market_id"],

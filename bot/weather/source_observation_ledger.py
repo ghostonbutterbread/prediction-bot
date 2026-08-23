@@ -25,6 +25,7 @@ SCHEMA_VERSION = 1
 PENDING_FILENAME = "pending_source_observations.jsonl"
 SETTLED_FILENAME = "settled_source_correctness.jsonl"
 UNSETTLED_FILENAME = "unsettled_or_unusable_source_observations.jsonl"
+VOID_FILENAME = "void_source_observations.jsonl"
 METADATA_FILENAME = "run_metadata.json"
 _IDENTITY_FIELDS = (
     "shared_snapshot_id", "shared_candidate_id", "market_id", "observed_at_utc", "raw_row_sha256",
@@ -44,6 +45,7 @@ class SourceObservationLedgerResult:
     pending_path: Path
     settled_path: Path
     unsettled_path: Path
+    void_path: Path
     metadata_path: Path
     metadata: dict[str, Any]
 
@@ -94,6 +96,7 @@ def materialize_source_observation_ledger(
     pending_rows = list(pending_by_id.values())
     settled_rows: list[dict[str, Any]] = []
     unusable_rows: list[dict[str, Any]] = []
+    void_rows: list[dict[str, Any]] = []
     for pending in pending_rows:
         eligibility = pending.get("source_correctness_eligibility")
         if eligibility != _ELIGIBLE_TARGET_PROOF:
@@ -108,6 +111,10 @@ def materialize_source_observation_ledger(
         outcome = outcome_index.get(identity_key)
         if outcome is None:
             unusable_rows.append(_unusable_row(pending, "missing_exact_authoritative_outcome"))
+            continue
+        if outcome["official_outcome"] == "VOID":
+            counters["void_resolution"] += 1
+            void_rows.append(_void_row(pending, outcome))
             continue
         implied = _source_implied_outcome(pending)
         if implied is None:
@@ -134,10 +141,14 @@ def materialize_source_observation_ledger(
     pending_bytes = _jsonl_bytes(pending_rows)
     settled_bytes = _jsonl_bytes(settled_rows)
     unusable_bytes = _jsonl_bytes(unusable_rows)
-    pending_path, settled_path, unusable_path = (target_dir / PENDING_FILENAME, target_dir / SETTLED_FILENAME, target_dir / UNSETTLED_FILENAME)
+    void_bytes = _jsonl_bytes(void_rows)
+    pending_path, settled_path, unusable_path, void_path = (
+        target_dir / PENDING_FILENAME, target_dir / SETTLED_FILENAME, target_dir / UNSETTLED_FILENAME, target_dir / VOID_FILENAME,
+    )
     pending_path.write_bytes(pending_bytes)
     settled_path.write_bytes(settled_bytes)
     unusable_path.write_bytes(unusable_bytes)
+    void_path.write_bytes(void_bytes)
     metadata = {
         "schema_name": "source_observation_ledger_materialization",
         "schema_version": SCHEMA_VERSION,
@@ -162,16 +173,18 @@ def materialize_source_observation_ledger(
                 "unusable_v1_forecast_not_scoreable",
             )},
             "pending": len(pending_rows), "settled": len(settled_rows), "unsettled_or_unusable": len(unusable_rows),
+            "void_resolution": len(void_rows),
         },
         "output_artifacts": {
             PENDING_FILENAME: {"sha256": hashlib.sha256(pending_bytes).hexdigest(), "record_count": len(pending_rows)},
             SETTLED_FILENAME: {"sha256": hashlib.sha256(settled_bytes).hexdigest(), "record_count": len(settled_rows)},
             UNSETTLED_FILENAME: {"sha256": hashlib.sha256(unusable_bytes).hexdigest(), "record_count": len(unusable_rows)},
+            VOID_FILENAME: {"sha256": hashlib.sha256(void_bytes).hexdigest(), "record_count": len(void_rows)},
         },
     }
     metadata_path = target_dir / METADATA_FILENAME
     metadata_path.write_bytes(_canonical_bytes(metadata))
-    return SourceObservationLedgerResult(target_dir, pending_path, settled_path, unusable_path, metadata_path, metadata)
+    return SourceObservationLedgerResult(target_dir, pending_path, settled_path, unusable_path, void_path, metadata_path, metadata)
 
 
 def is_eligible_for_future_history(row: Mapping[str, Any], future_decision_time: str) -> bool:
@@ -357,13 +370,18 @@ def _outcome_index(path: Path, counters: Counter[str]) -> tuple[dict[tuple[str, 
 
 
 def _normalized_outcome(row: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(row, Mapping):
+        return None
     identity = _decision_identity(row)
-    if identity is None or not isinstance(row, Mapping) or str(row.get("market_status") or "finalized").lower() != "finalized":
+    status = str(row.get("market_status") or "finalized").lower()
+    if identity is None or status not in {"finalized", "void_resolution"}:
         return None
     official = str(row.get("official_outcome") or "").upper()
     settlement = _text(row.get("settlement_ts"))
     resolution_id = _text(row.get("resolution_id"))
-    if official not in {"YES", "NO"} or not settlement or _parse_time(settlement) is None or not resolution_id:
+    if official not in {"YES", "NO", "VOID"} or not settlement or _parse_time(settlement) is None or not resolution_id:
+        return None
+    if (status == "void_resolution") != (official == "VOID"):
         return None
     return {
         **identity, "official_outcome": official, "settlement_ts": settlement, "resolution_id": resolution_id,
@@ -381,6 +399,24 @@ def _unusable_row(pending: Mapping[str, Any], reason: str, *, outcome: Mapping[s
             "resolution_id": outcome["resolution_id"], "resolution_resolved_at": outcome.get("resolution_resolved_at"),
         })
     return row
+
+
+def _void_row(pending: Mapping[str, Any], outcome: Mapping[str, Any]) -> dict[str, Any]:
+    """Retain a settled VOID receipt without scoring or source-history eligibility."""
+    return {
+        **pending,
+        "schema_name": "void_source_observation",
+        "schema_version": SCHEMA_VERSION,
+        "disposition_reason": "void_resolution",
+        "official_outcome": "VOID",
+        "eligible_for_reliability": False,
+        "eligible_for_source_history": False,
+        "settlement_ts": outcome["settlement_ts"],
+        "resolution_id": outcome["resolution_id"],
+        "resolution_resolved_at": outcome.get("resolution_resolved_at"),
+        "resolution_retrieved_at": outcome.get("resolution_retrieved_at"),
+        "resolution_provenance": outcome.get("provenance"),
+    }
 
 
 def _source_implied_outcome(row: Mapping[str, Any]) -> str | None:

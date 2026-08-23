@@ -88,6 +88,20 @@ class ReplayOutcomeBindingTests(unittest.TestCase):
         self.assertFalse(result.metadata["network_access"])
         self.assertTrue(result.metadata["non_mutating"])
 
+    def test_binds_void_as_a_first_class_authoritative_receipt(self):
+        record = replay_input("KXVOID", "v")
+        self._write([record], [strict_resolution("KXVOID", result="void")])
+
+        result = bind_replay_finalized_outcomes(
+            replay_inputs_path=self.inputs_path, strict_resolutions_path=self.resolutions_path, output_dir=self.output_dir,
+        )
+
+        [outcome] = self._outcomes(result)
+        self.assertEqual(outcome["official_outcome"], "VOID")
+        self.assertEqual(outcome["market_status"], "void_resolution")
+        self.assertEqual(outcome["canonical_input_sha256"], record["canonical_input_sha256"])
+        self.assertIn("raw_resolution_row_sha256", outcome["provenance"])
+
     def test_binding_does_not_mutate_replay_inputs_and_records_raw_resolution_provenance(self):
         record = replay_input("KXONE", "c")
         resolution = strict_resolution("KXONE")

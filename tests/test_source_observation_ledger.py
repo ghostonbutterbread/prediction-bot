@@ -110,7 +110,7 @@ class SourceObservationLedgerTests(unittest.TestCase):
         )
         artifacts = {
             path.stem: [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
-            for path in (result.pending_path, result.settled_path, result.unsettled_path)
+            for path in (result.pending_path, result.settled_path, result.unsettled_path, result.void_path)
         }
         return result.metadata, artifacts
 
@@ -327,6 +327,25 @@ class SourceObservationLedgerTests(unittest.TestCase):
             {row["disposition_reason"] for row in artifacts["unsettled_or_unusable_source_observations"]},
             {"conflicting_exact_authoritative_outcome", "unusable_legacy_target_unproven"},
         )
+
+    def test_void_receipt_is_retained_without_source_correctness_or_history(self) -> None:
+        record = _input()
+        record["source_inputs"]["source_context"]["data"]["weather_source_snapshot"]["sources"] = [{
+            "source_id": "nws", "source_name": "NWS", "forecast_high": 75.0,
+            "source_evidence_version": 1, "evidence_type": "forecast", "scoreable_forecast": True,
+            "target_mapping": {"market_target_date": "2026-08-03", "source_target_date": "2026-08-03"},
+        }]
+        outcome = _outcome(record, outcome="VOID")
+        outcome["market_status"] = "void_resolution"
+
+        metadata, artifacts = self._run([record], [outcome])
+
+        self.assertEqual(artifacts["settled_source_correctness"], [])
+        [void] = artifacts["void_source_observations"]
+        self.assertEqual(void["disposition_reason"], "void_resolution")
+        self.assertEqual(void["official_outcome"], "VOID")
+        self.assertFalse(void["eligible_for_source_history"])
+        self.assertEqual(metadata["counts"]["void_resolution"], 1)
 
     def test_history_eligibility_uses_settlement_time_strictly_not_retrieval_time(self) -> None:
         settled = {
