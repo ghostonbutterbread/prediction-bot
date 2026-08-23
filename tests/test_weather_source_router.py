@@ -7,6 +7,7 @@ from bot.weather.source_router import (
     build_joined_source_router_ledger_rows,
     build_source_router_replay_rows,
     select_source_for_candidate,
+    source_history_target_proof_rejection_key,
     summarize_source_router_replay_rows,
 )
 from scripts.weather_source_router_replay import main as source_router_main
@@ -50,6 +51,9 @@ def ledger_row(
         "stable_approved_position_size_usd": 100.0,
         "stable_reason_code": "approved",
         "source_correctness_eligibility": "eligible_strict_source_proof",
+        "eligible_for_source_history": True,
+        "strict_source_proof": {"status": "eligible", "reasons": []},
+        "source_provenance": {"source_record_sha256": "a" * 64, "canonical_input_sha256": "b" * 64},
     }
 
 
@@ -120,6 +124,18 @@ def stable_decision(
 
 
 class WeatherSourceRouterTests(unittest.TestCase):
+    def test_history_marker_alone_cannot_admit_unproven_row(self):
+        row = {
+            "source_correctness_eligibility": "eligible_strict_source_proof",
+            "eligible_for_source_history": False,
+            "strict_source_proof": {"status": "eligible", "reasons": []},
+        }
+
+        self.assertEqual(
+            source_history_target_proof_rejection_key(row),
+            "history_rows_rejected_incomplete_strict_source_proof",
+        )
+
     def test_selector_collapses_reobservations_before_minimum_sample_gate(self):
         candidate = {
             "city_id": "miami_fl", "market_kind": "high", "contract_shape": "range",
@@ -130,7 +146,7 @@ class WeatherSourceRouterTests(unittest.TestCase):
                 "market_id": "KXONE", "event_ticker": "KXEVENTONE", "market_date": "2026-08-01",
                 "source_id": "nws", "city_id": "miami_fl", "market_kind": "high", "contract_shape": "range",
                 "question_side": "above", "observed_at": observed_at, "outcome_known_at": "2026-08-05T00:00:00+00:00", "settlement_ts": "2026-08-05T00:00:00+00:00",
-                "eligible_for_edge_validation": True, "source_correctness_eligibility": "eligible_strict_source_proof",
+                "eligible_for_edge_validation": True, "source_correctness_eligibility": "eligible_strict_source_proof", "eligible_for_source_history": True, "strict_source_proof": {"status": "eligible", "reasons": []}, "source_provenance": {"source_record_sha256": "a" * 64, "canonical_input_sha256": "b" * 64},
                 "win": win, "binary_edge_realized": edge,
             }
             for observed_at, win, edge in (
@@ -161,7 +177,7 @@ class WeatherSourceRouterTests(unittest.TestCase):
                 "market_id": market_id, "event_ticker": event_ticker, "market_date": market_date,
                 "source_id": "nws", "city_id": "miami_fl", "market_kind": "high", "contract_shape": "range",
                 "question_side": "above", "observed_at": observed_at, "outcome_known_at": "2026-08-05T00:00:00+00:00", "settlement_ts": "2026-08-05T00:00:00+00:00",
-                "eligible_for_edge_validation": True, "source_correctness_eligibility": "eligible_strict_source_proof",
+                "eligible_for_edge_validation": True, "source_correctness_eligibility": "eligible_strict_source_proof", "eligible_for_source_history": True, "strict_source_proof": {"status": "eligible", "reasons": []}, "source_provenance": {"source_record_sha256": "a" * 64, "canonical_input_sha256": "b" * 64},
                 "win": True, "binary_edge_realized": 0.5,
             }
             for market_id, event_ticker, market_date, observed_at in (
@@ -195,6 +211,9 @@ class WeatherSourceRouterTests(unittest.TestCase):
                 "question_side": "above",
                 "eligible_for_edge_validation": True,
                 "source_correctness_eligibility": "eligible_strict_source_proof",
+                "eligible_for_source_history": True,
+                "strict_source_proof": {"status": "eligible", "reasons": []},
+                "source_provenance": {"source_record_sha256": "a" * 64, "canonical_input_sha256": "b" * 64},
                 "outcome_known_at": "2026-05-02T00:00:00+00:00",
                 "settlement_ts": "2026-05-02T00:00:00+00:00",
                 "win": True,
@@ -208,6 +227,9 @@ class WeatherSourceRouterTests(unittest.TestCase):
                 "question_side": "above",
                 "eligible_for_edge_validation": True,
                 "source_correctness_eligibility": "eligible_strict_source_proof",
+                "eligible_for_source_history": True,
+                "strict_source_proof": {"status": "eligible", "reasons": []},
+                "source_provenance": {"source_record_sha256": "a" * 64, "canonical_input_sha256": "b" * 64},
                 "outcome_known_at": "2026-05-04T00:00:00+00:00",
                 "settlement_ts": "2026-05-04T00:00:00+00:00",
                 "win": True,

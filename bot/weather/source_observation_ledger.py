@@ -201,7 +201,7 @@ def is_eligible_for_future_history(row: Mapping[str, Any], future_decision_time:
     contribute only after its authoritative settlement timestamp, strictly.
     """
 
-    if row.get("eligible_for_source_history") is not True or row.get("source_correctness_eligibility") != _ELIGIBLE_TARGET_PROOF:
+    if row.get("eligible_for_source_history") is not True or row.get("source_correctness_eligibility") != _ELIGIBLE_STRICT_SOURCE_PROOF:
         return False
     settlement, future = _parse_time(row.get("settlement_ts")), _parse_time(future_decision_time)
     return settlement is not None and future is not None and settlement < future

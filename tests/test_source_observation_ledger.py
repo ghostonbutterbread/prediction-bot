@@ -380,7 +380,9 @@ class SourceObservationLedgerTests(unittest.TestCase):
     def test_history_eligibility_uses_settlement_time_strictly_not_retrieval_time(self) -> None:
         settled = {
             "eligible_for_source_history": True,
-            "source_correctness_eligibility": "eligible_exact_target_proof",
+            "source_correctness_eligibility": "eligible_strict_source_proof",
+            "strict_source_proof": {"status": "eligible", "reasons": []},
+            "source_provenance": {"source_record_sha256": "a" * 64, "canonical_input_sha256": "b" * 64},
             "settlement_ts": "2026-08-04T00:00:00+00:00",
             "resolution_resolved_at": "2026-08-07T00:00:00+00:00",
         }

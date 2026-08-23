@@ -77,6 +77,23 @@ class ForecastTargetingTests(unittest.TestCase):
 
         self.assertIsNone(result)
 
+    def test_nws_records_offset_aware_source_timezone_for_exact_target(self):
+        feed = NWSFeed()
+        feed.http = _Http({
+            "properties": {"periods": [
+                {"number": 1, "name": "Tomorrow", "temperature": 84, "isDaytime": True,
+                 "startTime": "2026-08-02T06:00:00-05:00", "endTime": "2026-08-02T18:00:00-05:00"},
+                {"number": 2, "name": "Tomorrow Night", "temperature": 69, "isDaytime": False,
+                 "startTime": "2026-08-02T18:00:00-05:00", "endTime": "2026-08-03T06:00:00-05:00"},
+            ]},
+        })
+        feed._points_cache["austin"] = (datetime.now(timezone.utc), ("EWX", 152, 91))
+
+        snapshot = feed.get_forecast("austin", target_date="2026-08-02")
+
+        self.assertTrue(snapshot.scoreable_forecast)
+        self.assertEqual(snapshot.source_details["target_mapping"]["source_timezone"], "UTC-05:00")
+
     def test_nws_fails_closed_when_target_period_timezone_is_ambiguous(self):
         feed = NWSFeed()
         feed.http = _Http({

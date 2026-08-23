@@ -106,6 +106,9 @@ def source_history_row(*, market_id: str, settlement_ts: str, outcome: str = "YE
         "no_price": 0.60,
         "eligible_for_reliability": True,
         "source_correctness_eligibility": "eligible_strict_source_proof",
+        "eligible_for_source_history": True,
+        "strict_source_proof": {"status": "eligible", "reasons": []},
+        "source_provenance": {"source_record_sha256": "a" * 64, "canonical_input_sha256": "b" * 64},
         "settlement_ts": settlement_ts,
     }
 

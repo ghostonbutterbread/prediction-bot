@@ -37,8 +37,21 @@ def source_history_target_proof_rejection_key(row: Mapping[str, Any]) -> str | N
     """Return the audit counter for a row barred from source history."""
 
     status = row.get("source_correctness_eligibility")
-    if status == ELIGIBLE_STRICT_SOURCE_PROOF:
+    strict_proof = row.get("strict_source_proof")
+    source_provenance = row.get("source_provenance")
+    if (
+        status == ELIGIBLE_STRICT_SOURCE_PROOF
+        and row.get("eligible_for_source_history") is True
+        and isinstance(strict_proof, Mapping)
+        and strict_proof.get("status") == "eligible"
+        and strict_proof.get("reasons") == []
+        and isinstance(source_provenance, Mapping)
+        and _is_sha256(source_provenance.get("source_record_sha256"))
+        and _is_sha256(source_provenance.get("canonical_input_sha256"))
+    ):
         return None
+    if status == ELIGIBLE_STRICT_SOURCE_PROOF:
+        return "history_rows_rejected_incomplete_strict_source_proof"
     if status is None:
         return "history_rows_rejected_missing_exact_target_proof_marker"
     normalized = str(status)
@@ -114,11 +127,16 @@ def build_source_router_replay_rows(
         if key != current_group_key:
             flush_group()
             for pair_ in current_group:
-                rejection_key = source_history_target_proof_rejection_key(pair_["edge"])
+                rejection_key = source_history_target_proof_rejection_key(pair_["ledger"])
                 if rejection_key is not None:
                     history_exclusions[rejection_key] += 1
                     continue
-                history.append(pair_["edge"])
+                history.append({
+                    **pair_["edge"],
+                    "eligible_for_source_history": pair_["ledger"].get("eligible_for_source_history"),
+                    "strict_source_proof": dict(pair_["ledger"].get("strict_source_proof") or {}),
+                    "source_provenance": dict(pair_["ledger"].get("source_provenance") or {}),
+                })
             current_group = []
             current_group_key = key
         current_group.append(pair)
@@ -686,6 +704,10 @@ def _recorded_forecast_sort_key(row: Mapping[str, Any]) -> tuple[datetime, datet
         row.get("forecast_temp_f"), row.get("source_name"),
     ) or ""
     return recorded_at, source_as_of, source_fetched_at, identity
+
+
+def _is_sha256(value: Any) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(char in "0123456789abcdef" for char in value.lower())
 
 
 def _normalized_identity_text(*values: Any) -> str | None:

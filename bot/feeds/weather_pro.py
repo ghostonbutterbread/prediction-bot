@@ -129,6 +129,22 @@ def _c_to_f(c: float) -> float:
     return c * 9/5 + 32
 
 
+
+def _timezone_offset_label(value: object) -> str | None:
+    """Preserve an explicit source-local UTC offset from NWS period evidence."""
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    offset = parsed.utcoffset()
+    if offset is None:
+        return None
+    total_minutes = int(offset.total_seconds() // 60)
+    sign = "+" if total_minutes >= 0 else "-"
+    hours, minutes = divmod(abs(total_minutes), 60)
+    return f"UTC{sign}{hours:02d}:{minutes:02d}"
+
+
 def _target_date_text(target_date: str | None) -> str | None:
     if not isinstance(target_date, str):
         return None
@@ -453,6 +469,7 @@ class NWSFeed:
                         "mapping": "exact_source_local_nws_period" if target else None,
                         "source_period_start": period_start,
                         "source_period_end": period_end,
+                        "source_timezone": _timezone_offset_label(period_start),
                     },
                     "office": office,
                     "grid_x": grid_x,
