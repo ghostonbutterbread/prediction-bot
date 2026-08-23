@@ -18,12 +18,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True, help="absolute or working-directory-relative cohort config")
     parser.add_argument("--force", action="store_true", help="run even when the configured interval is not due")
+    parser.add_argument("--enable", action="store_true", help="explicitly enable the separate resolution feed for this one pass")
     args = parser.parse_args()
 
     config_path = Path(args.config).resolve()
     if not config_path.is_file():
         parser.error(f"cohort config does not exist: {config_path}")
-    result = run_resolution_feed_once(load_config(config_path), force=args.force)
+    config = load_config(config_path)
+    if args.enable:
+        config.setdefault("resolution_feed", {})["enabled"] = True
+    result = run_resolution_feed_once(config, force=args.force)
     print(result)
     return 0
 
