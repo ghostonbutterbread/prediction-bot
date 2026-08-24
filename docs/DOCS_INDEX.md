@@ -6,6 +6,14 @@ _Last updated: 2026-05-13_
 
 This file is the fast orientation map for the current docs set.
 
+## Integration dossiers
+
+Before reviving, merging, or replacing a non-trivial branch, read
+[`docs/INTEGRATION_STATUS.md`](INTEGRATION_STATUS.md), then the linked dossier
+under [`docs/integrations/`](integrations/README.md). Dossiers capture branch
+intent/inspiration, contract, evidence, blockers, and successor work; they are
+updated with every material coding change and finalized at the branch decision.
+
 Use it when you need to answer:
 - which spec should I read first?
 - which doc is strategic vs implementation-level?

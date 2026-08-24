@@ -13,6 +13,12 @@ This repository operates paper-only prediction-market research and forward-shado
 - Use a clean worktree based on `main` for implementation and review.
 - `main` contains reviewed shared infrastructure, controls, integrity fixes, and accepted paper-shadow lanes.
 - An experiment branch contains **one coherent behavioral hypothesis**. Create it from current `main`.
+- Every material code change updates that branch's tracked integration dossier in
+  `docs/integrations/` before commit. Use `docs/integrations/TEMPLATE.md` and
+  link it from `docs/INTEGRATION_STATUS.md`; record intent, inspiration/base,
+  target, contract, tests/review, blockers, activation boundary, and successor.
+  Finalize the dossier as integrated, blocked, superseded, or rejected at the
+  branch decision. A branch name or untracked worktree note is never enough.
 - Keep at most one active child experiment per hypothesis area. Do not make a new branch only to rerun a replay or change comparison settings.
 - Before a merge, verify actual ancestry with `git merge-base`, run the appropriate tests, inspect `git diff --check`, and preserve a linear history when possible.
 - Merge an experiment into `main` only after its code/test review and its explicitly defined evidence gate are satisfied. Otherwise retain it paper-only or delete/archive it.
