@@ -32,6 +32,7 @@ _IDENTITY_FIELDS = (
 )
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$", re.IGNORECASE)
 _ELIGIBLE_TARGET_PROOF = "eligible_exact_target_proof"
+_ELIGIBLE_STRICT_SOURCE_PROOF = "eligible_strict_source_proof"
 _TARGET_ALIASES = ("source_target_date", "target_forecast_date", "forecast_target", "forecast_date")
 
 
@@ -68,6 +69,7 @@ def materialize_source_observation_ledger(
 
     input_sha256, outcome_sha256 = _sha256_file(inputs_path), _sha256_file(outcomes_path)
     counters: Counter[str] = Counter()
+    strict_rejection_counts: Counter[str] = Counter()
     pending_by_id: dict[str, dict[str, Any]] = {}
     for _line_number, row in _read_jsonl(inputs_path):
         counters["input_records_seen"] += 1
@@ -83,6 +85,10 @@ def materialize_source_observation_ledger(
             counters["inputs_without_source_observations"] += 1
         for pending in pending_rows:
             counters["source_observations_seen"] += 1
+            strict_proof = pending.get("strict_source_proof")
+            if isinstance(strict_proof, Mapping) and strict_proof.get("status") != "eligible":
+                for reason in strict_proof.get("reasons") or ():
+                    strict_rejection_counts[str(reason)] += 1
             observation_id = pending["source_observation_id"]
             existing = pending_by_id.get(observation_id)
             if existing is None:
@@ -99,7 +105,7 @@ def materialize_source_observation_ledger(
     void_rows: list[dict[str, Any]] = []
     for pending in pending_rows:
         eligibility = pending.get("source_correctness_eligibility")
-        if eligibility != _ELIGIBLE_TARGET_PROOF:
+        if eligibility not in {_ELIGIBLE_TARGET_PROOF, _ELIGIBLE_STRICT_SOURCE_PROOF}:
             reason = str(eligibility or "unusable_legacy_target_unproven")
             counters[reason] += 1
             unusable_rows.append(_unusable_row(pending, reason))
@@ -128,7 +134,7 @@ def materialize_source_observation_ledger(
             "official_outcome": outcome["official_outcome"],
             "direction_correct": implied == outcome["official_outcome"],
             "eligible_for_reliability": True,
-            "eligible_for_source_history": True,
+            "eligible_for_source_history": eligibility == _ELIGIBLE_STRICT_SOURCE_PROOF,
             "availability_field": "settlement_ts",
             "settlement_ts": outcome["settlement_ts"],
             "known_after": outcome["settlement_ts"],
@@ -174,6 +180,7 @@ def materialize_source_observation_ledger(
             )},
             "pending": len(pending_rows), "settled": len(settled_rows), "unsettled_or_unusable": len(unusable_rows),
             "void_resolution": len(void_rows),
+            "strict_proof_rejection_counts": dict(sorted(strict_rejection_counts.items())),
         },
         "output_artifacts": {
             PENDING_FILENAME: {"sha256": hashlib.sha256(pending_bytes).hexdigest(), "record_count": len(pending_rows)},
@@ -194,7 +201,7 @@ def is_eligible_for_future_history(row: Mapping[str, Any], future_decision_time:
     contribute only after its authoritative settlement timestamp, strictly.
     """
 
-    if row.get("eligible_for_source_history") is not True or row.get("source_correctness_eligibility") != _ELIGIBLE_TARGET_PROOF:
+    if row.get("eligible_for_source_history") is not True or row.get("source_correctness_eligibility") != _ELIGIBLE_STRICT_SOURCE_PROOF:
         return False
     settlement, future = _parse_time(row.get("settlement_ts")), _parse_time(future_decision_time)
     return settlement is not None and future is not None and settlement < future
@@ -225,6 +232,18 @@ def _pending_rows_for_input(row: Mapping[str, Any], identity: Mapping[str, Any])
             target_proof = source_correctness_target_proof(
                 source_record=source_record, snapshot=snapshot, market_date=observation.market.market_date,
             )
+            strict_proof = strict_source_observation_proof(
+                source_record=source_record,
+                snapshot=snapshot,
+                market_metadata=metadata,
+                market_date=observation.market.market_date,
+                market_kind=observation.market.market_kind,
+                contract_shape=observation.market.contract_shape,
+                question_side=observation.market.question_side,
+            )
+            eligibility = _ELIGIBLE_STRICT_SOURCE_PROOF if (
+                target_proof["status"] == _ELIGIBLE_TARGET_PROOF and strict_proof["status"] == "eligible"
+            ) else target_proof["status"]
             source_as_of = _first_text(
                 _mapping_text(source_record, "source_as_of", "as_of", "observed_at"),
                 _mapping_text(snapshot, "source_as_of", "as_of", "source_timestamp", "fetched_at"),
@@ -266,8 +285,13 @@ def _pending_rows_for_input(row: Mapping[str, Any], identity: Mapping[str, Any])
                 "source_id": observation.source_id, "source_name": observation.source_name,
                 "source_as_of": source_as_of, "source_fetched_at": source_fetched_at,
                 "canonical_source_payload_sha256": source_payload_sha256, "target_identity": target_identity,
-                "source_correctness_eligibility": target_proof["status"],
+                "source_correctness_eligibility": eligibility,
                 "source_target_proof": target_proof,
+                "strict_source_proof": strict_proof,
+                "source_provenance": {
+                    "source_record_sha256": hashlib.sha256(_canonical_bytes(source_record)).hexdigest(),
+                    "canonical_input_sha256": identity["canonical_input_sha256"],
+                },
                 "forecast_temp_f": observation.forecast_temp_f, "threshold": observation.market.threshold,
                 "question_side": observation.market.question_side, "city_id": observation.market.city_id or "unknown",
                 "market_kind": observation.market.market_kind or "unknown", "contract_shape": observation.market.contract_shape or "unknown",
@@ -330,6 +354,77 @@ def source_correctness_target_proof(
         "status": status, "evidence_version": "legacy", "market_target_date": normalized_market_date,
         "source_target_date": source_target_date,
     }
+
+
+
+def strict_source_observation_proof(
+    *,
+    source_record: Mapping[str, Any],
+    snapshot: Mapping[str, Any],
+    market_metadata: Mapping[str, Any],
+    market_date: Any,
+    market_kind: Any,
+    contract_shape: Any,
+    question_side: Any,
+) -> dict[str, Any]:
+    """Validate the full recorded source-to-contract proof without inference.
+
+    This is deliberately separate from target-date correctness: incomplete v1
+    observations may remain useful audit/reliability evidence, but they cannot
+    become strict chronological Source Router history.
+    """
+    reasons: list[str] = []
+    source_id = _text(source_record.get("source_id"))
+    source_as_of = _text(source_record.get("source_as_of"))
+    mapping = source_record.get("target_mapping") if isinstance(source_record.get("target_mapping"), Mapping) else {}
+    if not source_id:
+        reasons.append("missing_source_id")
+    if not source_as_of or _parse_time(source_as_of) is None:
+        reasons.append("missing_or_unoffset_source_as_of")
+    if not _text(mapping.get("source_timezone")):
+        reasons.append("missing_source_timezone")
+
+    source_city = _normalized_city(source_record.get("source_location_city"))
+    recorded_city = _normalized_city(
+        _first_text(_mapping_text(market_metadata, "city"), _nested_text(snapshot, "station_resolution", "city"))
+    )
+    if not source_city:
+        reasons.append("missing_source_location_city")
+    elif not recorded_city or source_city != recorded_city:
+        reasons.append("source_city_conflicts_with_recorded_market_city")
+
+    expected = {
+        "forecast_measurement_kind": _text(market_kind),
+        "contract_shape": _text(contract_shape),
+        "question_side": _text(question_side),
+    }
+    for field, expected_value in expected.items():
+        actual_value = _text(source_record.get(field))
+        if not actual_value:
+            reasons.append(f"missing_{field}")
+        elif not expected_value or actual_value.lower() != expected_value.lower():
+            reasons.append(f"{field}_conflicts_with_recorded_contract")
+    if _normalized_date(market_date) is None:
+        reasons.append("missing_recorded_market_date")
+    return {
+        "status": "eligible" if not reasons else "unusable_strict_source_proof",
+        "reasons": reasons,
+        "source_id": source_id,
+        "source_as_of": source_as_of,
+        "source_timezone": _text(mapping.get("source_timezone")),
+        "source_location_city": source_city,
+        "recorded_market_city": recorded_city,
+        "market_kind": expected["forecast_measurement_kind"],
+        "contract_shape": expected["contract_shape"],
+        "question_side": expected["question_side"],
+    }
+
+
+def _normalized_city(value: Any) -> str | None:
+    text = _text(value)
+    if not text:
+        return None
+    return re.sub(r"[^a-z0-9]+", "", text.lower()) or None
 
 
 def _normalized_date(value: Any) -> str | None:

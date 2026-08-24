@@ -129,6 +129,22 @@ def _c_to_f(c: float) -> float:
     return c * 9/5 + 32
 
 
+
+def _timezone_offset_label(value: object) -> str | None:
+    """Preserve an explicit source-local UTC offset from NWS period evidence."""
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    offset = parsed.utcoffset()
+    if offset is None:
+        return None
+    total_minutes = int(offset.total_seconds() // 60)
+    sign = "+" if total_minutes >= 0 else "-"
+    hours, minutes = divmod(abs(total_minutes), 60)
+    return f"UTC{sign}{hours:02d}:{minutes:02d}"
+
+
 def _target_date_text(target_date: str | None) -> str | None:
     if not isinstance(target_date, str):
         return None
@@ -453,6 +469,7 @@ class NWSFeed:
                         "mapping": "exact_source_local_nws_period" if target else None,
                         "source_period_start": period_start,
                         "source_period_end": period_end,
+                        "source_timezone": _timezone_offset_label(period_start),
                     },
                     "office": office,
                     "grid_x": grid_x,
@@ -866,7 +883,13 @@ class ProWeatherEngine:
                 "market_target_date": market_date,
                 "sources": forecast.sources_used,
                 "agreement": forecast.source_agreement,
-                "source_details": self._source_contribution_details(forecast),
+                "source_details": self._source_contribution_details(
+                    forecast,
+                    city=city,
+                    forecast_measurement_kind="high" if is_high else "low",
+                    contract_shape="range" if is_range else "tail",
+                    question_side="range" if is_range else "above" if is_above else "below" if is_below else None,
+                ),
                 "settlement_source": forecast.details.get("settlement_source"),
                 "nws_high": forecast.details.get("nws_high"),
                 "nws_low": forecast.details.get("nws_low"),
@@ -875,7 +898,14 @@ class ProWeatherEngine:
         }
 
     @staticmethod
-    def _source_contribution_details(forecast: MultiSourceForecast) -> list[dict]:
+    def _source_contribution_details(
+        forecast: MultiSourceForecast,
+        *,
+        city: str | None = None,
+        forecast_measurement_kind: str | None = None,
+        contract_shape: str | None = None,
+        question_side: str | None = None,
+    ) -> list[dict]:
         settlement_source = forecast.details.get("settlement_source")
         sources = list(forecast.sources_used or [])
         has_settlement_source = settlement_source in sources
@@ -896,7 +926,12 @@ class ProWeatherEngine:
             snapshot = snapshot_by_source.get(source)
             target_mapping = snapshot.source_details.get("target_mapping") if snapshot else None
             details.append(_drop_none({
+                    "source_id": source.lower().replace("-", "_").replace(" ", "_"),
                     "source_name": source,
+                    "source_location_city": city,
+                    "forecast_measurement_kind": forecast_measurement_kind,
+                    "contract_shape": contract_shape,
+                    "question_side": question_side,
                     "source_evidence_version": snapshot.source_details.get("source_evidence_version") if snapshot else None,
                     "evidence_type": snapshot.source_details.get("evidence_type") if snapshot else None,
                     "forecast_availability": snapshot.source_details.get("forecast_availability") if snapshot else None,

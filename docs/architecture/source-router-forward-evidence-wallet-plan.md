@@ -102,6 +102,40 @@ canonical raw-row hash. The derived collapse manifest retains every member,
 selected representative, and reason. No raw-row volume will be presented as
 independent sample volume.
 
+## Collector/replay compatibility gate
+
+**This is a release gate, not optional documentation.** Before increasing
+Source Router strictness, changing the replay input schema, or declaring a
+collector cohort eligible, an agent must verify that the active observer
+collector actually emits every required field into a fresh immutable snapshot.
+A replay/materializer rule is not considered implemented until its collector
+producer and a bounded real-row compatibility check are also implemented.
+
+The current forward observer collector is healthy and is collecting valuable
+v1 source evidence: source names, v1 evidence type/scoreability, source-as-of,
+target mappings with source timezones, forecast values, and shared snapshot /
+candidate IDs. It is **not yet strict-v2 ready**: sampled fresh rows lack an
+explicit stable `source_id` and `collector_provenance` hash/locator chain, and
+the existing materializer does not yet validate all city/kind/shape/side proof
+components or collapse repeat polls. Therefore these rows must stay
+`v1_coverage_only` for strict Source Router history until the feature branch
+adds and verifies the producer/consumer contract.
+
+Every compatibility check must report, per fresh cohort:
+
+```text
+collector code commit and effective config
+snapshot ID, observed-at range, and raw archive path
+required-field present/missing counts by source evidence type
+replay-export accepted/rejected counts and named reasons
+strict pending/settled/unusable/VOID/collapsed counts
+```
+
+If a required field is absent, do **not** weaken the router or silently infer
+it downstream. Record the row as a coverage gap, add the smallest producer
+change plus test, and only then restart a paper/observer collector in a named
+fresh cohort after an explicit operational step.
+
 ## Forward artifact chain
 
 The collector remains the only shared-market publisher. The following are

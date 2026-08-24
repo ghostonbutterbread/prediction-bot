@@ -567,6 +567,9 @@ def _source_history_edge_rows(rows: Iterable[Mapping[str, Any]]) -> tuple[list[d
         historical["official_outcome"] = outcome
         historical["settlement_ts"] = _timestamp(settlement)
         edge = build_source_edge_evaluation_row(historical)
+        edge["eligible_for_source_history"] = historical.get("eligible_for_source_history")
+        edge["strict_source_proof"] = dict(historical.get("strict_source_proof") or {})
+        edge["source_provenance"] = dict(historical.get("source_provenance") or {})
         # The source ledger's hash-verified settlement timestamp is the sole
         # availability time for this selector-only history.
         edge["settlement_ts"] = historical["settlement_ts"]

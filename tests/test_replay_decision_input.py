@@ -157,6 +157,18 @@ class ReplayDecisionInputTests(unittest.TestCase):
             {(error.code, error.path) for error in result.errors},
         )
 
+    def test_preserves_strict_source_question_side_in_sealed_input(self):
+        row = _snapshot_row(patch={"collector_artifact_schema_version": 2})
+        source = row["decision_artifact"]["source_context"]["data"]["weather_source_snapshot"]["sources"][0]
+        source["question_side"] = "above"
+
+        result = build_replay_decision_input_v1(row)
+
+        self.assertTrue(result.ok, [error.to_dict() for error in result.errors])
+        assert result.record is not None
+        sealed_source = result.record["source_inputs"]["source_context"]["data"]["weather_source_snapshot"]["sources"][0]
+        self.assertEqual(sealed_source["question_side"], "above")
+
     def test_strict_v2_collector_row_requires_source_evidence_classification(self):
         row = _snapshot_row(patch={"collector_artifact_schema_version": 2})
         del row["decision_artifact"]["source_context"]["data"]["weather_source_snapshot"]["sources"][0]["source_evidence_version"]

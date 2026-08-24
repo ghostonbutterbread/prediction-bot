@@ -30,15 +30,28 @@ DEFAULT_MIN_SAMPLE_COUNT = 5
 BUY_YES = "BUY_YES"
 BUY_NO = "BUY_NO"
 SKIP = "SKIP"
-ELIGIBLE_EXACT_TARGET_PROOF = "eligible_exact_target_proof"
+ELIGIBLE_STRICT_SOURCE_PROOF = "eligible_strict_source_proof"
 
 
 def source_history_target_proof_rejection_key(row: Mapping[str, Any]) -> str | None:
     """Return the audit counter for a row barred from source history."""
 
     status = row.get("source_correctness_eligibility")
-    if status == ELIGIBLE_EXACT_TARGET_PROOF:
+    strict_proof = row.get("strict_source_proof")
+    source_provenance = row.get("source_provenance")
+    if (
+        status == ELIGIBLE_STRICT_SOURCE_PROOF
+        and row.get("eligible_for_source_history") is True
+        and isinstance(strict_proof, Mapping)
+        and strict_proof.get("status") == "eligible"
+        and strict_proof.get("reasons") == []
+        and isinstance(source_provenance, Mapping)
+        and _is_sha256(source_provenance.get("source_record_sha256"))
+        and _is_sha256(source_provenance.get("canonical_input_sha256"))
+    ):
         return None
+    if status == ELIGIBLE_STRICT_SOURCE_PROOF:
+        return "history_rows_rejected_incomplete_strict_source_proof"
     if status is None:
         return "history_rows_rejected_missing_exact_target_proof_marker"
     normalized = str(status)
@@ -114,11 +127,16 @@ def build_source_router_replay_rows(
         if key != current_group_key:
             flush_group()
             for pair_ in current_group:
-                rejection_key = source_history_target_proof_rejection_key(pair_["edge"])
+                rejection_key = source_history_target_proof_rejection_key(pair_["ledger"])
                 if rejection_key is not None:
                     history_exclusions[rejection_key] += 1
                     continue
-                history.append(pair_["edge"])
+                history.append({
+                    **pair_["edge"],
+                    "eligible_for_source_history": pair_["ledger"].get("eligible_for_source_history"),
+                    "strict_source_proof": dict(pair_["ledger"].get("strict_source_proof") or {}),
+                    "source_provenance": dict(pair_["ledger"].get("source_provenance") or {}),
+                })
             current_group = []
             current_group_key = key
         current_group.append(pair)
@@ -614,7 +632,7 @@ def _collapse_selector_history(
     """Use one forecast observation per independent settled source outcome.
 
     Raw observations are deliberately retained by the caller's audit ledger.
-    This is a selector-only view: newest recorded forecast observation wins
+    This is a selector-only view: the earliest valid recorded forecast wins
     within an outcome unit, never an observation's correctness or outcome.
     """
 
@@ -625,7 +643,7 @@ def _collapse_selector_history(
         if used_fallback:
             stats["history_conservative_identity_fallback_rows"] += 1
         representative = units.get(unit)
-        if representative is None or _recorded_forecast_sort_key(row) > _recorded_forecast_sort_key(representative):
+        if representative is None or _recorded_forecast_sort_key(row) < _recorded_forecast_sort_key(representative):
             units[unit] = dict(row)
     stats["history_independent_rows_used"] = len(units)
     stats["history_reobservation_excluded"] = len(rows) - len(units)
@@ -685,7 +703,11 @@ def _recorded_forecast_sort_key(row: Mapping[str, Any]) -> tuple[datetime, datet
         row.get("source_observation_id"), row.get("observation_id"), row.get("edge_evaluation_id"),
         row.get("forecast_temp_f"), row.get("source_name"),
     ) or ""
-    return recorded_at, source_as_of, source_fetched_at, identity
+    return source_as_of, recorded_at, source_fetched_at, identity
+
+
+def _is_sha256(value: Any) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(char in "0123456789abcdef" for char in value.lower())
 
 
 def _normalized_identity_text(*values: Any) -> str | None:
