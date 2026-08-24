@@ -1,41 +1,25 @@
-# Integration dossiers
+# Integration dossier template
 
-This directory is the repository's durable branch-handoff record. It prevents a
-branch name, a local worktree, or chat history from becoming the only account of
-why work exists and whether it is safe to merge.
+`TEMPLATE.md` is the repository-owned starting point for a **temporary dossier
+on an owning feature or experiment branch**. It is not a beta/main status board.
 
-## Required lifecycle
+## Lifecycle
 
-For every material code change, the owning branch updates its dossier before the
-commit that changes its integration facts. Create it from `TEMPLATE.md` when the
-branch first gains a material implementation or experiment contract.
+1. When material code work begins, create `docs/integrations/<topic>.md` in the
+   owning branch from `TEMPLATE.md`.
+2. Before every material code commit, update the dossier when intent, contract,
+   evidence, blockers, target, or successor work changed.
+3. During review, compare its statements with the candidate diff and receipts;
+   stale statements or vague blockers fail review.
+4. A blocker that defers verification must name the exact missing test/evidence,
+   command or fixture where known, and the trigger for running it.
+5. For a blocked or incomplete branch, retain its dossier in that branch so a
+   later agent can read the full handoff.
+6. For an accepted merge, record the final decision in the feature branch, then
+   remove its dossier from beta/main in the merge cleanup. The closed record
+   remains discoverable in Git history without cluttering the target checkout.
+7. Delete the dossier only with a merged, rejected, or superseded branch.
 
-A dossier records:
-
-- intent and source/inspiration documents;
-- branch, base commit, intended target, and status;
-- implemented behavior and contract boundaries;
-- tests, review, and evidence receipts;
-- blockers, deferred work, and explicit non-claims;
-- separate integration and activation/promotion gates; and
-- the successor branch or document when work is superseded or rejected.
-
-Update the dossier whenever code changes alter the contract, evidence, blockers,
-target, or next step. At a branch decision, mark it `integrated`, `blocked`,
-`superseded`, or `rejected`; do not leave an ambiguous active dossier.
-
-## Canonical status
-
-`../INTEGRATION_STATUS.md` is the discoverability index. It links active,
-blocked, and recently decided dossiers, but does not duplicate their evidence.
-The dossier itself is canonical.
-
-## Scope
-
-Use this for material feature, experiment, refactor, replay, lifecycle, or
-contract work. Trivial spelling-only documentation changes do not need a new
-dossier unless they change a currently recorded decision or boundary.
-
-A Git merge remains separate from runtime activation. A dossier must distinguish
-repository integration readiness from observer/paper cohort eligibility and any
-live/promotion readiness.
+A Git merge remains separate from runtime activation. The dossier must
+separately state repository integration readiness, observer/paper cohort
+gates, and promotion/live boundaries.

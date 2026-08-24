@@ -6,13 +6,14 @@ _Last updated: 2026-05-13_
 
 This file is the fast orientation map for the current docs set.
 
-## Integration dossiers
+## Feature-branch integration dossiers
 
-Before reviving, merging, or replacing a non-trivial branch, read
-[`docs/INTEGRATION_STATUS.md`](INTEGRATION_STATUS.md), then the linked dossier
-under [`docs/integrations/`](integrations/README.md). Dossiers capture branch
-intent/inspiration, contract, evidence, blockers, and successor work; they are
-updated with every material coding change and finalized at the branch decision.
+Before reviving, merging, or replacing a non-trivial feature branch, read that
+branch's `docs/integrations/<topic>.md` when present. Dossiers are temporary
+feature-branch handoffs: they capture intent/inspiration, contract, evidence,
+blockers, deferred tests, and successor work. Reviewers reconcile them with the
+diff and receipts. Do not use beta/main as a historical dossier board; merge
+cleanup removes resolved dossiers from the target lane.
 
 Use it when you need to answer:
 - which spec should I read first?
