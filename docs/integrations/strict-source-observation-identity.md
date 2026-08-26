@@ -1,6 +1,6 @@
 # Strict source-observation identity integration dossier
 
-- **Status:** feature
+- **Status:** review-ready
 - **Owner:** Hermes Agent
 - **Branch:** `fix/strict-source-observation-identity`
 - **Base commit:** `3712485` (`beta`)
@@ -41,3 +41,4 @@ Fix a real strict-source-ledger failure: distinct recorded source records could 
 
 - 2026-08-26 — created after reproducing source-observation ID conflict on current collector-derived replay inputs.
 - 2026-08-26 — added source-record provenance to the identity and a regression test; focused verification passed.
+- 2026-08-26 — independent read-only review exercised 70 related tests without a code finding; Ryushe directed local beta integration.
