@@ -271,10 +271,12 @@ def _pending_rows_for_input(row: Mapping[str, Any], identity: Mapping[str, Any])
                 "target_identity": target_identity,
             }
             source_payload_sha256 = hashlib.sha256(_canonical_bytes(source_payload)).hexdigest()
+            source_record_sha256 = hashlib.sha256(_canonical_bytes(source_record)).hexdigest()
             source_observation_id = "sha256:" + hashlib.sha256(_canonical_bytes({
                 "canonical_input_sha256": identity["canonical_input_sha256"], "decision_key": identity["decision_key"],
                 "source_id": observation.source_id, "target_identity": target_identity,
                 "canonical_source_payload_sha256": source_payload_sha256,
+                "source_record_sha256": source_record_sha256,
             })).hexdigest()
             rows.append({
                 "schema_name": "pending_source_observation", "schema_version": SCHEMA_VERSION,
@@ -289,7 +291,7 @@ def _pending_rows_for_input(row: Mapping[str, Any], identity: Mapping[str, Any])
                 "source_target_proof": target_proof,
                 "strict_source_proof": strict_proof,
                 "source_provenance": {
-                    "source_record_sha256": hashlib.sha256(_canonical_bytes(source_record)).hexdigest(),
+                    "source_record_sha256": source_record_sha256,
                     "canonical_input_sha256": identity["canonical_input_sha256"],
                 },
                 "forecast_temp_f": observation.forecast_temp_f, "threshold": observation.market.threshold,

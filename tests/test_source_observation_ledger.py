@@ -148,6 +148,20 @@ class SourceObservationLedgerTests(unittest.TestCase):
         self.assertEqual(metadata["counts"]["settled"], 2)
         self.assertEqual(metadata["counts"]["unsettled_or_unusable"], 1)
 
+    def test_distinct_recorded_source_payloads_do_not_conflict_when_core_fields_match(self) -> None:
+        record = _input()
+        duplicate = dict(record["source_inputs"]["source_context"]["data"]["weather_source_snapshot"]["sources"][0])
+        duplicate["weight"] = 0.5
+        record["source_inputs"]["source_context"]["data"]["weather_source_snapshot"]["sources"].append(duplicate)
+
+        metadata, artifacts = self._run([record], [_outcome(record)])
+
+        nws_rows = [row for row in artifacts["pending_source_observations"] if row["source_id"] == "nws"]
+        self.assertEqual(len(nws_rows), 2)
+        self.assertEqual(len({row["source_observation_id"] for row in nws_rows}), 2)
+        self.assertEqual(len({row["source_provenance"]["source_record_sha256"] for row in nws_rows}), 2)
+        self.assertEqual(metadata["counts"]["pending"], 4)
+
     def test_pending_has_no_outcomes_or_action_price_stake_data(self) -> None:
         record = _input()
         metadata, artifacts = self._run([record], [_outcome(record)])
