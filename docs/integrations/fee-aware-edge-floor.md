@@ -14,8 +14,9 @@ A **descriptive, non-promotion-grade** root-loss report at `/mnt/data-collection
 
 ## Verification
 
-- Focused test covers a baseline BUY that is rejected and one that is retained using only decision-time price/edge/fee inputs.
-- Pending: affected lane test suite, independent review, beta merge decision.
+- Focused test covers baseline BUY_YES and BUY_NO retention/rejection using only decision-time side probability, executable side ask, and fee inputs.
+- Focused suite: `PYTHONPATH=. python3 -m unittest tests.test_paper_shadow_lanes tests.test_collector_lane_replay` (56 tests, 1 skipped).
+- Pending: beta merge decision.
 
 ## Activation boundary
 

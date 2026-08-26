@@ -236,6 +236,16 @@ parameters:
         self.assertEqual(approved["reason_code"], "approved_fee_aware_edge_floor")
         self.assertAlmostEqual(approved["payout_aware"]["fee_aware_net_edge"], 0.05124)
 
+        no_baseline = {**baseline, "action": "BUY_NO"}
+        no_side = _fee_aware_edge_floor_decision(
+            lane,
+            {"model_probability": 0.33, "best_no_ask": 0.60, "confidence": 0.8},
+            no_baseline,
+        )
+        self.assertEqual(no_side["action"], "BUY_NO")
+        self.assertAlmostEqual(no_side["payout_aware"]["side_probability"], 0.67)
+        self.assertAlmostEqual(no_side["payout_aware"]["fee_aware_net_edge"], 0.05124)
+
     def _production_lanes_dir(self) -> Path:
         return Path(__file__).resolve().parents[1] / "lanes"
 
