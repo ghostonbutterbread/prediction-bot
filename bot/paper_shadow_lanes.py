@@ -31,6 +31,7 @@ SOURCE_RELIABILITY_LANE_ID = "shadow_source_reliability"
 SOURCE_SCOREBOARD_LANE_ID = "shadow_source_scoreboard"
 SOURCE_ROUTER_LANE_ID = "shadow_source_router"
 SOURCE_ROUTER_NO_PRICE_GUARD_LANE_ID = "shadow_source_router_no_price_guard"
+FEE_AWARE_EDGE_FLOOR_LANE_ID = "shadow_fee_aware_edge_floor"
 SOURCE_RELIABILITY_EVALUATOR_LANE_IDS = frozenset({SOURCE_RELIABILITY_LANE_ID, SOURCE_SCOREBOARD_LANE_ID})
 SOURCE_SCOREBOARD_LANE_IDS = frozenset({SOURCE_SCOREBOARD_LANE_ID})
 SOURCE_COLLECTION_LANE_IDS = frozenset(
@@ -51,6 +52,7 @@ KNOWN_LANE_IDS = (
     SOURCE_SCOREBOARD_LANE_ID,
     SOURCE_ROUTER_LANE_ID,
     SOURCE_ROUTER_NO_PRICE_GUARD_LANE_ID,
+    FEE_AWARE_EDGE_FLOOR_LANE_ID,
 )
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MAX_COMPACT_FUTURE_PNL_QUESTION_CHARS = 200
@@ -293,6 +295,8 @@ def _build_lane_row(
             "decision_only": True,
         },
     }
+    if isinstance(decision.get("payout_aware"), Mapping):
+        row["provenance"]["payout_aware"] = dict(decision["payout_aware"])
     if isinstance(decision.get("source_reliability"), Mapping):
         row["provenance"]["source_reliability"] = dict(decision["source_reliability"])
         if _is_source_scoreboard_lane(lane.lane_id):
@@ -437,6 +441,65 @@ def _confidence_floor_decision(
             "reason": f"Stable paper buy meets configured confidence floor {floor:.2f}",
         }
     )
+    return baseline
+
+
+def _fee_aware_edge_floor_decision(
+    lane: _LaneDefinition,
+    signal: Mapping[str, Any],
+    source_row: dict[str, Any] | None,
+    shared_candidate: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Keep a baseline buy only when its recorded edge clears a fee-aware floor.
+
+    This is a paper-only selectivity comparator. It uses only decision-time
+    signal fields and does not recompute a model probability, price, or size.
+    """
+    baseline = _passthrough_decision(
+        _LaneDefinition("control_stable", source_wallet_id=lane.source_wallet_id or STABLE_PAPER_WALLET_ID),
+        signal,
+        source_row,
+        shared_candidate,
+    )
+    action = str(baseline.get("action") or "SKIP").upper()
+    if action not in {"BUY_YES", "BUY_NO"}:
+        baseline.update({"action": "SKIP", "reason_code": "baseline_skip", "approved_position_size_usd": 0.0})
+        return baseline
+    probability = _number(signal.get("model_probability"), (source_row or {}).get("model_probability"))
+    price_key = "best_yes_ask" if action == "BUY_YES" else "best_no_ask"
+    entry_price = _number(signal.get(price_key), (source_row or {}).get(price_key), (source_row or {}).get("entry_price"))
+    fee_rate = _number(lane.parameters.get("fee_rate"))
+    fee_rate = 0.07 if fee_rate is None else fee_rate
+    floor = _number(lane.parameters.get("min_fee_aware_net_edge"))
+    floor = 0.03 if floor is None else floor
+    if probability is None or entry_price is None or not 0.0 < probability < 1.0 or not 0.0 < entry_price < 1.0 or not 0.0 <= fee_rate < 1.0:
+        baseline.update({
+            "action": "SKIP", "reason_code": "fee_aware_edge_inputs_unavailable",
+            "reason": "Baseline buy lacks a valid decision-time model probability, executable side price, or fee rate",
+            "approved_position_size_usd": 0.0,
+        })
+        return baseline
+    side_probability = probability if action == "BUY_YES" else 1.0 - probability
+    raw_edge = side_probability - entry_price
+    expected_fee_drag = side_probability * (1.0 - entry_price) * fee_rate
+    net_edge = raw_edge - expected_fee_drag
+    baseline["payout_aware"] = {
+        "entry_price": round(entry_price, 6), "model_probability": round(probability, 6),
+        "side_probability": round(side_probability, 6), "raw_edge": round(raw_edge, 6), "fee_rate": round(fee_rate, 6),
+        "expected_fee_drag": round(expected_fee_drag, 6), "fee_aware_net_edge": round(net_edge, 6),
+        "min_fee_aware_net_edge": round(floor, 6), "decision_contract": "baseline_buy_only_fee_aware_selectivity_comparator",
+    }
+    if net_edge < floor:
+        baseline.update({
+            "action": "SKIP", "reason_code": "fee_aware_edge_below_floor",
+            "reason": f"Baseline buy fee-aware net edge {net_edge:.4f} is below configured floor {floor:.4f}",
+            "approved_position_size_usd": 0.0,
+        })
+        return baseline
+    baseline.update({
+        "reason_code": "approved_fee_aware_edge_floor",
+        "reason": f"Baseline buy fee-aware net edge {net_edge:.4f} meets configured floor {floor:.4f}",
+    })
     return baseline
 
 
@@ -653,6 +716,7 @@ LANE_EVALUATORS = {
     "passthrough": _passthrough_decision,
     "confidence_floor": _confidence_floor_decision,
     "premium_city": _premium_city_decision,
+    "fee_aware_edge_floor": _fee_aware_edge_floor_decision,
     "source_reliability": _source_reliability_decision,
     "source_router": _source_router_decision,
 }

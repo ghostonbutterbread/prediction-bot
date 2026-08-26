@@ -120,6 +120,10 @@ Run commands from the activated `.venv`.
 
 When the news feed is unavailable, its weight is redistributed proportionally to the remaining active signals (not zeroed out).
 
+### Research objective
+
+Paper-shadow experimentation optimizes **fee-aware net expected value and payout-aware P&L**, not trade count or directional win rate. A lane may deliberately take fewer trades when decision-time evidence does not clear its net-edge and cost gate. Historical results are hypotheses only: validate a selected lane on a new, chronologically forward paper cohort before promotion.
+
 ### Position Sizing
 Uses **half-Kelly Criterion** for mathematically optimal bet sizing:
 - Kalshi fee (7% on winnings) is deducted from expected value before computing Kelly fraction
