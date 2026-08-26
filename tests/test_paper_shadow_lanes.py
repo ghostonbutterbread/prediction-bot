@@ -202,6 +202,40 @@ parameters:
         )
         return lanes_dir
 
+    def test_fee_aware_edge_floor_rejects_baseline_buy_below_net_edge(self):
+        from bot.paper_shadow_lanes import _fee_aware_edge_floor_decision, _LaneDefinition
+
+        baseline = {
+            "action": "BUY_YES",
+            "reason_code": "approved",
+            "requested_position_size_usd": 10.0,
+            "approved_position_size_usd": 10.0,
+        }
+        lane = _LaneDefinition(
+            "shadow_fee_aware_edge_floor",
+            lane_type="fee_aware_edge_floor",
+            source_wallet_id="stable_paper",
+            parameters={"min_fee_aware_net_edge": 0.03, "fee_rate": 0.07},
+        )
+        rejected = _fee_aware_edge_floor_decision(
+            lane,
+            {"edge": 0.07, "best_yes_ask": 0.20, "confidence": 0.8},
+            baseline,
+        )
+        self.assertEqual(rejected["action"], "SKIP")
+        self.assertEqual(rejected["reason_code"], "fee_aware_edge_below_floor")
+        self.assertEqual(rejected["approved_position_size_usd"], 0.0)
+        self.assertAlmostEqual(rejected["payout_aware"]["fee_aware_net_edge"], 0.014)
+
+        approved = _fee_aware_edge_floor_decision(
+            lane,
+            {"edge": 0.07, "best_yes_ask": 0.60, "confidence": 0.8},
+            baseline,
+        )
+        self.assertEqual(approved["action"], "BUY_YES")
+        self.assertEqual(approved["reason_code"], "approved_fee_aware_edge_floor")
+        self.assertAlmostEqual(approved["payout_aware"]["fee_aware_net_edge"], 0.042)
+
     def _production_lanes_dir(self) -> Path:
         return Path(__file__).resolve().parents[1] / "lanes"
 
