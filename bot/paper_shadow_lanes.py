@@ -295,6 +295,8 @@ def _build_lane_row(
             "decision_only": True,
         },
     }
+    if isinstance(decision.get("payout_aware"), Mapping):
+        row["provenance"]["payout_aware"] = dict(decision["payout_aware"])
     if isinstance(decision.get("source_reliability"), Mapping):
         row["provenance"]["source_reliability"] = dict(decision["source_reliability"])
         if _is_source_scoreboard_lane(lane.lane_id):
@@ -463,25 +465,28 @@ def _fee_aware_edge_floor_decision(
     if action not in {"BUY_YES", "BUY_NO"}:
         baseline.update({"action": "SKIP", "reason_code": "baseline_skip", "approved_position_size_usd": 0.0})
         return baseline
-    edge = _number(signal.get("edge"), (source_row or {}).get("edge"))
+    probability = _number(signal.get("model_probability"), (source_row or {}).get("model_probability"))
     price_key = "best_yes_ask" if action == "BUY_YES" else "best_no_ask"
     entry_price = _number(signal.get(price_key), (source_row or {}).get(price_key), (source_row or {}).get("entry_price"))
     fee_rate = _number(lane.parameters.get("fee_rate"))
     fee_rate = 0.07 if fee_rate is None else fee_rate
     floor = _number(lane.parameters.get("min_fee_aware_net_edge"))
     floor = 0.03 if floor is None else floor
-    if edge is None or entry_price is None or not 0.0 < entry_price < 1.0 or not 0.0 <= fee_rate < 1.0:
+    if probability is None or entry_price is None or not 0.0 < probability < 1.0 or not 0.0 < entry_price < 1.0 or not 0.0 <= fee_rate < 1.0:
         baseline.update({
             "action": "SKIP", "reason_code": "fee_aware_edge_inputs_unavailable",
-            "reason": "Baseline buy lacks a valid decision-time edge, executable side price, or fee rate",
+            "reason": "Baseline buy lacks a valid decision-time model probability, executable side price, or fee rate",
             "approved_position_size_usd": 0.0,
         })
         return baseline
-    fee_edge_drag = (1.0 - entry_price) * fee_rate
-    net_edge = edge - fee_edge_drag
+    side_probability = probability if action == "BUY_YES" else 1.0 - probability
+    raw_edge = side_probability - entry_price
+    expected_fee_drag = side_probability * (1.0 - entry_price) * fee_rate
+    net_edge = raw_edge - expected_fee_drag
     baseline["payout_aware"] = {
-        "entry_price": round(entry_price, 6), "edge": round(edge, 6), "fee_rate": round(fee_rate, 6),
-        "fee_edge_drag": round(fee_edge_drag, 6), "fee_aware_net_edge": round(net_edge, 6),
+        "entry_price": round(entry_price, 6), "model_probability": round(probability, 6),
+        "side_probability": round(side_probability, 6), "raw_edge": round(raw_edge, 6), "fee_rate": round(fee_rate, 6),
+        "expected_fee_drag": round(expected_fee_drag, 6), "fee_aware_net_edge": round(net_edge, 6),
         "min_fee_aware_net_edge": round(floor, 6), "decision_contract": "baseline_buy_only_fee_aware_selectivity_comparator",
     }
     if net_edge < floor:

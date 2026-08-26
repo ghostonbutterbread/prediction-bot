@@ -219,22 +219,22 @@ parameters:
         )
         rejected = _fee_aware_edge_floor_decision(
             lane,
-            {"edge": 0.07, "best_yes_ask": 0.20, "confidence": 0.8},
+            {"model_probability": 0.22, "best_yes_ask": 0.20, "confidence": 0.8},
             baseline,
         )
         self.assertEqual(rejected["action"], "SKIP")
         self.assertEqual(rejected["reason_code"], "fee_aware_edge_below_floor")
         self.assertEqual(rejected["approved_position_size_usd"], 0.0)
-        self.assertAlmostEqual(rejected["payout_aware"]["fee_aware_net_edge"], 0.014)
+        self.assertAlmostEqual(rejected["payout_aware"]["fee_aware_net_edge"], 0.00768)
 
         approved = _fee_aware_edge_floor_decision(
             lane,
-            {"edge": 0.07, "best_yes_ask": 0.60, "confidence": 0.8},
+            {"model_probability": 0.67, "best_yes_ask": 0.60, "confidence": 0.8},
             baseline,
         )
         self.assertEqual(approved["action"], "BUY_YES")
         self.assertEqual(approved["reason_code"], "approved_fee_aware_edge_floor")
-        self.assertAlmostEqual(approved["payout_aware"]["fee_aware_net_edge"], 0.042)
+        self.assertAlmostEqual(approved["payout_aware"]["fee_aware_net_edge"], 0.05124)
 
     def _production_lanes_dir(self) -> Path:
         return Path(__file__).resolve().parents[1] / "lanes"

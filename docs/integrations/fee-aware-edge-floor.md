@@ -10,7 +10,7 @@ Add a disabled paper-only comparator that is deliberately selective: it can reta
 
 ## Evidence and non-goal
 
-A historical diagnostic showed 2,797 resolved router buys with a 71.11% win rate but -$3,711.73 PnL (-13.27% ROI); directional correctness alone is not the optimization target. A separate in-sample price/action filter was positive but remains a disabled historical hypothesis, so this lane uses a general fee-aware edge constraint rather than hard-coding historical price buckets.
+A **descriptive, non-promotion-grade** root-loss report at `/mnt/data-collection/prediction-bot/data/derived_reports/source_router_root_loss_analysis_20260723.json` recorded 2,797 independently market-ID-resolved historical rows with 71.11% directional win rate and -13.27% ROI; its own methodology warning says decision provenance was not yet leakage-sanitized. This is motivation only, not evidence for promotion. A separate in-sample price/action filter was positive but remains a disabled historical hypothesis, so this lane uses a general fee-aware edge constraint rather than hard-coding historical price buckets.
 
 ## Verification
 
