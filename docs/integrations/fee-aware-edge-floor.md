@@ -1,8 +1,10 @@
 # Fee-aware edge-floor lane integration dossier
 
-- **Status:** feature
+- **Status:** review-approved
 - **Branch:** `feat/payout-aware-shadow`
 - **Base / target:** `beta` at `2c313af` → `beta`
+- **Implementation commits:** `6eb0644`, `0536810`, `d109ff8`
+- **Independent review:** approved after fee-math/provenance corrections; the reviewer also independently exercised a ledger write and confirmed the audit payload persisted.
 
 ## Goal
 
