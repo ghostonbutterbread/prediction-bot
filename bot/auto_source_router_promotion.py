@@ -326,6 +326,55 @@ def _generation_path(value: Any, generation_dir: Path, *, label: str) -> Path:
 
 
 def _validate_generation(manifest_path: Path) -> dict[str, Any]:
+    manifest, _ = _validate_generation_with_scorecard_bytes(manifest_path)
+    return manifest
+
+
+def load_verified_strict_scorecard_rows(scoreboard_path: str | Path) -> list[dict[str, Any]] | None:
+    """Load auto-promoted strict scorecard rows from verified published bytes.
+
+    ``None`` preserves the existing legacy-scoreboard path. A path shaped as an
+    auto-promotion strict handoff is fail-closed instead of falling back.
+    """
+    binding = _strict_scorecard_generation_binding(scoreboard_path)
+    if binding is None:
+        return None
+    generation_dir, expected_scoreboard = binding
+    manifest, scoreboard_bytes = _validate_generation_with_scorecard_bytes(generation_dir / MANIFEST_FILENAME)
+    actual_scoreboard = _generation_path(
+        manifest["runtime_consumption"]["scoreboard_path"], generation_dir, label="runtime scoreboard_path",
+    )
+    if actual_scoreboard != expected_scoreboard:
+        raise ValueError("strict scorecard path does not match its published generation")
+    return _parse_strict_scorecard_rows(scoreboard_bytes)
+
+
+def _strict_scorecard_generation_binding(scoreboard_path: str | Path) -> tuple[Path, Path] | None:
+    """Recognize only exact current/immutable auto-promotion scorecard paths."""
+    configured = Path(scoreboard_path).expanduser()
+    absolute = configured if configured.is_absolute() else Path.cwd() / configured
+    suffix = STRICT_SCORECARD_RELATIVE_PATH.parts
+    if len(absolute.parts) < len(suffix) or absolute.parts[-len(suffix):] != suffix:
+        return None
+    handoff = Path(*absolute.parts[:-len(suffix)])
+    if handoff.name == CURRENT_GENERATION_LINKNAME:
+        root = handoff.parent
+        generations = root / "generations"
+        if not handoff.is_symlink():
+            raise ValueError("strict current handoff must be a generation symlink")
+        generation_dir = handoff.resolve()
+        if generation_dir.parent != generations.resolve():
+            raise ValueError("strict current handoff targets outside generations")
+        return generation_dir, generation_dir / STRICT_SCORECARD_RELATIVE_PATH
+    if handoff.parent.name != "generations":
+        return None
+    generation_dir = handoff.resolve()
+    if generation_dir.parent != handoff.parent.resolve():
+        raise ValueError("strict immutable scorecard generation is not contained")
+    return generation_dir, generation_dir / STRICT_SCORECARD_RELATIVE_PATH
+
+
+def _validate_generation_with_scorecard_bytes(manifest_path: Path) -> tuple[dict[str, Any], bytes]:
     manifest = _load_manifest(manifest_path)
     generation_dir = manifest_path.parent.resolve()
     artifacts = manifest.get("artifacts")
@@ -333,9 +382,15 @@ def _validate_generation(manifest_path: Path) -> dict[str, Any]:
     expected = {"replay_inputs", "finalized_outcomes", "unbound_outcomes", "history_ledger", "unusable_observations", "scoreboard", "strict_independent_history"}
     if not isinstance(artifacts, dict) or not isinstance(hashes, dict) or set(hashes) != expected | {"source_history_manifest"}:
         raise ValueError("promotion manifest is missing artifact integrity data")
+    scoreboard_bytes: bytes | None = None
     for name in expected:
         path = _generation_path(artifacts.get(name), generation_dir, label=f"artifact {name}")
-        if not path.is_file() or _sha256_file(path) != hashes.get(name):
+        if name == "scoreboard" and path.is_file():
+            scoreboard_bytes = path.read_bytes()
+            digest = _sha256_bytes(scoreboard_bytes)
+        else:
+            digest = _sha256_file(path) if path.is_file() else None
+        if digest != hashes.get(name):
             raise ValueError(f"artifact hash mismatch: {name}")
     runtime = manifest.get("runtime_consumption")
     if not isinstance(runtime, dict):
@@ -352,8 +407,10 @@ def _validate_generation(manifest_path: Path) -> dict[str, Any]:
     if not history_manifest_path.is_file() or _sha256_file(history_manifest_path) != hashes.get("source_history_manifest"):
         raise ValueError("source history manifest hash mismatch")
     _validate_source_history_manifest(history_manifest_path, generation_dir)
-    _validate_strict_scorecard(_generation_path(artifacts["scoreboard"], generation_dir, label="scoreboard"))
-    return manifest
+    if scoreboard_bytes is None:
+        raise ValueError("strict scorecard is missing")
+    _parse_strict_scorecard_rows(scoreboard_bytes)
+    return manifest, scoreboard_bytes
 
 
 def _validate_source_history_manifest(path: Path, generation_dir: Path) -> None:
@@ -374,8 +431,20 @@ def _validate_source_history_manifest(path: Path, generation_dir: Path) -> None:
 
 
 def _validate_strict_scorecard(path: Path) -> None:
-    for line in path.read_bytes().splitlines():
-        row = json.loads(line)
+    _parse_strict_scorecard_rows(path.read_bytes())
+
+
+def _parse_strict_scorecard_rows(scoreboard_bytes: bytes) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    try:
+        for line in scoreboard_bytes.splitlines():
+            row = json.loads(line)
+            if not isinstance(row, dict):
+                raise ValueError("strict scorecard integrity check failed")
+            rows.append(row)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("strict scorecard is invalid JSON") from error
+    for row in rows:
         provenance = row.get("provenance") if isinstance(row, dict) else None
         observations = provenance.get("settled_observations") if isinstance(provenance, dict) else None
         if row.get("schema_name") != "strict_finalized_source_router_scorecard" or not isinstance(observations, list):
@@ -388,6 +457,7 @@ def _validate_strict_scorecard(path: Path) -> None:
         accuracy = round(correct / len(observations), 6) if observations else None
         if row.get("threshold_direction_accuracy") != accuracy:
             raise ValueError("strict scorecard integrity check failed")
+    return rows
 
 
 def _source_history_manifest(
@@ -439,3 +509,7 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()

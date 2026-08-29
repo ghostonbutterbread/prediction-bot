@@ -631,6 +631,7 @@ def _source_router_decision(
         source_row,
         shared_candidate,
     )
+    from bot.auto_source_router_promotion import load_verified_strict_scorecard_rows
     from bot.weather.source_confidence import build_source_confidence_row
     from bot.weather.source_reliability import build_reliability_candidate_row, load_scoreboard_rows
 
@@ -639,7 +640,15 @@ def _source_router_decision(
         candidate_row["predicted_outcome"] = "YES"
         candidate_row["source_router_candidate_outcome_default"] = "market_yes_event"
     scoreboard_path = _source_reliability_scoreboard_path(lane)
-    reliability_rows = load_scoreboard_rows(scoreboard_path) if scoreboard_path and Path(scoreboard_path).exists() else None
+    try:
+        strict_rows = load_verified_strict_scorecard_rows(scoreboard_path) if scoreboard_path else None
+    except ValueError:
+        return _strict_scorecard_verification_failed_decision(baseline, signal, scoreboard_path)
+    # Only the exact strict auto-promotion handoff is verified here. Existing
+    # legacy scoreboards retain their historical loader and behavior unchanged.
+    reliability_rows = strict_rows if strict_rows is not None else (
+        load_scoreboard_rows(scoreboard_path) if scoreboard_path and Path(scoreboard_path).exists() else None
+    )
     reliability_rows = _strict_scorecard_as_of(reliability_rows, candidate_row.get("observed_at"))
     confidence_row = build_source_confidence_row(candidate_row, reliability_table=reliability_rows)
     source_direction = _optional_text(confidence_row.get("source_direction"))
@@ -707,6 +716,27 @@ def _source_router_decision(
             "sources_excluded": confidence_row.get("sources_excluded") or [],
             "source_observations": confidence_row.get("source_observations") or [],
             "data_quality": confidence_row.get("data_quality") or {},
+            "scoreboard_path": scoreboard_path,
+            "decision_contract": "shadow_lane_recommendation_only_no_accounting_mutation",
+        },
+    }
+
+
+def _strict_scorecard_verification_failed_decision(
+    baseline: Mapping[str, Any], signal: Mapping[str, Any], scoreboard_path: str | None,
+) -> dict[str, Any]:
+    """Fail closed rather than route on an unverified strict publication."""
+    return {
+        "source_row": baseline.get("source_row"),
+        "action": "SKIP",
+        "reason_code": "strict_scorecard_verification_failed",
+        "reason": "Strict auto-promotion scorecard could not be verified; Source Router was not used",
+        "confidence_after": _number(signal.get("confidence")),
+        "requested_position_size_usd": 0.0,
+        "approved_position_size_usd": 0.0,
+        "source_router": {
+            "available": False,
+            "reason_code": "strict_scorecard_verification_failed",
             "scoreboard_path": scoreboard_path,
             "decision_contract": "shadow_lane_recommendation_only_no_accounting_mutation",
         },

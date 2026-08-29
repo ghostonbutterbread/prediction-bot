@@ -222,3 +222,26 @@ The affected suite (`test_auto_source_router_promotion`,
 7 skips and one pre-existing environment error: missing optional
 `kalshi_python_sync` while importing `test_kalshi_direct`. No service, timer,
 runtime, active config, archive, wallet, or order was changed.
+
+## Fifth review repair: runtime strict-scorecard verification
+
+The paper Source Router now recognizes the exact strict auto-promotion scorecard
+handoff path for either `current` or an immutable generation. Before use it
+requires a contained generation binding, promotion-manifest runtime/artifact
+path agreement, complete declared artifact hashes, and strict scorecard
+validation. The scorecard is read once, hash-validated, then parsed from those
+same verified bytes; it is never verified and reopened through `current`.
+Invalid bindings, external current targets, hash failures, and parse failures
+produce a paper `SKIP` with `strict_scorecard_verification_failed` and no router
+use. Legacy scoreboards still use their existing loader unchanged. The existing
+as-of chronology filter continues to run on verified strict rows.
+
+**TDD receipt:**
+`PYTHONPATH=. python3 -m unittest tests.test_auto_source_router_promotion.AutoSourceRouterPromotionTests.test_actual_paper_router_fails_closed_when_current_strict_scorecard_is_replaced_after_publish -v`
+was red before the implementation (`BUY_YES` rather than `SKIP`) after a valid
+strict generation's `current` scorecard was replaced. The focused regression,
+external-current-target rejection, parse-failure rejection, and immutable happy
+path then passed. The affected suite:
+`PYTHONPATH=. python3 -m unittest tests.test_auto_source_router_promotion tests.test_paper_shadow_lanes tests.test_weather_source_confidence tests.test_simulator_source_scoreboard_shadow -q`
+ran 103 tests, `OK` (1 skipped). `git diff --check` passed. No service, timer,
+runtime config, archive, wallet, or order was changed.

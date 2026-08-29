@@ -253,6 +253,73 @@ class AutoSourceRouterPromotionTests(unittest.TestCase):
         self.assertTrue(first.manifest_path.is_file())
         self.assertTrue(second.manifest_path.is_file())
 
+    def test_actual_paper_router_fails_closed_when_current_strict_scorecard_is_replaced_after_publish(self) -> None:
+        rows = [_collector_row(market_id=f"KXHIGHSEA-26AUG{index:02}-T70") for index in range(1, 101)]
+        result = self.run_pipeline(rows, [_strict_resolution(row["market_id"]) for row in rows])
+        current_scoreboard = self.output_root / "current" / "source_router_scoreboard" / "strict_finalized_source_scoreboard.jsonl"
+        # This remains a valid legacy scoreboard and would previously drive BUY_YES,
+        # despite replacing the published strict artifact after its manifest hash.
+        _write_jsonl(current_scoreboard, [{
+            "source_id": "nws", "source_name": "NWS", "city_id": "seattle_wa",
+            "market_kind": "high", "contract_shape": "tail", "sample_count": 100,
+            "threshold_sample_count": 100, "threshold_correct_count": 100,
+            "threshold_direction_accuracy": 1.0,
+        }])
+
+        decision = _source_router_decision(
+            _LaneDefinition("shadow_source_router", lane_type="source_router", parameters={"scoreboard_path": str(current_scoreboard)}),
+            {
+                "market_id": "KXHIGHSEA-26AUG03-T70", "observed_at": "2026-08-05T00:00:00+00:00",
+                "question": "Will Seattle high temperature be above 70°?", "city_id": "seattle_wa",
+                "market_kind": "high", "contract_shape": "tail", "question_side": "above", "threshold": 70.0,
+                "source_details": [{"source_id": "nws", "source_name": "NWS", "forecast_high": 75.0}],
+            },
+            None,
+            {"market_id": "KXHIGHSEA-26AUG03-T70", "observed_at": "2026-08-05T00:00:00+00:00", "market": {"id": "KXHIGHSEA-26AUG03-T70", "question": "Will Seattle high temperature be above 70°?"}},
+        )
+
+        self.assertEqual(decision["action"], "SKIP")
+        self.assertFalse(decision["source_router"]["available"])
+        self.assertEqual(decision["source_router"]["reason_code"], "strict_scorecard_verification_failed")
+        self.assertEqual(result.scoreboard_path, current_scoreboard.resolve())
+
+    def test_actual_paper_router_fails_closed_for_external_current_target(self) -> None:
+        rows = [_collector_row(market_id=f"KXHIGHSEA-26AUG{index:02}-T70") for index in range(1, 101)]
+        self.run_pipeline(rows, [_strict_resolution(row["market_id"]) for row in rows])
+        current = self.output_root / "current"
+        current.unlink()
+        current.symlink_to(self.root)
+        scoreboard = current / "source_router_scoreboard" / "strict_finalized_source_scoreboard.jsonl"
+
+        decision = _source_router_decision(
+            _LaneDefinition("shadow_source_router", lane_type="source_router", parameters={"scoreboard_path": str(scoreboard)}),
+            {"observed_at": "2026-08-05T00:00:00+00:00", "question": "Will Seattle high temperature be above 70°?", "city_id": "seattle_wa", "market_kind": "high", "contract_shape": "tail", "question_side": "above", "threshold": 70.0, "source_details": [{"source_id": "nws", "source_name": "NWS", "forecast_high": 75.0}]},
+            None, {"observed_at": "2026-08-05T00:00:00+00:00", "market": {"question": "Will Seattle high temperature be above 70°?"}},
+        )
+
+        self.assertEqual(decision["action"], "SKIP")
+        self.assertFalse(decision["source_router"]["available"])
+
+    def test_actual_paper_router_fails_closed_for_invalid_verified_strict_scorecard_json(self) -> None:
+        rows = [_collector_row(market_id=f"KXHIGHSEA-26AUG{index:02}-T70") for index in range(1, 101)]
+        result = self.run_pipeline(rows, [_strict_resolution(row["market_id"]) for row in rows])
+        malformed = b"{not json}\n"
+        result.scoreboard_path.write_bytes(malformed)
+        # Even a malformed scorecard whose mutable manifest hash is rewritten
+        # cannot be parsed or used by the strict runtime consumer.
+        manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+        manifest["artifact_sha256"]["scoreboard"] = hashlib.sha256(malformed).hexdigest()
+        result.manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
+
+        decision = _source_router_decision(
+            _LaneDefinition("shadow_source_router", lane_type="source_router", parameters={"scoreboard_path": str(result.scoreboard_path)}),
+            {"observed_at": "2026-08-05T00:00:00+00:00", "question": "Will Seattle high temperature be above 70°?", "city_id": "seattle_wa", "market_kind": "high", "contract_shape": "tail", "question_side": "above", "threshold": 70.0, "source_details": [{"source_id": "nws", "source_name": "NWS", "forecast_high": 75.0}]},
+            None, {"observed_at": "2026-08-05T00:00:00+00:00", "market": {"question": "Will Seattle high temperature be above 70°?"}},
+        )
+
+        self.assertEqual(decision["action"], "SKIP")
+        self.assertFalse(decision["source_router"]["available"])
+
     def test_published_strict_scorecard_drives_actual_paper_source_router(self) -> None:
         rows = [_collector_row(market_id=f"KXHIGHSEA-26AUG{index:02}-T70") for index in range(1, 101)]
         result = self.run_pipeline(rows, [_strict_resolution(row["market_id"]) for row in rows])
