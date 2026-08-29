@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from bot.auto_source_router_promotion import auto_populate_source_router_history
+from bot.paper_shadow_lanes import _LaneDefinition, _source_router_decision
 from bot.weather.collector_source_router_replay import run_collector_source_router_replay
 from scripts.weather_source_router_replay import _load_router_ledger_rows
 
@@ -41,7 +42,7 @@ def _collector_row(*, strict: bool = True, market_id: str = "KXHIGHSEA-26AUG03-T
         "question": "Will Seattle high temperature be above 70°?",
         "yes_price": 0.42, "no_price": 0.58,
         "decision_artifact": {"source_context": {"source": "provided", "mode": "prediction_lab", "as_of": "2026-08-01T11:55:00+00:00", "data": {
-            "market_metadata": {"event_ticker": "KXHIGHSEA-26AUG03", "city": "Seattle", "city_id": "seattle_wa", "market_kind": "high", "contract_shape": "threshold"},
+            "market_metadata": {"event_ticker": market_id.rsplit("-", 1)[0], "city": "Seattle", "city_id": "seattle_wa", "market_kind": "high", "contract_shape": "threshold"},
             "weather_source_snapshot": {
                 "market_id": market_id, "question": "Will Seattle high temperature be above 70°?",
                 "market_date": "2026-08-03", "station_resolution": {"city_id": "seattle_wa", "city": "Seattle"},
@@ -211,6 +212,42 @@ class AutoSourceRouterPromotionTests(unittest.TestCase):
         self.assertTrue(second.reused)
         self.assertEqual(first.generation_dir, second.generation_dir)
         self.assertEqual(before, second.history_path.read_bytes())
+
+    def test_published_strict_scorecard_drives_actual_paper_source_router(self) -> None:
+        rows = [_collector_row(market_id=f"KXHIGHSEA-26AUG{index:02}-T70") for index in range(1, 101)]
+        result = self.run_pipeline(rows, [_strict_resolution(row["market_id"]) for row in rows])
+
+        decision = _source_router_decision(
+            _LaneDefinition("shadow_source_router", lane_type="source_router", parameters={"scoreboard_path": str(result.scoreboard_path)}),
+            {
+                "market_id": "KXHIGHSEA-26AUG03-T70",
+                "question": "Will Seattle high temperature be above 70°?",
+                "city_id": "seattle_wa",
+                "market_kind": "high",
+                "contract_shape": "tail",
+                "question_side": "above",
+                "threshold": 70.0,
+                "source_details": [{"source_id": "nws", "source_name": "NWS", "forecast_high": 75.0}],
+            },
+            None,
+            {"market_id": "KXHIGHSEA-26AUG03-T70", "market": {"id": "KXHIGHSEA-26AUG03-T70", "question": "Will Seattle high temperature be above 70°?"}},
+        )
+
+        [scorecard] = [json.loads(line) for line in result.scoreboard_path.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(scorecard["source_id"], "nws")
+        self.assertEqual(scorecard["sample_count"], 100)
+        self.assertEqual(scorecard["threshold_direction_accuracy"], 1.0)
+        self.assertEqual(decision["action"], "BUY_YES")
+        self.assertEqual(decision["source_router"]["scoreboard_path"], str(result.scoreboard_path))
+
+    def test_published_helper_metadata_never_retains_random_staging_paths(self) -> None:
+        row = _collector_row()
+        result = self.run_pipeline([row], [_strict_resolution(row["market_id"])])
+
+        metadata_paths = list(result.generation_dir.rglob("*.json"))
+        metadata_paths.extend(result.generation_dir.rglob("*.metadata.json"))
+        for path in metadata_paths:
+            self.assertNotIn("/.staging/", path.read_text(encoding="utf-8"), path)
 
     def test_malformed_ambiguous_and_unproven_evidence_stays_out_of_router_history(self) -> None:
         unproven = _collector_row(strict=False)

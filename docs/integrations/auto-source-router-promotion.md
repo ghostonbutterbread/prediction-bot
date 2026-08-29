@@ -107,6 +107,41 @@ one incomplete-final-generation retry rejection.
 
 **Exact green receipt:** `PYTHONPATH=. python3 -m unittest tests.test_auto_source_router_promotion tests.test_collector_replay_inputs tests.test_replay_outcome_binding tests.test_source_observation_ledger tests.test_source_history_manifest tests.test_collector_source_router_replay -v && git diff --check` — 69 tests, `OK`; whitespace check passed.
 
+## Second review repair: strict paper Source Router handoff
+
+The published `scoreboard_path` is now
+`source_router_scoreboard/strict_finalized_source_router_scorecard.jsonl`, a
+strict aggregate built only from the collapsed `eligible_strict_source_proof`
+finalized observations. It has the exact source-router consumer fields:
+`source_id`, `source_name`, `city_id`, `market_kind`, `contract_shape`,
+`sample_count`, `threshold_sample_count`, `threshold_correct_count`, and
+`threshold_direction_accuracy`. Its provenance binds the collapsed strict
+history SHA and preserves settlement availability values. The independent
+strict-history JSONL remains published separately as an audit artifact.
+
+This is deliberately consumed through the actual paper lane path:
+`bot.paper_shadow_lanes._source_router_decision` ->
+`load_scoreboard_rows` -> `build_source_confidence_row`; it does not use the
+loose legacy materializer. `config.paper_source_router_auto_population.yaml`
+is a committed handoff template with both `paper_shadow_lanes.enabled` and
+`shadow_source_router.enabled` false and no configured scorecard path.
+
+Before publishing, JSON helper metadata paths are rebased from the random
+private staging directory to the deterministic generation directory. This
+happens before the verified source-history manifest hashes the replay metadata,
+so the existing byte materialization, hash verification, atomic rename, and
+retry contract remain intact.
+
+**RED receipt:**
+`PYTHONPATH=. python3 -m unittest tests.test_auto_source_router_promotion.AutoSourceRouterPromotionTests.test_published_strict_scorecard_drives_actual_paper_source_router tests.test_auto_source_router_promotion.AutoSourceRouterPromotionTests.test_published_helper_metadata_never_retains_random_staging_paths -v`
+failed before this repair: the collapsed-history row lacked `sample_count` and
+published ledger helper metadata retained `/.staging/` paths.
+
+**Green receipts:**
+
+- `PYTHONPATH=. python3 -m unittest tests.test_auto_source_router_promotion -v` — 11 tests, `OK`.
+- `PYTHONPATH=. python3 -m unittest tests.test_source_history_manifest tests.test_collector_source_router_replay tests.test_weather_source_confidence tests.test_simulator_source_scoreboard_shadow -v` — 53 tests, `OK`.
+
 ## Activation boundary and residual integration requirement
 
 Do **not** schedule this script or change a runtime config/service/timer in this
@@ -115,10 +150,11 @@ branch. After independent review and a beta merge, an owner must explicitly:
 1. verify a beta cohort collector snapshot path and separately finalized strict
    resolution feed are available;
 2. choose/approve a derived output root and invoke the script after the resolver;
-3. verify the generation manifest and strict ledger hashes/counts; and
-4. separately wire the resulting immutable ledger path into the Source Router
-   runtime's approved history input, then validate chronology in a fresh beta
-   cohort.
+3. verify the generation manifest, strict ledger, scorecard, and metadata
+   hashes/counts; and
+4. copy that generation's `runtime_consumption.scoreboard_path` into an ignored
+   fresh-cohort paper-lane config, explicitly set both lane enablement gates,
+   and validate chronology in a fresh beta cohort.
 
-That runtime/scheduler wiring is intentionally the remaining blocker and is not
-implemented here.
+That runtime/scheduler wiring and the explicit paper-lane enablement remain the
+intentional blocker; neither is implemented here.

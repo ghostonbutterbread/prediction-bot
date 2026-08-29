@@ -97,6 +97,13 @@ def auto_populate_source_router_history(
         collapsed = materialize_strict_source_history_collapse(
             observations.settled_path, staging_dir / "source_router_scoreboard",
         )
+        strict_scorecard_path = _materialize_strict_finalized_scorecard(
+            collapsed.collapsed_path, staging_dir / "source_router_scoreboard" / "strict_finalized_source_scoreboard.jsonl",
+        )
+        # Helper metadata is produced while staging, but a published generation
+        # must not retain an unresolvable random staging location. Rebase before
+        # hashing the replay manifest into source_history_manifest.
+        _rebase_staged_metadata_paths(staging_dir, generation_dir)
         counts = _counts(exported.metadata, bound.metadata, observations.metadata, dict(collapsed.metadata))
         status = "history_ready" if counts["eligible"] else "no_router_history"
         published = lambda path: generation_dir / path.relative_to(staging_dir)
@@ -129,8 +136,8 @@ def auto_populate_source_router_history(
             "runtime_consumption": {
                 "history_ledger_path": str(published(observations.settled_path)),
                 "history_manifest_path": str(published(history_manifest_path)),
-                "scoreboard_path": str(published(collapsed.collapsed_path)),
-                "consumer": "bot.weather.collector_source_router_replay.run_collector_source_router_replay --history-manifest",
+                "scoreboard_path": str(published(strict_scorecard_path)),
+                "consumer": "bot.paper_shadow_lanes._source_router_decision via load_scoreboard_rows/build_source_confidence_row (disabled beta paper lane handoff)",
             },
         "counts": counts,
         "artifacts": {
@@ -139,7 +146,8 @@ def auto_populate_source_router_history(
             "unbound_outcomes": str(published(bound.unbound_path)),
             "history_ledger": str(published(observations.settled_path)),
             "unusable_observations": str(published(observations.unsettled_path)),
-            "scoreboard": str(published(collapsed.collapsed_path)),
+            "scoreboard": str(published(strict_scorecard_path)),
+            "strict_independent_history": str(published(collapsed.collapsed_path)),
         },
             "source_history_manifest": {
                 "path": str(published(history_manifest_path)),
@@ -178,6 +186,70 @@ def _counts(export: dict[str, Any], binding: dict[str, Any], observations: dict[
         "eligible": int(collapse_counts.get("independent_rows") or 0),
         "collapsed": int(collapse_counts.get("collapsed_repeat_polls") or 0),
     }
+
+
+
+def _materialize_strict_finalized_scorecard(source_path: Path, output_path: Path) -> Path:
+    """Aggregate only collapsed strict finalized observations for the paper router.
+
+    The row fields intentionally match ``load_scoreboard_rows`` and
+    ``build_source_confidence_row``; this is not the legacy loose scoreboard.
+    """
+    source_bytes = source_path.read_bytes()
+    rows = [json.loads(line) for line in source_bytes.splitlines() if line.strip()]
+    slices: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if row.get("eligible_for_source_history") is not True or row.get("source_correctness_eligibility") != "eligible_strict_source_proof":
+            continue
+        direction_correct = row.get("direction_correct")
+        if not isinstance(direction_correct, bool):
+            continue
+        source_id = str(row.get("source_id") or "unknown")
+        city_id = str(row.get("city_id") or "unknown")
+        market_kind = str(row.get("market_kind") or "unknown")
+        contract_shape = str(row.get("contract_shape") or "unknown")
+        source_name = str(row.get("source_name") or "unknown")
+        key = (source_id, city_id, market_kind, contract_shape, source_name)
+        aggregate = slices.setdefault(key, {"sample_count": 0, "correct_count": 0, "settlement_ts": []})
+        aggregate["sample_count"] += 1
+        aggregate["correct_count"] += int(direction_correct)
+        aggregate["settlement_ts"].append(str(row.get("settlement_ts") or ""))
+
+    scorecard_rows: list[dict[str, Any]] = []
+    source_sha256 = hashlib.sha256(source_bytes).hexdigest()
+    for (source_id, city_id, market_kind, contract_shape, source_name), aggregate in sorted(slices.items()):
+        sample_count = int(aggregate["sample_count"])
+        scorecard_rows.append({
+            "schema_name": "strict_finalized_source_router_scorecard",
+            "schema_version": 1,
+            "source_id": source_id,
+            "source_name": source_name,
+            "city_id": city_id,
+            "market_kind": market_kind,
+            "contract_shape": contract_shape,
+            "sample_count": sample_count,
+            "threshold_sample_count": sample_count,
+            "threshold_correct_count": int(aggregate["correct_count"]),
+            "threshold_direction_accuracy": round(int(aggregate["correct_count"]) / sample_count, 6),
+            "provenance": {
+                "input_kind": "collapsed_strict_finalized_source_history",
+                "source_history_sha256": source_sha256,
+                "eligibility": "eligible_for_source_history and eligible_strict_source_proof",
+                "availability_field": "settlement_ts",
+                "settlement_ts": sorted(value for value in aggregate["settlement_ts"] if value),
+            },
+        })
+    output_path.write_bytes(b"".join(_canonical_bytes(row) for row in scorecard_rows))
+    return output_path
+
+
+def _rebase_staged_metadata_paths(staging_dir: Path, generation_dir: Path) -> None:
+    """Replace private staging roots before metadata hashes become public evidence."""
+    old, new = str(staging_dir).encode("utf-8"), str(generation_dir).encode("utf-8")
+    for path in staging_dir.rglob("*.json"):
+        path.write_bytes(path.read_bytes().replace(old, new))
 
 
 def _result_from_manifest(manifest: dict[str, Any], manifest_path: Path, *, reused: bool) -> AutoSourceRouterPromotionResult:
