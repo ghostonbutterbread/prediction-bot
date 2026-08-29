@@ -125,7 +125,10 @@ This is deliberately consumed through the actual paper lane path:
 `load_scoreboard_rows` -> `build_source_confidence_row`; it does not use the
 loose legacy materializer. `config.paper_source_router_auto_population.yaml`
 is a committed handoff template with both `paper_shadow_lanes.enabled` and
-`shadow_source_router.enabled` false and no configured scorecard path.
+`shadow_source_router.enabled` false. Its configured scorecard path is the
+stable `data/derived_reports/auto_source_router_history/current/...` handoff;
+the promotion job must use `data/derived_reports/auto_source_router_history` as
+its output root.
 
 Before publishing, JSON helper metadata paths are rebased from the random
 private staging directory to the deterministic generation directory. This
@@ -143,6 +146,35 @@ published ledger helper metadata retained `/.staging/` paths.
 - `PYTHONPATH=. python3 -m unittest tests.test_auto_source_router_promotion -v` — 11 tests, `OK`.
 - `PYTHONPATH=. python3 -m unittest tests.test_source_history_manifest tests.test_collector_source_router_replay tests.test_weather_source_confidence tests.test_simulator_source_scoreboard_shadow -v` — 53 tests, `OK`.
 
+## Third repair: atomic current scorecard handoff
+
+Each completed immutable generation is first atomically renamed out of its
+private `.staging` directory. Only after its promotion manifest exists does the
+pipeline atomically replace `<output-root>/current` with a relative symlink to
+that complete generation. The paper config follows that stable link to
+`source_router_scoreboard/strict_finalized_source_scoreboard.jsonl`; it never
+names a staging directory or asks an operator to update a generation-specific
+path. Previous generations and their manifests are never modified or removed.
+A failed second build leaves `current` pointing to the preceding completed
+generation. Reusing an existing generation does not repoint `current`, so an
+older repeated input cannot roll back the newest published handoff.
+
+**RED receipt:**
+`PYTHONPATH=. python3 -m unittest tests.test_auto_source_router_promotion.AutoSourceRouterPromotionTests.test_current_scoreboard_handoff_only_moves_after_successful_immutable_generation_publish -v`
+failed before this repair because `<output-root>/current` did not exist.
+
+**Green receipts:**
+
+- `PYTHONPATH=. python3 -m unittest tests.test_auto_source_router_promotion -v` — 12 tests, `OK`.
+- `PYTHONPATH=. python3 -m unittest tests.test_source_history_manifest tests.test_collector_source_router_replay tests.test_weather_source_confidence tests.test_simulator_source_scoreboard_shadow -v` — 53 tests, `OK`.
+- `PYTHONPATH=. python3 -m unittest tests.test_replay_outcome_binding tests.test_source_observation_ledger -v` — 27 tests, `OK`.
+- `git diff --check` — passed.
+
+The focused handoff test publishes two distinct generations, verifies the stable
+path is accepted by the actual paper router, injects a failed second promotion
+without moving the link, then verifies the succeeding generation advances it
+while the first generation remains byte-identical.
+
 ## Activation boundary and residual integration requirement
 
 Do **not** schedule this script or change a runtime config/service/timer in this
@@ -150,12 +182,14 @@ branch. After independent review and a beta merge, an owner must explicitly:
 
 1. verify a beta cohort collector snapshot path and separately finalized strict
    resolution feed are available;
-2. choose/approve a derived output root and invoke the script after the resolver;
+2. use the approved `data/derived_reports/auto_source_router_history` derived
+   output root and invoke the script after the resolver;
 3. verify the generation manifest, strict ledger, scorecard, and metadata
    hashes/counts; and
-4. copy that generation's `runtime_consumption.scoreboard_path` into an ignored
-   fresh-cohort paper-lane config, explicitly set both lane enablement gates,
-   and validate chronology in a fresh beta cohort.
+4. copy the disabled template into an ignored fresh-cohort paper-lane config,
+   explicitly set both lane enablement gates, and validate chronology in a
+   fresh beta cohort. The stable configured handoff then tracks only later
+   successful immutable generation publications.
 
 That runtime/scheduler wiring and the explicit paper-lane enablement remain the
 intentional blocker; neither is implemented here.

@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import tempfile
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,8 @@ from bot.weather.source_observation_ledger import materialize_source_observation
 
 PIPELINE_SCHEMA_VERSION = 1
 MANIFEST_FILENAME = "source_router_history_promotion.manifest.json"
+CURRENT_GENERATION_LINKNAME = "current"
+STRICT_SCORECARD_RELATIVE_PATH = Path("source_router_scoreboard") / "strict_finalized_source_scoreboard.jsonl"
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +140,7 @@ def auto_populate_source_router_history(
                 "history_ledger_path": str(published(observations.settled_path)),
                 "history_manifest_path": str(published(history_manifest_path)),
                 "scoreboard_path": str(published(strict_scorecard_path)),
+                "current_scoreboard_path": str(root / CURRENT_GENERATION_LINKNAME / STRICT_SCORECARD_RELATIVE_PATH),
                 "consumer": "bot.paper_shadow_lanes._source_router_decision via load_scoreboard_rows/build_source_confidence_row (disabled beta paper lane handoff)",
             },
         "counts": counts,
@@ -160,6 +164,7 @@ def auto_populate_source_router_history(
             os.replace(staging_dir, generation_dir)
         except FileExistsError:
             return _load_completed_generation(manifest_path, snapshot_sha256, resolution_sha256)
+        _publish_current_generation(root, generation_dir)
         return _result_from_manifest(manifest, manifest_path, reused=False)
     finally:
         if staging_dir.exists():
@@ -173,6 +178,20 @@ def _prepare_root(value: str | Path) -> Path:
         raise ValueError(f"output root must be below {derived_root}")
     root.mkdir(parents=True, exist_ok=True)
     return root
+
+
+def _publish_current_generation(root: Path, generation_dir: Path) -> None:
+    """Atomically repoint the stable consumer handoff after full publication."""
+    if not (generation_dir / MANIFEST_FILENAME).is_file():
+        raise ValueError(f"refusing to hand off incomplete promotion generation: {generation_dir}")
+    current_link = root / CURRENT_GENERATION_LINKNAME
+    temporary_link = root / f".{CURRENT_GENERATION_LINKNAME}.{uuid.uuid4().hex}"
+    try:
+        temporary_link.symlink_to(Path("generations") / generation_dir.name, target_is_directory=True)
+        os.replace(temporary_link, current_link)
+    finally:
+        if temporary_link.is_symlink():
+            temporary_link.unlink()
 
 
 def _counts(export: dict[str, Any], binding: dict[str, Any], observations: dict[str, Any], collapse: dict[str, Any]) -> dict[str, int]:

@@ -213,6 +213,46 @@ class AutoSourceRouterPromotionTests(unittest.TestCase):
         self.assertEqual(first.generation_dir, second.generation_dir)
         self.assertEqual(before, second.history_path.read_bytes())
 
+    def test_current_scoreboard_handoff_only_moves_after_successful_immutable_generation_publish(self) -> None:
+        first_rows = [_collector_row(market_id=f"KXHIGHSEA-26AUG{index:02}-T70") for index in range(1, 101)]
+        first = self.run_pipeline(first_rows, [_strict_resolution(row["market_id"]) for row in first_rows])
+        current = self.output_root / "current"
+        current_scoreboard = current / "source_router_scoreboard" / "strict_finalized_source_scoreboard.jsonl"
+        first_scoreboard_bytes = first.scoreboard_path.read_bytes()
+
+        self.assertTrue(current.is_symlink())
+        self.assertEqual(current_scoreboard.resolve(), first.scoreboard_path)
+        self.assertEqual(current_scoreboard.read_bytes(), first_scoreboard_bytes)
+        first_decision = _source_router_decision(
+            _LaneDefinition("shadow_source_router", lane_type="source_router", parameters={"scoreboard_path": str(current_scoreboard)}),
+            {
+                "market_id": "KXHIGHSEA-26AUG03-T70", "question": "Will Seattle high temperature be above 70°?",
+                "city_id": "seattle_wa", "market_kind": "high", "contract_shape": "tail", "question_side": "above",
+                "threshold": 70.0, "source_details": [{"source_id": "nws", "source_name": "NWS", "forecast_high": 75.0}],
+            },
+            None,
+            {"market_id": "KXHIGHSEA-26AUG03-T70", "market": {"id": "KXHIGHSEA-26AUG03-T70", "question": "Will Seattle high temperature be above 70°?"}},
+        )
+        self.assertEqual(first_decision["action"], "BUY_YES")
+        self.assertEqual(first_decision["source_router"]["scoreboard_path"], str(current_scoreboard))
+
+        second_rows = [_collector_row(market_id=f"KXHIGHSEA-26SEP{index:02}-T70") for index in range(1, 101)]
+        with patch("bot.auto_source_router_promotion.materialize_strict_source_history_collapse", side_effect=RuntimeError("interrupted second promotion")):
+            with self.assertRaisesRegex(RuntimeError, "interrupted second promotion"):
+                self.run_pipeline(second_rows, [_strict_resolution(row["market_id"]) for row in second_rows])
+
+        self.assertEqual(current_scoreboard.resolve(), first.scoreboard_path)
+        self.assertEqual(current_scoreboard.read_bytes(), first_scoreboard_bytes)
+        self.assertEqual(first.scoreboard_path.read_bytes(), first_scoreboard_bytes)
+
+        second = self.run_pipeline(second_rows, [_strict_resolution(row["market_id"]) for row in second_rows])
+
+        self.assertNotEqual(first.generation_dir, second.generation_dir)
+        self.assertEqual(current_scoreboard.resolve(), second.scoreboard_path)
+        self.assertEqual(first.scoreboard_path.read_bytes(), first_scoreboard_bytes)
+        self.assertTrue(first.manifest_path.is_file())
+        self.assertTrue(second.manifest_path.is_file())
+
     def test_published_strict_scorecard_drives_actual_paper_source_router(self) -> None:
         rows = [_collector_row(market_id=f"KXHIGHSEA-26AUG{index:02}-T70") for index in range(1, 101)]
         result = self.run_pipeline(rows, [_strict_resolution(row["market_id"]) for row in rows])
