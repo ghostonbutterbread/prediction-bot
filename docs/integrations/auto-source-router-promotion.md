@@ -245,3 +245,6 @@ path then passed. The affected suite:
 `PYTHONPATH=. python3 -m unittest tests.test_auto_source_router_promotion tests.test_paper_shadow_lanes tests.test_weather_source_confidence tests.test_simulator_source_scoreboard_shadow -q`
 ran 103 tests, `OK` (1 skipped). `git diff --check` passed. No service, timer,
 runtime config, archive, wallet, or order was changed.
+
+**Checkpoint:** `cf3d9c0` (`fix: verify strict scorecard at paper runtime`), on
+`feat/auto-source-router-promotion`; intended integration target remains `beta`.
