@@ -25,26 +25,22 @@ Repair the observer collector boundary so exhaustion of `http_get_with_retry` tr
   - RED: `PYTHONPATH=. .venv/bin/python -m unittest tests.test_kalshi_direct.KalshiDirectMarketTests.test_get_markets_direct_raises_when_retries_exhaust_without_response -v` — failed as expected: `AssertionError: RuntimeError not raised`.
   - GREEN: same focused regression — passed.
   - Focused: `PYTHONPATH=. .venv/bin/python -m unittest tests.test_kalshi_direct tests.test_prediction_lab_collect -v` — 69 tests passed.
-  - Full: `PYTHONPATH=. .venv/bin/python -m unittest discover -s tests` — 1042 tests run, 18 pre-existing/environmental errors and 7 skips; failures include missing optional `rich` and absent ignored `data/summaries` fixture directory. The changed focused suites passed.
-  - `git diff --check` pending final staged diff inspection.
-- Independent review: not requested; minimal local ownership-boundary change.
+  - Full: `PYTHONPATH=/home/ryushe/worktrees/prediction-bot-collector-network-recovery /mnt/data-collection/prediction-bot/.venv/bin/python -m unittest discover -s tests -q` — 1042 tests, `OK` (7 expected skips). The earlier reviewer failure was caused by using a worktree-local/nonexistent `.venv`; the mounted runtime venv contains the optional `rich` dependency used by this beta runtime.
+  - `git diff --check` — passed.
+- Independent review: requested after the initial focused receipt. Reviewer confirmed the behavior but deferred merge until the clean full-suite receipt above; no code finding remained.
 - Replay/cohort/fixture evidence: deterministic mocked transport exhaustion and HTTP-200-empty fixtures only; no live network calls.
 - Merge/ancestry evidence: branch starts at `a30121d` / `beta`; no merge or push performed.
 
 ## Blockers and deferred work
 
-- **Missing test or evidence:** clean-environment full-suite receipt.
-- **Command / fixture / environment needed:** `PYTHONPATH=. .venv/bin/python -m unittest discover -s tests`, with optional `rich` installed and expected ignored `data/summaries` test fixture directory available.
-- **Trigger to run it:** before integration or any activation decision.
-- **Why it blocks integration, activation, or promotion:** a whole-suite clean receipt cannot be claimed from this fresh worktree; it does not block the focused collector repair evidence.
-- **Next completion step / successor reference:** supply the repository's complete test environment, re-run discovery, and record outcome before an integration decision.
+- **Integration evidence:** complete — focused and full-suite receipts are green, and the independent reviewer found no code-level blocker after the runtime-venv receipt was supplied.
 
 ## Interruption / resume handoff
 
 - **Owning feature branch/ref:** `fix/collector-network-recovery`
 - **Latest immutable recovery checkpoint:** `5c8b608d68c8435e95ddf4d440667b66c5a1e95f`
 - **Feature implementation commit(s):** `5c8b608d68c8435e95ddf4d440667b66c5a1e95f`
-- **Exact resume point:** review the implementation commit and this final dossier-only commit; resolve the documented full-suite environment prerequisites before any integration decision.
+- **Exact resume point:** integration-ready: merge the reviewed implementation into `beta`, then restart the managed observer collector and verify a fresh snapshot.
 - **Working-tree state at handoff:** clean after committing this dossier update.
 
 ## Decision gates
