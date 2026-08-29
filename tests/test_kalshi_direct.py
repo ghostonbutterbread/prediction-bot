@@ -167,6 +167,21 @@ class KalshiDirectMarketTests(unittest.TestCase):
         self.assertEqual([market.id for market in markets], [_future_ticker("KXHIGHCHI", "T67"), _future_ticker("KXHIGHCHI", "T68")])
         self.assertEqual(len({market.id for market in markets}), 2)
 
+    def test_get_markets_direct_raises_when_retries_exhaust_without_response(self):
+        exchange = self._exchange()
+
+        with patch("bot.exchanges.kalshi.http_get_with_retry", return_value=None):
+            with self.assertRaisesRegex(RuntimeError, "direct market pull unavailable after retries"):
+                exchange.get_markets_direct(limit=1, page_size=50, max_pages=1)
+
+    def test_get_markets_direct_returns_empty_list_for_a_successful_empty_response(self):
+        exchange = self._exchange()
+
+        with patch("bot.exchanges.kalshi.http_get_with_retry", return_value=_FakeResponse(200, {"markets": []})):
+            markets = exchange.get_markets_direct(limit=1, page_size=50, max_pages=1)
+
+        self.assertEqual(markets, [])
+
     def test_weather_series_filter_rejects_broad_wind_energy_series(self):
         self.assertFalse(KalshiExchange._is_weather_series_ticker("KXPRIMEENGCONSUMPTION-30-WIND"))
         self.assertTrue(KalshiExchange._is_weather_series_ticker("KXHIGHNY"))
