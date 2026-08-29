@@ -1,0 +1,98 @@
+# Auto populate Source Router history (beta)
+
+## Handoff
+
+- **Feature branch:** `feat/auto-source-router-promotion`
+- **Base:** `d41bb473` (`docs: remove merged fee-aware lane dossier`)
+- **Intended integration target:** `beta`
+- **Status:** branch-local, derived-only implementation; not merged, pushed, scheduled, or activated.
+
+## Contract
+
+`auto_populate_source_router_history` and
+`scripts/auto_populate_source_router_history.py` form the single named,
+post-resolver pipeline.
+
+```text
+immutable beta collector snapshots
+  -> sanitized sealed replay inputs (existing exporter)
+  -> exact bindings to independently finalized strict resolutions (existing binder)
+  -> strict source-observation ledger (existing strict materializer)
+  -> settled Source Router history + independent collapsed scoreboard
+```
+
+Inputs are explicit `--collector-snapshots` and `--strict-resolutions` paths;
+the intended cohort is
+`/mnt/data-collection/prediction-bot/data/beta_shadow/forward_20260829T063405Z_beta_strict_source`.
+The scheduled resolver remains an independent prerequisite. The pipeline does
+not invoke a resolver or fetch a result.
+
+Each output is a hash-addressed generation under an explicit root below
+`data/derived_reports`. A byte-identical repeat returns the completed generation
+without rewriting it. A partial generation is refused rather than overwritten.
+The manifest records input hashes, chronology, artifact paths, status, and:
+`pending`, `unresolved`, `invalid`, `eligible`, and `collapsed` counts.
+
+### Runtime handoff
+
+The generated `source_observations/settled_source_correctness.jsonl` is the
+strict history ledger accepted by the existing Source Router loader (for example
+`weather_source_router_replay.py --history-ledger-input <path>`). The separate
+`source_router_scoreboard/strict_independent_source_history.jsonl` supplies
+one outcome-blind independent observation per source/event slice for audit and
+sample accounting. The generation manifest names both paths.
+
+## Boundaries
+
+- Reads immutable collector snapshots; does not modify raw archives, replay
+  inputs, resolutions, collector state, orders, paper wallets, or trading.
+- Uses only the strict canonical exporter, exact outcome binder,
+  `source_observation_ledger`, and strict history-collapse components.
+  It deliberately does **not** use the loose legacy `source_performance`
+  materializer.
+- The binder fails closed for missing, malformed, or ambiguous strict
+  resolutions. The source ledger excludes malformed, ambiguous, unproven, and
+  incomplete strict-source evidence from history.
+- Outcome fields remain in separate finalized/bound and settled derived
+  artifacts; they are never written to raw snapshots or sanitized replay inputs.
+- History availability is `settlement_ts`; the runtime must include a row only
+  when `settlement_ts < later_decision_time`.
+- `history_ready` means only that a derived ledger has eligible rows. It is not
+  a live result, lane promotion, activation, or trading claim.
+
+## Test receipts
+
+1. **RED (before implementation):**
+   `python3 -m unittest tests.test_auto_source_router_promotion.AutoSourceRouterPromotionTests.test_no_resolutions_writes_no_router_history`
+   failed as expected with `ModuleNotFoundError: No module named
+   'bot.auto_source_router_promotion'`.
+2. **Focused green:**
+   `python3 -m unittest tests.test_auto_source_router_promotion -v` — 6 tests,
+   `OK` (no resolutions; exact strict settlement with provenance/chronology;
+   existing router loader consumption; idempotent repeat; malformed/ambiguous/
+   unproven exclusion; CLI count report).
+3. **Adjacent green:**
+   `python3 -m unittest tests.test_collector_replay_inputs tests.test_replay_decision_input tests.test_source_observation_ledger tests.test_source_history_manifest tests.test_weather_source_router -v`
+   — 81 tests, `OK`.
+4. **Repository suite attempted:** `python3 -m unittest discover -s tests` —
+   1,020 tests run, 7 skipped, 4 environment/pre-existing errors: missing
+   optional `kalshi_python_sync` for `test_kalshi_direct`, plus three
+   `test_paper_shadow_lane_composition_sweep` tests requiring the absent ignored
+   `data/summaries/` directory. The feature's focused/adjacent tests passed.
+5. `git diff --check` (including staged feature paths) — passed.
+
+## Activation boundary and residual integration requirement
+
+Do **not** schedule this script or change a runtime config/service/timer in this
+branch. After independent review and a beta merge, an owner must explicitly:
+
+1. verify a beta cohort collector snapshot path and separately finalized strict
+   resolution feed are available;
+2. choose/approve a derived output root and invoke the script after the resolver;
+3. verify the generation manifest and strict ledger hashes/counts; and
+4. separately wire the resulting immutable ledger path into the Source Router
+   runtime's approved history input, then validate chronology in a fresh beta
+   cohort.
+
+That runtime/scheduler wiring is intentionally the remaining blocker and is not
+implemented here.
