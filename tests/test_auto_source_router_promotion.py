@@ -226,12 +226,12 @@ class AutoSourceRouterPromotionTests(unittest.TestCase):
         first_decision = _source_router_decision(
             _LaneDefinition("shadow_source_router", lane_type="source_router", parameters={"scoreboard_path": str(current_scoreboard)}),
             {
-                "market_id": "KXHIGHSEA-26AUG03-T70", "question": "Will Seattle high temperature be above 70°?",
+                "market_id": "KXHIGHSEA-26AUG03-T70", "observed_at": "2026-08-05T00:00:00+00:00", "question": "Will Seattle high temperature be above 70°?",
                 "city_id": "seattle_wa", "market_kind": "high", "contract_shape": "tail", "question_side": "above",
                 "threshold": 70.0, "source_details": [{"source_id": "nws", "source_name": "NWS", "forecast_high": 75.0}],
             },
             None,
-            {"market_id": "KXHIGHSEA-26AUG03-T70", "market": {"id": "KXHIGHSEA-26AUG03-T70", "question": "Will Seattle high temperature be above 70°?"}},
+            {"market_id": "KXHIGHSEA-26AUG03-T70", "observed_at": "2026-08-05T00:00:00+00:00", "market": {"id": "KXHIGHSEA-26AUG03-T70", "question": "Will Seattle high temperature be above 70°?"}},
         )
         self.assertEqual(first_decision["action"], "BUY_YES")
         self.assertEqual(first_decision["source_router"]["scoreboard_path"], str(current_scoreboard))
@@ -260,7 +260,7 @@ class AutoSourceRouterPromotionTests(unittest.TestCase):
         decision = _source_router_decision(
             _LaneDefinition("shadow_source_router", lane_type="source_router", parameters={"scoreboard_path": str(result.scoreboard_path)}),
             {
-                "market_id": "KXHIGHSEA-26AUG03-T70",
+                "market_id": "KXHIGHSEA-26AUG03-T70", "observed_at": "2026-08-05T00:00:00+00:00",
                 "question": "Will Seattle high temperature be above 70°?",
                 "city_id": "seattle_wa",
                 "market_kind": "high",
@@ -270,7 +270,7 @@ class AutoSourceRouterPromotionTests(unittest.TestCase):
                 "source_details": [{"source_id": "nws", "source_name": "NWS", "forecast_high": 75.0}],
             },
             None,
-            {"market_id": "KXHIGHSEA-26AUG03-T70", "market": {"id": "KXHIGHSEA-26AUG03-T70", "question": "Will Seattle high temperature be above 70°?"}},
+            {"market_id": "KXHIGHSEA-26AUG03-T70", "observed_at": "2026-08-05T00:00:00+00:00", "market": {"id": "KXHIGHSEA-26AUG03-T70", "question": "Will Seattle high temperature be above 70°?"}},
         )
 
         [scorecard] = [json.loads(line) for line in result.scoreboard_path.read_text(encoding="utf-8").splitlines()]
@@ -279,6 +279,73 @@ class AutoSourceRouterPromotionTests(unittest.TestCase):
         self.assertEqual(scorecard["threshold_direction_accuracy"], 1.0)
         self.assertEqual(decision["action"], "BUY_YES")
         self.assertEqual(decision["source_router"]["scoreboard_path"], str(result.scoreboard_path))
+
+    def test_actual_paper_router_excludes_scorecard_settled_at_or_after_candidate_time(self) -> None:
+        rows = [_collector_row(market_id=f"KXHIGHSEA-26AUG{index:02}-T70") for index in range(1, 101)]
+        result = self.run_pipeline(rows, [_strict_resolution(row["market_id"]) for row in rows])
+
+        decision = _source_router_decision(
+            _LaneDefinition("shadow_source_router", lane_type="source_router", parameters={"scoreboard_path": str(result.scoreboard_path)}),
+            {
+                "market_id": "KXHIGHSEA-26AUG03-T70", "observed_at": "2026-08-02T00:00:00+00:00",
+                "question": "Will Seattle high temperature be above 70°?", "city_id": "seattle_wa",
+                "market_kind": "high", "contract_shape": "tail", "question_side": "above", "threshold": 70.0,
+                "source_details": [{"source_id": "nws", "source_name": "NWS", "forecast_high": 75.0}],
+            },
+            None,
+            {"market_id": "KXHIGHSEA-26AUG03-T70", "observed_at": "2026-08-02T00:00:00+00:00", "market": {"id": "KXHIGHSEA-26AUG03-T70", "question": "Will Seattle high temperature be above 70°?"}},
+        )
+
+        [scorecard] = [json.loads(line) for line in result.scoreboard_path.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(scorecard["sample_count"], 100)
+        self.assertEqual(len(scorecard["provenance"]["settled_observations"]), 100)
+        self.assertEqual(decision["action"], "SKIP")
+        self.assertEqual(decision["reason_code"], "no_usable_reliability_after_backoff")
+
+    def test_promotion_excludes_source_evidence_claimed_after_immutable_observation(self) -> None:
+        row = _collector_row()
+        row["decision_artifact"]["source_context"]["data"]["weather_source_snapshot"]["sources"][0]["source_as_of"] = "2026-08-01T12:01:00+00:00"
+
+        result = self.run_pipeline([row], [_strict_resolution(row["market_id"])])
+
+        self.assertEqual(result.status, "no_router_history")
+        self.assertEqual(result.counts["eligible"], 0)
+
+    def test_reuse_rejects_tampered_source_history_manifest(self) -> None:
+        row = _collector_row()
+        first = self.run_pipeline([row], [_strict_resolution(row["market_id"])])
+        first.history_manifest_path.write_text("{}\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "source history manifest"):
+            self.run_pipeline([row], [_strict_resolution(row["market_id"])])
+
+    def test_reuse_rejects_tampered_scorecard(self) -> None:
+        row = _collector_row()
+        first = self.run_pipeline([row], [_strict_resolution(row["market_id"])])
+        first.scoreboard_path.write_text("{}\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "artifact hash mismatch"):
+            self.run_pipeline([row], [_strict_resolution(row["market_id"])])
+
+    def test_reuse_rejects_manifest_artifact_path_outside_generation(self) -> None:
+        row = _collector_row()
+        first = self.run_pipeline([row], [_strict_resolution(row["market_id"])])
+        manifest = json.loads(first.manifest_path.read_text(encoding="utf-8"))
+        manifest["artifacts"]["scoreboard"] = str(self.root / "external-scoreboard.jsonl")
+        first.manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "outside generation"):
+            self.run_pipeline([row], [_strict_resolution(row["market_id"])])
+
+    def test_reuse_rejects_current_link_outside_a_complete_generation(self) -> None:
+        row = _collector_row()
+        self.run_pipeline([row], [_strict_resolution(row["market_id"])])
+        current = self.output_root / "current"
+        current.unlink()
+        current.symlink_to(self.root)
+
+        with self.assertRaisesRegex(ValueError, "current.*complete generation"):
+            self.run_pipeline([row], [_strict_resolution(row["market_id"])])
 
     def test_published_helper_metadata_never_retains_random_staging_paths(self) -> None:
         row = _collector_row()

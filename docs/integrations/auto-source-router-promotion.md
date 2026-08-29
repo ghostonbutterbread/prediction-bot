@@ -193,3 +193,32 @@ branch. After independent review and a beta merge, an owner must explicitly:
 
 That runtime/scheduler wiring and the explicit paper-lane enablement remain the
 intentional blocker; neither is implemented here.
+
+## Fourth review repair: chronological consumption and verified reuse
+
+Strict scorecards now retain each collapsed observation's `settlement_ts` and
+`direction_correct` under provenance. The actual paper Source Router recomputes
+strict scorecard sample/correct/accuracy fields as of the candidate's immutable
+`observed_at`, accepting only `settlement_ts < observed_at`; legacy scoreboards
+are unchanged. The strict source ledger rejects a `source_as_of` later than its
+sealed input observation time.
+
+Completed-generation reuse now rejects manifest paths outside the immutable
+generation, verifies every declared promotion artifact hash, validates the
+source-history manifest and all of its declared artifact hashes, checks strict
+scorecard aggregates against retained observations, and accepts `current` only
+when it is a symlink to a verified complete generation. Publication remains an
+atomic relative-symlink handoff after validation.
+
+**TDD receipts:** the six new focused tests were run red before implementation
+(future scorecard data was selected; future `source_as_of` was eligible; and
+tampered/external reuse was accepted), then green with
+`PYTHONPATH=. python3 -m unittest tests.test_auto_source_router_promotion tests.test_source_observation_ledger -q` — 37 tests, `OK`.
+The affected suite (`test_auto_source_router_promotion`,
+`test_source_observation_ledger`, `test_source_history_manifest`,
+`test_collector_source_router_replay`, `test_weather_source_confidence`, and
+`test_simulator_source_scoreboard_shadow`) ran 90 tests, `OK`.
+`PYTHONPATH=. python3 -m unittest discover -s tests -q` ran 1,032 tests with
+7 skips and one pre-existing environment error: missing optional
+`kalshi_python_sync` while importing `test_kalshi_direct`. No service, timer,
+runtime, active config, archive, wallet, or order was changed.

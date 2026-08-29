@@ -56,6 +56,7 @@ def auto_populate_source_router_history(
     if not snapshots.is_file() or not resolutions.is_file():
         raise ValueError("collector snapshots and strict resolutions must be readable files")
     root = _prepare_root(output_root)
+    _validate_current_generation(root)
     # Consume each input exactly once before deriving its generation identity.
     # All downstream helpers receive the materialized bytes, not a path that a
     # collector or resolver can append between hash calculation and reread.
@@ -158,6 +159,16 @@ def auto_populate_source_router_history(
                 "sha256": history_manifest["sha256"],
             },
         }
+        manifest["artifact_sha256"] = {
+            "replay_inputs": _sha256_file(exported.records_path),
+            "finalized_outcomes": _sha256_file(bound.outcomes_path),
+            "unbound_outcomes": _sha256_file(bound.unbound_path),
+            "history_ledger": _sha256_file(observations.settled_path),
+            "unusable_observations": _sha256_file(observations.unsettled_path),
+            "scoreboard": _sha256_file(strict_scorecard_path),
+            "strict_independent_history": _sha256_file(collapsed.collapsed_path),
+            "source_history_manifest": _sha256_file(history_manifest_path),
+        }
         staged_manifest_path = staging_dir / MANIFEST_FILENAME
         staged_manifest_path.write_bytes(_canonical_bytes(manifest))
         try:
@@ -182,8 +193,8 @@ def _prepare_root(value: str | Path) -> Path:
 
 def _publish_current_generation(root: Path, generation_dir: Path) -> None:
     """Atomically repoint the stable consumer handoff after full publication."""
-    if not (generation_dir / MANIFEST_FILENAME).is_file():
-        raise ValueError(f"refusing to hand off incomplete promotion generation: {generation_dir}")
+    _validate_generation(generation_dir / MANIFEST_FILENAME)
+    _validate_current_generation(root)
     current_link = root / CURRENT_GENERATION_LINKNAME
     temporary_link = root / f".{CURRENT_GENERATION_LINKNAME}.{uuid.uuid4().hex}"
     try:
@@ -231,10 +242,13 @@ def _materialize_strict_finalized_scorecard(source_path: Path, output_path: Path
         contract_shape = str(row.get("contract_shape") or "unknown")
         source_name = str(row.get("source_name") or "unknown")
         key = (source_id, city_id, market_kind, contract_shape, source_name)
-        aggregate = slices.setdefault(key, {"sample_count": 0, "correct_count": 0, "settlement_ts": []})
+        aggregate = slices.setdefault(key, {"sample_count": 0, "correct_count": 0, "settlement_ts": [], "settled_observations": []})
         aggregate["sample_count"] += 1
         aggregate["correct_count"] += int(direction_correct)
         aggregate["settlement_ts"].append(str(row.get("settlement_ts") or ""))
+        aggregate["settled_observations"].append({
+            "settlement_ts": str(row.get("settlement_ts") or ""), "direction_correct": direction_correct,
+        })
 
     scorecard_rows: list[dict[str, Any]] = []
     source_sha256 = hashlib.sha256(source_bytes).hexdigest()
@@ -258,6 +272,7 @@ def _materialize_strict_finalized_scorecard(source_path: Path, output_path: Path
                 "eligibility": "eligible_for_source_history and eligible_strict_source_proof",
                 "availability_field": "settlement_ts",
                 "settlement_ts": sorted(value for value in aggregate["settlement_ts"] if value),
+                "settled_observations": sorted(aggregate["settled_observations"], key=lambda value: value["settlement_ts"]),
             },
         })
     output_path.write_bytes(b"".join(_canonical_bytes(row) for row in scorecard_rows))
@@ -286,13 +301,93 @@ def _load_completed_generation(
 ) -> AutoSourceRouterPromotionResult:
     if not manifest_path.is_file():
         raise ValueError(f"incomplete promotion generation exists; refusing to consume: {manifest_path.parent}")
-    manifest = _load_manifest(manifest_path)
+    manifest = _validate_generation(manifest_path)
     if manifest.get("input_sha256") != {"collector_snapshots": snapshot_sha256, "strict_resolutions": resolution_sha256}:
         raise ValueError("existing promotion generation input hash mismatch")
-    result = _result_from_manifest(manifest, manifest_path, reused=True)
-    if not result.history_manifest_path.is_file():
-        raise ValueError("completed promotion generation is missing its source history manifest")
-    return result
+    return _result_from_manifest(manifest, manifest_path, reused=True)
+
+
+def _validate_current_generation(root: Path) -> None:
+    current = root / CURRENT_GENERATION_LINKNAME
+    if not current.exists() and not current.is_symlink():
+        return
+    target = current.resolve()
+    generations = (root / "generations").resolve()
+    if not current.is_symlink() or target.parent != generations:
+        raise ValueError("current handoff must target a complete generation")
+    _validate_generation(target / MANIFEST_FILENAME)
+
+
+def _generation_path(value: Any, generation_dir: Path, *, label: str) -> Path:
+    path = Path(str(value)).expanduser().resolve()
+    if path.parent == generation_dir or generation_dir in path.parents:
+        return path
+    raise ValueError(f"{label} path is outside generation: {path}")
+
+
+def _validate_generation(manifest_path: Path) -> dict[str, Any]:
+    manifest = _load_manifest(manifest_path)
+    generation_dir = manifest_path.parent.resolve()
+    artifacts = manifest.get("artifacts")
+    hashes = manifest.get("artifact_sha256")
+    expected = {"replay_inputs", "finalized_outcomes", "unbound_outcomes", "history_ledger", "unusable_observations", "scoreboard", "strict_independent_history"}
+    if not isinstance(artifacts, dict) or not isinstance(hashes, dict) or set(hashes) != expected | {"source_history_manifest"}:
+        raise ValueError("promotion manifest is missing artifact integrity data")
+    for name in expected:
+        path = _generation_path(artifacts.get(name), generation_dir, label=f"artifact {name}")
+        if not path.is_file() or _sha256_file(path) != hashes.get(name):
+            raise ValueError(f"artifact hash mismatch: {name}")
+    runtime = manifest.get("runtime_consumption")
+    if not isinstance(runtime, dict):
+        raise ValueError("promotion manifest is missing runtime consumption paths")
+    source_history = manifest.get("source_history_manifest")
+    if not isinstance(source_history, dict):
+        raise ValueError("promotion manifest is missing source history manifest")
+    for name, key in (("history_ledger", "history_ledger_path"), ("scoreboard", "scoreboard_path"), ("source_history_manifest", "history_manifest_path")):
+        if _generation_path(runtime.get(key), generation_dir, label=f"runtime {key}") != _generation_path(
+            artifacts.get(name) if name != "source_history_manifest" else source_history.get("path"), generation_dir, label=name,
+        ):
+            raise ValueError(f"promotion manifest {key} does not match its artifact")
+    history_manifest_path = _generation_path(source_history.get("path"), generation_dir, label="source history manifest")
+    if not history_manifest_path.is_file() or _sha256_file(history_manifest_path) != hashes.get("source_history_manifest"):
+        raise ValueError("source history manifest hash mismatch")
+    _validate_source_history_manifest(history_manifest_path, generation_dir)
+    _validate_strict_scorecard(_generation_path(artifacts["scoreboard"], generation_dir, label="scoreboard"))
+    return manifest
+
+
+def _validate_source_history_manifest(path: Path, generation_dir: Path) -> None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise ValueError("source history manifest is invalid JSON") from error
+    if not isinstance(value, dict) or value.get("schema_name") != "source_history_manifest":
+        raise ValueError("source history manifest is invalid")
+    declared_hashes = value.get("sha256")
+    expected = {"source_ledger", "strict_resolution", "raw_archive", "replay_index", "replay_manifest"}
+    if not isinstance(declared_hashes, dict) or set(declared_hashes) != expected:
+        raise ValueError("source history manifest is missing hashes")
+    for name, digest in declared_hashes.items():
+        artifact = _generation_path(value.get(f"{name}_path"), generation_dir, label=f"source history {name}")
+        if not artifact.is_file() or _sha256_file(artifact) != digest:
+            raise ValueError(f"source history manifest artifact hash mismatch: {name}")
+
+
+def _validate_strict_scorecard(path: Path) -> None:
+    for line in path.read_bytes().splitlines():
+        row = json.loads(line)
+        provenance = row.get("provenance") if isinstance(row, dict) else None
+        observations = provenance.get("settled_observations") if isinstance(provenance, dict) else None
+        if row.get("schema_name") != "strict_finalized_source_router_scorecard" or not isinstance(observations, list):
+            raise ValueError("strict scorecard integrity check failed")
+        correct = sum(item.get("direction_correct") is True for item in observations if isinstance(item, dict))
+        if any(not isinstance(item, dict) or not item.get("settlement_ts") or not isinstance(item.get("direction_correct"), bool) for item in observations):
+            raise ValueError("strict scorecard integrity check failed")
+        if row.get("sample_count") != len(observations) or row.get("threshold_sample_count") != len(observations) or row.get("threshold_correct_count") != correct:
+            raise ValueError("strict scorecard integrity check failed")
+        accuracy = round(correct / len(observations), 6) if observations else None
+        if row.get("threshold_direction_accuracy") != accuracy:
+            raise ValueError("strict scorecard integrity check failed")
 
 
 def _source_history_manifest(
