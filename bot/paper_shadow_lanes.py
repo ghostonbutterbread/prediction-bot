@@ -631,6 +631,7 @@ def _source_router_decision(
         source_row,
         shared_candidate,
     )
+    from bot.auto_source_router_promotion import load_verified_strict_scorecard_rows
     from bot.weather.source_confidence import build_source_confidence_row
     from bot.weather.source_reliability import build_reliability_candidate_row, load_scoreboard_rows
 
@@ -639,7 +640,16 @@ def _source_router_decision(
         candidate_row["predicted_outcome"] = "YES"
         candidate_row["source_router_candidate_outcome_default"] = "market_yes_event"
     scoreboard_path = _source_reliability_scoreboard_path(lane)
-    reliability_rows = load_scoreboard_rows(scoreboard_path) if scoreboard_path and Path(scoreboard_path).exists() else None
+    try:
+        strict_rows = load_verified_strict_scorecard_rows(scoreboard_path) if scoreboard_path else None
+    except ValueError:
+        return _strict_scorecard_verification_failed_decision(baseline, signal, scoreboard_path)
+    # Only the exact strict auto-promotion handoff is verified here. Existing
+    # legacy scoreboards retain their historical loader and behavior unchanged.
+    reliability_rows = strict_rows if strict_rows is not None else (
+        load_scoreboard_rows(scoreboard_path) if scoreboard_path and Path(scoreboard_path).exists() else None
+    )
+    reliability_rows = _strict_scorecard_as_of(reliability_rows, candidate_row.get("observed_at"))
     confidence_row = build_source_confidence_row(candidate_row, reliability_table=reliability_rows)
     source_direction = _optional_text(confidence_row.get("source_direction"))
     action = _action_from_source_direction(source_direction)
@@ -710,6 +720,62 @@ def _source_router_decision(
             "decision_contract": "shadow_lane_recommendation_only_no_accounting_mutation",
         },
     }
+
+
+def _strict_scorecard_verification_failed_decision(
+    baseline: Mapping[str, Any], signal: Mapping[str, Any], scoreboard_path: str | None,
+) -> dict[str, Any]:
+    """Fail closed rather than route on an unverified strict publication."""
+    return {
+        "source_row": baseline.get("source_row"),
+        "action": "SKIP",
+        "reason_code": "strict_scorecard_verification_failed",
+        "reason": "Strict auto-promotion scorecard could not be verified; Source Router was not used",
+        "confidence_after": _number(signal.get("confidence")),
+        "requested_position_size_usd": 0.0,
+        "approved_position_size_usd": 0.0,
+        "source_router": {
+            "available": False,
+            "reason_code": "strict_scorecard_verification_failed",
+            "scoreboard_path": scoreboard_path,
+            "decision_contract": "shadow_lane_recommendation_only_no_accounting_mutation",
+        },
+    }
+
+
+def _strict_scorecard_as_of(rows: list[dict[str, Any]] | None, decision_time: Any) -> list[dict[str, Any]] | None:
+    """Recompute strict promoted history at the candidate's immutable cutoff.
+
+    Legacy scoreboards do not carry per-settlement evidence and retain their
+    existing behavior. Strict generated scorecards must carry it, so malformed
+    or future evidence is never selected by the paper Source Router.
+    """
+    if rows is None:
+        return None
+    cutoff = _parse_timestamp(decision_time)
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        if row.get("schema_name") != "strict_finalized_source_router_scorecard":
+            result.append(row)
+            continue
+        raw_provenance = row.get("provenance")
+        provenance = dict(raw_provenance) if isinstance(raw_provenance, Mapping) else {}
+        observations = provenance.get("settled_observations")
+        eligible: list[Mapping[str, Any]] = []
+        if cutoff is not None and isinstance(observations, list):
+            for item in observations:
+                settlement = _parse_timestamp(item.get("settlement_ts")) if isinstance(item, Mapping) else None
+                if isinstance(item, Mapping) and isinstance(item.get("direction_correct"), bool) and settlement is not None and settlement < cutoff:
+                    eligible.append(item)
+        correct = sum(item["direction_correct"] for item in eligible)
+        recomputed = dict(row)
+        recomputed["sample_count"] = len(eligible)
+        recomputed["threshold_sample_count"] = len(eligible)
+        recomputed["threshold_correct_count"] = correct
+        recomputed["threshold_direction_accuracy"] = round(correct / len(eligible), 6) if eligible else None
+        recomputed["provenance"] = {**provenance, "as_of_decision_time": decision_time, "settled_observations": eligible}
+        result.append(recomputed)
+    return result
 
 
 LANE_EVALUATORS = {

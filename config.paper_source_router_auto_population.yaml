@@ -1,0 +1,16 @@
+# Disabled branch-local handoff for the strict auto-populated Source Router scorecard.
+# Do not run directly. An owner must copy this to an ignored fresh-cohort config
+# and explicitly enable the paper shadow lane after the required review gate.
+# The promotion job must use data/derived_reports/auto_source_router_history as
+# its output root; its atomically switched current link only targets a fully
+# published immutable generation, never a staging directory.
+paper_shadow_lanes:
+  enabled: false
+  definitions_dir: lanes
+  enabled_lanes: []
+  source_scoreboard_path: "data/derived_reports/auto_source_router_history/current/source_router_scoreboard/strict_finalized_source_scoreboard.jsonl"
+  shadow_source_router:
+    enabled: false
+    parameters:
+      hypothetical_notional_usd: 10.0
+      min_edge: 0.03

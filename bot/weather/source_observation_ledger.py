@@ -240,6 +240,7 @@ def _pending_rows_for_input(row: Mapping[str, Any], identity: Mapping[str, Any])
                 market_kind=observation.market.market_kind,
                 contract_shape=observation.market.contract_shape,
                 question_side=observation.market.question_side,
+                observed_at=identity["decision_key"]["observed_at_utc"],
             )
             eligibility = _ELIGIBLE_STRICT_SOURCE_PROOF if (
                 target_proof["status"] == _ELIGIBLE_TARGET_PROOF and strict_proof["status"] == "eligible"
@@ -368,6 +369,7 @@ def strict_source_observation_proof(
     market_kind: Any,
     contract_shape: Any,
     question_side: Any,
+    observed_at: Any,
 ) -> dict[str, Any]:
     """Validate the full recorded source-to-contract proof without inference.
 
@@ -381,8 +383,11 @@ def strict_source_observation_proof(
     mapping = source_record.get("target_mapping") if isinstance(source_record.get("target_mapping"), Mapping) else {}
     if not source_id:
         reasons.append("missing_source_id")
-    if not source_as_of or _parse_time(source_as_of) is None:
+    source_as_of_time, observed_at_time = _parse_time(source_as_of), _parse_time(observed_at)
+    if not source_as_of or source_as_of_time is None:
         reasons.append("missing_or_unoffset_source_as_of")
+    elif observed_at_time is None or source_as_of_time > observed_at_time:
+        reasons.append("source_as_of_after_immutable_observed_at")
     if not _text(mapping.get("source_timezone")):
         reasons.append("missing_source_timezone")
 
