@@ -13,6 +13,7 @@ from bot.file_ops import append_jsonl, load_jsonl
 
 from bot.config import load_config
 from bot.decision_pipeline import DecisionPipelineEvaluator
+from bot.exchanges.kalshi import DirectMarketFetchUnavailable
 from bot.prediction_lab import PredictionLab, PredictionLabRunResult
 from bot.prediction_lab_collect import PredictionLabCollectorDaemon
 from bot.prediction_lab_replay import classify_replay_row_quality
@@ -132,6 +133,32 @@ class PredictionLabCollectorTests(unittest.TestCase):
     @staticmethod
     def _runtime_prediction_lab_dir(data_dir: Path) -> Path:
         return data_dir / "paper" / "prediction_lab"
+
+    def test_direct_fetch_unavailable_does_not_advance_last_collect_at(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "data_dir": tmpdir,
+                "prediction_lab": {
+                    "enabled": True,
+                    "mode": "collector",
+                    "observer_mode": True,
+                    "groups": ["weather"],
+                    "collector_fetch_mode": "direct_markets",
+                },
+            }
+            lab = PredictionLab(config)
+            last_successful_collect = "2026-05-14T12:00:00+00:00"
+            lab.update_runtime_state(last_collect_at=last_successful_collect)
+            exchange = SimpleNamespace(
+                get_markets_direct=lambda **kwargs: (_ for _ in ()).throw(
+                    DirectMarketFetchUnavailable("direct market pull unavailable after retries")
+                )
+            )
+
+            with self.assertRaises(DirectMarketFetchUnavailable):
+                lab.run(exchange)
+
+            self.assertEqual(PredictionLab(config).state["last_collect_at"], last_successful_collect)
 
     def _collect_sports_buy_artifact(self, tmpdir: str, books: list[dict | None], *, lab_patch: dict | None = None) -> dict:
         prediction_lab_cfg = {

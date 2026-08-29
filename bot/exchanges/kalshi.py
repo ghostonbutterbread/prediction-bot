@@ -20,6 +20,9 @@ KALSHI_DEMO = "https://demo-api.kalshi.co/trade-api/v2"
 KALSHI_PROD = "https://api.elections.kalshi.com/trade-api/v2"
 
 
+class DirectMarketFetchUnavailable(RuntimeError):
+    """Raised when a direct market request exhausts its transport retries."""
+
 
 class KalshiExchange(BaseExchange):
     name = "kalshi"
@@ -222,6 +225,8 @@ class KalshiExchange(BaseExchange):
                     params += f'&cursor={cursor}'
                 url = f'{self.host}/markets{params}'
                 resp = http_get_with_retry(url, auth_headers, throttle=self._throttle, timeout=10)
+                if resp is None:
+                    raise DirectMarketFetchUnavailable('direct market pull unavailable after retries')
                 if not resp or resp.status_code != 200:
                     logger.warning('Kalshi direct market pull stopped: page=%s status=%s', pages, getattr(resp, 'status_code', None))
                     break
@@ -247,6 +252,8 @@ class KalshiExchange(BaseExchange):
             deduped = self._dedupe_and_filter_markets(markets, now=datetime.now(timezone.utc))
             logger.info('Kalshi direct market pull complete: pages=%s accepted=%s deduped=%s returning=%s', pages, len(markets), len(deduped), min(len(deduped), limit))
             return deduped[:limit]
+        except DirectMarketFetchUnavailable:
+            raise
         except Exception as e:
             logger.error(f'Error fetching direct markets: {e}')
             return []
@@ -275,11 +282,15 @@ class KalshiExchange(BaseExchange):
         try:
             url = f'{self.host}/markets?status=open&limit={max(1, min(limit, 50))}&series_ticker={series_ticker}'
             resp = http_get_with_retry(url, auth_headers, throttle=self._throttle, timeout=8)
+            if resp is None:
+                raise DirectMarketFetchUnavailable('direct market pull unavailable after retries')
             if not resp or resp.status_code != 200:
                 return []
             data = resp.json()
             markets = data.get('markets', [])
             return markets if isinstance(markets, list) else []
+        except DirectMarketFetchUnavailable:
+            raise
         except Exception as e:
             logger.debug('Kalshi direct series fetch failed for %s: %s', series_ticker, e)
             return []
