@@ -6,7 +6,7 @@
 - **Base:** `d41bb473` (`docs: remove merged fee-aware lane dossier`)
 - **Intended integration target:** `beta`
 - **Status:** branch-local, derived-only implementation; not merged, pushed, scheduled, or activated.
-- **Implementation checkpoint:** `6ab4655f7bc53257203cb39f1505e62d71bb9abf` (`fix: publish strict paper source router scorecard`)
+- **Implementation checkpoints:** `6ab4655f7bc53257203cb39f1505e62d71bb9abf` (`fix: publish strict paper source router scorecard`); `b27ae0a3df5f370fcd8b8e145b22aa80d9445b4c` (`fix: atomically hand off current source router scorecard`).
 
 ## Contract
 
