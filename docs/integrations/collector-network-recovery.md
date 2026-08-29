@@ -7,8 +7,8 @@
 - **Intended integration target:** `beta`
 - **Last updated:** 2026-08-29
 - **Owning feature branch/ref:** `fix/collector-network-recovery`
-- **Latest immutable recovery checkpoint:** `a30121d` (pre-implementation base; implementation commit pending)
-- **Feature implementation commit(s):** none yet
+- **Latest immutable recovery checkpoint:** `5c8b608d68c8435e95ddf4d440667b66c5a1e95f`
+- **Feature implementation commit(s):** `5c8b608d68c8435e95ddf4d440667b66c5a1e95f` — `fix: surface collector direct-fetch outages`
 - **Inspiration / canonical references:** collector DNS outage report; `bot/http_rate_limit.py`; `bot/exchanges/kalshi.py`; `bot/prediction_lab_collect.py`
 
 ## Intent
@@ -42,10 +42,10 @@ Repair the observer collector boundary so exhaustion of `http_get_with_retry` tr
 ## Interruption / resume handoff
 
 - **Owning feature branch/ref:** `fix/collector-network-recovery`
-- **Latest immutable recovery checkpoint:** `a30121d` (implementation commit pending)
-- **Feature implementation commit(s):** none yet
-- **Exact resume point:** inspect/stage only `bot/exchanges/kalshi.py`, `tests/test_kalshi_direct.py`, `tests/test_prediction_lab_collect.py`, and this dossier; run `git diff --check`; commit locally; then amend this dossier in a follow-up documentation commit with the implementation SHA.
-- **Working-tree state at handoff:** intentionally uncommitted implementation and dossier pending local commit.
+- **Latest immutable recovery checkpoint:** `5c8b608d68c8435e95ddf4d440667b66c5a1e95f`
+- **Feature implementation commit(s):** `5c8b608d68c8435e95ddf4d440667b66c5a1e95f`
+- **Exact resume point:** review the implementation commit and this final dossier-only commit; resolve the documented full-suite environment prerequisites before any integration decision.
+- **Working-tree state at handoff:** clean after committing this dossier update.
 
 ## Decision gates
 
@@ -56,3 +56,4 @@ Repair the observer collector boundary so exhaustion of `http_get_with_retry` tr
 ## Decision record
 
 - 2026-08-29 — created for the direct-fetch retry-exhaustion recovery repair; focused tests green; full-suite environment failures recorded.
+- 2026-08-29 — implementation committed as `5c8b608d68c8435e95ddf4d440667b66c5a1e95f`; no merge, push, activation, or config change.
