@@ -29,15 +29,25 @@ not invoke a resolver or fetch a result.
 
 Each output is a hash-addressed generation under an explicit root below
 `data/derived_reports`. A byte-identical repeat returns the completed generation
-without rewriting it. A partial generation is refused rather than overwritten.
-The manifest records input hashes, chronology, artifact paths, status, and:
+without rewriting it. Inputs are read once then copied into the generation, so
+the hashes, replay export, binding, and provenance all name the same immutable
+bytes. Work is built in a private staging directory and atomically renamed only
+after both manifests are complete; a failed staging attempt is never consumable
+as a generation and the same inputs can be retried. The manifest records input
+hashes, chronology, artifact paths, status, and:
 `pending`, `unresolved`, `invalid`, `eligible`, and `collapsed` counts.
 
 ### Runtime handoff
 
-The generated `source_observations/settled_source_correctness.jsonl` is the
-strict history ledger accepted by the existing Source Router loader (for example
-`weather_source_router_replay.py --history-ledger-input <path>`). The separate
+The generated `source_history_manifest.json` follows the existing verified
+`source_history_manifest` contract: it hash-binds the strict ledger, exact
+materialized strict-resolution source, materialized raw archive, replay index,
+and replay-export manifest. The intended consumer is
+`bot.weather.collector_source_router_replay.run_collector_source_router_replay`
+with `history_manifest_path` (and the exact matching `history_ledger_path`),
+not the report-only replay helper. The generated
+`source_observations/settled_source_correctness.jsonl` is that strict history
+ledger. The separate
 `source_router_scoreboard/strict_independent_source_history.jsonl` supplies
 one outcome-blind independent observation per source/event slice for audit and
 sample accounting. The generation manifest names both paths.
@@ -62,11 +72,11 @@ sample accounting. The generation manifest names both paths.
 
 ## Test receipts
 
-1. **RED (before implementation):**
+1. **Original RED (before feature implementation):**
    `python3 -m unittest tests.test_auto_source_router_promotion.AutoSourceRouterPromotionTests.test_no_resolutions_writes_no_router_history`
    failed as expected with `ModuleNotFoundError: No module named
    'bot.auto_source_router_promotion'`.
-2. **Focused green:**
+2. **Original focused green:**
    `python3 -m unittest tests.test_auto_source_router_promotion -v` — 6 tests,
    `OK` (no resolutions; exact strict settlement with provenance/chronology;
    existing router loader consumption; idempotent repeat; malformed/ambiguous/
@@ -80,6 +90,22 @@ sample accounting. The generation manifest names both paths.
    `test_paper_shadow_lane_composition_sweep` tests requiring the absent ignored
    `data/summaries/` directory. The feature's focused/adjacent tests passed.
 5. `git diff --check` (including staged feature paths) — passed.
+
+## Rejection repair
+
+Independent review rejected `9d375922` because it emitted only a custom
+promotion manifest, hashed caller paths before downstream rereads, and created
+the final generation before successful completion. This follow-up resolves
+those blockers by emitting the contract-owned verified source-history manifest,
+materializing the consumed source bytes before hashing/export, and atomically
+publishing a completed staging tree.
+
+**RED receipt:**
+`PYTHONPATH=. python3 -m unittest tests.test_auto_source_router_promotion.AutoSourceRouterPromotionTests.test_generation_is_accepted_by_verified_collector_consumer_with_exact_manifest_ledger tests.test_auto_source_router_promotion.AutoSourceRouterPromotionTests.test_promotion_binds_provenance_to_materialized_input_bytes_when_source_changes tests.test_auto_source_router_promotion.AutoSourceRouterPromotionTests.test_failed_partial_generation_can_be_retried_without_publishing_incomplete_history -v`
+failed on the pre-fix revision: two missing `history_manifest_path` errors and
+one incomplete-final-generation retry rejection.
+
+**Exact green receipt:** `PYTHONPATH=. python3 -m unittest tests.test_auto_source_router_promotion tests.test_collector_replay_inputs tests.test_replay_outcome_binding tests.test_source_observation_ledger tests.test_source_history_manifest tests.test_collector_source_router_replay -v && git diff --check` — 69 tests, `OK`; whitespace check passed.
 
 ## Activation boundary and residual integration requirement
 

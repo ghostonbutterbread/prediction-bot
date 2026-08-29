@@ -1,3 +1,4 @@
+import hashlib
 import json
 import shutil
 import subprocess
@@ -5,8 +6,10 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from bot.auto_source_router_promotion import auto_populate_source_router_history
+from bot.weather.collector_source_router_replay import run_collector_source_router_replay
 from scripts.weather_source_router_replay import _load_router_ledger_rows
 
 
@@ -113,6 +116,73 @@ class AutoSourceRouterPromotionTests(unittest.TestCase):
         self.assertEqual(stats["history_ledger_rows"], 1)
         self.assertTrue(loaded[0]["source_router_history_only"])
         self.assertEqual(loaded[0]["settlement_ts"], loaded[0]["known_after"])
+
+    def test_generation_is_accepted_by_verified_collector_consumer_with_exact_manifest_ledger(self) -> None:
+        row = _collector_row()
+        result = self.run_pipeline([row], [_strict_resolution(row["market_id"])])
+        promotion = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+        replay_output = Path(tempfile.mkdtemp(prefix="test_source_router_consumer_", dir=DERIVED_ROOT))
+        self.addCleanup(shutil.rmtree, replay_output, True)
+
+        consumed = run_collector_source_router_replay(
+            replay_inputs_path=promotion["artifacts"]["replay_inputs"],
+            finalized_outcomes_path=promotion["artifacts"]["finalized_outcomes"],
+            output_dir=replay_output,
+            min_sample_count=1,
+            history_manifest_path=result.history_manifest_path,
+            history_ledger_path=result.history_path,
+        )
+
+        provenance = consumed.metadata["inputs"]["selector_history"]
+        self.assertEqual(provenance["verification"], "manifest_sha256_verified")
+        self.assertEqual(provenance["history_ledger_path"], str(result.history_path))
+        self.assertEqual(provenance["history_manifest_source_ledger_sha256"], promotion["source_history_manifest"]["sha256"]["source_ledger"])
+
+    def test_promotion_binds_provenance_to_materialized_input_bytes_when_source_changes(self) -> None:
+        row = _collector_row()
+        _write_jsonl(self.archive, [row])
+        _write_jsonl(self.resolutions, [_strict_resolution(row["market_id"])])
+        from bot.auto_source_router_promotion import export_collector_replay_inputs as real_export
+
+        def append_before_export(**kwargs):
+            with self.archive.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(_collector_row(market_id="KXHIGHSEA-26AUG04-T71"), sort_keys=True) + "\n")
+            return real_export(**kwargs)
+
+        with patch("bot.auto_source_router_promotion.export_collector_replay_inputs", side_effect=append_before_export):
+            result = auto_populate_source_router_history(
+                collector_snapshots_path=self.archive,
+                strict_resolutions_path=self.resolutions,
+                output_root=self.output_root,
+            )
+
+        history_manifest = json.loads(result.history_manifest_path.read_text(encoding="utf-8"))
+        materialized_archive = Path(history_manifest["raw_archive_path"])
+        self.assertNotEqual(materialized_archive.read_bytes(), self.archive.read_bytes())
+        self.assertEqual(history_manifest["sha256"]["raw_archive"], hashlib.sha256(materialized_archive.read_bytes()).hexdigest())
+        self.assertEqual(history_manifest["sha256"]["raw_archive"], json.loads(result.manifest_path.read_text())["input_sha256"]["collector_snapshots"])
+
+    def test_failed_partial_generation_can_be_retried_without_publishing_incomplete_history(self) -> None:
+        row = _collector_row()
+        _write_jsonl(self.archive, [row])
+        _write_jsonl(self.resolutions, [_strict_resolution(row["market_id"])])
+        with patch("bot.auto_source_router_promotion.materialize_strict_source_history_collapse", side_effect=RuntimeError("interrupted")):
+            with self.assertRaisesRegex(RuntimeError, "interrupted"):
+                auto_populate_source_router_history(
+                    collector_snapshots_path=self.archive,
+                    strict_resolutions_path=self.resolutions,
+                    output_root=self.output_root,
+                )
+
+        retried = auto_populate_source_router_history(
+            collector_snapshots_path=self.archive,
+            strict_resolutions_path=self.resolutions,
+            output_root=self.output_root,
+        )
+
+        self.assertFalse(retried.reused)
+        self.assertTrue(retried.history_manifest_path.is_file())
+        self.assertTrue(retried.history_path.is_file())
 
     def test_cli_reports_required_promotion_counts(self) -> None:
         row = _collector_row()

@@ -10,6 +10,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -31,6 +34,7 @@ class AutoSourceRouterPromotionResult:
     history_path: Path
     scoreboard_path: Path
     manifest_path: Path
+    history_manifest_path: Path
     counts: dict[str, int]
 
 
@@ -49,7 +53,12 @@ def auto_populate_source_router_history(
     if not snapshots.is_file() or not resolutions.is_file():
         raise ValueError("collector snapshots and strict resolutions must be readable files")
     root = _prepare_root(output_root)
-    snapshot_sha256, resolution_sha256 = _sha256_file(snapshots), _sha256_file(resolutions)
+    # Consume each input exactly once before deriving its generation identity.
+    # All downstream helpers receive the materialized bytes, not a path that a
+    # collector or resolver can append between hash calculation and reread.
+    snapshot_bytes, resolution_bytes = snapshots.read_bytes(), resolutions.read_bytes()
+    snapshot_sha256 = hashlib.sha256(snapshot_bytes).hexdigest()
+    resolution_sha256 = hashlib.sha256(resolution_bytes).hexdigest()
     generation_id = hashlib.sha256(_canonical_bytes({
         "schema_name": "auto_source_router_history_promotion",
         "schema_version": PIPELINE_SCHEMA_VERSION,
@@ -59,33 +68,48 @@ def auto_populate_source_router_history(
     generation_dir = root / "generations" / generation_id
     manifest_path = generation_dir / MANIFEST_FILENAME
     if generation_dir.exists():
-        if not manifest_path.is_file():
-            raise ValueError(f"incomplete promotion generation exists; refusing overwrite: {generation_dir}")
-        manifest = _load_manifest(manifest_path)
-        if manifest.get("input_sha256") != {"collector_snapshots": snapshot_sha256, "strict_resolutions": resolution_sha256}:
-            raise ValueError("existing promotion generation input hash mismatch")
-        return _result_from_manifest(manifest, manifest_path, reused=True)
+        return _load_completed_generation(manifest_path, snapshot_sha256, resolution_sha256)
 
-    generation_dir.mkdir(parents=True, exist_ok=False)
-    exported = export_collector_replay_inputs(
-        source_archive=snapshots, output_dir=generation_dir / "replay_inputs",
-    )
-    bound = bind_replay_finalized_outcomes(
-        replay_inputs_path=exported.records_path,
-        strict_resolutions_path=resolutions,
-        output_dir=generation_dir / "finalized_outcomes",
-    )
-    observations = materialize_source_observation_ledger(
-        replay_inputs_path=exported.records_path,
-        finalized_outcomes_path=bound.outcomes_path,
-        output_dir=generation_dir / "source_observations",
-    )
-    collapsed = materialize_strict_source_history_collapse(
-        observations.settled_path, generation_dir / "source_router_scoreboard",
-    )
-    counts = _counts(exported.metadata, bound.metadata, observations.metadata, dict(collapsed.metadata))
-    status = "history_ready" if counts["eligible"] else "no_router_history"
-    manifest = {
+    (root / "generations").mkdir(parents=True, exist_ok=True)
+    staging_root = root / ".staging"
+    staging_root.mkdir(parents=True, exist_ok=True)
+    staging_dir = Path(tempfile.mkdtemp(prefix=f"{generation_id}.", dir=staging_root))
+    try:
+        materialized_inputs = staging_dir / "materialized_inputs"
+        materialized_inputs.mkdir()
+        materialized_snapshots = materialized_inputs / "collector_snapshots.jsonl"
+        materialized_resolutions = materialized_inputs / "strict_resolutions.jsonl"
+        materialized_snapshots.write_bytes(snapshot_bytes)
+        materialized_resolutions.write_bytes(resolution_bytes)
+        exported = export_collector_replay_inputs(
+            source_archive=materialized_snapshots, output_dir=staging_dir / "replay_inputs",
+        )
+        bound = bind_replay_finalized_outcomes(
+            replay_inputs_path=exported.records_path,
+            strict_resolutions_path=materialized_resolutions,
+            output_dir=staging_dir / "finalized_outcomes",
+        )
+        observations = materialize_source_observation_ledger(
+            replay_inputs_path=exported.records_path,
+            finalized_outcomes_path=bound.outcomes_path,
+            output_dir=staging_dir / "source_observations",
+        )
+        collapsed = materialize_strict_source_history_collapse(
+            observations.settled_path, staging_dir / "source_router_scoreboard",
+        )
+        counts = _counts(exported.metadata, bound.metadata, observations.metadata, dict(collapsed.metadata))
+        status = "history_ready" if counts["eligible"] else "no_router_history"
+        published = lambda path: generation_dir / path.relative_to(staging_dir)
+        history_manifest_path = staging_dir / "source_history_manifest.json"
+        history_manifest = _source_history_manifest(
+            source_ledger=(published(observations.settled_path), observations.settled_path),
+            strict_resolution=(published(materialized_resolutions), materialized_resolutions),
+            raw_archive=(published(materialized_snapshots), materialized_snapshots),
+            replay_index=(published(exported.records_path), exported.records_path),
+            replay_manifest=(published(exported.metadata_path), exported.metadata_path),
+        )
+        history_manifest_path.write_bytes(_canonical_bytes(history_manifest))
+        manifest = {
         "schema_name": "auto_source_router_history_promotion",
         "schema_version": PIPELINE_SCHEMA_VERSION,
         "mode": "derived_only_post_resolver_source_router_history",
@@ -102,23 +126,36 @@ def auto_populate_source_router_history(
             "eligibility": "eligible_for_source_history and settlement_ts < later_decision_time",
             "outcomes_never_written_to": "collector snapshots or replay decision inputs",
         },
-        "runtime_consumption": {
-            "history_ledger_path": str(observations.settled_path),
-            "scoreboard_path": str(collapsed.collapsed_path),
-            "consumer": "scripts/weather_source_router_replay.py --history-ledger-input",
-        },
+            "runtime_consumption": {
+                "history_ledger_path": str(published(observations.settled_path)),
+                "history_manifest_path": str(published(history_manifest_path)),
+                "scoreboard_path": str(published(collapsed.collapsed_path)),
+                "consumer": "bot.weather.collector_source_router_replay.run_collector_source_router_replay --history-manifest",
+            },
         "counts": counts,
         "artifacts": {
-            "replay_inputs": str(exported.records_path),
-            "finalized_outcomes": str(bound.outcomes_path),
-            "unbound_outcomes": str(bound.unbound_path),
-            "history_ledger": str(observations.settled_path),
-            "unusable_observations": str(observations.unsettled_path),
-            "scoreboard": str(collapsed.collapsed_path),
+            "replay_inputs": str(published(exported.records_path)),
+            "finalized_outcomes": str(published(bound.outcomes_path)),
+            "unbound_outcomes": str(published(bound.unbound_path)),
+            "history_ledger": str(published(observations.settled_path)),
+            "unusable_observations": str(published(observations.unsettled_path)),
+            "scoreboard": str(published(collapsed.collapsed_path)),
         },
-    }
-    manifest_path.write_bytes(_canonical_bytes(manifest))
-    return _result_from_manifest(manifest, manifest_path, reused=False)
+            "source_history_manifest": {
+                "path": str(published(history_manifest_path)),
+                "sha256": history_manifest["sha256"],
+            },
+        }
+        staged_manifest_path = staging_dir / MANIFEST_FILENAME
+        staged_manifest_path.write_bytes(_canonical_bytes(manifest))
+        try:
+            os.replace(staging_dir, generation_dir)
+        except FileExistsError:
+            return _load_completed_generation(manifest_path, snapshot_sha256, resolution_sha256)
+        return _result_from_manifest(manifest, manifest_path, reused=False)
+    finally:
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir, ignore_errors=True)
 
 
 def _prepare_root(value: str | Path) -> Path:
@@ -149,8 +186,51 @@ def _result_from_manifest(manifest: dict[str, Any], manifest_path: Path, *, reus
     return AutoSourceRouterPromotionResult(
         status=str(manifest.get("status")), reused=reused, generation_dir=manifest_path.parent,
         history_path=Path(str(runtime["history_ledger_path"])), scoreboard_path=Path(str(runtime["scoreboard_path"])),
-        manifest_path=manifest_path, counts=counts,
+        manifest_path=manifest_path, history_manifest_path=Path(str(runtime["history_manifest_path"])), counts=counts,
     )
+
+
+def _load_completed_generation(
+    manifest_path: Path, snapshot_sha256: str, resolution_sha256: str,
+) -> AutoSourceRouterPromotionResult:
+    if not manifest_path.is_file():
+        raise ValueError(f"incomplete promotion generation exists; refusing to consume: {manifest_path.parent}")
+    manifest = _load_manifest(manifest_path)
+    if manifest.get("input_sha256") != {"collector_snapshots": snapshot_sha256, "strict_resolutions": resolution_sha256}:
+        raise ValueError("existing promotion generation input hash mismatch")
+    result = _result_from_manifest(manifest, manifest_path, reused=True)
+    if not result.history_manifest_path.is_file():
+        raise ValueError("completed promotion generation is missing its source history manifest")
+    return result
+
+
+def _source_history_manifest(
+    *,
+    source_ledger: tuple[Path, Path],
+    strict_resolution: tuple[Path, Path],
+    raw_archive: tuple[Path, Path],
+    replay_index: tuple[Path, Path],
+    replay_manifest: tuple[Path, Path],
+) -> dict[str, Any]:
+    """Build the existing verified collector-history contract from staged bytes."""
+    artifacts = {
+        "source_ledger": source_ledger,
+        "strict_resolution": strict_resolution,
+        "raw_archive": raw_archive,
+        "replay_index": replay_index,
+        "replay_manifest": replay_manifest,
+    }
+    return {
+        "schema_name": "source_history_manifest",
+        "schema_version": 1,
+        "historical_counterfactual_only": True,
+        "non_mutating": True,
+        "join_key": "market_id",
+        "eligibility_filter": "eligible_for_source_history == true and source_correctness_eligibility == eligible_strict_source_proof",
+        "availability_field": "settlement_ts",
+        **{f"{name}_path": str(published_path) for name, (published_path, _) in artifacts.items()},
+        "sha256": {name: _sha256_file(staged_path) for name, (_, staged_path) in artifacts.items()},
+    }
 
 
 def _load_manifest(path: Path) -> dict[str, Any]:
