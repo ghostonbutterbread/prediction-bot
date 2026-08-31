@@ -1,0 +1,9 @@
+# Beta derived-maintenance timer
+
+- **Feature branch:** `fix/beta-derived-maintenance`
+- **Base/target:** `704ab11` on `beta` → `beta`
+- **Goal:** keep the collector continuous while one configuration-driven maintenance pass independently resolves every configured 30 minutes and promotes SourceWriter history every configured two hours.
+- **Contract:** the worker never runs the collector, never mutates raw snapshots, wallets, orders, or lanes, and attempts promotion only immediately after a successful resolver refresh. It persists derived-stage timestamps under the cohort-configured state path.
+- **Runtime plan after merge:** **blocked pending an explicit retention and failure-containment policy.** The current collector volume has 60 GB free and one existing promotion generation is 3.41 GB; the existing dossier documents unbounded growth. Do not install or enable the maintenance timer until a bounded retention/archival policy, memory/time limit, and SIGKILL-safe staging sweep are implemented and verified.
+- **Evidence:** test-first coverage demonstrates due promotion, interval skip, resolver-gated skip, promotion-failure retry behavior without early resolver reruns, and mismatch rejection between configured and freshly produced resolution artifacts. Focused suite: 40 tests passed (6 skipped); `py_compile` and `git diff --check` passed. Independent re-review confirmed the code fixes but blocked runtime activation on the existing retention/ownership/failure-containment decision.
+- **Next:** focused tests, independent review, beta merge, then controlled user-systemd cutover and read-back verification. Remove this temporary dossier from beta after merge.
