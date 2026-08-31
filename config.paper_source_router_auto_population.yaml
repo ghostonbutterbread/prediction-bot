@@ -1,9 +1,9 @@
 # Disabled branch-local handoff for the strict auto-populated Source Router scorecard.
 # Do not run directly. An owner must copy this to an ignored fresh-cohort config
 # and explicitly enable the paper shadow lane after the required review gate.
-# The promotion job must use data/derived_reports/auto_source_router_history as
-# its output root; its atomically switched current link only targets a fully
-# published immutable generation, never a staging directory.
+# Default storage uses /mnt/data-collection/prediction-bot. Set
+# PREDICTION_BOT_COLLECTOR_ROOT to change that default, or pass --output-root
+# to the promotion command for a one-off location.
 paper_shadow_lanes:
   enabled: false
   definitions_dir: lanes

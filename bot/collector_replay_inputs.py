@@ -14,7 +14,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
-from bot.collector_paths import derived_reports_root
 from bot.replay_decision_input import (
     REPLAY_DECISION_INPUT_SCHEMA_NAME,
     REPLAY_DECISION_INPUT_SCHEMA_VERSION,
@@ -156,9 +155,6 @@ def export_collector_replay_inputs(
 
 def _prepare_output_dir(value: str | Path) -> Path:
     target_dir = Path(value).resolve()
-    derived_root = derived_reports_root().resolve()
-    if target_dir == derived_root or derived_root not in target_dir.parents:
-        raise ValueError(f"output directory must be under {derived_root}")
     if target_dir.exists():
         if not target_dir.is_dir() or any(target_dir.iterdir()):
             raise ValueError("output directory must be new or empty; refusing to overwrite artifacts")

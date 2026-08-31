@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from bot.collector_paths import auto_source_router_history_root, derived_reports_root
+from bot.collector_paths import auto_source_router_history_root
 from bot.collector_replay_inputs import export_collector_replay_inputs
 from bot.replay_outcome_binding import bind_replay_finalized_outcomes
 from bot.weather.source_history_manifest import materialize_strict_source_history_collapse
@@ -185,9 +185,6 @@ def auto_populate_source_router_history(
 
 def _prepare_root(value: str | Path) -> Path:
     root = Path(value).expanduser().resolve()
-    derived_root = derived_reports_root().resolve()
-    if root == derived_root or derived_root not in root.parents:
-        raise ValueError(f"output root must be below {derived_root}")
     root.mkdir(parents=True, exist_ok=True)
     return root
 

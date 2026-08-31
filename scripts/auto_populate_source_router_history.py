@@ -19,7 +19,7 @@ def main() -> int:
     parser.add_argument("--strict-resolutions", required=True, help="independently finalized authoritative strict-resolution JSONL")
     parser.add_argument(
         "--output-root",
-        help="collector-derived output root; defaults to the canonical collector Source Router history root",
+        help="output root; defaults under PREDICTION_BOT_COLLECTOR_ROOT (or /mnt/data-collection/prediction-bot), but any new/empty path is allowed",
     )
     args = parser.parse_args()
     try:

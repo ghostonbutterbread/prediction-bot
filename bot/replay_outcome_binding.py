@@ -16,7 +16,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from bot.collector_paths import derived_reports_root
 from bot.replay_decision_input import verify_replay_decision_input_record_v1
 OUTCOMES_FILENAME = "finalized_replay_outcomes.jsonl"
 UNBOUND_FILENAME = "unbound_replay_inputs.jsonl"
@@ -264,9 +263,6 @@ def _read_jsonl_with_raw(path: Path) -> Iterable[tuple[int, Mapping[str, Any] | 
 
 def _prepare_output_dir(value: str | Path) -> Path:
     target_dir = Path(value).resolve()
-    root = derived_reports_root().resolve()
-    if target_dir == root or root not in target_dir.parents:
-        raise ValueError(f"output directory must be under {root}")
     if target_dir.exists():
         if not target_dir.is_dir() or any(target_dir.iterdir()):
             raise ValueError("output directory must be new or empty; refusing to overwrite artifacts")

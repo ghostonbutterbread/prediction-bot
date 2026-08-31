@@ -1,8 +1,9 @@
 """Canonical storage roots for collector-owned derived artifacts.
 
-The code checkout may live on the host root filesystem while collector evidence
-and derived artifacts belong on the collector volume.  Callers may override the
-collector root for isolated tests only.
+The default collector root is `/mnt/data-collection/prediction-bot`; set
+``PREDICTION_BOT_COLLECTOR_ROOT`` to select a different default.  Individual
+calls may also supply an explicit output root when a one-off artifact belongs
+elsewhere.
 """
 from __future__ import annotations
 
@@ -15,7 +16,7 @@ DEFAULT_COLLECTOR_ROOT = Path("/mnt/data-collection/prediction-bot")
 
 
 def collector_root() -> Path:
-    """Return the collector-owned repository root, never the code checkout."""
+    """Return the configured default root for collector-owned artifacts."""
     return Path(os.environ.get(COLLECTOR_ROOT_ENV, str(DEFAULT_COLLECTOR_ROOT))).expanduser().resolve()
 
 
