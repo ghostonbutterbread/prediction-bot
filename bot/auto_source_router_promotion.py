@@ -18,7 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from bot.collector_replay_inputs import DERIVED_REPORTS_ROOT, export_collector_replay_inputs
+from bot.collector_paths import auto_source_router_history_root, derived_reports_root
+from bot.collector_replay_inputs import export_collector_replay_inputs
 from bot.replay_outcome_binding import bind_replay_finalized_outcomes
 from bot.weather.source_history_manifest import materialize_strict_source_history_collapse
 from bot.weather.source_observation_ledger import materialize_source_observation_ledger
@@ -42,7 +43,7 @@ class AutoSourceRouterPromotionResult:
 
 
 def auto_populate_source_router_history(
-    *, collector_snapshots_path: str | Path, strict_resolutions_path: str | Path, output_root: str | Path,
+    *, collector_snapshots_path: str | Path, strict_resolutions_path: str | Path, output_root: str | Path | None = None,
 ) -> AutoSourceRouterPromotionResult:
     """Build one hash-addressed Source Router history generation after resolution.
 
@@ -55,7 +56,7 @@ def auto_populate_source_router_history(
     resolutions = Path(strict_resolutions_path).expanduser().resolve()
     if not snapshots.is_file() or not resolutions.is_file():
         raise ValueError("collector snapshots and strict resolutions must be readable files")
-    root = _prepare_root(output_root)
+    root = _prepare_root(output_root or auto_source_router_history_root())
     _validate_current_generation(root)
     # Consume each input exactly once before deriving its generation identity.
     # All downstream helpers receive the materialized bytes, not a path that a
@@ -184,7 +185,7 @@ def auto_populate_source_router_history(
 
 def _prepare_root(value: str | Path) -> Path:
     root = Path(value).expanduser().resolve()
-    derived_root = DERIVED_REPORTS_ROOT.resolve()
+    derived_root = derived_reports_root().resolve()
     if root == derived_root or derived_root not in root.parents:
         raise ValueError(f"output root must be below {derived_root}")
     root.mkdir(parents=True, exist_ok=True)

@@ -1,12 +1,15 @@
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from bot.collector_paths import COLLECTOR_ROOT_ENV
 from bot.weather.collector_source_router_replay import (
     build_sealed_source_probability_decisions,
     resolve_sealed_source_probability_decisions,
@@ -16,7 +19,7 @@ from bot.weather.source_history_manifest import SourceHistoryManifestError
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DERIVED_ROOT = ROOT / "data" / "derived_reports"
+DERIVED_ROOT = Path(tempfile.gettempdir()) / "prediction-bot-test-collector" / "data" / "derived_reports"
 
 
 def replay_input(
@@ -116,9 +119,13 @@ def source_history_row(*, market_id: str, settlement_ts: str, outcome: str = "YE
 class CollectorSourceRouterReplayTests(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
+        self._collector_root_env = patch.dict(os.environ, {COLLECTOR_ROOT_ENV: str(DERIVED_ROOT.parents[1])})
+        self._collector_root_env.start()
+        DERIVED_ROOT.mkdir(parents=True, exist_ok=True)
         self.output_dir = Path(tempfile.mkdtemp(prefix="test_source_probability_", dir=DERIVED_ROOT))
 
     def tearDown(self):
+        self._collector_root_env.stop()
         shutil.rmtree(self.output_dir, ignore_errors=True)
         self.tempdir.cleanup()
 

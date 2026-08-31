@@ -1,18 +1,21 @@
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from bot.collector_paths import COLLECTOR_ROOT_ENV
 from bot.replay_outcome_binding import bind_replay_finalized_outcomes
 from bot.weather.collector_source_router_replay import _strict_outcome_index
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DERIVED_ROOT = ROOT / "data" / "derived_reports"
+DERIVED_ROOT = Path(tempfile.gettempdir()) / "prediction-bot-test-collector" / "data" / "derived_reports"
 
 
 def replay_input(market_id: str, marker: str) -> dict:
@@ -56,11 +59,15 @@ def strict_resolution(market_id: str, *, result: str | None = "yes", outcome: st
 class ReplayOutcomeBindingTests(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
+        self._collector_root_env = patch.dict(os.environ, {COLLECTOR_ROOT_ENV: str(DERIVED_ROOT.parents[1])})
+        self._collector_root_env.start()
+        DERIVED_ROOT.mkdir(parents=True, exist_ok=True)
         self.inputs_path = Path(self.tempdir.name) / "replay_decision_inputs.jsonl"
         self.resolutions_path = Path(self.tempdir.name) / "strict_resolutions.jsonl"
         self.output_dir = Path(tempfile.mkdtemp(prefix="test_replay_outcome_binding_", dir=DERIVED_ROOT))
 
     def tearDown(self):
+        self._collector_root_env.stop()
         shutil.rmtree(self.output_dir, ignore_errors=True)
         self.tempdir.cleanup()
 

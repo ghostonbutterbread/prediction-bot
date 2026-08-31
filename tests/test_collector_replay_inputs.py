@@ -1,17 +1,20 @@
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from bot.collector_paths import COLLECTOR_ROOT_ENV
 from bot.collector_replay_inputs import export_collector_replay_inputs
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DERIVED_ROOT = ROOT / "data" / "derived_reports"
+DERIVED_ROOT = Path(tempfile.gettempdir()) / "prediction-bot-test-collector" / "data" / "derived_reports"
 
 
 def _legacy_collector_row(*, market_id: str = "KXHIGHNY-26AUG12-T80") -> dict:
@@ -63,10 +66,14 @@ def _contains_forbidden_payload(value: object) -> bool:
 class CollectorReplayInputExportTests(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
+        self._collector_root_env = patch.dict(os.environ, {COLLECTOR_ROOT_ENV: str(DERIVED_ROOT.parents[1])})
+        self._collector_root_env.start()
+        DERIVED_ROOT.mkdir(parents=True, exist_ok=True)
         self.archive_path = Path(self.tempdir.name) / "collector.jsonl"
         self.output_dir = Path(tempfile.mkdtemp(prefix="test_collector_replay_inputs_", dir=DERIVED_ROOT))
 
     def tearDown(self):
+        self._collector_root_env.stop()
         shutil.rmtree(self.output_dir, ignore_errors=True)
         self.tempdir.cleanup()
 
