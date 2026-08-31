@@ -1,0 +1,9 @@
+# Beta derived-maintenance timer
+
+- **Feature branch:** `fix/beta-derived-maintenance`
+- **Base/target:** `704ab11` on `beta` → `beta`
+- **Goal:** keep the collector continuous while one configuration-driven maintenance pass independently resolves every configured 30 minutes and promotes SourceWriter history every configured two hours.
+- **Contract:** the worker never runs the collector, never mutates raw snapshots, wallets, orders, or lanes, and attempts promotion only immediately after a successful resolver refresh. It persists derived-stage timestamps under the cohort-configured state path.
+- **Runtime plan after merge:** Ryushe selected **no automatic pruning; leave the maintenance worker disabled.** The code may merge as an inactive, configuration-gated capability, but no cohort config, timer, service, retention policy, or paper-lane setting will be changed. A future activation requires an explicit retention/archival decision plus bounded resource and staging-cleanup controls.
+- **Evidence:** test-first coverage demonstrates disabled no-op behavior without configuration, due promotion, interval skip, resolver-gated skip, promotion-failure retry behavior without early resolver reruns, and mismatch rejection between configured and freshly produced resolution artifacts. Focused suite: 41 tests passed (6 skipped); `py_compile` and `git diff --check` passed. Independent re-review confirmed the code fixes and blocked only runtime activation pending the retention decision.
+- **Next:** merge the reviewed, inactive capability into `beta`, remove this temporary dossier from the target, and leave runtime state unchanged.
