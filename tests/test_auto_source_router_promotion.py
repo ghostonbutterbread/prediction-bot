@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -8,6 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from bot.collector_paths import COLLECTOR_ROOT_ENV, auto_source_router_history_root
 from bot.auto_source_router_promotion import auto_populate_source_router_history
 from bot.paper_shadow_lanes import _LaneDefinition, _source_router_decision
 from bot.weather.collector_source_router_replay import run_collector_source_router_replay
@@ -15,7 +17,6 @@ from scripts.weather_source_router_replay import _load_router_ledger_rows
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DERIVED_ROOT = ROOT / "data" / "derived_reports"
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -64,13 +65,17 @@ class AutoSourceRouterPromotionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
         self.root = Path(self.tempdir.name)
+        self.collector_root = self.root / "collector"
+        self._collector_root_env = patch.dict(os.environ, {COLLECTOR_ROOT_ENV: str(self.collector_root)})
+        self._collector_root_env.start()
+        self.derived_root = self.collector_root / "data" / "derived_reports"
         self.archive = self.root / "immutable_snapshots.jsonl"
         self.resolutions = self.root / "authoritative_resolutions.jsonl"
-        DERIVED_ROOT.mkdir(parents=True, exist_ok=True)
-        self.output_root = Path(tempfile.mkdtemp(prefix="test_auto_source_router_", dir=DERIVED_ROOT))
+        self.derived_root.mkdir(parents=True, exist_ok=True)
+        self.output_root = Path(tempfile.mkdtemp(prefix="test_auto_source_router_", dir=self.derived_root))
 
     def tearDown(self) -> None:
-        shutil.rmtree(self.output_root, ignore_errors=True)
+        self._collector_root_env.stop()
         self.tempdir.cleanup()
 
     def run_pipeline(self, rows: list[dict], resolutions: list[dict]):
@@ -81,6 +86,32 @@ class AutoSourceRouterPromotionTests(unittest.TestCase):
             strict_resolutions_path=self.resolutions,
             output_root=self.output_root,
         )
+
+    def test_default_output_root_uses_the_collector_volume(self) -> None:
+        row = _collector_row()
+        _write_jsonl(self.archive, [row])
+        _write_jsonl(self.resolutions, [_strict_resolution(row["market_id"])])
+
+        result = auto_populate_source_router_history(
+            collector_snapshots_path=self.archive,
+            strict_resolutions_path=self.resolutions,
+        )
+
+        self.assertEqual(auto_source_router_history_root(), self.collector_root / "data" / "derived_reports" / "auto_source_router_history")
+        self.assertTrue(result.generation_dir.is_relative_to(auto_source_router_history_root()))
+        self.assertFalse(result.generation_dir.is_relative_to(ROOT / "data"))
+
+    def test_explicit_root_disk_output_is_rejected(self) -> None:
+        row = _collector_row()
+        _write_jsonl(self.archive, [row])
+        _write_jsonl(self.resolutions, [_strict_resolution(row["market_id"])])
+
+        with self.assertRaisesRegex(ValueError, "output root must be below"):
+            auto_populate_source_router_history(
+                collector_snapshots_path=self.archive,
+                strict_resolutions_path=self.resolutions,
+                output_root=ROOT / "data" / "derived_reports" / "auto_source_router_history",
+            )
 
     def test_no_resolutions_writes_no_router_history(self) -> None:
         result = self.run_pipeline([_collector_row()], [])
@@ -122,7 +153,7 @@ class AutoSourceRouterPromotionTests(unittest.TestCase):
         row = _collector_row()
         result = self.run_pipeline([row], [_strict_resolution(row["market_id"])])
         promotion = json.loads(result.manifest_path.read_text(encoding="utf-8"))
-        replay_output = Path(tempfile.mkdtemp(prefix="test_source_router_consumer_", dir=DERIVED_ROOT))
+        replay_output = Path(tempfile.mkdtemp(prefix="test_source_router_consumer_", dir=self.derived_root))
         self.addCleanup(shutil.rmtree, replay_output, True)
 
         consumed = run_collector_source_router_replay(
@@ -194,7 +225,6 @@ class AutoSourceRouterPromotionTests(unittest.TestCase):
                 sys.executable, "scripts/auto_populate_source_router_history.py",
                 "--collector-snapshots", str(self.archive),
                 "--strict-resolutions", str(self.resolutions),
-                "--output-root", str(self.output_root),
             ],
             cwd=ROOT, check=True, capture_output=True, text=True,
         )

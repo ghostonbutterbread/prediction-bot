@@ -8,7 +8,7 @@ paper_shadow_lanes:
   enabled: false
   definitions_dir: lanes
   enabled_lanes: []
-  source_scoreboard_path: "data/derived_reports/auto_source_router_history/current/source_router_scoreboard/strict_finalized_source_scoreboard.jsonl"
+  source_scoreboard_path: "/mnt/data-collection/prediction-bot/data/derived_reports/auto_source_router_history/current/source_router_scoreboard/strict_finalized_source_scoreboard.jsonl"
   shadow_source_router:
     enabled: false
     parameters:

@@ -14,15 +14,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
+from bot.collector_paths import derived_reports_root
 from bot.replay_decision_input import (
     REPLAY_DECISION_INPUT_SCHEMA_NAME,
     REPLAY_DECISION_INPUT_SCHEMA_VERSION,
     build_replay_decision_input_v1,
 )
-
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DERIVED_REPORTS_ROOT = PROJECT_ROOT / "data" / "derived_reports"
 RECORDS_FILENAME = "replay_decision_inputs.jsonl"
 METADATA_FILENAME = "run_metadata.json"
 _REVERSE_READ_CHUNK_SIZE = 1024 * 1024
@@ -159,7 +156,7 @@ def export_collector_replay_inputs(
 
 def _prepare_output_dir(value: str | Path) -> Path:
     target_dir = Path(value).resolve()
-    derived_root = DERIVED_REPORTS_ROOT.resolve()
+    derived_root = derived_reports_root().resolve()
     if target_dir == derived_root or derived_root not in target_dir.parents:
         raise ValueError(f"output directory must be under {derived_root}")
     if target_dir.exists():

@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from bot.collector_paths import derived_reports_root
 from bot.replay_decision_input import verify_replay_decision_input_record_v1
 from bot.weather.source_reliability import (
     build_source_edge_evaluation_row,
@@ -31,8 +32,6 @@ from bot.weather.source_router import (
 )
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DERIVED_REPORTS_ROOT = PROJECT_ROOT / "data" / "derived_reports"
 CONTROL_LANE_ID = "source_probability_control_v1"
 CANDIDATE_LANE_ID = "source_router_candidate_v1"
 POLICY_VERSION = "source_probability_replay_v1"
@@ -829,7 +828,7 @@ def _identity(row: Mapping[str, Any]) -> tuple[str, str] | None:
 
 def _prepare_output_dir(value: str | Path) -> Path:
     target = Path(value).resolve()
-    root = DERIVED_REPORTS_ROOT.resolve()
+    root = derived_reports_root().resolve()
     if target == root or root not in target.parents:
         raise ValueError(f"output directory must be under {root}")
     if target.exists():

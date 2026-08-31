@@ -17,7 +17,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--collector-snapshots", required=True, help="immutable beta collector JSONL snapshots to read")
     parser.add_argument("--strict-resolutions", required=True, help="independently finalized authoritative strict-resolution JSONL")
-    parser.add_argument("--output-root", required=True, help="derived_reports root for hash-addressed Source Router history generations")
+    parser.add_argument(
+        "--output-root",
+        help="collector-derived output root; defaults to the canonical collector Source Router history root",
+    )
     args = parser.parse_args()
     try:
         result = auto_populate_source_router_history(
