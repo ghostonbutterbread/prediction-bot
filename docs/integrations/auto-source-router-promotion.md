@@ -5,7 +5,10 @@
 - **Feature branch:** `feat/auto-source-router-promotion`
 - **Base:** `d41bb473` (`docs: remove merged fee-aware lane dossier`)
 - **Intended integration target:** `beta`
-- **Status:** branch-local, derived-only implementation; not merged, pushed, scheduled, or activated.
+- **Status:** SUPERSEDED as of 2026-08-30 — this line is stale. The work is
+  merged into `beta`, and was scheduled and activated contrary to the activation
+  boundary below. See *Status correction and operational incident — 2026-08-30*
+  at the end of this file before acting on anything above it.
 - **Implementation checkpoints:** `6ab4655f7bc53257203cb39f1505e62d71bb9abf` (`fix: publish strict paper source router scorecard`); `b27ae0a3df5f370fcd8b8e145b22aa80d9445b4c` (`fix: atomically hand off current source router scorecard`).
 
 ## Contract
@@ -248,3 +251,148 @@ runtime config, archive, wallet, or order was changed.
 
 **Checkpoint:** `cf3d9c0` (`fix: verify strict scorecard at paper runtime`), on
 `feat/auto-source-router-promotion`; intended integration target remains `beta`.
+
+## Status correction and operational incident — 2026-08-30
+
+Recorded by an operator investigating host disk exhaustion. This entry changes
+no code, unit, config, or runtime state; it records Git-verified findings and
+the decisions they now force. Treat the `Handoff` block at the top of this file
+as superseded by this section.
+
+### The recorded status is stale on every count
+
+`Handoff` states the work is "not merged, pushed, scheduled, or activated".
+Verified on `beta` at `ed76d37`:
+
+- `feat/auto-source-router-promotion` **is** an ancestor of `beta`
+  (`git merge-base --is-ancestor feat/auto-source-router-promotion beta` → true).
+  Checkpoint `cf3d9c0` is present. `bot/auto_source_router_promotion.py` and
+  `scripts/auto_populate_source_router_history.py` are tracked here.
+- The pipeline **was scheduled and activated**, contrary to the activation
+  boundary in *Activation boundary and residual integration requirement*.
+
+None of the four owner preconditions in that section is recorded as satisfied,
+and no review receipt for them exists in this file.
+
+### The scheduling is invisible to this repository
+
+`git ls-files` matches no `.service` or `.timer` file anywhere in the tree. The
+units exist only in the operator's untracked `~/.config/systemd/user/`:
+
+```text
+prediction-lab-strict-source-cohort-20260823.service   collector, Type=simple, enabled
+prediction-strict-source-resolution-20260823.timer     resolver, OnUnitActiveSec=30m, enabled
+prediction-auto-source-router-promotion.timer          promotion, OnUnitActiveSec=35m
+prediction-auto-source-router-promotion.service        promotion, Type=oneshot
+```
+
+Because the schedule lives outside version control, crossing the activation
+boundary left no trace in the repository and no reviewer could have seen it in
+a diff. This is the root process failure, not an incidental detail.
+
+### Observed failure: unbounded generation growth
+
+The promotion job filled the host root filesystem to 94% (258G used, 19G free
+of 292G). Measured 2026-08-30:
+
+```text
+data/derived_reports/auto_source_router_history   76G
+  generations/    72G   45 generations, 2026-08-29 00:54 -> 2026-08-30 14:45
+  .staging/      3.4G   3 orphaned trees from killed runs
+```
+
+- Each generation is a **complete independent copy**; link count is 1 on every
+  large file. `materialized_inputs/collector_snapshots.jsonl` is re-copied at
+  ~1.96 GB per generation, duplicating bytes that already exist under
+  `/mnt/data-collection`.
+- Generations range 1.3–3.2 GB. 45 in ~38 hours is roughly **45 GB/day**.
+- **No retention exists.** `retention|prune|keep` matches nothing in
+  `bot/auto_source_router_promotion.py`. Nothing ever removes a generation.
+- Staging cleanup at `bot/auto_source_router_promotion.py:181-182` is a
+  `shutil.rmtree` inside `finally`, which SIGKILL bypasses. The journal records
+  three OOM kills on 2026-08-30 (07:27, 10:34, 15:11), matching the three
+  orphaned `.staging` trees exactly.
+- The job peaks at ~2.7 GB RSS plus ~1.4 GB swap and runs 35 min – 2 h, while
+  `OnUnitActiveSec=35m` refires it. Runs therefore overlap and the host swaps.
+
+Host effect while active: load average 22.8 on 4 cores, memory pressure
+`some avg10=87.5`, 2.3 GiB swapped. Stopping the timer and service alone
+returned those to 6.6 and 2.7 with swap at 940 MiB. CPU pressure was 0.00
+throughout — the contention was memory and IO, never CPU.
+
+### Unresolved doctrine conflict: immutability vs. bounded growth
+
+This file states, under *Third repair*, that "previous generations and their
+manifests are never modified or removed", and the reuse contract in *Fourth
+review repair* verifies declared artifact hashes of completed generations.
+Immutability is a designed integrity property, not an oversight.
+
+That property and unbounded 45 GB/day accumulation cannot both hold on this
+host. **This is a real conflict in the contract and is left explicitly open
+rather than resolved unilaterally.** Any retention scheme must state which
+guarantee it is weakening and what still verifies the retained set. Recording
+the conflict here is deliberate; do not add a prune without deciding it.
+
+### Output root is coupled to the committed paper template
+
+*Second review repair* requires the job to use
+`data/derived_reports/auto_source_router_history` as its output root, and
+`config.paper_source_router_auto_population.yaml` names
+`data/derived_reports/auto_source_router_history/current/...` as the stable
+handoff. The scheduled unit passed the absolute form of that same repo path,
+so the 76 GB landed where the contract asked for it.
+
+Relocating output to `/mnt/data-collection` is therefore **not** a one-flag
+change. It must move the committed template's configured path in the same
+decision, or the paper Source Router will follow a `current` symlink that no
+longer exists and fail closed with `strict_scorecard_verification_failed`.
+
+### Current runtime state
+
+- Collector and resolver: **running**, unchanged, both writing under
+  `/mnt/data-collection` (confirmed via `/proc/<pid>/cwd`).
+- Promotion timer and service: **stopped and disabled** on 2026-08-30. The
+  76 GB tree is not growing. Unit files remain intact, so a single
+  `systemctl --user start` resumes accumulation.
+- No file under any prediction-bot path on the root filesystem is held open by
+  any running process.
+
+### Intended direction
+
+The operator's stated goal is to make the three stages one integrated pipeline
+owned by this repository, so the collector, resolver, and promotion step run as
+a single unit rather than three independently scheduled jobs wired together
+outside version control.
+
+That goal is compatible with this dossier's contract — the pipeline is already
+"the single named, post-resolver pipeline" — but it is blocked on the decisions
+below, and on the fact that scheduling is currently not a repository artifact
+at all.
+
+### Open decisions, in dependency order
+
+1. **Retention vs. immutability.** Resolve the conflict above. Until it is
+   resolved, the promotion timer must stay disabled; re-enabling it without
+   retention refills any filesystem it points at within days.
+2. **Whether generations must re-materialize their inputs.** The ~1.96 GB
+   per-generation copy is the dominant cost and exists to make provenance hash
+   the same immutable bytes. Decide whether a verified reference to the source
+   under `/mnt/data-collection` can satisfy that contract instead.
+3. **Output root**, decided together with the committed paper template path.
+4. **Whether scheduling becomes a repository artifact.** Required for the
+   intended direction, and the direct fix for the invisibility above. Note that
+   `AGENTS.md` holds that a merge is not a deployment; committing unit files
+   must not by itself enable a lane.
+5. **Failure containment.** `MemoryMax=` on the unit so exhaustion is a clean
+   failure rather than a swap storm, and a staging sweep that does not depend on
+   a `finally` block surviving SIGKILL.
+
+### Verification status of this entry
+
+Git ancestry, tracked-file, and branch facts were verified with the commands
+named above. Sizes, generation counts, link counts, OOM timestamps, and host
+pressure figures are point-in-time measurements from 2026-08-30. No test was
+run for this entry and no code was changed; nothing here is a test receipt.
+
+- 2026-08-30 — status corrected; activation-boundary breach and unbounded
+  growth recorded; retention/immutability conflict left open for decision.
