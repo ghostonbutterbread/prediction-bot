@@ -9,6 +9,18 @@ from bot.resolution_feed import ResolutionFeedResult
 
 
 class DerivedMaintenanceTests(unittest.TestCase):
+    def test_disabled_configuration_is_a_noop_without_a_state_path(self):
+        result = run_derived_maintenance_once(
+            {"derived_maintenance": {"enabled": False}},
+            resolve=lambda received_config, *, force: (_ for _ in ()).throw(AssertionError("disabled maintenance must not resolve")),
+            promote=lambda **kwargs: (_ for _ in ()).throw(AssertionError("disabled maintenance must not promote")),
+        )
+
+        self.assertEqual(result.resolution_status, "disabled")
+        self.assertEqual(result.promotion_status, "disabled")
+        self.assertFalse(result.resolution_ran)
+        self.assertFalse(result.promotion_ran)
+
     def test_due_promotion_runs_after_successful_resolution_and_records_state(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

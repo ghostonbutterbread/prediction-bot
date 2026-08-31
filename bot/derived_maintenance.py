@@ -44,9 +44,9 @@ def run_derived_maintenance_once(
     """
     maintenance = _mapping(config.get("derived_maintenance"))
     promotion = _mapping(maintenance.get("source_router_promotion"))
-    state_path = _state_path(maintenance, promotion)
     if not maintenance.get("enabled", False):
-        return DerivedMaintenanceResult("disabled", False, "disabled", False, state_path)
+        return DerivedMaintenanceResult("disabled", False, "disabled", False, _state_path(maintenance, promotion, required=False))
+    state_path = _state_path(maintenance, promotion)
     if not promotion.get("enabled", False):
         return DerivedMaintenanceResult("not_run", False, "disabled", False, state_path)
 
@@ -92,10 +92,12 @@ def _mapping(value: object) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
 
 
-def _state_path(maintenance: Mapping[str, Any], promotion: Mapping[str, Any]) -> Path:
+def _state_path(maintenance: Mapping[str, Any], promotion: Mapping[str, Any], *, required: bool = True) -> Path:
     configured = maintenance.get("state_path") or promotion.get("state_path")
     if configured in (None, ""):
-        raise ValueError("derived_maintenance.state_path is required")
+        if required:
+            raise ValueError("derived_maintenance.state_path is required")
+        return Path("data/derived_maintenance/state.json").resolve()
     return Path(str(configured)).expanduser().resolve()
 
 
