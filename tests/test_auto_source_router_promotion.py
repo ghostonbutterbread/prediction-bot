@@ -101,17 +101,20 @@ class AutoSourceRouterPromotionTests(unittest.TestCase):
         self.assertTrue(result.generation_dir.is_relative_to(auto_source_router_history_root()))
         self.assertFalse(result.generation_dir.is_relative_to(ROOT / "data"))
 
-    def test_explicit_root_disk_output_is_rejected(self) -> None:
+    def test_explicit_noncollector_output_root_is_supported(self) -> None:
         row = _collector_row()
         _write_jsonl(self.archive, [row])
         _write_jsonl(self.resolutions, [_strict_resolution(row["market_id"])])
+        alternate_root = self.root / "alternate-output-root"
 
-        with self.assertRaisesRegex(ValueError, "output root must be below"):
-            auto_populate_source_router_history(
-                collector_snapshots_path=self.archive,
-                strict_resolutions_path=self.resolutions,
-                output_root=ROOT / "data" / "derived_reports" / "auto_source_router_history",
-            )
+        result = auto_populate_source_router_history(
+            collector_snapshots_path=self.archive,
+            strict_resolutions_path=self.resolutions,
+            output_root=alternate_root,
+        )
+
+        self.assertTrue(result.generation_dir.is_relative_to(alternate_root))
+        self.assertTrue(result.scoreboard_path.is_relative_to(alternate_root))
 
     def test_no_resolutions_writes_no_router_history(self) -> None:
         result = self.run_pipeline([_collector_row()], [])
