@@ -261,7 +261,8 @@ def _sealed_wallet_intent(
 ) -> dict[str, Any] | None:
     """Create an outcome-free wallet input only when all decision-time fields exist."""
     action = str(composed_row.get("action") or "")
-    if action not in {"BUY_YES", "BUY_NO"} or _has_outcome_like_field((action_row, base_row, sizing_row, price_row, future_inputs)) or not _matching_component_identity(base_row, action_row, sizing_row, price_row):
+    configured_price_lane = str(composition.get("price_lane") or "")
+    if action not in {"BUY_YES", "BUY_NO"} or _first_text(_field(price_row, "policy")) != configured_price_lane or _has_outcome_like_field((action_row, base_row, sizing_row, price_row, future_inputs)) or not _matching_component_identity(base_row, action_row, sizing_row, price_row):
         return None
     question = _first_text(_field(action_row, "question"), _field(base_row, "question"), future_inputs.get("question"))
     model_probability = _number(_field(action_row, "model_probability"), _field(base_row, "model_probability"))

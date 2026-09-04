@@ -165,6 +165,16 @@ class PaperShadowLaneComposeReplayTests(unittest.TestCase):
         self.assertEqual(result["summary"]["pnl"]["winning_buy_rows"], 1)
         self.assertAlmostEqual(result["summary"]["pnl"]["total_pnl_usd"], 2.6923)
 
+    def test_wallet_intent_fails_closed_without_configured_price_lane(self):
+        stable = _lane_row(policy="control_stable", candidate_id="wallet-price-lane", market_id="KXWALLET-PRICE-LANE", action="BUY_YES", size=5.0, yes_price=0.40)
+        result = compose_lane_replay(
+            lane_rows=[stable],
+            config={"composition": {"name": "missing_price_lane", "base_lane": "control_stable", "action_lane": "control_stable", "price_lane": "missing_price", "sizing_lane": "control_stable", "fallback_to_base": False}},
+        )
+        self.assertEqual(len(result["composition_rows"]), 1)
+        self.assertEqual(result["composition_rows"][0]["entry_price"], 0.40)
+        self.assertEqual(result["wallet_intents"], [])
+
     def test_wallet_intent_fails_closed_without_recorded_exchange(self):
         stable = _lane_row(policy="control_stable", candidate_id="wallet-exchange", market_id="KXWALLET-EXCHANGE", action="BUY_YES", size=5.0, yes_price=0.40)
         stable.pop("exchange")
