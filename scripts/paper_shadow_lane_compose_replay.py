@@ -8,6 +8,7 @@ not mutate wallets, accounting ledgers, source lane decisions, or live state.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from collections import Counter, defaultdict
@@ -63,6 +64,10 @@ def main(argv: list[str] | None = None) -> int:
         "".join(json.dumps(row, sort_keys=True) + "\n" for row in result["composition_rows"]),
         encoding="utf-8",
     )
+    (output_dir / "wallet_intents.jsonl").write_text(
+        "".join(json.dumps(row, sort_keys=True) + "\n" for row in result["wallet_intents"]),
+        encoding="utf-8",
+    )
     (output_dir / "resolved_rows.jsonl").write_text(
         "".join(json.dumps(row, sort_keys=True) + "\n" for row in result["resolved_rows"]),
         encoding="utf-8",
@@ -106,6 +111,7 @@ def compose_lane_replay(
 
     composed_rows, exposure_diagnostics = _apply_exposure_controls(composed_rows, composition)
     diagnostics.update(exposure_diagnostics)
+    wallet_intents = [row["wallet_intent"] for row in composed_rows if isinstance(row.get("wallet_intent"), Mapping)]
 
     resolved_rows = build_paper_shadow_lane_resolution_rows(
         lane_rows=composed_rows,
@@ -126,6 +132,7 @@ def compose_lane_replay(
     return {
         "composition": composition,
         "composition_rows": composed_rows,
+        "wallet_intents": wallet_intents,
         "resolved_rows": resolved_rows,
         "summary": summary,
     }
@@ -228,7 +235,99 @@ def _compose_candidate(
             "places_live_orders": False,
         },
     }
+    wallet_intent = _sealed_wallet_intent(
+        composition=composition,
+        composed_row=row,
+        action_row=action_row,
+        base_row=base_row,
+        price_row=price_row,
+        future_inputs=future_inputs,
+    )
+    if wallet_intent is not None:
+        row["wallet_intent"] = wallet_intent
     return row, veto_reason or ("composed_buy" if action in {"BUY_YES", "BUY_NO"} else "composed_skip")
+
+
+def _sealed_wallet_intent(
+    *,
+    composition: Mapping[str, Any],
+    composed_row: Mapping[str, Any],
+    action_row: Mapping[str, Any],
+    base_row: Mapping[str, Any],
+    price_row: Mapping[str, Any],
+    future_inputs: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Create an outcome-free wallet input only when all decision-time fields exist."""
+    action = str(composed_row.get("action") or "")
+    if action not in {"BUY_YES", "BUY_NO"} or _has_outcome_like_field((action_row, base_row, price_row, future_inputs)) or not _matching_component_identity(base_row, action_row, price_row):
+        return None
+    question = _first_text(_field(action_row, "question"), _field(base_row, "question"), future_inputs.get("question"))
+    model_probability = _number(_field(action_row, "model_probability"), _field(base_row, "model_probability"))
+    confidence = _number(_field(action_row, "confidence"), _field(base_row, "confidence"))
+    entry_price = _number(composed_row.get("entry_price"))
+    route = _market_route(action_row, base_row, price_row)
+    shared_candidate_id = _first_text(composed_row.get("shared_candidate_id"))
+    market_id = _first_text(composed_row.get("market_id"))
+    observed_at = _first_text(composed_row.get("observed_at"))
+    run_id = _first_text(_field(action_row, "run_id"), _field(base_row, "run_id"))
+    shared_snapshot_id = _first_text(_field(action_row, "shared_snapshot_id"), _field(base_row, "shared_snapshot_id"))
+    if not all((question, model_probability is not None, confidence is not None, entry_price is not None, route, shared_candidate_id, market_id, observed_at, run_id, shared_snapshot_id)):
+        return None
+    source_decision_id = _first_text(_field(action_row, "decision_id"), _field(base_row, "decision_id"))
+    material = {"composition": composition, "source_decision_id": source_decision_id, "shared_candidate_id": shared_candidate_id, "market_id": market_id, "observed_at": observed_at, "action": action, "entry_price": entry_price}
+    decision_id = "composed-wallet:" + hashlib.sha256(json.dumps(material, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return {
+        "schema_name": "composed_lane_wallet_intent",
+        "schema_version": 1,
+        "decision_id": decision_id,
+        "run_id": run_id,
+        "shared_snapshot_id": shared_snapshot_id,
+        "shared_candidate_id": shared_candidate_id,
+        "lane_id": composed_row.get("selected_lane"),
+        "market_id": market_id,
+        "question": question,
+        "exchange": _first_text(_field(action_row, "exchange"), _field(base_row, "exchange")) or "kalshi",
+        "observed_at": observed_at,
+        "action": action,
+        "entry_price": entry_price,
+        "model_probability": model_probability,
+        "confidence": confidence,
+        "source_context": {"market_route": route},
+        "provenance": {"composition_name": composition["name"], "action_lane": composition["action_lane"], "price_lane": composition["price_lane"], "sizing_lane": composition["sizing_lane"], "source_decision_id": source_decision_id, "composition_sha256": hashlib.sha256(json.dumps(composition, sort_keys=True, separators=(",", ":")).encode()).hexdigest()},
+        "non_mutating": True,
+        "paper_only": True,
+    }
+
+
+def _matching_component_identity(*rows: Mapping[str, Any]) -> bool:
+    """Require every supplied component to agree on the sealed snapshot identity."""
+    for field in ("shared_candidate_id", "market_id", "run_id", "shared_snapshot_id"):
+        values = {_first_text(_field(row, field)) for row in rows}
+        if "" in values or len(values) != 1:
+            return False
+    return True
+
+
+def _market_route(*rows: Mapping[str, Any]) -> dict[str, Any] | None:
+    for row in rows:
+        provenance = row.get("provenance") if isinstance(row.get("provenance"), Mapping) else {}
+        direct_route = row.get("market_route")
+        route = provenance.get("market_route") if isinstance(provenance.get("market_route"), Mapping) else direct_route
+        if isinstance(route, Mapping):
+            route_mapping = dict(route)
+            if route_mapping.get("allowed") is True and route_mapping.get("handler_id"):
+                return {"allowed": True, "handler_id": str(route_mapping["handler_id"]), **({"reason_code": str(route_mapping["reason_code"])} if route_mapping.get("reason_code") else {})}
+    return None
+
+
+def _has_outcome_like_field(values: Iterable[Any]) -> bool:
+    def visit(value: Any) -> bool:
+        if isinstance(value, Mapping):
+            return any(any(token in str(key).lower() for token in ("outcome", "settlement", "resolved")) or visit(child) for key, child in value.items())
+        if isinstance(value, (list, tuple)):
+            return any(visit(child) for child in value)
+        return False
+    return any(visit(value) for value in values)
 
 
 def _veto_reason(

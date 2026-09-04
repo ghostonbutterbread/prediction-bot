@@ -18,22 +18,24 @@ No live order path, runtime lane activation, real wallet access/mutation, or raw
 
 The first isolated vertical slice now provides an outcome-free, in-memory evaluator over **new sealed composed intents**. It projects action, side-selected decision-time price, YES probability, confidence, and allowlisted provenance into `TradeContext`; it recomputes approval/size through shared core; it reserves synthetic capital; and it accepts only an exact `(decision_id, shared_candidate_id, run_id, market_id)` later authoritative receipt. Nested outcome-like fields are rejected recursively; conflicting receipts remain unresolved; and `VOID` releases capital while carrying no economic stake/P&L attribution.
 
-It remains a synthetic fixture tracer, not archive-backed parity. It does not write files, invoke runtime code, touch a wallet, mutate raw ledgers, or activate a lane. Results are labelled non-mutating, paper-only, not paper-parity/promotion evidence.
+The composition runner now emits a separate `wallet_intents.jsonl` derived artifact when—and only when—the selected lane components provide complete, outcome-free decision-time data and exact matching `shared_snapshot_id`, candidate, market, and run identity. The sealed intent preserves the declared action/price/sizing lane ownership, so `shadow_source_router` remains optional: it can supply the action and price, operate as a veto, or be absent entirely. The selected intent can then pass through the synthetic wallet evaluator; existing fixed-notional composition outputs remain unchanged controls.
+
+It remains a synthetic fixture tracer, not archive-backed parity. It does not write files outside the selected derived output directory, invoke runtime code, touch a wallet, mutate raw ledgers, or activate a lane. Results are labelled non-mutating, paper-only, not paper-parity/promotion evidence.
 
 ## Evidence and review
 
-- Tests and commands: `PYTHONPATH=. python3 -m unittest tests.test_composed_lane_wallet -v` — 4 passed after review-driven RED→GREEN fixes; broader focused composition suite remains to run after adapter work.
-- Independent reviews: `deleg_b2d8dafe` established that the current composer is fixed-notional only; `deleg_01870599` identified shared-core/replay binding seams; `deleg_c55b10cd` found nested-outcome leakage, ambiguous resolution handling, VOID attribution, and stale dossier defects. The first three are fixed in this slice; actual-composition adaptation remains blocked below.
+- Tests and commands: `PYTHONPATH=. python3 -m unittest tests.test_composed_lane_wallet tests.test_paper_shadow_lane_compose_replay -v` — 20 passed; isolated full suite `PYTHONPATH=. python3 -m unittest discover -s tests` — 1,053 passed, 7 skipped.
+- Independent reviews: `deleg_b2d8dafe` established that the current composer is fixed-notional only; `deleg_01870599` identified shared-core/replay binding seams; `deleg_c55b10cd` found nested-outcome leakage, ambiguous resolution handling, VOID attribution, and stale dossier defects. The first three are fixed in this slice; a read-only composition-adapter design review (`deleg_184d2367`) confirmed the minimal opt-in sealed-projection approach and identity fail-closed requirement.
 - Replay/cohort/fixture evidence: synthetic fixtures only; no historical cohort replay executed.
-- Merge/ancestry evidence: branch created from local `main` at `4ca50c3`.
+- Merge/ancestry evidence: branch created from local `main` at `4ca50c3`; first checkpoint is `843a942`.
 
 ## Blockers and deferred work
 
-- **Missing test or evidence:** current fixed-notional composition rows omit the sealed wallet intent fields required here (probability/confidence, complete question/exchange/route context, immutable input/config identity). A versioned opt-in adapter/projection must be designed and tested; it must support a generic stable/shadow route as well as Source Router enrichment, without making Source Router mandatory.
-- **Command / fixture / environment needed:** adapter integration fixture from composition output → sealed intent → strict binding receipt; then a bounded, common-universe archive replay.
-- **Trigger to run it:** after the adapter emits complete, hash-addressed decision-time fields and the exact binding ledger is available.
-- **Why it blocks integration, activation, or promotion:** current rows cannot honestly produce a real-composition parity claim; neither synthetic fixture success nor historical replay is promotion evidence.
-- **Exact resume point:** write the next RED test for an explicit `compose_row_to_sealed_intent` adapter that accepts both a non-Source-Router shadow composition and an intact Source Router composition, fails closed on missing decision-time fields, and never derives missing probability/context.
+- **Missing test or evidence:** real historical composition rows may omit one or more required sealed decision-time fields; such rows now remain fixed-notional-only and are excluded from `wallet_intents.jsonl`. A bounded common-universe archive fixture is still required before any historical live-shaped claim.
+- **Command / fixture / environment needed:** adapter integration fixture from real lane rows → sealed intent → strict binding receipt; then a bounded, common-universe archive replay.
+- **Trigger to run it:** after a selected real composition yields a complete sealed-intent artifact and an exact authoritative binding ledger.
+- **Why it blocks integration, activation, or promotion:** synthetic fixture success and historical replay do not prove forward parity or promotion readiness.
+- **Exact resume point:** run a bounded derived composition; inventory emitted versus omitted wallet intents by reason; bind only exact later authoritative receipts and compare fixed-notional versus synthetic-wallet results.
 
 ## Decision gates
 
