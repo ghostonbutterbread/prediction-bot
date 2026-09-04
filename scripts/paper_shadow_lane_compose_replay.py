@@ -240,6 +240,7 @@ def _compose_candidate(
         composed_row=row,
         action_row=action_row,
         base_row=base_row,
+        sizing_row=sizing_row,
         price_row=price_row,
         future_inputs=future_inputs,
     )
@@ -254,24 +255,26 @@ def _sealed_wallet_intent(
     composed_row: Mapping[str, Any],
     action_row: Mapping[str, Any],
     base_row: Mapping[str, Any],
+    sizing_row: Mapping[str, Any],
     price_row: Mapping[str, Any],
     future_inputs: Mapping[str, Any],
 ) -> dict[str, Any] | None:
     """Create an outcome-free wallet input only when all decision-time fields exist."""
     action = str(composed_row.get("action") or "")
-    if action not in {"BUY_YES", "BUY_NO"} or _has_outcome_like_field((action_row, base_row, price_row, future_inputs)) or not _matching_component_identity(base_row, action_row, price_row):
+    if action not in {"BUY_YES", "BUY_NO"} or _has_outcome_like_field((action_row, base_row, sizing_row, price_row, future_inputs)) or not _matching_component_identity(base_row, action_row, sizing_row, price_row):
         return None
     question = _first_text(_field(action_row, "question"), _field(base_row, "question"), future_inputs.get("question"))
     model_probability = _number(_field(action_row, "model_probability"), _field(base_row, "model_probability"))
     confidence = _number(_field(action_row, "confidence"), _field(base_row, "confidence"))
     entry_price = _number(composed_row.get("entry_price"))
-    route = _market_route(action_row, base_row, price_row)
+    exchange = _first_text(_field(action_row, "exchange"), _field(base_row, "exchange"), _field(sizing_row, "exchange"), _field(price_row, "exchange"))
+    route = _market_route(action_row, base_row, sizing_row, price_row)
     shared_candidate_id = _first_text(composed_row.get("shared_candidate_id"))
     market_id = _first_text(composed_row.get("market_id"))
     observed_at = _first_text(composed_row.get("observed_at"))
     run_id = _first_text(_field(action_row, "run_id"), _field(base_row, "run_id"))
     shared_snapshot_id = _first_text(_field(action_row, "shared_snapshot_id"), _field(base_row, "shared_snapshot_id"))
-    if not all((question, model_probability is not None, confidence is not None, entry_price is not None, route, shared_candidate_id, market_id, observed_at, run_id, shared_snapshot_id)):
+    if not all((question, exchange, model_probability is not None, confidence is not None, entry_price is not None, route, shared_candidate_id, market_id, observed_at, run_id, shared_snapshot_id)):
         return None
     source_decision_id = _first_text(_field(action_row, "decision_id"), _field(base_row, "decision_id"))
     material = {"composition": composition, "source_decision_id": source_decision_id, "shared_candidate_id": shared_candidate_id, "market_id": market_id, "observed_at": observed_at, "action": action, "entry_price": entry_price}
@@ -286,7 +289,7 @@ def _sealed_wallet_intent(
         "lane_id": composed_row.get("selected_lane"),
         "market_id": market_id,
         "question": question,
-        "exchange": _first_text(_field(action_row, "exchange"), _field(base_row, "exchange")) or "kalshi",
+        "exchange": exchange,
         "observed_at": observed_at,
         "action": action,
         "entry_price": entry_price,

@@ -24,8 +24,8 @@ It remains a synthetic fixture tracer, not archive-backed parity. It does not wr
 
 ## Evidence and review
 
-- Tests and commands: `PYTHONPATH=. python3 -m unittest tests.test_composed_lane_wallet tests.test_paper_shadow_lane_compose_replay -v` — 20 passed; isolated full suite `PYTHONPATH=. python3 -m unittest discover -s tests` — 1,053 passed, 7 skipped.
-- Independent reviews: `deleg_b2d8dafe` established that the current composer is fixed-notional only; `deleg_01870599` identified shared-core/replay binding seams; `deleg_c55b10cd` found nested-outcome leakage, ambiguous resolution handling, VOID attribution, and stale dossier defects. The first three are fixed in this slice; a read-only composition-adapter design review (`deleg_184d2367`) confirmed the minimal opt-in sealed-projection approach and identity fail-closed requirement.
+- Tests and commands: `PYTHONPATH="$PWD" python3 -m unittest tests.test_composed_lane_wallet tests.test_paper_shadow_lane_compose_replay -v` — 21 passed; isolated full suite `PYTHONPATH="$PWD" python3 -m unittest discover -s tests` — 1,054 passed, 7 skipped.
+- Independent reviews: `deleg_b2d8dafe` established that the current composer is fixed-notional only; `deleg_01870599` identified shared-core/replay binding seams; `deleg_c55b10cd` found nested-outcome leakage, ambiguous resolution handling, VOID attribution, and stale dossier defects. The first three are fixed in this slice. The adapter design review (`deleg_184d2367`) additionally required fail-closed recorded exchange/route identity; the adapter now refuses missing recorded exchange rather than defaulting it, and includes every selected component in identity/outcome checks. A final read-only review (`deleg_ddddebe8`) remains in progress.
 - Replay/cohort/fixture evidence: synthetic fixtures only; no historical cohort replay executed.
 - Merge/ancestry evidence: branch created from local `main` at `4ca50c3`; first checkpoint is `843a942`.
 
