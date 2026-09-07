@@ -25,6 +25,7 @@ from bot.paper_shadow_lanes import (  # noqa: E402
     _build_lane_resolution_row,
     _resolution_index,
 )
+from bot.collector_paths import collector_root  # noqa: E402
 
 DEFAULT_OUTPUT_DIR = "data/derived_reports/unified_replay_corpus_current"
 DEFAULT_DECISION_LEDGER_GLOBS = (
@@ -37,6 +38,7 @@ DEFAULT_RESOLUTION_GLOBS = (
     "data/beta_shadow/resolution_feed/*/latest_resolutions.jsonl",
 )
 DEFAULT_RESOLVED_REPLAY_GLOBS = (
+    "data/derived_reports/lane_compositions/*/resolved_rows.jsonl",
     "data/summaries/lane_compositions/*/resolved_rows.jsonl",
     "data/derived_reports/*/resolved_rows.jsonl",
     "data/derived_reports/source_router_rule_discovery_current/joined_source_router_rows.jsonl",
@@ -453,10 +455,15 @@ def _discover_paths(
     include_defaults: bool,
 ) -> list[Path]:
     paths: list[Path] = []
+    default_patterns = list(defaults) if include_defaults else []
     for value in explicit:
         paths.append(_root_path(value))
-    for pattern in (list(defaults) if include_defaults else []) + list(patterns):
+    for pattern in default_patterns + list(patterns):
         paths.extend(_root_path(match) for match in glob(str(_root_path(pattern)), recursive=True))
+    if include_defaults:
+        # Keep legacy checkout reports discoverable; new reports live on storage.
+        for pattern in default_patterns:
+            paths.extend(Path(match) for match in glob(str(collector_root() / pattern), recursive=True))
     return _unique_existing_paths(paths)
 
 

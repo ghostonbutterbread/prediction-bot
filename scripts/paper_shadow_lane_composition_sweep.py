@@ -21,10 +21,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from bot.file_ops import load_jsonl  # noqa: E402
+from bot.collector_paths import collector_root  # noqa: E402
 from scripts.paper_shadow_lane_compose_replay import (  # noqa: E402
     DEFAULT_LANE_DECISION_PATH,
     DEFAULT_OUTPUT_ROOT,
-    SAFE_OUTPUT_ROOTS,
+    _data_path,
+    _ensure_safe_output_dir,
     _load_config,
     _markdown_report,
     _root_path,
@@ -63,8 +65,8 @@ def main(argv: list[str] | None = None) -> int:
     if not config_paths:
         raise SystemExit("At least one --composition-config or --composition-dir is required")
 
-    lane_rows = load_jsonl(_root_path(args.lane_decision_path))
-    resolution_rows = load_jsonl(_root_path(args.resolution_path)) if args.resolution_path else []
+    lane_rows = load_jsonl(_data_path(args.lane_decision_path))
+    resolution_rows = load_jsonl(_data_path(args.resolution_path)) if args.resolution_path else []
     output_dir = _sweep_output_dir(args.output_dir)
 
     result = run_composition_sweep(
@@ -78,7 +80,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result["summary"], indent=2, sort_keys=True))
     else:
         print(_text_report(result["summary"]))
-        print(f"output_dir={output_dir.relative_to(ROOT)}")
+        print(f"output_dir={_display_path(output_dir)}")
     return 0
 
 
@@ -215,16 +217,8 @@ def _sweep_output_dir(raw: str | None) -> Path:
         output = _root_path(raw).resolve()
     else:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        output = (ROOT / DEFAULT_OUTPUT_ROOT / f"composition_sweep_{timestamp}").resolve()
+        output = (collector_root() / DEFAULT_OUTPUT_ROOT / f"composition_sweep_{timestamp}").resolve()
     return _ensure_safe_output_dir(output)
-
-
-def _ensure_safe_output_dir(output: Path) -> Path:
-    output = output.resolve()
-    safe_roots = [root.resolve() for root in SAFE_OUTPUT_ROOTS]
-    if not any(output == root or root in output.parents for root in safe_roots):
-        raise ValueError("Output directory must be under data/summaries, data/beta_shadow/summaries, or data/derived_reports")
-    return output
 
 
 def _unique_child_dir(parent: Path, slug: str) -> Path:

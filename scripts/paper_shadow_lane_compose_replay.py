@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from bot.file_ops import load_jsonl  # noqa: E402
+from bot.collector_paths import collector_root, derived_reports_root  # noqa: E402
 from bot.paper_shadow_lanes import (  # noqa: E402
     build_paper_shadow_lane_resolution_rows,
     summarize_paper_shadow_lane_resolution_rows,
@@ -28,7 +29,7 @@ from bot.paper_shadow_lanes import (  # noqa: E402
 
 DEFAULT_STABLE_LANE = "control_stable"
 DEFAULT_LANE_DECISION_PATH = "data/beta_shadow/paper/source_scoreboard/paper_shadow_lane_decisions.jsonl"
-DEFAULT_OUTPUT_ROOT = "data/summaries/lane_compositions"
+DEFAULT_OUTPUT_ROOT = "data/derived_reports/lane_compositions"
 SAFE_OUTPUT_ROOTS = (
     ROOT / "data" / "summaries",
     ROOT / "data" / "beta_shadow" / "summaries",
@@ -52,8 +53,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    lane_rows = load_jsonl(_root_path(args.lane_decision_path))
-    resolution_rows = load_jsonl(_root_path(args.resolution_path)) if args.resolution_path else []
+    lane_rows = load_jsonl(_data_path(args.lane_decision_path))
+    resolution_rows = load_jsonl(_data_path(args.resolution_path)) if args.resolution_path else []
     config = _load_config(_root_path(args.composition_config))
     result = compose_lane_replay(lane_rows=lane_rows, resolution_rows=resolution_rows, config=config)
 
@@ -77,7 +78,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(_summary_payload(result), indent=2, sort_keys=True))
     else:
         print(_text_report(result))
-        print(f"output_dir={output_dir.relative_to(ROOT)}")
+        print(f"output_dir={output_dir}")
     return 0
 
 
@@ -600,16 +601,30 @@ def _root_path(raw: str | None) -> Path:
     return path if path.is_absolute() else ROOT / path
 
 
+def _data_path(raw: str | Path) -> Path:
+    """Resolve persistent data independently of the code/definition root."""
+    path = Path(raw).expanduser()
+    if not path.is_absolute() and path.parts and path.parts[0] == "data":
+        return collector_root() / path
+    return _root_path(str(path))
+
+
+def _ensure_safe_output_dir(output: Path) -> Path:
+    output = output.resolve()
+    safe_roots = [root.resolve() for root in SAFE_OUTPUT_ROOTS]
+    safe_roots.append(derived_reports_root().resolve())
+    if not any(output == root or root in output.parents for root in safe_roots):
+        raise ValueError("Output directory must be under collector data/derived_reports or checkout data/summaries, data/beta_shadow/summaries, or data/derived_reports")
+    return output
+
+
 def _output_dir(raw: str | None, name: str) -> Path:
     if raw:
         output = _root_path(raw).resolve()
     else:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        output = (ROOT / DEFAULT_OUTPUT_ROOT / f"{_slug(name)}_{timestamp}").resolve()
-    safe_roots = [root.resolve() for root in SAFE_OUTPUT_ROOTS]
-    if not any(output == root or root in output.parents for root in safe_roots):
-        raise ValueError("Output directory must be under data/summaries, data/beta_shadow/summaries, or data/derived_reports")
-    return output
+        output = (collector_root() / DEFAULT_OUTPUT_ROOT / f"{_slug(name)}_{timestamp}").resolve()
+    return _ensure_safe_output_dir(output)
 
 
 def _summary_payload(result: Mapping[str, Any]) -> dict[str, Any]:

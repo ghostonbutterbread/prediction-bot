@@ -1,10 +1,11 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.paper_shadow_lane_composition_sweep import (
-    ROOT,
     _composition_config_paths,
     main,
     run_composition_sweep,
@@ -45,8 +46,17 @@ def _lane_row(
 
 
 class PaperShadowLaneCompositionSweepTests(unittest.TestCase):
+    def setUp(self):
+        root = tempfile.TemporaryDirectory()
+        self.addCleanup(root.cleanup)
+        env = patch.dict(os.environ, {"PREDICTION_BOT_COLLECTOR_ROOT": root.name})
+        env.start()
+        self.addCleanup(env.stop)
+        self.derived_root = Path(root.name) / "data" / "derived_reports"
+        self.derived_root.mkdir(parents=True)
+
     def test_runs_multiple_configs_and_writes_aggregate_artifacts(self):
-        with tempfile.TemporaryDirectory(dir=ROOT / "data" / "summaries") as tmp:
+        with tempfile.TemporaryDirectory(dir=self.derived_root) as tmp:
             tmp_path = Path(tmp)
             config_one = tmp_path / "stable_with_router_veto.yaml"
             config_two = tmp_path / "router_side_stable_size.yaml"
@@ -147,8 +157,8 @@ composition:
                 summary["aggregate"]["best_total_pnl_usd"],
                 {
                     "name": "stable_with_router_veto",
-                    "config_path": str(config_one.relative_to(ROOT)),
-                    "output_dir": str((output_dir / "stable_with_router_veto").relative_to(ROOT)),
+                    "config_path": str(config_one),
+                    "output_dir": str(output_dir / "stable_with_router_veto"),
                     "total_pnl_usd": 5.0,
                 },
             )
@@ -161,7 +171,7 @@ composition:
             self.assertEqual(persisted["schema_name"], "paper_shadow_lane_composition_sweep_summary")
 
     def test_cli_loads_repeated_config_and_composition_dir(self):
-        with tempfile.TemporaryDirectory(dir=ROOT / "data" / "summaries") as tmp:
+        with tempfile.TemporaryDirectory(dir=self.derived_root) as tmp:
             tmp_path = Path(tmp)
             config_dir = tmp_path / "configs"
             config_dir.mkdir()
@@ -263,7 +273,7 @@ composition:
                 )
 
     def test_best_metric_keeps_duplicate_name_paths_traceable(self):
-        with tempfile.TemporaryDirectory(dir=ROOT / "data" / "summaries") as tmp:
+        with tempfile.TemporaryDirectory(dir=self.derived_root) as tmp:
             tmp_path = Path(tmp)
             config_one = tmp_path / "dupe_one.yaml"
             config_two = tmp_path / "dupe_two.yaml"
@@ -319,8 +329,8 @@ composition:
 
             best = result["summary"]["aggregate"]["best_total_pnl_usd"]
             self.assertEqual(best["name"], "duplicate_name")
-            self.assertEqual(best["config_path"], str(config_two.relative_to(ROOT)))
-            self.assertEqual(best["output_dir"], str((output_dir / "duplicate_name_2").relative_to(ROOT)))
+            self.assertEqual(best["config_path"], str(config_two))
+            self.assertEqual(best["output_dir"], str(output_dir / "duplicate_name_2"))
             self.assertEqual(best["total_pnl_usd"], 1.25)
 
 
