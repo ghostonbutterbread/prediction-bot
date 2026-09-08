@@ -6,7 +6,7 @@
 - Canonical spec: this branch-local dossier. Durable accepted contract belongs in `docs/architecture/persistent-storage-contract.md`.
 - Branch: `feat/sourcewriter-indexed-artifacts`; worktree `/home/ryushe/worktrees/prediction-bot-sourcewriter-indexed-artifacts`.
 - Immutable baseline: `537c6268d06c2313b8af63d341beff9f35b66e61`; target: local `beta`, never main.
-- Implementation commit: pending.
+- Recoverable prerequisite implementation commit: `8c042a2a585960cb36d7255ddd3c121be9a27055`; owning ref `feat/sourcewriter-indexed-artifacts`. Later dossier-only commits are handoff metadata, not additional implementation. Complete SourceWriter implementation remains pending.
 - Supersedes the full-copy resource workaround from `fix/sourcewriter-default-enabled`. That branch's dirty default-config changes remain separately owned and untouched; they are not silently imported. Default activation remains a successor operational gate.
 
 ## User objective and invariants
@@ -49,13 +49,16 @@ live/large input or activate it on the basis of this checkpoint**.
   input was read or modified. Preflight reported 48G available on the volume.
 - Durable contract: `docs/architecture/persistent-storage-contract.md`, section
   “Collector replay-index committed prefixes (manifest version 2)”.
-- Full isolated suite: **1127 run, 0 failures, 0 errors, 7 skips**;
-  `full-suite.json` and `full-suite.log` beneath the TEMP root. Elapsed
-  36.37547456799075 seconds; process peak RSS 731292 KiB. This is suite memory,
+- Full isolated suite rerun on committed `8c042a2`: **1128 run, 0 failures, 0 errors, 7 skips**;
+  `committed-full-suite.json` and `committed-full-suite.log` beneath the TEMP root. Elapsed
+  32.1009924239479 seconds; process peak RSS 862820 KiB. This is suite memory,
   not SourceWriter workload memory. Python socket guard also inherited by
   subprocesses via `sitecustomize.py` on the explicit PYTHONPATH.
-- Focused index suite: **23 run, 0 failures/errors** in
-  `green-partial-only.json`. RED/GREEN receipts are paired by suffix:
+  All seven skips are absent ignored/local runtime configs in this isolated
+  worktree, not skipped indexed-artifact assertions.
+- Focused index suite on committed `8c042a2`: **24 run, 0 failures/errors** in
+  `committed-focused-suite.json`. The earlier `full-suite.json`/1127 run is
+  superseded, not evidence for the final committed code. RED/GREEN receipts are paired by suffix:
   `initial-tail`, `frozen-extent`, `index-digest`, `interrupted-publication`,
   `initial-publication`, `identity`, `locator-extents`, `concurrent-append`,
   `idempotency-path`, `partial-only`. Additional invariant tests verify
@@ -76,6 +79,12 @@ live/large input or activate it on the basis of this checkpoint**.
   30 CPU seconds. No production extrapolation.
 - Review: independent read-only review dispatched for this prerequisite;
   full implementation review/integration remains the parent's responsibility.
+- Small final JSON report copies only (no fixture/raw copies):
+  `/mnt/data-collection/prediction-bot/data/derived_reports/sourcewriter_indexed_artifacts/checkpoint-8c042a2/`.
+  Contains `checkpoint-gates.json`, `committed-full-suite.json`,
+  `committed-focused-suite.json`, and baseline/candidate `*-index-resource.json`,
+  each naming the implementation checkpoint SHA; the older `full-suite.json`
+  is explicitly marked superseded/precommit rather than pinned to that SHA.
 - No beta/main changes, merges, pushes, runtime config edits, services,
   schedulers, orders or activation. Only task-owned local files changed.
 
@@ -86,9 +95,9 @@ W=/home/ryushe/worktrees/prediction-bot-sourcewriter-indexed-artifacts
 R=/mnt/data-collection/sourcewriter-indexed-tpv8yxcv
 P=/mnt/data-collection/prediction-bot/.venv/bin/python
 PYTHONPATH="$R/guard:$W" PREDICTION_BOT_COLLECTOR_ROOT="$R" TMPDIR="$R" \
-  "$P" "$R/run_tests.py" 'test_*.py' full-suite
+  "$P" "$R/run_tests.py" 'test_*.py' committed-full-suite
 PYTHONPATH="$R/guard:$W" PREDICTION_BOT_COLLECTOR_ROOT="$R" TMPDIR="$R" \
-  "$P" "$R/run_tests.py" 'test_collector*index*.py' focused-rerun
+  "$P" "$R/run_tests.py" 'test_collector*index*.py' committed-focused-suite
 git diff --check
 ```
 
