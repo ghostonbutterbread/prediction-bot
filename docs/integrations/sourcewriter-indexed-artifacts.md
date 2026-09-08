@@ -6,7 +6,7 @@
 - Canonical spec: this branch-local dossier. Durable accepted contract belongs in `docs/architecture/persistent-storage-contract.md`.
 - Branch: `feat/sourcewriter-indexed-artifacts`; worktree `/home/ryushe/worktrees/prediction-bot-sourcewriter-indexed-artifacts`.
 - Immutable baseline: `537c6268d06c2313b8af63d341beff9f35b66e61`; target: local `beta`, never main.
-- Recoverable prerequisite implementation commit: `8c042a2a585960cb36d7255ddd3c121be9a27055`; owning ref `feat/sourcewriter-indexed-artifacts`. Later dossier-only commits are handoff metadata, not additional implementation. Complete SourceWriter implementation remains pending.
+- Recoverable prerequisite implementation: `8c042a2a585960cb36d7255ddd3c121be9a27055`, followed by locator-order fix `61c772fdba2436ebeda96d02f9d5caf5ea30c1ab`; owning ref `feat/sourcewriter-indexed-artifacts`. Dossier-only commits are handoff metadata, not additional implementation. Complete SourceWriter implementation remains pending.
 - Supersedes the full-copy resource workaround from `fix/sourcewriter-default-enabled`. That branch's dirty default-config changes remain separately owned and untouched; they are not silently imported. Default activation remains a successor operational gate.
 
 ## User objective and invariants
@@ -55,8 +55,13 @@ manifest unchanged on failure. It adds a compact structural scan, not a raw scan
   26745 derived bytes, 30868 KiB peak RSS, 0.6701437160372734 seconds. Path-length
   metadata differs from the earlier output label; no raw copy was made.
 - Narrow independent re-review of this fix dispatched; approval pending.
-- Fix implementation commit: pending below; all edits remain on the existing
+- Fix implementation commit: `61c772fdba2436ebeda96d02f9d5caf5ea30c1ab`; all edits remain on the existing
   feature branch, with no propagation to beta/main or runtime.
+- Small follow-up JSON receipts, verified after copy:
+  `/mnt/data-collection/prediction-bot/data/derived_reports/sourcewriter_indexed_artifacts/checkpoint-61c772f/`.
+  This contains `review-fix-gates.json`, `green-review-locator-order.json`,
+  `review-fix-full-suite.json`, and `candidate-reviewfix-index-resource.json`,
+  all explicitly pinned to `61c772f`. Earlier checkpoint receipts remain intact.
 
 Receipt root is still `/mnt/data-collection/sourcewriter-indexed-tpv8yxcv`.
 Exact follow-up commands, using W/R/P from the earlier command block:
