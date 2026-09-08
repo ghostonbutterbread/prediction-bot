@@ -1,58 +1,30 @@
 # Beta reasoning, data-flow and persistence audit
 
-- **Status:** reviewed ancestor fixes; approved local beta integration in progress
-- **Current verification:** parent isolated full suite 1,102 tests OK (7 skipped), `/tmp/predbot-final-ancestor-suite.log`. Kelly/storage residual fixes approved by `deleg_8f2515b9`; runtime history admission approved by `deleg_e3739fcb`. Frozen V1 producer now tracked with pinned SHA-256 instead of requiring Git history at test runtime.
-- **Authorization:** user approved isolated persistence tests and reviewed local beta integration; no push, restart, live trading or raw-history mutation. Preserve beta's unrelated untracked migration handoff unchanged.
-- **Remaining integration gate:** merge beta into task branch, pass configured storage authority through maintenance caller, run maintenance regression/full beta suite and actual disposable branch-switch persistence check, then local integration only.
-- **Owner:** Hermes; project Kanban `t_500d82fb`; Discord thread `1546659523605962934`
-- **Branch:** `fix/beta-audit-persistence`
-- **Worktree:** `/home/ryushe/worktrees/prediction-bot-beta-audit`
-- **Base commit:** `4ca50c30c39707fd13e4b657d6299667cd761580` (`main`, lowest shared owner of configuration and accounting behavior)
-- **Audited beta:** `cf234f98598eab0e2e31d5826eae3d7e5ca6fe5f`
-- **Intended integration target:** `beta`, never `main` or an active runtime
-- **Last updated:** 2026-09-07
-- **References:** user audit request; repository AGENTS.md; existing untracked beta `docs/DATA_REORGANIZATION_HANDOFF.md` (read-only, separate ownership)
+## Ownership and decision
+- Owner: Hermes; prediction-bot Kanban `t_500d82fb`.
+- Branch/worktree: `fix/beta-audit-persistence`, `/home/ryushe/worktrees/prediction-bot-beta-audit`.
+- Shared ancestor: `4ca50c30c39707fd13e4b657d6299667cd761580`.
+- Audited/local target beta: `cf234f98598eab0e2e31d5826eae3d7e5ca6fe5f`.
+- Implementation checkpoints: `41f75408eef2b5f2c8a57d67e9841c6835b94261` (composition paths), `6ae5fc24282fc4c0b172b47ce55437338cf689b7` (accounting/evidence/storage fixes). This merge checkpoint adds beta maintenance wiring and contains the reviewed complete integration.
+- Status: independently approved for local beta integration; never main.
+- User approved synthetic persistence checks and local beta integration. No push, restart, live trading, raw-history edits, or lane activation.
+- Latest explicit user decision supersedes beta's arbitrary-output-directory change: reports remain under selected storage root; consumers validate shape/eligibility. Preserve unrelated untracked beta migration handoff byte-for-byte.
 
-## Intent and success criteria
+## Implemented contracts
+Persistent selected storage across CWD/worktree changes; env > configured > default root authority; report containment; signal audit persistence; composition output discovery. Shared Kelly env/config resolution, consistent entry fees through settlement/reload, VOID reservation release without economic attribution, NO-side mark-to-market, explicit settlement chronology. Immutable candidate cutoff/snapshot identity, exact settlement joins, authoritative receipt timestamps. Forecast vote/target-period proof, capture-before-settlement strict history, ISO-date parsing correctness. V2 derived generations and runtime rejection of old incompatible history; immutable old artifacts retained. Maintenance passes configured storage authority to the actual promotion consumer.
 
-Reproduce and minimally fix concrete reasoning/data-flow defects. Verify that a selected beta cohort's collector, shared snapshot, paper consumers, resolver and derived source history use one persistent storage location across code-checkout/CWD changes. Run focused regressions, an artifact-linked deterministic E2E fixture, the isolated complete suite, and an independent review. Report evidence gaps instead of claiming all strategies are profitable or formally correct.
+## Verification
+- Final combined beta tree: **1,109 tests OK, 7 skipped**; `/mnt/data-collection/prediction-bot/data/derived_reports/beta_audit_20260907/final-beta-integration-suite.log`.
+- Shared ancestor fixes: 1,102 tests OK, 7 skipped, `/tmp/predbot-final-ancestor-suite.log`.
+- Actual disposable Git switches fixed 6ae5fc2 -> old beta cf234f9 -> fixed 6ae5fc2: same raw/state paths, checkpoints and row counts 1/2/3, first-row hash unchanged. Receipt `branch-portability-6ae5fc2.json` in audit report directory. External absolute paths maintain old-code compatibility.
+- Actual PredictionLab with config-only root and relative cohort, fresh interpreters CWD A -> B -> A: same paths, checkpoints/rows 1/2/3, first-row hash unchanged, no checkout files. Receipt `config-only-cwd-persistence.json` in audit report directory.
+- Real collector-to-router E2E, paper lifecycle regressions, and config-load -> maintenance -> real publication covered in suite; external boundaries are synthetic and no live orders occur.
+- Independent approvals: residual Kelly/storage `deleg_8f2515b9`; runtime history `deleg_e3739fcb`; final integration `deleg_2b2414a8` (70 focused tests). Frozen V1 fixture has pinned SHA-256 and provenance to41f7540; differs from ancestor only by terminal newline, AST identical; no runtime Git dependency.
+- `git diff --check` clean. Final working-tree hunks explicitly staged before commit.
 
-## Boundaries
+## Integration and residual boundaries
+Local beta is the authorized target; remote `origin/beta` does not exist (fetch attempted and returned missing ref). No remote branch is created or pushed. Beta checkout is an active source, but no process restart or configuration/timer/lane activation is part of this task. Maintenance remains disabled by default. Old V1 history requires explicit derived re-materialization before runtime use; this task never rewrites historical evidence.
 
-Paper/observer/synthetic fixtures only. No live orders, balance or real-wallet access, raw historical edits, migration, deletion, service restart, schedule changes, live configuration edits or push. No integration of separate composed-wallet feature merely to increase audit coverage. The active collector executes code from the beta integration worktree, so changing beta itself is operationally sensitive even without restarting its process. Beta also contains an unrelated untracked migration handoff. Keep it untouched; integration requires explicit reconciliation/activation decision.
+A missing manifest may raise FileNotFoundError instead of a structured SKIP (inherited fail-closed behavior); no claim that every I/O error becomes structured verification failure. Seven suite skips remain reported, not counted as executed coverage. Historical profitability, full multi-GB replay, and live operational paper-cohort activation are outside this synthetic correctness audit.
 
-## Reproduced evidence
-
-The same active external cohort config loaded from two CWDs resolves `runtime.base_dir`, `data_dir`, `shared_market.runtime_root`, and resolver outputs beneath each CWD, while its compact replay index and raw resolver input remain absolute beneath `/mnt/data-collection/prediction-bot`. This splits producer/consumer identity and state when switching checkouts. Active services currently rely on the mounted checkout as WorkingDirectory.
-
-Active collector and resolver are writing current artifacts; only the collector is a continuous process. Resolver uses a timer. Source Router promotion has failed historical service state and no active timer; paper consumer is inactive. These are operational states, not strategy correctness findings.
-
-## Implementation plan
-
-1. Preserve legacy non-beta semantics unless a storage root is explicitly selected; beta composed profiles select the canonical collector root. Resolve only owned data fields, not source code/config/definition paths or provenance.
-2. Minimal regression-backed fixes for verified decision/settlement defects, if found.
-3. Connect real internal collector/index/resolver/materializer/router functions using fake external market/weather boundaries and temporary output roots.
-4. Commit shared ancestor fixes once, merge audited beta into this task branch, and rerun tests. Leave target/runtime unchanged unless safe integration is separately approved.
-
-## Evidence and review
-
-- Baseline isolated suite: **1,044 tests, 3 errors, 7 skips**, all errors from three composition-sweep tests assuming ignored `data/summaries` existed. Log and audit repros preserved in `/mnt/data-collection/prediction-bot/data/derived_reports/beta_audit_20260907/`.
-- Composition persistence regressions: RED reproduced checkout-default outputs, rejection of collector-root output, and missing downstream discovery; GREEN **5 new tests**, **15 existing composition tests**, **4 unified-corpus tests**. Old sweep tests now allocate their own temporary collector root, not an ignored repository directory.
-- Parent independently reran the auditors' accounting and settlement bad-behavior reproducers successfully; desired data-contract regressions failed as expected. Dedicated non-overlapping builders are fixing actual paper lifecycle, source-evidence qualification/chronology, and snapshot/settlement identity handoffs.
-- Fresh active collector sample: 20 complete rows from a bounded 2MiB tail; export accepted 20/rejected 0. 80 source rows: 40 strict-complete forecast candidates, 20 forecast-unavailable, 20 observation-only. This is bounded field compatibility, not full-cohort performance evidence.
-- Resumed parent verification: `PYTHONPATH=<task worktree> /mnt/data-collection/prediction-bot/.venv/bin/python -m unittest discover -s tests` with temporary HOME/collector root and a sanitized environment: **1,095 tests, OK (7 skipped)**; `/tmp/predbot-parent-continued-suite.log`. This receipt predates the residual review fixes below and is not final acceptance.
-- ISO calendar dates were incorrectly parsed as temperature ranges; repaired source-side inference preserves ISO/prose BUY parity through the actual collector-to-router fixture. Independent accounting review accepted the repaired fee/VOID/mark-to-market paths but found PredictionLab still ignored Kelly environment settings. Independent storage review found configured promotion roots rejected by the real consumer's default-root validator.
-- Narrow fix workers are addressing Kelly resolution parity and explicit promotion storage authority. Source/history and identity review was interrupted by an API usage-limit error; a fresh read-only review is dispatched. Neither the interrupted review nor a green suite counts as review approval.
-- Original standalone contract regression harness currently fails during setup because its temporary promotion path is outside the selected collector root; it ran zero assertions. Do not cite that harness as a product-regression result or weaken containment to make it run. The checked-in isolated E2E is green.
-- No final review acceptance, beta integration, push, or runtime activation claim yet. After residual fixes: independent re-review, isolated full suite, committed branch-switch persistence fixture, then record exact integration/activation blockers.
-
-## Blockers and deferred work
-
-- **Integration:** beta is an active code source and has an unrelated untracked handoff. User decision required before changing that worktree; fixture verification can complete independently.
-- **Live operational E2E:** paper consumer and promotion are disabled. Requires explicit authorized activation into a named fresh paper cohort after retention/capacity preflight. This audit will not restart or enable them.
-- **Tracking:** parent Kanban `claim/show` was incorrectly denied as a delegated-child context after dispatch. Logged sanitized papercut; retry after child completion. Card creation succeeded.
-- **Historical replay:** no full multi-GB replay or strategy profitability claim in this task. The composed-wallet feature remains separately owned/unmerged.
-
-## Decision record
-
-- 2026-09-07 — created isolated worktree from owning shared ancestor; inspected beta/runtime authority; reproduced CWD-dependent split; began bounded audit.
+After local integration, remove this temporary dossier from beta; retain durable contract in `docs/architecture/persistent-storage-contract.md` and test receipts in the audit report directory. Record final beta commit and post-integration verification on Kanban. No unrelated worktree cleanup.
