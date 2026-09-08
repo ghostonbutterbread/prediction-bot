@@ -15,7 +15,6 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Iterable, Mapping
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from bot.replay_decision_input import verify_replay_decision_input_record_v1
 from bot.weather.source_scoreboard import extract_source_forecast_observations
@@ -123,22 +122,6 @@ def materialize_source_observation_ledger(
             counters["void_resolution"] += 1
             void_rows.append(_void_row(pending, outcome))
             continue
-        observed_time = _parse_time(pending.get("input_observed_at"))
-        source_time = _parse_time(pending.get("source_as_of"))
-        fetched_time = _parse_time(pending.get("source_fetched_at"))
-        settlement_time = _parse_time(outcome["settlement_ts"])
-        chronology_problem = None
-        if observed_time is None or settlement_time is None or observed_time >= settlement_time:
-            chronology_problem = "input_observed_at_not_before_settlement"
-        elif source_time is not None and source_time > observed_time:
-            chronology_problem = "source_as_of_after_immutable_observed_at"
-        elif fetched_time is not None and fetched_time > observed_time:
-            chronology_problem = "source_fetched_at_after_immutable_observed_at"
-        if chronology_problem:
-            if chronology_problem not in pending["strict_source_proof"]["reasons"]:
-                strict_rejection_counts[chronology_problem] += 1
-            unusable_rows.append(_unusable_row(pending, chronology_problem, outcome=outcome))
-            continue
         implied = _source_implied_outcome(pending)
         if implied is None:
             unusable_rows.append(_unusable_row(pending, "unavailable_source_implied_side", outcome=outcome))
@@ -181,7 +164,7 @@ def materialize_source_observation_ledger(
         "router_selection_used": False,
         "settlement_join": "exact canonical_input_sha256 plus complete decision_key",
         "history_availability_field": "settlement_ts",
-        "history_eligibility": "source_as_of <= input_observed_at < settlement_ts < future_decision_time",
+        "history_eligibility": "settlement_ts < future_decision_time",
         "inputs": {
             "replay_inputs_path": str(inputs_path), "replay_inputs_sha256": input_sha256,
             "finalized_outcomes_path": str(outcomes_path), "finalized_outcomes_sha256": outcome_sha256,
@@ -214,21 +197,14 @@ def materialize_source_observation_ledger(
 def is_eligible_for_future_history(row: Mapping[str, Any], future_decision_time: str) -> bool:
     """Return whether a source-correctness row was authoritative before a decision.
 
-    Resolution retrieval timestamps are audit-only. Source evidence must exist
-    at capture, capture must precede settlement, and settlement must precede the
-    future decision, strictly.
+    Retrieval/resolution timestamps are deliberately audit-only. A source row may
+    contribute only after its authoritative settlement timestamp, strictly.
     """
 
     if row.get("eligible_for_source_history") is not True or row.get("source_correctness_eligibility") != _ELIGIBLE_STRICT_SOURCE_PROOF:
         return False
     settlement, future = _parse_time(row.get("settlement_ts")), _parse_time(future_decision_time)
-    source, observed = _parse_time(row.get("source_as_of")), _parse_time(row.get("input_observed_at"))
-    fetched = _parse_time(row.get("source_fetched_at"))
-    return (
-        source is not None and observed is not None and settlement is not None and future is not None
-        and source <= observed < settlement < future
-        and (row.get("source_fetched_at") is None or (fetched is not None and fetched <= observed))
-    )
+    return settlement is not None and future is not None and settlement < future
 
 
 def _pending_rows_for_input(row: Mapping[str, Any], identity: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -340,9 +316,7 @@ def source_correctness_target_proof(
 
     normalized_market_date = _normalized_date(market_date)
     version = source_record.get("source_evidence_version")
-    recorded_mapping = source_record.get("target_mapping")
-    mapping = recorded_mapping if isinstance(recorded_mapping, Mapping) else {}
-    period_problem = _source_period_target_problem(source_record, mapping, normalized_market_date)
+    mapping = source_record.get("target_mapping") if isinstance(source_record.get("target_mapping"), Mapping) else {}
     if str(version).strip() == "1":
         evidence_type = str(source_record.get("evidence_type") or "").strip().lower()
         if evidence_type != "forecast" or source_record.get("scoreable_forecast") is not True:
@@ -358,8 +332,6 @@ def source_correctness_target_proof(
             status = "unusable_v1_target_unproven"
         elif any(value != normalized_market_date for value in (*market_targets, *source_targets)):
             status = "unusable_v1_target_mismatch"
-        elif period_problem:
-            status = f"unusable_{period_problem}"
         else:
             status = _ELIGIBLE_TARGET_PROOF
         return {
@@ -378,7 +350,7 @@ def source_correctness_target_proof(
     if normalized_market_date and any(value != normalized_market_date for value in normalized_aliases):
         status = "unusable_legacy_target_mismatch"
     elif normalized_market_date and normalized_aliases:
-        status = f"unusable_{period_problem}" if period_problem else _ELIGIBLE_TARGET_PROOF
+        status = _ELIGIBLE_TARGET_PROOF
     else:
         status = "unusable_legacy_target_unproven"
     return {
@@ -386,43 +358,6 @@ def source_correctness_target_proof(
         "source_target_date": source_target_date,
     }
 
-
-
-def _source_period_target_problem(
-    source: Mapping[str, Any], mapping: Mapping[str, Any], market_date: str | None,
-) -> str | None:
-    """Check optional retained periods in source-local time, including aliases.
-
-    An overnight period may end the following day. Missing bounds do not impose
-    a new legacy requirement, and naive provider timestamps are source-local.
-    """
-    if not market_date:
-        return None
-    target = date.fromisoformat(market_date)
-    timezone_name = _text(mapping.get("source_timezone"))
-    try:
-        source_timezone = ZoneInfo(timezone_name) if timezone_name else None
-    except (ZoneInfoNotFoundError, ValueError):
-        # NWS records an explicit offset (UTC-07:00), already retained on each
-        # period timestamp; it is not an IANA zone name.
-        source_timezone = None
-    for boundary in ("start", "end"):
-        values = [mapping.get(f"source_period_{boundary}"), *(
-            source.get(f"{prefix}_{boundary}") for prefix in ("forecast", "forecast_period", "period")
-        )]
-        for value in values:
-            if value is None:
-                continue
-            try:
-                period = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-            except (TypeError, ValueError):
-                return "source_period_invalid"
-            if period.tzinfo is not None and source_timezone is not None:
-                period = period.astimezone(source_timezone)
-            day_offset = (period.date() - target).days
-            if day_offset != 0 and not (boundary == "end" and day_offset == 1):
-                return "source_period_target_mismatch"
-    return None
 
 
 def strict_source_observation_proof(
@@ -445,8 +380,7 @@ def strict_source_observation_proof(
     reasons: list[str] = []
     source_id = _text(source_record.get("source_id"))
     source_as_of = _text(source_record.get("source_as_of"))
-    recorded_mapping = source_record.get("target_mapping")
-    mapping = recorded_mapping if isinstance(recorded_mapping, Mapping) else {}
+    mapping = source_record.get("target_mapping") if isinstance(source_record.get("target_mapping"), Mapping) else {}
     if not source_id:
         reasons.append("missing_source_id")
     source_as_of_time, observed_at_time = _parse_time(source_as_of), _parse_time(observed_at)
@@ -456,9 +390,6 @@ def strict_source_observation_proof(
         reasons.append("source_as_of_after_immutable_observed_at")
     if not _text(mapping.get("source_timezone")):
         reasons.append("missing_source_timezone")
-    period_problem = _source_period_target_problem(source_record, mapping, _normalized_date(market_date))
-    if period_problem:
-        reasons.append(period_problem)
 
     source_city = _normalized_city(source_record.get("source_location_city"))
     recorded_city = _normalized_city(

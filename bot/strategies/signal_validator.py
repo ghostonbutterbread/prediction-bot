@@ -47,7 +47,6 @@ class SignalAuditLog:
 
     def __init__(self, path: str = "data/signal_audit.jsonl"):
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         self.enabled = os.getenv("SIGNAL_AUDIT_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
         self.log_rejections = os.getenv("SIGNAL_AUDIT_REJECTIONS", "false").lower() in {"1", "true", "yes", "on"}
         self.max_bytes = int(os.getenv("SIGNAL_AUDIT_MAX_BYTES", str(50 * 1024 * 1024)))
@@ -79,6 +78,7 @@ class SignalAuditLog:
     ):
         if not self._should_write(validation):
             return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         self._maybe_rotate()
         record = {
             "timestamp": datetime.now(timezone.utc).isoformat(),

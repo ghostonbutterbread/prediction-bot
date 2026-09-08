@@ -397,6 +397,8 @@ class SourceObservationLedgerTests(unittest.TestCase):
             "source_correctness_eligibility": "eligible_strict_source_proof",
             "strict_source_proof": {"status": "eligible", "reasons": []},
             "source_provenance": {"source_record_sha256": "a" * 64, "canonical_input_sha256": "b" * 64},
+            "source_as_of": "2026-08-01T11:54:00+00:00",
+            "input_observed_at": "2026-08-01T12:00:00+00:00",
             "settlement_ts": "2026-08-04T00:00:00+00:00",
             "resolution_resolved_at": "2026-08-07T00:00:00+00:00",
         }

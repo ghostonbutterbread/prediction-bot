@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Optional
 
 from bot.shared_core.resolution import (
+    VOID_MARKET_STATUSES,
     has_definitive_market_outcome,
     detect_market_outcome,
     market_resolution_status,
@@ -52,7 +53,8 @@ class TradeResolver:
 
     KALSHI_FEE_RATE = 0.07  # 7% on profits
 
-    def __init__(self, data_dir: str = "data"):
+    def __init__(self, data_dir: str = "data", *, fee_rate: float = KALSHI_FEE_RATE):
+        self.fee_rate = fee_rate
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
@@ -84,8 +86,9 @@ class TradeResolver:
         still_open_count = 0
 
         for trade in trades:
+            fee_rate = self._coerce_float(trade.get("fee_rate"), default=self.fee_rate)
             if trade.get("resolved"):
-                enrich_trade_audit_fields(trade, fee_rate=self.KALSHI_FEE_RATE)
+                enrich_trade_audit_fields(trade, fee_rate=fee_rate)
                 continue  # Already resolved
 
             market_id = trade.get("market_id", "")
@@ -99,7 +102,7 @@ class TradeResolver:
             reserved_capital = self._reserved_capital_for_trade(trade)
 
             if not market_id or entry_price is None or position_size <= 0:
-                enrich_trade_audit_fields(trade, fee_rate=self.KALSHI_FEE_RATE)
+                enrich_trade_audit_fields(trade, fee_rate=fee_rate)
                 continue
 
             trade["market_price"] = round(entry_price, 4)
@@ -109,7 +112,7 @@ class TradeResolver:
                 # Fetch current market state
                 market = exchange.get_market(market_id)
                 if market is None:
-                    enrich_trade_audit_fields(trade, fee_rate=self.KALSHI_FEE_RATE)
+                    enrich_trade_audit_fields(trade, fee_rate=fee_rate)
                     still_open_count += 1
                     continue
 
@@ -121,32 +124,40 @@ class TradeResolver:
                 # on "closed" status alone, as Kalshi marks markets closed before
                 # the settlement result is available.
                 result_available = self._has_result(market)
-                if market_status in ("settled", "resolved", "finalized") or (
+                if market_status in {"settled", "resolved", "finalized"} | VOID_MARKET_STATUSES or (
                     market_status == "closed" and result_available
                 ):
                     # Market resolved — determine winner
                     outcome = self._determine_outcome(market)
-                    if outcome not in {"YES", "NO"}:
+                    if outcome not in {"YES", "NO", "VOID"}:
+                        still_open_count += 1
+                        continue
+                    trade["resolution_blocker"] = self._settlement_chronology_blocker(trade, market)
+                    if trade["resolution_blocker"]:
+                        logger.warning("Paper settlement blocked for %s: %s", market_id, trade["resolution_blocker"])
                         still_open_count += 1
                         continue
                     pnl = self._calculate_realized_pnl(
-                        direction, entry_price, position_size, outcome
+                        direction, entry_price, position_size, outcome, fee_rate=fee_rate
                     )
 
                     trade["resolved"] = True
                     trade["outcome"] = outcome
-                    trade["pnl"] = round(pnl, 4)
+                    trade["pnl"] = None if outcome == "VOID" else round(pnl, 4)
                     trade["resolved_at"] = datetime.now(timezone.utc).isoformat()
-                    trade["resolution_type"] = "settled"
+                    trade["resolution_type"] = "void_resolution" if outcome == "VOID" else "settled"
                     trade["market_price"] = round(entry_price, 4)
-                    trade["exit_price"] = 1.0 if outcome == "YES" else 0.0
+                    trade["exit_price"] = None if outcome == "VOID" else (1.0 if outcome == "YES" else 0.0)
                     trade["settlement_value"] = round(reserved_capital + pnl, 4)
 
                     resolved_count += 1
 
                     # Sync outcome to RiskManager so streaks/drawdown/daily_PnL update
                     if risk_manager is not None:
-                        risk_manager.record_outcome(trade.get("id") or market_id, pnl)
+                        if outcome == "VOID":
+                            risk_manager.record_outcome(trade.get("id") or market_id, 0.0, void=True)
+                        else:
+                            risk_manager.record_outcome(trade.get("id") or market_id, pnl)
 
                     logger.info(
                         f"  ✅ Resolved: {trade['question'][:50]}... | "
@@ -198,10 +209,10 @@ class TradeResolver:
                     trade["market_price"] = round(entry_price, 4)
                     still_open_count += 1
 
-                enrich_trade_audit_fields(trade, fee_rate=self.KALSHI_FEE_RATE)
+                enrich_trade_audit_fields(trade, fee_rate=fee_rate)
             except Exception as e:
                 logger.debug(f"Error resolving {market_id}: {e}")
-                enrich_trade_audit_fields(trade, fee_rate=self.KALSHI_FEE_RATE)
+                enrich_trade_audit_fields(trade, fee_rate=fee_rate)
                 still_open_count += 1
                 continue
 
@@ -264,8 +275,36 @@ class TradeResolver:
         """
         return detect_market_outcome(market) or "UNKNOWN"
 
+    def _settlement_chronology_blocker(self, trade: dict, market) -> Optional[str]:
+        """Preserve explicit source times; never turn retrieval time into settlement."""
+        metadata = market.get("metadata", {}) if isinstance(market, dict) else getattr(market, "metadata", {})
+        for key in ("settlement_ts", "outcome_known_at"):
+            value = market.get(key) if isinstance(market, dict) else getattr(market, key, None)
+            if value in (None, "") and isinstance(metadata, dict):
+                value = metadata.get(key)
+            trade[key] = value.isoformat() if isinstance(value, datetime) else value
+
+        for key in ("settlement_ts", "outcome_known_at"):
+            value = trade.get(key)
+            if value in (None, ""):
+                continue  # Legacy live receipts may have no authoritative timestamp.
+            try:
+                settled = datetime.fromisoformat(value)
+                entered = datetime.fromisoformat(trade["timestamp"])
+                # Older paper rows used naive UTC timestamps.
+                if settled.tzinfo is None:
+                    settled = settled.replace(tzinfo=timezone.utc)
+                if entered.tzinfo is None:
+                    entered = entered.replace(tzinfo=timezone.utc)
+            except (TypeError, ValueError, KeyError):
+                return "invalid_settlement_chronology"
+            if settled <= entered:
+                return "settlement_not_after_entry"
+        return None
+
     def _calculate_realized_pnl(
-        self, direction: str, entry_price: float, size: float, outcome: str
+        self, direction: str, entry_price: float, size: float, outcome: str,
+        *, fee_rate: Optional[float] = None,
     ) -> float:
         """
         Calculate realized P&L for a settled market (after Kalshi 7% fee on wins).
@@ -279,7 +318,7 @@ class TradeResolver:
             entry_price=entry_price,
             position_size=size,
             outcome=outcome,
-            fee_rate=self.KALSHI_FEE_RATE,
+            fee_rate=self.fee_rate if fee_rate is None else fee_rate,
         )
         return accounting["net_pnl"]
 
@@ -290,9 +329,8 @@ class TradeResolver:
         Calculate unrealized P&L based on current market price.
         
         contracts = size / entry_price
-        P&L = contracts * (current_price - entry_price) for BUY_YES
-        P&L = contracts * ((1 - current_price) - (1 - entry_price)) for BUY_NO
-             = contracts * (entry_price - current_price) for BUY_NO
+        P&L = contracts * (current_price - entry_price) for either purchased side.
+        The caller supplies a NO price for BUY_NO, so do not invert it again.
         """
         return calculate_unrealized_pnl(
             direction=direction,
@@ -312,13 +350,14 @@ class TradeResolver:
         trusted_resolved = [
             t for t in resolved_trades if t.get("integrity_status") == "ok"
         ]
+        economic_resolved = [t for t in trusted_resolved if t.get("outcome") != "VOID"]
         wins = [t for t in trusted_resolved if self._coerce_float(t.get("net_pnl", t.get("pnl"))) > 0]
         losses = [t for t in trusted_resolved if self._coerce_float(t.get("net_pnl", t.get("pnl"))) < 0]
 
         edges = [t.get("edge", 0) for t in trades]
         confidences = [t.get("confidence", 0) for t in trades]
         sizes = [t.get("position_size", 0) for t in trades]
-        pnls = [self._coerce_float(t.get("net_pnl", t.get("pnl"))) for t in trusted_resolved]
+        pnls = [self._coerce_float(t.get("net_pnl", t.get("pnl"))) for t in economic_resolved]
         event_summary = summarize_event_performance(trusted_resolved)
 
         by_direction = {}
@@ -331,11 +370,12 @@ class TradeResolver:
             "total_trades": total,
             "resolved_trades": len(resolved_trades),
             "trusted_resolved_trades": len(trusted_resolved),
+            "void_trades": sum(t.get("outcome") == "VOID" for t in trusted_resolved),
             "invalid_resolved_trades": len(resolved_trades) - len(trusted_resolved),
             "open_trades": total - len(resolved_trades),
             "wins": len(wins),
             "losses": len(losses),
-            "win_rate": round(len(wins) / len(trusted_resolved), 4) if trusted_resolved else 0,
+            "win_rate": round(len(wins) / len(economic_resolved), 4) if economic_resolved else 0,
             "starting_balance": data.get("starting_balance", 100),
             "current_balance": data.get("balance", 100),
             "total_equity": data.get("balance", 100),

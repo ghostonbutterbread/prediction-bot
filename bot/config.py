@@ -14,6 +14,7 @@ from copy import deepcopy
 from typing import Any
 from pathlib import Path
 
+from bot.collector_paths import COLLECTOR_ROOT_ENV, auto_source_router_history_root, collector_root
 from bot.config_composition import compose_config, deep_merge
 from bot.paper_wallets import build_paper_wallet_contracts
 from bot.strategy_policy import normalize_strategy_policy
@@ -440,6 +441,101 @@ def _apply_runtime_paths(config: dict) -> dict:
     return config
 
 
+def _apply_persistent_storage_paths(config: dict) -> dict:
+    """Anchor known data paths once, without rewriting code or provenance paths.
+
+    Beta runtime overlays opt in with runtime.storage_root. An explicit root or
+    PREDICTION_BOT_COLLECTOR_ROOT also opts other profiles in; legacy configs
+    otherwise retain their CWD-relative behavior. The root must be absolute
+    (after expanding ~); the environment takes precedence over config. Relative
+    data paths are root-relative, not config-relative. Absolute data paths are kept,
+    including symlinks such as the atomically switched current generation.
+    """
+    runtime = config["runtime"]
+    if not (runtime.get("storage_root") or os.environ.get(COLLECTOR_ROOT_ENV)):
+        return config
+    root = collector_root(runtime.get("storage_root"))
+    runtime["storage_root"] = str(root)
+
+    def anchored(value: str | Path | None) -> str | Path | None:
+        if value in (None, "") or Path(value).is_absolute():
+            return value
+        return str(root / value)
+
+    def anchor_paths(section: dict | None, *keys: str) -> None:
+        if section is None:
+            return
+        for key in keys:
+            if key not in section:
+                continue
+            value = section[key]
+            section[key] = (
+                [anchored(item) for item in value] if isinstance(value, (list, tuple)) else anchored(value)
+            )
+
+    anchor_paths(runtime, "base_dir", "mode_dir")
+    anchor_paths(config, "data_dir", "log_dir", "paper_candidate_dataset_path")
+    anchor_paths(config.get("logging", {}), "log_dir")
+    strategy = config["strategy"]
+    strategy.setdefault(
+        "weather_observation_log_path", str(Path(config["data_dir"]) / "weather_observations.jsonl"),
+    )
+    strategy.setdefault("signal_audit_path", str(Path(config["data_dir"]) / "signal_audit.jsonl"))
+    anchor_paths(strategy, "weather_observation_log_path", "signal_audit_path")
+    anchor_paths(config["storage"]["logs"], "include_paths", "exclude_paths")
+    anchor_paths(config.get("shared_market", {}), "runtime_root")
+    lab = config.get("prediction_lab", {})
+    anchor_paths(lab, "market_snapshots_path", "candidate_dataset_path")
+    anchor_paths(lab.get("replay_index", {}), "root_dir")
+    # Mirror the resolver's top-level-over-nested precedence without changing
+    # its defaults or flattening unrelated configuration.
+    from bot.resolution_feed import DEFAULT_OUTPUT_DIR
+
+    feed = config.get("resolution_feed") or {}
+    nested_feed = lab.get("resolution_feed") or {}
+    if not {**nested_feed, **feed}.get("output_dir"):
+        feed["output_dir"] = DEFAULT_OUTPUT_DIR
+        config["resolution_feed"] = feed
+    for section in (feed, nested_feed):
+        anchor_paths(
+            section, "output_dir", "central_output_dir", "canonical_output_dir",
+            "decision_ledger_path", "ledger_path", "decision_ledger_paths", "ledger_paths",
+            "market_ref_paths", "collector_market_paths", "decision_ledger_globs",
+            "decision_ledger_path_globs", "ledger_path_globs",
+        )
+    # These keys are also consumed by the beta-only maintenance orchestrator;
+    # keep config loading independent of that optional module.
+    maintenance = config.get("derived_maintenance") or {}
+    anchor_paths(maintenance, "state_path")
+    promotion = maintenance.get("source_router_promotion")
+    if isinstance(promotion, dict):
+        if not promotion.get("output_root"):
+            promotion["output_root"] = str(auto_source_router_history_root(root))
+        anchor_paths(promotion, "state_path", "collector_snapshots_path", "strict_resolutions_path", "output_root")
+
+    wallets = config.get("paper_wallets", {}) or {}
+    for wallet_id in ("stable_paper", "beta_paper", "stable", "beta"):
+        anchor_paths(wallets.get(wallet_id, {}) or {}, "root_dir", "base_dir")
+
+    from bot.paper_shadow_lanes import KNOWN_LANE_IDS
+
+    scoreboard_keys = (
+        "source_reliability_scoreboard", "source_reliability_scoreboard_path", "source_scoreboard_path",
+    )
+    for section_name in ("paper_shadow_lanes", "paper_decision_lanes"):
+        shadow = config.get(section_name) or {}
+        anchor_paths(shadow, "decision_ledger_path", "ledger_path", *scoreboard_keys)
+        for container in (shadow, shadow.get("lanes"), shadow.get("enabled_lanes")):
+            if not isinstance(container, dict):
+                continue
+            for lane_id in KNOWN_LANE_IDS:
+                lane = container.get(lane_id)
+                if isinstance(lane, dict):
+                    anchor_paths(lane, "scoreboard_path", *scoreboard_keys)
+                    anchor_paths(lane.get("parameters") or {}, "scoreboard_path", *scoreboard_keys)
+    return config
+
+
 def _apply_paper_wallet_contract(config: dict) -> dict:
     config = deepcopy(config)
     config["paper_wallets"] = build_paper_wallet_contracts(config)
@@ -470,6 +566,7 @@ def load_config(config_path: str | Path | None = None) -> dict:
     config = _normalize_strategy_policy_config(config)
     config = _normalize_storage_config(config)
     config = _apply_runtime_paths(config)
+    config = _apply_persistent_storage_paths(config)
     config = _apply_paper_wallet_contract(config)
 
     return config

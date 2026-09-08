@@ -10,6 +10,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
+from bot.weather.source_observation_ledger import _parse_time, source_correctness_target_proof
 from bot.weather.source_reliability import (
     SourceReliabilityTable,
     TIER_NEUTRAL,
@@ -17,6 +18,7 @@ from bot.weather.source_reliability import (
     TIER_TRUSTED,
     TIER_WEAK,
 )
+from bot.weather.source_scoreboard import extract_market_context
 from bot.weather.thresholds import infer_predicted_outcome, infer_question_side
 
 
@@ -78,16 +80,7 @@ def normalize_source_observations(row: Mapping[str, Any] | None) -> list[dict[st
 
     market_kind = _market_kind(row)
     forecast_target = _forecast_target(row)
-    market_date = _first_text(
-        row.get("market_date"),
-        _nested(row, "shared_candidate", "market_date"),
-        _nested(row, "shared_candidate", "market", "market_date"),
-        _nested(row, "shared_candidate", "market", "event_date"),
-        _nested(row, "market", "market_date"),
-        _nested(row, "market", "event_date"),
-        _nested(row, "decision_artifact", "strategy_signal", "data", "market_date"),
-        _nested(row, "data", "market_date"),
-    )
+    market_date = _market_date(row) or extract_market_context(dict(row)).market_date
     row_observed_at = _first_text(
         row.get("observed_at"),
         _nested(row, "shared_candidate", "observed_at"),
@@ -254,6 +247,7 @@ def normalize_source_observations(row: Mapping[str, Any] | None) -> list[dict[st
                 normalized.get("source_family"),
                 normalized.get("forecast_temp_f"),
                 normalized.get("fetched_at"),
+                normalized.get("evidence_problem"),
             )
             if key in seen:
                 continue
@@ -639,6 +633,8 @@ def _score_single_observation(
         "candidate_outcome": candidate_outcome,
         "backoff_path": " -> ".join(attempted_paths),
     }
+    if observation.get("evidence_problem"):
+        return None, {**base_row, "reason_code": observation["evidence_problem"]}
     if forecast_temp is None:
         return None, {**base_row, "reason_code": "missing_forecast_temp"}
     normalized_question_side = (question_side or "").strip().lower()
@@ -857,7 +853,22 @@ def _normalize_observation(
     if not source_id and not source_name:
         return None
 
-    forecast_temp = _forecast_temp_for_source(source, market_kind=market_kind, forecast_target=forecast_target)
+    target_proof = source_correctness_target_proof(source_record=source, snapshot={}, market_date=market_date)
+    evidence_problem = None
+    if target_proof["status"] not in {"eligible_exact_target_proof", "unusable_legacy_target_unproven"}:
+        evidence_problem = target_proof["status"]
+    observed_time = _parse_time(row_observed_at)
+    for field in ("source_as_of", "source_fetched_at", "fetched_at"):
+        if source.get(field) is None:
+            continue
+        source_time = _parse_time(source[field])
+        if source_time is None:
+            evidence_problem = evidence_problem or f"invalid_or_unoffset_{field}"
+        elif observed_time is None or source_time > observed_time:
+            evidence_problem = evidence_problem or f"{field}_after_immutable_observed_at"
+    forecast_temp = None if evidence_problem else _forecast_temp_for_source(
+        source, market_kind=market_kind, forecast_target=forecast_target,
+    )
     temp_unit = _first_text(source.get("temp_unit"), source.get("temperature_unit"), source.get("unit"))
     if temp_unit is None and forecast_temp is not None:
         temp_unit = "F"
@@ -882,6 +893,11 @@ def _normalize_observation(
             source.get("gridpoint"),
         ),
         "forecast_temp_f": forecast_temp,
+        "evidence_problem": evidence_problem,
+        **{key: source[key] for key in (
+            "source_evidence_version", "evidence_type", "scoreable_forecast", "availability_reason",
+            "target_mapping", "source_as_of", "source_fetched_at",
+        ) if key in source},
         "temp_unit": temp_unit,
         "forecast_valid_at": _first_text(
             source.get("forecast_valid_at"),
@@ -1174,6 +1190,8 @@ def _engine_inputs_hash(row: Mapping[str, Any]) -> str:
 def _threshold_range_from_question(question: str) -> tuple[float | None, float | None]:
     if not question:
         return None, None
+    # Skip dates even when they precede a genuine temperature range.
+    question = re.sub(r"\b\d{4}-\d{2}-\d{2}\b", " ", question)
     match = re.search(r"(-?\d+(?:\.\d+)?)\s*(?:°|degrees?)?\s*(?:-|to|through)\s*(-?\d+(?:\.\d+)?)", question, flags=re.IGNORECASE)
     if not match:
         return None, None

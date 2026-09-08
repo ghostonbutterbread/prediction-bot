@@ -1,6 +1,9 @@
 # Beta reasoning, data-flow and persistence audit
 
-- **Status:** implementation and reproduction
+- **Status:** reviewed ancestor fixes; approved local beta integration in progress
+- **Current verification:** parent isolated full suite 1,102 tests OK (7 skipped), `/tmp/predbot-final-ancestor-suite.log`. Kelly/storage residual fixes approved by `deleg_8f2515b9`; runtime history admission approved by `deleg_e3739fcb`. Frozen V1 producer now tracked with pinned SHA-256 instead of requiring Git history at test runtime.
+- **Authorization:** user approved isolated persistence tests and reviewed local beta integration; no push, restart, live trading or raw-history mutation. Preserve beta's unrelated untracked migration handoff unchanged.
+- **Remaining integration gate:** merge beta into task branch, pass configured storage authority through maintenance caller, run maintenance regression/full beta suite and actual disposable branch-switch persistence check, then local integration only.
 - **Owner:** Hermes; project Kanban `t_500d82fb`; Discord thread `1546659523605962934`
 - **Branch:** `fix/beta-audit-persistence`
 - **Worktree:** `/home/ryushe/worktrees/prediction-bot-beta-audit`
@@ -37,7 +40,11 @@ Active collector and resolver are writing current artifacts; only the collector 
 - Composition persistence regressions: RED reproduced checkout-default outputs, rejection of collector-root output, and missing downstream discovery; GREEN **5 new tests**, **15 existing composition tests**, **4 unified-corpus tests**. Old sweep tests now allocate their own temporary collector root, not an ignored repository directory.
 - Parent independently reran the auditors' accounting and settlement bad-behavior reproducers successfully; desired data-contract regressions failed as expected. Dedicated non-overlapping builders are fixing actual paper lifecycle, source-evidence qualification/chronology, and snapshot/settlement identity handoffs.
 - Fresh active collector sample: 20 complete rows from a bounded 2MiB tail; export accepted 20/rejected 0. 80 source rows: 40 strict-complete forecast candidates, 20 forecast-unavailable, 20 observation-only. This is bounded field compatibility, not full-cohort performance evidence.
-- No final full-suite, review acceptance, or runtime activation claim yet.
+- Resumed parent verification: `PYTHONPATH=<task worktree> /mnt/data-collection/prediction-bot/.venv/bin/python -m unittest discover -s tests` with temporary HOME/collector root and a sanitized environment: **1,095 tests, OK (7 skipped)**; `/tmp/predbot-parent-continued-suite.log`. This receipt predates the residual review fixes below and is not final acceptance.
+- ISO calendar dates were incorrectly parsed as temperature ranges; repaired source-side inference preserves ISO/prose BUY parity through the actual collector-to-router fixture. Independent accounting review accepted the repaired fee/VOID/mark-to-market paths but found PredictionLab still ignored Kelly environment settings. Independent storage review found configured promotion roots rejected by the real consumer's default-root validator.
+- Narrow fix workers are addressing Kelly resolution parity and explicit promotion storage authority. Source/history and identity review was interrupted by an API usage-limit error; a fresh read-only review is dispatched. Neither the interrupted review nor a green suite counts as review approval.
+- Original standalone contract regression harness currently fails during setup because its temporary promotion path is outside the selected collector root; it ran zero assertions. Do not cite that harness as a product-regression result or weaken containment to make it run. The checked-in isolated E2E is green.
+- No final review acceptance, beta integration, push, or runtime activation claim yet. After residual fixes: independent re-review, isolated full suite, committed branch-switch persistence fixture, then record exact integration/activation blockers.
 
 ## Blockers and deferred work
 

@@ -1,5 +1,8 @@
 import unittest
+import os
+import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 from bot.config import load_config
 
@@ -9,14 +12,22 @@ COHORT_ROOT = "data/beta_shadow/forward_router_guard_comparison_TEMPLATE"
 
 
 class SourceRouterGuardComparisonConfigTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.storage_root = Path(temp.name)
+        env = patch.dict(os.environ, {"PREDICTION_BOT_COLLECTOR_ROOT": temp.name}, clear=True)
+        env.start()
+        self.addCleanup(env.stop)
+
     def test_paper_profile_is_isolated_and_enables_only_direct_comparators(self):
         config = load_config(ROOT / "config.paper_source_router_guard_comparison.yaml")
 
-        self.assertEqual(config["runtime"]["base_dir"], COHORT_ROOT)
+        self.assertEqual(config["runtime"]["base_dir"], str(self.storage_root / COHORT_ROOT))
         self.assertTrue(config["runtime"]["isolated"])
         self.assertEqual(
             config["shared_market"]["runtime_root"],
-            f"{COHORT_ROOT}/shared_market_runtime",
+            str(self.storage_root / COHORT_ROOT / "shared_market_runtime"),
         )
         self.assertEqual(
             config["paper_shadow_lanes"]["enabled_lanes"],
@@ -27,15 +38,15 @@ class SourceRouterGuardComparisonConfigTests(unittest.TestCase):
         self.assertTrue(guard["enabled"])
         self.assertEqual(guard["parameters"]["allowed_actions"], ["BUY_NO"])
         self.assertEqual(guard["parameters"]["allowed_entry_price_ranges"], [[0.60, 0.70], [0.80, 0.90]])
-        self.assertEqual(config["resolution_feed"]["central_output_dir"], f"{COHORT_ROOT}/resolutions")
+        self.assertEqual(config["resolution_feed"]["central_output_dir"], str(self.storage_root / COHORT_ROOT / "resolutions"))
 
     def test_collector_profile_is_observer_only_and_uses_the_same_cohort_root(self):
         config = load_config(ROOT / "config.prediction_lab_source_router_guard_comparison.yaml")
 
-        self.assertEqual(config["runtime"]["base_dir"], COHORT_ROOT)
+        self.assertEqual(config["runtime"]["base_dir"], str(self.storage_root / COHORT_ROOT))
         self.assertEqual(
             config["shared_market"]["runtime_root"],
-            f"{COHORT_ROOT}/shared_market_runtime",
+            str(self.storage_root / COHORT_ROOT / "shared_market_runtime"),
         )
         self.assertTrue(config["prediction_lab"]["observer_mode"])
         self.assertTrue(config["prediction_lab"]["score_only"])

@@ -392,6 +392,8 @@ def _infer_market_kind_from_text(*, market_id: str | None, question: str | None)
 def _infer_contract_shape_from_text(*, market_id: str | None, question: str | None, question_side: str | None) -> str | None:
     side = str(question_side or "").strip().lower()
     text = " ".join(value.lower() for value in (market_id, question) if value)
+    # Calendar dates are not temperature bounds (e.g. 2026-09-16).
+    text = re.sub(r"\b\d{4}-\d{2}-\d{2}\b", " ", text)
     if side == "range" or re.search(r"\b\d+\s*(?:-|to)\s*\d+\b", text):
         return "range"
     if side == "binary_bucket" or "bucket" in text or re.search(r"-b-?\d", text):

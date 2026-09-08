@@ -24,7 +24,9 @@ from bot.replay_outcome_binding import bind_replay_finalized_outcomes
 from bot.weather.source_history_manifest import materialize_strict_source_history_collapse
 from bot.weather.source_observation_ledger import materialize_source_observation_ledger
 
-PIPELINE_SCHEMA_VERSION = 1
+# V2 re-materializes history under strict capture/source/settlement chronology
+# and retained source-period target proof; V1 generations remain immutable.
+PIPELINE_SCHEMA_VERSION = 2
 MANIFEST_FILENAME = "source_router_history_promotion.manifest.json"
 CURRENT_GENERATION_LINKNAME = "current"
 STRICT_SCORECARD_RELATIVE_PATH = Path("source_router_scoreboard") / "strict_finalized_source_scoreboard.jsonl"
@@ -44,6 +46,7 @@ class AutoSourceRouterPromotionResult:
 
 def auto_populate_source_router_history(
     *, collector_snapshots_path: str | Path, strict_resolutions_path: str | Path, output_root: str | Path | None = None,
+    storage_root: str | Path | None = None,
 ) -> AutoSourceRouterPromotionResult:
     """Build one hash-addressed Source Router history generation after resolution.
 
@@ -51,12 +54,15 @@ def auto_populate_source_router_history(
     existing Source Router history loader.  ``scoreboard_path`` is the collapsed
     independent-observation artifact for audit/sample accounting.  A repeated
     invocation for byte-identical inputs only returns the completed generation.
+    Config callers must pass ``runtime.storage_root`` separately from the output
+    destination. Environment overrides retain precedence; an output path never
+    grants storage authority.
     """
     snapshots = Path(collector_snapshots_path).expanduser().resolve()
     resolutions = Path(strict_resolutions_path).expanduser().resolve()
     if not snapshots.is_file() or not resolutions.is_file():
         raise ValueError("collector snapshots and strict resolutions must be readable files")
-    root = _prepare_root(output_root or auto_source_router_history_root())
+    root = _prepare_root(output_root or auto_source_router_history_root(storage_root), storage_root=storage_root)
     _validate_current_generation(root)
     # Consume each input exactly once before deriving its generation identity.
     # All downstream helpers receive the materialized bytes, not a path that a
@@ -88,11 +94,13 @@ def auto_populate_source_router_history(
         materialized_resolutions.write_bytes(resolution_bytes)
         exported = export_collector_replay_inputs(
             source_archive=materialized_snapshots, output_dir=staging_dir / "replay_inputs",
+            storage_root=storage_root,
         )
         bound = bind_replay_finalized_outcomes(
             replay_inputs_path=exported.records_path,
             strict_resolutions_path=materialized_resolutions,
             output_dir=staging_dir / "finalized_outcomes",
+            storage_root=storage_root,
         )
         observations = materialize_source_observation_ledger(
             replay_inputs_path=exported.records_path,
@@ -183,9 +191,9 @@ def auto_populate_source_router_history(
             shutil.rmtree(staging_dir, ignore_errors=True)
 
 
-def _prepare_root(value: str | Path) -> Path:
+def _prepare_root(value: str | Path, *, storage_root: str | Path | None = None) -> Path:
     root = Path(value).expanduser().resolve()
-    derived_root = derived_reports_root().resolve()
+    derived_root = derived_reports_root(storage_root).resolve()
     if root == derived_root or derived_root not in root.parents:
         raise ValueError(f"output root must be below {derived_root}")
     root.mkdir(parents=True, exist_ok=True)

@@ -12,6 +12,8 @@ from math import isfinite
 from typing import Any, Mapping
 
 
+from bot.shared_market_feed import shared_candidate_identity_mismatch
+
 REPLAY_DECISION_INPUT_SCHEMA_NAME = "replay_decision_input"
 REPLAY_DECISION_INPUT_SCHEMA_VERSION = 1
 
@@ -219,6 +221,9 @@ def build_replay_decision_input_v1(
     decision-time fields.  ``strict=True`` retains the original v1 contract
     for callers that need every v1 provenance and context field present.
     """
+    mismatch = shared_candidate_identity_mismatch(raw_snapshot_row)
+    if mismatch:
+        return _failure(mismatch, mismatch.removesuffix("_mismatch"), "recorded root and shared candidate identities conflict")
     if strict:
         return _build_replay_decision_input_strict_v1(raw_snapshot_row)
     return _build_replay_decision_input_sanitized_v1(raw_snapshot_row)

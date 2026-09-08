@@ -29,6 +29,7 @@ from bot.hidden_gem_evidence import (
     summarize_hidden_gem_evidence_cards,
 )
 from bot.prediction_lab_shadow_delta import build_shadow_delta, summarize_shadow_delta_rows
+from bot.risk import PAPER_LIMITS, resolve_kelly_limits
 from bot.strategies.enhanced import EnhancedStrategyEngine, KellySizer, strategy_config_with_policy
 from bot.market_classification import apply_classification_metadata, classify_market_object
 from bot.market_router import route_market
@@ -107,7 +108,12 @@ class PredictionLab:
             mode=PAPER_LAB_MODE,
         )
         economics_cfg = self.config.get("trade_economics", {}) or {}
+        kelly_fraction, max_bet_pct = resolve_kelly_limits(self.config, preset=PAPER_LIMITS)
+        opportunity_risk = build_fixed_opportunity_risk_policy(self.config, bankroll_usd=self.opportunity_bankroll_usd)
+        opportunity_risk.max_bet_pct = max_bet_pct
         self.kelly = KellySizer(
+            kelly_fraction=kelly_fraction,
+            max_bet_pct=max_bet_pct,
             fee_rate=self.config.get("kalshi_fee_rate"),
             min_position_size_usd=economics_cfg.get("min_position_size_usd", 1.0),
             min_expected_net_profit_usd=economics_cfg.get("min_expected_net_profit_usd", 0.0),
@@ -117,7 +123,7 @@ class PredictionLab:
                 self.config,
                 strategy=self.strategy,
                 kelly_sizer=self.kelly,
-                risk_policy=build_fixed_opportunity_risk_policy(self.config, bankroll_usd=self.opportunity_bankroll_usd),
+                risk_policy=opportunity_risk,
             )
             if self.use_shared_pipeline
             else None

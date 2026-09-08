@@ -631,19 +631,24 @@ def _source_router_decision(
         source_row,
         shared_candidate,
     )
-    from bot.auto_source_router_promotion import load_verified_strict_scorecard_rows
     from bot.weather.source_confidence import build_source_confidence_row
     from bot.weather.source_reliability import build_reliability_candidate_row, load_scoreboard_rows
 
     candidate_row = build_reliability_candidate_row(signal, shared_candidate)
+    # Both canonical feed adapters carry candidate_observed_at. Keep an explicit
+    # legacy observed_at first, but never use routing/retrieval wall time.
+    candidate_row["observed_at"] = _optional_text(
+        candidate_row.get("observed_at"), signal.get("candidate_observed_at"),
+        _mapping(shared_candidate).get("observed_at"),
+    )
     if not _optional_text(candidate_row.get("predicted_outcome")):
         candidate_row["predicted_outcome"] = "YES"
         candidate_row["source_router_candidate_outcome_default"] = "market_yes_event"
     scoreboard_path = _source_reliability_scoreboard_path(lane)
     try:
-        strict_rows = load_verified_strict_scorecard_rows(scoreboard_path) if scoreboard_path else None
-    except ValueError:
-        return _strict_scorecard_verification_failed_decision(baseline, signal, scoreboard_path)
+        strict_rows = _load_compatible_strict_scorecard_rows(scoreboard_path) if scoreboard_path else None
+    except ValueError as error:
+        return _strict_scorecard_verification_failed_decision(baseline, signal, scoreboard_path, detail=str(error))
     # Only the exact strict auto-promotion handoff is verified here. Existing
     # legacy scoreboards retain their historical loader and behavior unchanged.
     reliability_rows = strict_rows if strict_rows is not None else (
@@ -722,15 +727,46 @@ def _source_router_decision(
     }
 
 
+def _load_compatible_strict_scorecard_rows(scoreboard_path: str | Path) -> list[dict[str, Any]] | None:
+    """Admit verified publications only under the current history contract.
+
+    V1 hashes prove integrity, not capture/source/settlement chronology. Use
+    the existing validator's manifest and scorecard bytes together, pinning a
+    current symlink once rather than reopening it across admission and loading.
+    Publication/reuse validation remains separate so old history is immutable.
+    """
+    from bot.auto_source_router_promotion import (
+        MANIFEST_FILENAME, PIPELINE_SCHEMA_VERSION, _generation_path,
+        _parse_strict_scorecard_rows, _strict_scorecard_generation_binding,
+        _validate_generation_with_scorecard_bytes,
+    )
+
+    binding = _strict_scorecard_generation_binding(scoreboard_path)
+    if binding is None:
+        return None
+    generation_dir, expected_scoreboard = binding
+    manifest, scoreboard_bytes = _validate_generation_with_scorecard_bytes(generation_dir / MANIFEST_FILENAME)
+    version = manifest.get("schema_version")
+    if version != PIPELINE_SCHEMA_VERSION:
+        raise ValueError(
+            f"incompatible Source Router history schema version {version!r}; "
+            f"re-materialize history with pipeline schema version {PIPELINE_SCHEMA_VERSION}"
+        )
+    if _generation_path(manifest["runtime_consumption"]["scoreboard_path"], generation_dir, label="runtime scoreboard_path") != expected_scoreboard:
+        raise ValueError("strict scorecard path does not match its published generation")
+    return _parse_strict_scorecard_rows(scoreboard_bytes)
+
+
 def _strict_scorecard_verification_failed_decision(
     baseline: Mapping[str, Any], signal: Mapping[str, Any], scoreboard_path: str | None,
+    *, detail: str | None = None,
 ) -> dict[str, Any]:
     """Fail closed rather than route on an unverified strict publication."""
     return {
         "source_row": baseline.get("source_row"),
         "action": "SKIP",
         "reason_code": "strict_scorecard_verification_failed",
-        "reason": "Strict auto-promotion scorecard could not be verified; Source Router was not used",
+        "reason": "Strict auto-promotion scorecard could not be verified; Source Router was not used" + (f": {detail}" if detail else ""),
         "confidence_after": _number(signal.get("confidence")),
         "requested_position_size_usd": 0.0,
         "approved_position_size_usd": 0.0,
@@ -1944,6 +1980,8 @@ def _build_lane_resolution_row(
         shared_candidate_id=shared_candidate_id,
         run_id=_optional_text(row.get("run_id"), future_inputs.get("run_id")),
         market_id=market_id,
+        shared_snapshot_id=_optional_text(row.get("shared_snapshot_id"), _mapping(row.get("shared_candidate")).get("shared_snapshot_id")),
+        observed_at=_optional_text(row.get("observed_at"), future_inputs.get("observed_at")),
     )
     resolution = resolution_match.get("row") if isinstance(resolution_match.get("row"), Mapping) else None
     resolution_blocker = _optional_text(resolution_match.get("blocker"))
@@ -1960,7 +1998,9 @@ def _build_lane_resolution_row(
         future_inputs.get("stable_approved_position_size_usd"),
         future_inputs.get("stable_requested_position_size_usd"),
     )
-    blocker = resolution_blocker or _resolution_row_blocker(action=action, outcome=outcome, side=side, fill_price=fill_price, stake=stake)
+    observed_at = _optional_text(row.get("observed_at"), future_inputs.get("observed_at"))
+    chronology_blocker = _resolution_chronology_blocker(resolution, observed_at)
+    blocker = resolution_blocker or chronology_blocker or _resolution_row_blocker(action=action, outcome=outcome, side=side, fill_price=fill_price, stake=stake)
     pnl = _resolution_row_pnl(action=action, outcome=outcome, side=side, fill_price=fill_price, stake=stake) if blocker is None else None
     return {
         "schema_name": "paper_shadow_lane_resolution",
@@ -1981,12 +2021,19 @@ def _build_lane_resolution_row(
         "requested_position_size_usd": _number(row.get("requested_position_size_usd"), future_inputs.get("requested_position_size_usd"), future_inputs.get("stable_requested_position_size_usd")),
         "approved_position_size_usd": _number(row.get("approved_position_size_usd"), future_inputs.get("approved_position_size_usd"), future_inputs.get("stable_approved_position_size_usd")),
         "resolution": {
-            "matched": resolution is not None or outcome is not None,
+            "matched": resolution is not None and chronology_blocker is None,
             "match_source": _optional_text(resolution_match.get("matched_by")) if resolution is not None else ("future_pnl_inputs" if outcome is not None else None),
             "matched_by": _optional_text(resolution_match.get("matched_by")),
             "match_key": _optional_text(resolution_match.get("match_key")),
             "outcome": outcome,
-            "resolved_at": _optional_text(_mapping(resolution).get("resolved_at"), _mapping(_mapping(resolution).get("resolution")).get("resolved_at"), future_inputs.get("resolved_at")),
+            "resolved_at": _optional_text(_mapping(resolution).get("resolved_at"), _mapping(_mapping(resolution).get("resolution")).get("resolved_at")),
+            # Settlement availability is authoritative evidence, not retrieval time.
+            "settlement_ts": _optional_text(
+                _mapping(resolution).get("settlement_ts"), _mapping(_mapping(resolution).get("resolution")).get("settlement_ts"),
+                _mapping(resolution).get("outcome_known_at"), _mapping(_mapping(resolution).get("resolution")).get("outcome_known_at"),
+            ),
+            "outcome_known_at": _optional_text(_mapping(resolution).get("outcome_known_at"), _mapping(_mapping(resolution).get("resolution")).get("outcome_known_at")),
+            "run_id": _optional_text(_mapping(resolution).get("run_id"), _mapping(_mapping(resolution).get("resolution")).get("run_id")),
             "market_id": _optional_text(_mapping(resolution).get("market_id"), market_id),
             "shared_candidate_id": _optional_text(_mapping(resolution).get("shared_candidate_id"), shared_candidate_id),
             "resolution_source_path": _optional_text(resolution_match.get("resolution_source_path")),
@@ -2005,6 +2052,33 @@ def _build_lane_resolution_row(
         "cost_model": {"fees_supported": False, "fees_usd": 0.0, "slippage_supported": False},
         "source_inputs": {"future_pnl_inputs": future_inputs},
     }
+
+
+def _resolution_chronology_blocker(resolution: Mapping[str, Any] | None, observed_at: Any) -> str | None:
+    """Validate supplied settlement assertions without inferring missing history.
+
+    Legacy fixed-notional reports can still use untimed resolutions, but those
+    receipts have no authoritative time and cannot settle the Kelly diagnostic.
+    """
+    resolution = _mapping(resolution)
+    timestamps = [
+        source.get(key)
+        for source in (resolution, _mapping(resolution.get("resolution")))
+        for key in ("settlement_ts", "outcome_known_at")
+        if source.get(key) not in (None, "")
+    ]
+    if not timestamps:
+        return None
+    decision_time = _parse_timestamp(observed_at)
+    if decision_time is None:
+        return "missing_decision_timestamp"
+    for value in timestamps:
+        settlement_time = _parse_timestamp(value)
+        if settlement_time is None:
+            return "invalid_settlement_timestamp"
+        if settlement_time <= decision_time:
+            return "settlement_not_after_decision"
+    return None
 
 
 def _resolution_row_blocker(*, action: str, outcome: str | None, side: str | None, fill_price: float | None, stake: float | None) -> str | None:
@@ -2149,6 +2223,8 @@ def _find_resolution(
     shared_candidate_id: str | None,
     run_id: str | None,
     market_id: str | None,
+    shared_snapshot_id: str | None = None,
+    observed_at: str | None = None,
 ) -> dict[str, Any]:
     lookup_plan: list[tuple[str, Any, str | None]] = []
     if shared_candidate_id:
@@ -2183,6 +2259,35 @@ def _find_resolution(
                     "match_key": display_key,
                     "candidate_match_count": len(entry_indexes),
                 }
+        # A strong lookup key cannot override contradictory supplied identity.
+        # Missing optional legacy fields remain usable; explicit disagreements
+        # fail closed, including disagreements on a weaker fallback match.
+        for entry_index in entry_indexes:
+            candidate = _mapping(entries[entry_index].get("row"))
+            nested = _mapping(candidate.get("resolution"))
+            identity_values = {
+                "shared_candidate_id": (shared_candidate_id, candidate.get("shared_candidate_id"), nested.get("shared_candidate_id")),
+                "run_id": (run_id, candidate.get("run_id"), nested.get("run_id")),
+                "market_id": (market_id, candidate.get("market_id"), candidate.get("ticker"), nested.get("market_id"), nested.get("ticker")),
+                "shared_snapshot_id": (shared_snapshot_id, candidate.get("shared_snapshot_id"), candidate.get("snapshot_id"), nested.get("shared_snapshot_id"), nested.get("snapshot_id")),
+            }
+            if any(len({str(value) for value in values if value not in (None, "")}) > 1 for values in identity_values.values()):
+                return {
+                    "row": None, "blocker": "resolution_identity_mismatch",
+                    "matched_by": matched_by, "match_key": display_key,
+                    "candidate_match_count": len(entry_indexes),
+                }
+        # Duplicate same-outcome receipts must not hide a supplied chronology
+        # contradiction just because the first row happened to be valid.
+        if len(entry_indexes) > 1:
+            for entry_index in entry_indexes:
+                chronology_blocker = _resolution_chronology_blocker(_mapping(entries[entry_index].get("row")), observed_at)
+                if chronology_blocker:
+                    return {
+                        "row": None, "blocker": chronology_blocker,
+                        "matched_by": matched_by, "match_key": display_key,
+                        "candidate_match_count": len(entry_indexes),
+                    }
         entry = entries[entry_indexes[0]] if entry_indexes[0] < len(entries) else {}
         return {
             "row": _mapping(entry.get("row")),
@@ -2440,10 +2545,11 @@ def _shared_candidate_ref(
 
 
 def _observed_at(source_row: dict[str, Any] | None, signal: Mapping[str, Any]) -> str:
-    value = signal.get("candidate_observed_at") or signal.get("observed_at") or (source_row or {}).get("observed_at")
-    if value not in (None, ""):
-        return str(value)
-    return datetime.now(timezone.utc).isoformat()
+    # A missing immutable observation time is a coverage gap, not a new decision.
+    observed_at = _optional_text(signal.get("candidate_observed_at"), signal.get("observed_at"), (source_row or {}).get("observed_at"))
+    if observed_at is None:
+        raise ValueError("paper shadow lane missing candidate observed_at")
+    return observed_at
 
 
 def _confidence_floor(lane: _LaneDefinition) -> float:

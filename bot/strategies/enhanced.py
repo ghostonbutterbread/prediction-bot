@@ -136,7 +136,7 @@ class EnhancedStrategyEngine:
         # Live data feeds (weather, crypto, forex)
         self.live_feeds = LiveFeedAggregator()
         self.validator = SignalValidator()
-        self.signal_audit = SignalAuditLog()
+        self.signal_audit = SignalAuditLog(config.get("signal_audit_path", "data/signal_audit.jsonl"))
         self.enable_weather_observation_log = bool(config.get("enable_weather_observation_log", False))
         self.weather_market_mapper = None
         self.weather_observation_log = None

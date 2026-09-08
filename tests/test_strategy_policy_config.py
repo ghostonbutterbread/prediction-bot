@@ -282,6 +282,8 @@ config_composition:
                         load_config(config_path)
 
     def test_repo_beta_shadow_configs_normalize_active_shadow_policy(self):
+        from bot.collector_paths import DEFAULT_COLLECTOR_ROOT
+
         stable_path = REPO_ROOT / "config.yaml"
         paper_path = REPO_ROOT / "config.paper_beta_shadow_weather.yaml"
         lab_path = REPO_ROOT / "config.prediction_lab_beta_shadow_weather.yaml"
@@ -315,15 +317,16 @@ config_composition:
             self.assertEqual(config["strategy_lanes"]["confidence_slow_profit"]["min_confidence"], 0.75)
             self.assertEqual(config["strategy_lanes"]["sizing"]["hidden_gem"]["max_position_usd"], 3.0)
             self.assertEqual(config["strategy_lanes"]["sizing"]["confidence_slow_profit"]["max_position_usd"], 2.0)
-            self.assertEqual(Path(config["data_dir"]), Path("data/beta_shadow/paper"))
-            self.assertEqual(Path(config["log_dir"]), Path("data/beta_shadow/paper"))
+            self.assertEqual(Path(config["runtime"]["storage_root"]), DEFAULT_COLLECTOR_ROOT)
+            self.assertEqual(Path(config["data_dir"]), DEFAULT_COLLECTOR_ROOT / "data/beta_shadow/paper")
+            self.assertEqual(Path(config["log_dir"]), DEFAULT_COLLECTOR_ROOT / "data/beta_shadow/paper")
             self.assertFalse(config["storage"]["logs"]["auto_prune"])
             self.assertFalse(config["alerts"]["enabled"])
             self.assertFalse(config["alerts"]["telegram_enabled"])
             self.assertFalse(config["alerts"]["trade_events"])
             self.assertFalse(config["alerts"]["status_events"])
             include_paths = config["storage"]["logs"]["include_paths"]
-            self.assertTrue(all(str(path).startswith("data/beta_shadow/") for path in include_paths))
+            self.assertTrue(all(Path(path).is_relative_to(DEFAULT_COLLECTOR_ROOT / "data/beta_shadow") for path in include_paths))
             self.assertNotIn("data/paper_loop.log", include_paths)
             self.assertNotIn("logs/", include_paths)
 

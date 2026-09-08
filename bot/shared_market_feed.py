@@ -4,7 +4,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Mapping
 
 from bot.exchanges.base import Market
 
@@ -206,6 +206,28 @@ def shared_candidate_id_from_row(row: dict[str, Any] | None) -> str | None:
     return None
 
 
+def shared_candidate_identity_mismatch(row: Any) -> str | None:
+    """Reject contradictory recorded identities, not absent legacy enrichment.
+
+    A run identifies a producer execution, not necessarily its snapshot. Compare
+    like identities only; a recorded snapshot must never be replaced by run_id.
+    """
+    if not isinstance(row, Mapping):
+        return None
+    shared = row if row.get("schema_name") == SCHEMA_NAME else _mapping(row.get("shared_candidate"))
+    market = _mapping(shared.get("market"))
+    identities = {
+        "shared_candidate_id": (row.get("shared_candidate_id"), shared.get("candidate_id"), shared.get("shared_candidate_id")),
+        "shared_snapshot_id": (row.get("shared_snapshot_id"), row.get("snapshot_id"), shared.get("shared_snapshot_id"), shared.get("snapshot_id")),
+        "market_id": (row.get("market_id"), shared.get("market_id"), market.get("id")),
+        "run_id": (row.get("run_id"), shared.get("run_id")),
+    }
+    for field, values in identities.items():
+        if len({str(value) for value in values if value not in (None, "")}) > 1:
+            return f"{field}_mismatch"
+    return None
+
+
 def normalize_shared_candidate_input(row: Any) -> SharedCandidateInput:
     """Normalize a shared candidate or legacy snapshot row into analysis inputs.
 
@@ -297,6 +319,11 @@ def normalize_shared_candidate_input(row: Any) -> SharedCandidateInput:
 
 def shared_candidate_market_from_row(row: Any) -> SharedCandidateMarketResult:
     """Build a Market from shared-row data only when required fields are sane."""
+    mismatch = shared_candidate_identity_mismatch(row)
+    if mismatch:
+        return SharedCandidateMarketResult(
+            ok=False, status=SHARED_INPUT_STATUS_PARTIAL, reason_code=mismatch, market=None,
+        )
     shared_candidate, source_schema = _shared_candidate_for_normalization(row)
     if shared_candidate is None:
         return SharedCandidateMarketResult(
@@ -671,6 +698,7 @@ def _shared_input_signal(
     )
     signal = {
         "shared_candidate_id": _optional_text(shared_candidate.get("candidate_id")),
+        "shared_snapshot_id": provenance.get("shared_snapshot_id"),
         "candidate_feed_read_only": True,
         "candidate_source_runtime": _optional_text(shared_candidate.get("source_runtime")),
         "candidate_provenance": _optional_text(shared_candidate.get("provenance")),

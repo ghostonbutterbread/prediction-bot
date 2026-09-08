@@ -13,6 +13,7 @@ def infer_question_side(question: str, metadata: dict[str, Any] | None = None) -
     metadata = metadata or {}
     candidates = [question, str(metadata.get("market_subtitle") or "")]
     normalized = " ".join(candidate.lower() for candidate in candidates if candidate)
+    normalized = re.sub(r"\b\d{4}-\d{2}-\d{2}\b", " ", normalized)
     if " above " in f" {normalized} " or ">" in normalized:
         return "above"
     if " below " in f" {normalized} " or "<" in normalized:

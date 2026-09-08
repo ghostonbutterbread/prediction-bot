@@ -41,6 +41,7 @@ def export_collector_replay_inputs(
     output_dir: str | Path,
     max_rows: int | None = None,
     accepted_limit: int | None = None,
+    storage_root: str | Path | None = None,
 ) -> CollectorReplayInputExportResult:
     """Export successful default-sanitized replay inputs from collector JSONL.
 
@@ -61,7 +62,7 @@ def export_collector_replay_inputs(
     archive_path = Path(source_archive).resolve()
     if not archive_path.is_file():
         raise ValueError(f"collector archive must be a readable file: {archive_path}")
-    target_dir = _prepare_output_dir(output_dir)
+    target_dir = _prepare_output_dir(output_dir, storage_root=storage_root)
 
     selected_row_count = 0
     accepted_records: list[dict[str, Any]] = []
@@ -154,9 +155,9 @@ def export_collector_replay_inputs(
     )
 
 
-def _prepare_output_dir(value: str | Path) -> Path:
+def _prepare_output_dir(value: str | Path, *, storage_root: str | Path | None = None) -> Path:
     target_dir = Path(value).resolve()
-    derived_root = derived_reports_root().resolve()
+    derived_root = derived_reports_root(storage_root).resolve()
     if target_dir == derived_root or derived_root not in target_dir.parents:
         raise ValueError(f"output directory must be under {derived_root}")
     if target_dir.exists():

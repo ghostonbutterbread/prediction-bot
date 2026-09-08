@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Collection, Iterator, Mapping
 
+from bot.shared_market_feed import shared_candidate_identity_mismatch
+
 INDEX_SCHEMA_NAME = "collector_replay_index"
 INDEX_SCHEMA_VERSION = 1
 
@@ -199,9 +201,11 @@ def load_indexed_collector_rows(
 
 
 def _index_entry(row: Mapping[str, Any], *, row_number: int, byte_offset: int, payload: bytes) -> dict[str, Any] | None:
+    if shared_candidate_identity_mismatch(row):
+        return None
     market_id = str(row.get("market_id") or "")
     observed_at = str(row.get("observed_at") or row.get("timestamp") or "")
-    snapshot_id = str(row.get("run_id") or row.get("snapshot_key") or "")
+    snapshot_id = str(row.get("shared_snapshot_id") or row.get("run_id") or row.get("snapshot_key") or "")
     if not market_id or not observed_at or not snapshot_id:
         return None
     shared_value = row.get("shared_candidate")

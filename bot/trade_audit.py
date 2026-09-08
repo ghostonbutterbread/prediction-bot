@@ -10,7 +10,7 @@ from bot.market_classification import is_weather_market
 
 
 VALID_DIRECTIONS = {"BUY_YES", "BUY_NO"}
-VALID_OUTCOMES = {"YES", "NO"}
+VALID_OUTCOMES = {"YES", "NO", "VOID"}
 EXECUTION_AUDIT_SCHEMA_NAME = "execution_audit_row"
 EXECUTION_AUDIT_SCHEMA_VERSION = 1
 VALID_EXECUTION_SNAPSHOT_SOURCES = {"book", "fallback", "missing", "unknown"}
@@ -513,7 +513,7 @@ def validate_execution_audit_row(trade: dict) -> list[str]:
         resolution_type = str(trade.get("resolution_type") or "")
         if resolution_type != "manual_mark_close" and normalize_market_outcome(trade.get("outcome")) is None:
             issues.append("resolved_without_outcome")
-        if coerce_float(trade.get("pnl"), default=None) is None:
+        if normalize_market_outcome(trade.get("outcome")) != "VOID" and coerce_float(trade.get("pnl"), default=None) is None:
             issues.append("resolved_without_pnl")
         if coerce_float(trade.get("settlement_value"), default=None) is None:
             issues.append("resolved_without_settlement_value")
@@ -583,6 +583,10 @@ def normalize_market_outcome(value) -> Optional[str]:
         aliases = {
             "YES": "YES",
             "NO": "NO",
+            "VOID": "VOID",
+            "VOIDED": "VOID",
+            "CANCELLED": "VOID",
+            "CANCELED": "VOID",
             "TRUE": "YES",
             "FALSE": "NO",
             "1": "YES",
@@ -609,6 +613,8 @@ def normalize_resolution_result(value) -> Optional[str]:
 def resolution_result_for_outcome(direction: str, outcome: str) -> Optional[str]:
     if direction not in VALID_DIRECTIONS or outcome not in VALID_OUTCOMES:
         return None
+    if outcome == "VOID":
+        return "void"
     won = (direction == "BUY_YES" and outcome == "YES") or (direction == "BUY_NO" and outcome == "NO")
     return "won" if won else "lost"
 
@@ -656,7 +662,9 @@ def canonicalize_resolved_resolution_fields(trade: dict) -> dict:
     if result is not None:
         trade["resolution_result"] = result
 
-    if coerce_float(trade.get("exit_price"), default=None) is None:
+    if outcome == "VOID":
+        trade["exit_price"] = None
+    elif coerce_float(trade.get("exit_price"), default=None) is None:
         trade["exit_price"] = 1.0 if outcome == "YES" else 0.0
 
     return trade
@@ -675,7 +683,7 @@ def calculate_realized_accounting(
     outcome: str,
     fee_rate: float = 0.07,
 ) -> dict:
-    if position_size <= 0 or not (0 < entry_price < 1):
+    if outcome == "VOID" or position_size <= 0 or not (0 < entry_price < 1):
         return {
             "contracts": 0.0,
             "gross_pnl": 0.0,
@@ -715,9 +723,8 @@ def calculate_unrealized_pnl(
         return 0.0
 
     contracts = calculate_contracts(entry_price, position_size)
-    if direction == "BUY_YES":
-        return contracts * (current_price - entry_price)
-    return contracts * (entry_price - current_price)
+    # Both prices belong to the purchased side (YES or NO), not always YES.
+    return contracts * (current_price - entry_price)
 
 
 def trade_event_key(trade: dict) -> str:
@@ -750,6 +757,9 @@ def trade_event_key(trade: dict) -> str:
 
 def enrich_trade_audit_fields(trade: dict, fee_rate: float = 0.07) -> dict:
     issues: list[str] = []
+    # A persisted entry assumption takes precedence over today's config/default.
+    fee_rate = coerce_float(trade.get("fee_rate"), default=fee_rate)
+    trade["fee_rate"] = fee_rate
 
     apply_execution_audit_contract(trade)
     trade["event_key"] = trade_event_key(trade)
@@ -817,7 +827,15 @@ def enrich_trade_audit_fields(trade: dict, fee_rate: float = 0.07) -> dict:
         issues.append("missing_resolved_at")
 
     reported_pnl = coerce_float(trade.get("pnl"), default=None)
-    if manual_mark_close:
+    if outcome == "VOID":
+        # Retain the original order and refund receipt, not a flat economic trade.
+        trade["resolution_type"] = "void_resolution"
+        for key in ("pnl", "net_pnl", "gross_pnl", "expected_pnl", "unrealized_pnl", "exit_price"):
+            trade[key] = None
+        trade["fee_paid"] = 0.0
+        trade["settlement_value"] = coerce_float(trade.get("settlement_value"), default=size)
+        reported_pnl = None
+    elif manual_mark_close:
         if reported_pnl is None:
             issues.append("missing_pnl")
         else:
@@ -893,7 +911,11 @@ def group_trades_by_event(
 
 
 def summarize_event_performance(trades: list[dict]) -> dict:
-    event_groups = group_trades_by_event(trades, resolved_only=True, trusted_only=True)
+    event_groups = group_trades_by_event(
+        [trade for trade in trades if normalize_market_outcome(trade.get("outcome")) != "VOID"],
+        resolved_only=True,
+        trusted_only=True,
+    )
     event_pnls = [
         round(sum(coerce_float(t.get("net_pnl", t.get("pnl")), 0.0) for t in group), 4)
         for group in event_groups.values()

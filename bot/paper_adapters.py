@@ -39,6 +39,7 @@ class PaperSimulatorHost(Protocol):
     data_dir: Path
     trades: list[Any]
     risk: Any
+    kelly: Any
     config: dict[str, Any]
 
 
@@ -103,7 +104,7 @@ class SimulatorPaperSessionStore:
         discarded = 0
         for idx, raw_trade in enumerate(data.get("trades", []), start=1):
             trade_data = dict(raw_trade)
-            enrich_trade_audit_fields(trade_data)
+            enrich_trade_audit_fields(trade_data, fee_rate=self.host.kelly.fee_rate)
             if not self.state_adapter.is_trade_row_effective(trade_data):
                 discarded += 1
                 continue
@@ -158,7 +159,7 @@ class SimulatorPaperSessionStore:
         trade_rows = []
         for trade in self.host.trades:
             trade_row = asdict(trade)
-            enrich_trade_audit_fields(trade_row)
+            enrich_trade_audit_fields(trade_row, fee_rate=self.host.kelly.fee_rate)
             trade_rows.append(trade_row)
         return {
             "session_id": self.host.session_id,
@@ -177,7 +178,7 @@ class SimulatorPaperSessionStore:
     def save_session(self) -> Path:
         self.state_adapter.prune_ineffective_trades()
         for trade in self.host.trades:
-            enrich_trade_audit_fields(trade.__dict__)
+            enrich_trade_audit_fields(trade.__dict__, fee_rate=self.host.kelly.fee_rate)
         self.state_adapter.refresh_capital_state()
         self.host.risk.sync_with_trades(
             self.host.trades,
@@ -776,7 +777,7 @@ class SimulatorPaperResolutionAdapter:
 
         from bot.resolver import TradeResolver
 
-        resolver = TradeResolver(str(self.host.data_dir))
+        resolver = TradeResolver(str(self.host.data_dir), fee_rate=self.host.kelly.fee_rate)
         self.last_summary = resolver.resolve_session(
             self.host.session_id,
             settlement_source,
@@ -813,6 +814,8 @@ class SimulatorPaperResolutionAdapter:
                         "direction": getattr(trade, "direction", ""),
                         "question": getattr(trade, "question", ""),
                         "integrity_status": getattr(trade, "integrity_status", ""),
+                        "settlement_ts": getattr(trade, "settlement_ts", None),
+                        "outcome_known_at": getattr(trade, "outcome_known_at", None),
                     },
                 )
             )

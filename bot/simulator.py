@@ -108,9 +108,12 @@ class SimTrade:
 
     # Resolution (filled in later)
     resolved: bool = False
-    outcome: Optional[str] = None  # "YES" or "NO"
+    outcome: Optional[str] = None  # "YES", "NO", or "VOID"
     pnl: Optional[float] = None
     resolved_at: Optional[str] = None
+    settlement_ts: Optional[str] = None
+    outcome_known_at: Optional[str] = None
+    resolution_blocker: Optional[str] = None
     resolution_type: Optional[str] = None
     current_price: Optional[float] = None
     unrealized_pnl: Optional[float] = None
@@ -118,6 +121,7 @@ class SimTrade:
     contracts: Optional[float] = None
     gross_pnl: Optional[float] = None
     fee_paid: Optional[float] = None
+    fee_rate: Optional[float] = None  # Entry-time fee assumption; stable across reloads.
     net_pnl: Optional[float] = None
     expected_pnl: Optional[float] = None
     exit_price: Optional[float] = None
@@ -164,16 +168,17 @@ class Simulator:
         scan_cfg.setdefault("allowed_market_routes", list(DEFAULT_ALLOWED_MARKET_ROUTES))
         self.config = config
         self.strategy = EnhancedStrategyEngine(strategy_config_with_policy(config))
+        # Resolve mode/config/environment risk settings once for entry sizing too.
+        from bot.risk import RiskManager
+        self.risk = RiskManager(config)
         economics_cfg = config.get("trade_economics", {}) or {}
         self.kelly = KellySizer(
+            kelly_fraction=self.risk.kelly_fraction,
+            max_bet_pct=self.risk.max_bet_pct,
             fee_rate=config.get("kalshi_fee_rate"),
             min_position_size_usd=economics_cfg.get("min_position_size_usd", 1.0),
             min_expected_net_profit_usd=economics_cfg.get("min_expected_net_profit_usd", 0.0),
         )
-
-        # Risk management
-        from bot.risk import RiskManager
-        self.risk = RiskManager(config)
 
         self.starting_balance = config.get("starting_balance", 100.0)
         self.balance = self.starting_balance  # Total equity = available cash + reserved capital
@@ -336,6 +341,9 @@ class Simulator:
             outcome=t_data.get("outcome"),
             pnl=t_data.get("pnl"),
             resolved_at=t_data.get("resolved_at"),
+            settlement_ts=t_data.get("settlement_ts"),
+            outcome_known_at=t_data.get("outcome_known_at"),
+            resolution_blocker=t_data.get("resolution_blocker"),
             resolution_type=t_data.get("resolution_type"),
             current_price=self._coerce_float_or_none(t_data.get("current_price")),
             unrealized_pnl=self._coerce_float_or_none(t_data.get("unrealized_pnl")),
@@ -343,6 +351,7 @@ class Simulator:
             contracts=self._coerce_float_or_none(t_data.get("contracts")),
             gross_pnl=self._coerce_float_or_none(t_data.get("gross_pnl")),
             fee_paid=self._coerce_float_or_none(t_data.get("fee_paid")),
+            fee_rate=self._coerce_float_or_none(t_data.get("fee_rate")),
             net_pnl=self._coerce_float_or_none(t_data.get("net_pnl")),
             expected_pnl=self._coerce_float_or_none(t_data.get("expected_pnl")),
             exit_price=self._coerce_float_or_none(t_data.get("exit_price")),
@@ -1346,7 +1355,7 @@ class Simulator:
             trade_id=trade.id,
             accounting_mutated=True,
         )
-        enrich_trade_audit_fields(trade.__dict__)
+        enrich_trade_audit_fields(trade.__dict__, fee_rate=self.kelly.fee_rate)
         if self.single_trade_mode:
             self.single_trade_completed = True
         return trade
@@ -1385,6 +1394,7 @@ class Simulator:
             edge=metadata.get("edge", 0),
             confidence=metadata.get("confidence", 0),
             position_size=round(result.filled_size, 2),
+            fee_rate=self.kelly.fee_rate,
             signals=metadata.get("signals", {}),
             decision_trace=dict(metadata.get("decision_trace", {}) or {}),
             category=metadata.get("category", ""),
@@ -2122,13 +2132,13 @@ class Simulator:
 
         resolved_positions = [t for t in effective_trades if t.resolved]
         trusted_resolved = [
-            t for t in resolved_positions if t.integrity_status == "ok" and t.pnl is not None
+            t for t in resolved_positions if t.integrity_status == "ok"
         ]
         event_summary = summarize_event_performance([asdict(t) for t in trusted_resolved])
         canonical_trade_rows = []
         for trade in self.trades:
             trade_row = asdict(trade)
-            enrich_trade_audit_fields(trade_row)
+            enrich_trade_audit_fields(trade_row, fee_rate=self.kelly.fee_rate)
             canonical_trade_rows.append(trade_row)
 
         normalized_trade_rows = [
@@ -2154,6 +2164,7 @@ class Simulator:
             "total_trades": total,
             "resolved_trades": len(resolved_positions),
             "trusted_resolved_trades": len(trusted_resolved),
+            "void_trades": sum(t.outcome == "VOID" for t in trusted_resolved),
             "invalid_resolved_trades": len(resolved_positions) - len(trusted_resolved),
             "starting_balance": self.starting_balance,
             "current_balance": self.balance,

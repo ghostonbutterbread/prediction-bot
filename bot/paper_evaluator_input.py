@@ -13,7 +13,10 @@ from bot.paper_wallets import (
     STABLE_PAPER_WALLET_ID,
     resolve_paper_wallet_contract,
 )
-from bot.shared_market_feed import SCHEMA_NAME, shared_candidate_from_market_snapshot_row, shared_candidate_id_from_row
+from bot.shared_market_feed import (
+    SCHEMA_NAME, shared_candidate_from_market_snapshot_row, shared_candidate_id_from_row,
+    shared_candidate_identity_mismatch,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,6 +166,13 @@ def _normalize_shared_candidate_row(
     if not isinstance(row, dict):
         return None, SharedCandidateSkip(row_index=row_index, reason_code="invalid_row")
 
+    mismatch = shared_candidate_identity_mismatch(row)
+    if mismatch:
+        return None, SharedCandidateSkip(
+            row_index=row_index, reason_code=mismatch, market_id=_candidate_market_id(row),
+            shared_candidate_id=shared_candidate_id_from_row(row),
+        )
+
     if str(row.get("schema_name") or "") == SCHEMA_NAME:
         shared_candidate = dict(row)
         candidate_id = _optional_text(shared_candidate.get("candidate_id"))
@@ -262,6 +272,7 @@ def _build_signal_from_normalized_candidate(
     signal.update(
         {
             "shared_candidate_id": shared_candidate_id,
+            "shared_snapshot_id": _coalesce(source_row.get("shared_snapshot_id"), shared_candidate.get("shared_snapshot_id"), shared_candidate.get("snapshot_id")),
             "candidate_dataset_path": str(candidate_dataset_path),
             "candidate_feed_read_only": True,
             "candidate_source_runtime": _optional_text(shared_candidate.get("source_runtime")),

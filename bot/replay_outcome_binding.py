@@ -40,6 +40,7 @@ class ReplayOutcomeBindingResult:
 
 def bind_replay_finalized_outcomes(
     *, replay_inputs_path: str | Path, strict_resolutions_path: str | Path, output_dir: str | Path,
+    storage_root: str | Path | None = None,
 ) -> ReplayOutcomeBindingResult:
     """Write exact-decision outcome bindings from unambiguous strict resolutions.
 
@@ -52,7 +53,7 @@ def bind_replay_finalized_outcomes(
     resolutions_path = Path(strict_resolutions_path).resolve()
     if not inputs_path.is_file() or not resolutions_path.is_file():
         raise ValueError("replay inputs and strict resolutions must be readable files")
-    target_dir = _prepare_output_dir(output_dir)
+    target_dir = _prepare_output_dir(output_dir, storage_root=storage_root)
     inputs_sha256 = _sha256_file(inputs_path)
     resolutions_sha256 = _sha256_file(resolutions_path)
 
@@ -262,9 +263,9 @@ def _read_jsonl_with_raw(path: Path) -> Iterable[tuple[int, Mapping[str, Any] | 
             yield line_number, payload if isinstance(payload, Mapping) else None, raw_line
 
 
-def _prepare_output_dir(value: str | Path) -> Path:
+def _prepare_output_dir(value: str | Path, *, storage_root: str | Path | None = None) -> Path:
     target_dir = Path(value).resolve()
-    root = derived_reports_root().resolve()
+    root = derived_reports_root(storage_root).resolve()
     if target_dir == root or root not in target_dir.parents:
         raise ValueError(f"output directory must be under {root}")
     if target_dir.exists():

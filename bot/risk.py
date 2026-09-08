@@ -58,6 +58,16 @@ def get_preset(is_live: bool) -> dict:
     return LIVE_LIMITS if is_live else PAPER_LIMITS
 
 
+def resolve_kelly_limits(config: dict, *, preset: dict) -> tuple[float, float]:
+    """Resolve sizing without state I/O: env > nested risk > top-level > preset."""
+    risk_cfg = config.get("risk", {}) or {}
+
+    def resolve(key: str) -> float:
+        return float(os.getenv(key.upper(), risk_cfg.get(key, config.get(key, preset[key]))))
+
+    return resolve("kelly_fraction"), resolve("max_bet_pct")
+
+
 # ─── Dataclasses ─────────────────────────────────────────────────────────────
 
 @dataclass
@@ -141,10 +151,11 @@ class RiskState:
 
     @property
     def win_rate(self) -> float:
-        if not self.trade_history:
+        trades = [t for t in self.trade_history if t.get("outcome") != "VOID"]
+        if not trades:
             return 0
-        wins = sum(1 for t in self.trade_history if (t.get("pnl") or 0) > 0)
-        return wins / len(self.trade_history)
+        wins = sum(1 for t in trades if (t.get("pnl") or 0) > 0)
+        return wins / len(trades)
 
     @property
     def is_in_cooldown(self) -> bool:
@@ -211,7 +222,7 @@ class RiskManager:
         self.risk_preset_mode = "paper" if self.is_live and self.parity_comparison_mode == "identical_risk" else ("live" if self.is_live else "paper")
         preset = get_preset(self.risk_preset_mode == "live")
 
-        # Resolve limits: env vars override preset, explicit config overrides both
+        # Resolve limits: env > nested risk config > top-level config > preset.
         def resolve_float(key: str, default: float) -> float:
             env_key = key.upper()
             return float(os.getenv(env_key, config_value(key, preset.get(key, default))))
@@ -220,8 +231,7 @@ class RiskManager:
             env_key = key.upper()
             return int(float(os.getenv(env_key, config_value(key, preset.get(key, default)))))
 
-        self.kelly_fraction = resolve_float("kelly_fraction", preset["kelly_fraction"])
-        self.max_bet_pct = resolve_float("max_bet_pct", preset["max_bet_pct"])
+        self.kelly_fraction, self.max_bet_pct = resolve_kelly_limits(config, preset=preset)
         self.max_exposure_pct = resolve_float("max_exposure_pct", preset["max_exposure_pct"])
         self.daily_loss_limit_pct = resolve_float("daily_loss_limit_pct", preset["daily_loss_limit_pct"])
         self.max_drawdown_pct = resolve_float("max_drawdown_pct", preset["max_drawdown_pct"])
@@ -684,7 +694,8 @@ class RiskManager:
                 "reserved_capital": round(reserved_amount, 2),
                 "market_price": self._coerce_float(getattr(trade, "market_price", None)),
                 "resolved": resolved,
-                "pnl": self._coerce_float(getattr(trade, "pnl", None)),
+                "pnl": None if getattr(trade, "outcome", None) == "VOID" else self._coerce_float(getattr(trade, "pnl", None)),
+                "outcome": getattr(trade, "outcome", None),
             }
             synced_history.append(record)
 
@@ -735,16 +746,17 @@ class RiskManager:
         """Backward-compatible alias for older runner calls."""
         self.record_outcome(trade_ref, pnl)
 
-    def record_outcome(self, trade_ref, pnl: float):
-        """Record the outcome of a resolved trade."""
-        self.reset_daily()
+    def record_outcome(self, trade_ref, pnl: float, *, void: bool = False):
+        """Settle a trade, or refund a VOID without affecting economic metrics."""
+        if not void:
+            self.reset_daily()
         trade = self._find_trade_record(trade_ref)
         if trade is not None:
             if trade.get("resolved"):
                 return
 
             trade["resolved"] = True
-            trade["pnl"] = self._coerce_float(pnl)
+            trade["pnl"] = 0.0 if void else self._coerce_float(pnl)
             reserved_capital = self._coerce_float(trade.get("reserved_capital"), trade.get("size", 0))
 
             # Release exposure (approximate — full size released on resolve)
@@ -757,6 +769,12 @@ class RiskManager:
                 self.state.available_cash + reserved_capital + trade["pnl"],
                 2,
             )
+            if void:
+                trade["pnl"] = None
+                trade["outcome"] = "VOID"
+                self.state.open_positions = max(0, self.state.open_positions - 1)
+                self._save_state()
+                return
 
             # Update balance
             self.state.current_balance += trade["pnl"]

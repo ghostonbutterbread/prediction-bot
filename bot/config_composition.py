@@ -6,6 +6,8 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from bot.collector_paths import DEFAULT_COLLECTOR_ROOT
+
 
 CONFIG_COMPOSITION_KEY = "config_composition"
 _MISSING = object()
@@ -79,6 +81,7 @@ BUILTIN_OVERLAYS: dict[str, dict[str, Any]] = {
     "paper_beta_shadow_runtime": {
         "runtime": {
             "base_dir": "data/beta_shadow",
+            "storage_root": str(DEFAULT_COLLECTOR_ROOT),
             "isolated": True,
         },
         "storage": {
@@ -123,6 +126,7 @@ BUILTIN_OVERLAYS: dict[str, dict[str, Any]] = {
     "prediction_lab_beta_shadow_runtime": {
         "runtime": {
             "base_dir": "data/beta_shadow",
+            "storage_root": str(DEFAULT_COLLECTOR_ROOT),
             "isolated": True,
         },
         "storage": {

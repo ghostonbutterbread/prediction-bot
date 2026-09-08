@@ -1529,6 +1529,7 @@ parameters:
                                 "threshold": 70.0,
                                 "question_side": "above",
                                 "confidence": 0.88,
+                                "candidate_observed_at": "2026-05-14T12:00:00+00:00",
                                 "source_details": [
                                     {
                                         "source_id": "local_station_98101",

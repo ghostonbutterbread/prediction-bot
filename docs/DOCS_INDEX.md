@@ -6,6 +6,10 @@ _Last updated: 2026-05-13_
 
 This file is the fast orientation map for the current docs set.
 
+## Persistent data and runtime portability
+
+Read [`architecture/persistent-storage-contract.md`](architecture/persistent-storage-contract.md) for code-root versus storage-root ownership, cohort paths, legacy branch compatibility, and non-mutating verification boundaries.
+
 ## Feature-branch integration dossiers
 
 Before reviving, merging, or replacing a non-trivial feature branch, read that
