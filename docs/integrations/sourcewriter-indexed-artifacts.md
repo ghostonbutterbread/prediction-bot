@@ -33,6 +33,47 @@ The new implementation must reproduce baseline semantic results: accepted/reject
 - Bounded resource fixture with large irrelevant raw payloads demonstrates output lacks full archive copies and does not call full-archive read_bytes/read. Report measured input/output bytes, peak memory and elapsed time for baseline/candidate; do not fabricate production-scale extrapolations. No multi-GB live run without separate resource preflight.
 - Full isolated test suite with explicit worktree PYTHONPATH and temporary storage; `git diff --check`; independent read-only review and narrow fix/re-review loop.
 
+## Review follow-up: locator ordering
+
+Independent review of `8c042a2` found one P2 semantic-validation defect: a
+checksum-consistent malformed index could assign duplicate row numbers or
+conflicting offsets. The regression reproduced all three mutations (duplicate
+row numbers, overlapping ranges, reversed ranges): `red-review-locator-order`
+failed three subtests. The fix validates strictly increasing row numbers and
+ordered, non-overlapping offsets across the **entire committed compact prefix**
+before any hydration/filter/limit or update. This preserves fail-closed behavior
+even for `max_rows=1` and filters matching nothing; update leaves the old
+manifest unchanged on failure. It adds a compact structural scan, not a raw scan.
+
+- `green-review-locator-order.json`: **25 focused tests passed**.
+- `review-fix-full-suite.json`: **1129 run, zero failures/errors, seven
+  absent-local-runtime-config skips**, 33.424980803974904 seconds, peak suite RSS
+  861608 KiB. This supersedes the earlier checkpoint suite for the new fix.
+- `review-fix-gates.json`: index-only full-row semantic diff remains `[]` across
+  64 rows; full SourceWriter/router parity remains `not_run`, merge gate false.
+- `candidate-reviewfix-index-resource.json`: same 16785836-byte sealed fixture;
+  26745 derived bytes, 30868 KiB peak RSS, 0.6701437160372734 seconds. Path-length
+  metadata differs from the earlier output label; no raw copy was made.
+- Narrow independent re-review of this fix dispatched; approval pending.
+- Fix implementation commit: pending below; all edits remain on the existing
+  feature branch, with no propagation to beta/main or runtime.
+
+Receipt root is still `/mnt/data-collection/sourcewriter-indexed-tpv8yxcv`.
+Exact follow-up commands, using W/R/P from the earlier command block:
+
+```bash
+"$P" "$R/run_tests.py" test_collector_index_checkpoints.py red-review-locator-order
+"$P" "$R/run_tests.py" 'test_collector*index*.py' green-review-locator-order
+PYTHONPATH="$R/guard:$W" PREDICTION_BOT_COLLECTOR_ROOT="$R" TMPDIR="$R" \
+  "$P" "$R/run_tests.py" 'test_*.py' review-fix-full-suite
+PYTHONPATH="$R/guard" "$P" "$R/index_probe.py" --code-root "$W" --storage-root "$R" --label candidate-reviewfix
+"$P" "$R/compare_index.py" candidate-reviewfix review-fix-gates
+```
+
+The RED command describes the actual pre-fix execution, not an expectation that
+it will still fail on the fixed branch. Resource probes require a fresh label
+for repeat execution, as their output directories are exclusive-create.
+
 ## Checkpoint evidence and exact resume point
 
 This turn implements only the collector-owned committed-prefix prerequisite in
@@ -77,8 +118,9 @@ live/large input or activate it on the basis of this checkpoint**.
   `Path.read_bytes` and negative-size raw `read`. This does **not** measure or
   satisfy the SourceWriter resource gate. Probe cap: 1 GiB address space,
   30 CPU seconds. No production extrapolation.
-- Review: independent read-only review dispatched for this prerequisite;
-  full implementation review/integration remains the parent's responsibility.
+- Original prerequisite review returned one P2, reproduced and fixed in the
+  follow-up above. Full implementation review/integration remains the parent's
+  responsibility.
 - Small final JSON report copies only (no fixture/raw copies):
   `/mnt/data-collection/prediction-bot/data/derived_reports/sourcewriter_indexed_artifacts/checkpoint-8c042a2/`.
   Contains `checkpoint-gates.json`, `committed-full-suite.json`,

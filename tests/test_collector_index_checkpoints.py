@@ -256,6 +256,36 @@ class CollectorIndexCheckpointTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'index path'):
             update_collector_replay_index(self.raw, other, self.manifest)
 
+    def test_conflicting_locator_order_fails_before_filtered_or_bounded_load(self):
+        import hashlib
+        for mutation in ('duplicate_row_number', 'overlapping_offset', 'reordered_offsets'):
+            with self.subTest(mutation=mutation):
+                self.raw.write_bytes(self.encoded(self.first) + self.encoded(self.second))
+                if self.manifest.exists():
+                    self.manifest.unlink()
+                    self.index.unlink()
+                self.build()
+                entries = [json.loads(line) for line in self.index.read_text().splitlines()]
+                if mutation == 'duplicate_row_number':
+                    entries[1]['row_number'] = 1
+                elif mutation == 'overlapping_offset':
+                    entries[1] = {**entries[0], 'row_number': 2}
+                else:
+                    entries.reverse()
+                    entries[0]['row_number'], entries[1]['row_number'] = 1, 2
+                self.index.write_text(''.join(json.dumps(row) + '\n' for row in entries))
+                manifest = json.loads(self.manifest.read_text())
+                manifest['committed_index_bytes'] = self.index.stat().st_size
+                manifest['index_sha256'] = hashlib.sha256(self.index.read_bytes()).hexdigest()
+                self.manifest.write_text(json.dumps(manifest))
+                before = self.manifest.read_bytes()
+                for markets, numbers, limit in ((None, None, None), (None, {1}, None), (None, None, 1), ({'NONE'}, None, None)):
+                    with self.assertRaisesRegex(ValueError, 'locator order'):
+                        next(load_indexed_collector_rows(self.index, self.manifest, market_ids=markets, row_numbers=numbers, max_rows=limit))
+                with self.assertRaisesRegex(ValueError, 'locator order'):
+                    self.update()
+                self.assertEqual(self.manifest.read_bytes(), before)
+
     def test_initial_partial_only_file_has_empty_complete_checkpoint(self):
         self.raw.write_bytes(b'{')
         result = self.build()

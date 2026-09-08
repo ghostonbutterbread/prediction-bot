@@ -285,6 +285,22 @@ def _verify_index_extent(index: Any, manifest: Mapping[str, Any]) -> None:
         remaining -= len(chunk)
     if digest.hexdigest() != manifest.get("index_sha256"):
         raise ValueError("committed replay index digest mismatch")
+    # Validate the whole compact sequence before any filtering, early return,
+    # hydration, or update can consume a checksum-consistent malformed index.
+    index.seek(0)
+    previous_number = previous_end = 0
+    while index.tell() < extent:
+        line = index.readline(extent - index.tell())
+        if not line or not line.endswith(b"\n"):
+            raise ValueError("committed replay index ends in an incomplete row")
+        entry = json.loads(line)
+        if not isinstance(entry, Mapping) or entry.get("schema_name") != INDEX_SCHEMA_NAME:
+            raise ValueError("invalid replay index row")
+        _validate_locator(entry, manifest)
+        if entry["row_number"] <= previous_number or entry["byte_offset"] < previous_end:
+            raise ValueError("replay index locator order conflicts with committed row sequence")
+        previous_number = entry["row_number"]
+        previous_end = entry["byte_offset"] + entry["byte_length"]
     index.seek(0)
 
 

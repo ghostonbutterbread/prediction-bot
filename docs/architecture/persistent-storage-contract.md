@@ -100,8 +100,10 @@ Readers may retain an exact manifest receipt and continue using its committed
 prefix after later appends. A future generation must seal/hash that receipt in
 its own immutable contract, rather than follow the mutable collector manifest.
 Reading verifies the committed compact digest before filtering/hydration, then
-uses bounded offset/length raw reads and verifies payload plus full routing
-identity. Missing/truncated/replaced raw archives, changed selected payloads,
+validates strictly increasing row numbers and ordered non-overlapping byte
+ranges across the complete compact prefix before any filtered/limited result or
+update, then uses bounded offset/length raw reads and verifies payload plus full
+routing identity. Missing/truncated/replaced raw archives, changed selected payloads,
 wrong index paths, unsupported schemas, and invalid locators fail closed.
 Device/inode identity is local to the archive filesystem; relocation is **not
 supported yet**. There is no heuristic search or fallback to another archive.
@@ -109,8 +111,12 @@ supported yet**. There is no heuristic search or fallback to another archive.
 Memory is bounded by the largest individual decoded raw record plus a fixed
 compact hashing buffer, not by total raw archive size (filter sets are
 caller-owned). Updates read the new raw suffix but verify/hash the compact
-index prefix; readers verify/scan the compact prefix once **per load**, not
-once per generation or process. This is not computationally incremental
+index prefix. Each load performs a bounded digest pass, a bounded structural
+validation pass, and a filtered hydration pass over the compact index (the
+last may stop early); updates validate their prior prefix in the same way and
+hash the extended compact index. None of these passes rereads the full raw
+archive. Verification is repeated **per load**, not cached per generation or
+process. This is not computationally incremental
 SourceWriter or a per-decision verification cache.
 
 Legacy collector manifest version 1 remains read-compatible for its original
