@@ -9,86 +9,82 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Collection, Iterator, Mapping
 
 from bot.shared_market_feed import shared_candidate_identity_mismatch
+from bot.file_ops import atomic_write_json, locked_file
 
 INDEX_SCHEMA_NAME = "collector_replay_index"
 INDEX_SCHEMA_VERSION = 1
 
 
 def build_collector_replay_index(
-    source_path: Path,
-    index_path: Path,
-    manifest_path: Path,
+    source_path: Path, index_path: Path, manifest_path: Path,
 ) -> dict[str, Any]:
-    """Stream a raw JSONL archive into a compact byte-offset replay index.
+    """Create a collector-owned committed-prefix index without copying raw rows."""
+    with locked_file(Path(str(manifest_path) + ".lock"), "a+"):
+        return _build_collector_replay_index(source_path, index_path, manifest_path)
 
-    Neither the source archive nor its rows are changed. Existing outputs are
-    rejected so a replay index is always attributable to one source digest.
-    """
+
+def _build_collector_replay_index(
+    source_path: Path, index_path: Path, manifest_path: Path,
+) -> dict[str, Any]:
     source_path = Path(source_path).resolve()
-    index_path = Path(index_path)
-    manifest_path = Path(manifest_path)
+    index_path, manifest_path = Path(index_path), Path(manifest_path)
     if not source_path.is_file():
         raise FileNotFoundError(source_path)
     if index_path.exists() or manifest_path.exists():
         raise FileExistsError("replay index outputs already exist")
     index_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
-
-    source_digest = hashlib.sha256()
-    indexed_rows = invalid_rows = 0
-    with source_path.open("rb") as source, index_path.open("w", encoding="utf-8") as index:
-        row_number = 0
-        while True:
-            byte_offset = source.tell()
-            payload = source.readline()
-            if not payload:
-                break
-            source_digest.update(payload)
-            row_number += 1
-            try:
-                row = json.loads(payload)
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                invalid_rows += 1
-                continue
-            if not isinstance(row, Mapping):
-                invalid_rows += 1
-                continue
-            entry = _index_entry(row, row_number=row_number, byte_offset=byte_offset, payload=payload)
-            if entry is None:
-                invalid_rows += 1
-                continue
-            index.write(json.dumps(entry, sort_keys=True, separators=(",", ":")) + "\n")
-            indexed_rows += 1
-
+    with index_path.open("xb") as index:
+        index.flush()
+        os.fsync(index.fileno())
+    empty_digest = hashlib.sha256(b"").hexdigest()
+    source_stat = source_path.stat()
     manifest = {
         "schema_name": "collector_replay_index_manifest",
-        "schema_version": 1,
+        "schema_version": 2,
         "index_schema_name": INDEX_SCHEMA_NAME,
         "index_schema_version": INDEX_SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "source_path": str(source_path),
-        "source_size_bytes": source_path.stat().st_size,
-        "indexed_source_bytes": source_path.stat().st_size,
-        "source_rows_seen": row_number,
-        "source_sha256": source_digest.hexdigest(),
-        "append_chain_base_sha256": source_digest.hexdigest(),
-        "append_chain_sha256": source_digest.hexdigest(),
-        "index_path": str(index_path),
-        "indexed_rows": indexed_rows,
-        "invalid_rows": invalid_rows,
+        "archive_identity": _archive_identity(source_stat),
+        "source_size_bytes": source_stat.st_size,
+        "indexed_source_bytes": 0,
+        "unindexed_trailing_bytes": source_stat.st_size,
+        "source_rows_seen": 0,
+        "source_sha256": empty_digest,
+        "append_chain_base_sha256": empty_digest,
+        "append_chain_sha256": empty_digest,
+        "index_path": str(index_path.resolve()),
+        "committed_index_bytes": 0,
+        "index_sha256": empty_digest,
+        "indexed_rows": 0,
+        "invalid_rows": 0,
         "non_mutating": True,
         "storage_contract": "raw_payload_remains_only_in_source_archive; index_contains_offsets_and_compact_replay_metadata",
     }
-    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return {**manifest, "manifest_path": str(manifest_path)}
+    try:
+        # A failed first scan still has a valid empty checkpoint to retry from.
+        atomic_write_json(manifest_path, manifest)
+    except BaseException:
+        # No bytes or published references exist yet; remove only our empty file.
+        index_path.unlink()
+        raise
+    return _update_collector_replay_index(source_path, index_path, manifest_path)
 
 
 def update_collector_replay_index(source_path: Path, index_path: Path, manifest_path: Path) -> dict[str, Any]:
+    """Serialize collector-owned updates; readers consume committed prefixes."""
+    with locked_file(Path(str(manifest_path) + ".lock"), "a+"):
+        return _update_collector_replay_index(source_path, index_path, manifest_path)
+
+
+def _update_collector_replay_index(source_path: Path, index_path: Path, manifest_path: Path) -> dict[str, Any]:
     """Append locators for newly appended raw JSONL rows without rescanning payloads.
 
     The raw archive is append-only. Each index entry has its own payload digest,
@@ -98,9 +94,18 @@ def update_collector_replay_index(source_path: Path, index_path: Path, manifest_
     source_path = Path(source_path).resolve()
     index_path = Path(index_path)
     manifest_path = Path(manifest_path)
+    if not manifest_path.exists() and index_path.is_file() and index_path.stat().st_size == 0:
+        if index_path.resolve() != source_path:
+            # Process death before the first empty manifest was published.
+            # No committed bytes exist; never remove a raw input or nonempty index.
+            index_path.unlink()
     if not index_path.exists() or not manifest_path.exists():
-        return build_collector_replay_index(source_path, index_path, manifest_path)
+        return _build_collector_replay_index(source_path, index_path, manifest_path)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    _validate_manifest(manifest)
+    if manifest["schema_version"] != 2:
+        raise ValueError("legacy replay index requires an explicit offline checkpoint migration")
+    _verify_index_path(index_path, manifest)
     if Path(str(manifest.get("source_path") or "")) != source_path:
         raise ValueError("replay-index manifest refers to a different raw archive")
     start_offset = int(manifest.get("indexed_source_bytes") or 0)
@@ -111,17 +116,25 @@ def update_collector_replay_index(source_path: Path, index_path: Path, manifest_
     last_complete_offset = start_offset
     chain = bytes.fromhex(str(manifest.get("append_chain_sha256") or manifest.get("source_sha256") or "00" * 32))
     new_indexed = new_invalid = 0
-    with source_path.open("rb") as source, index_path.open("a", encoding="utf-8") as index:
+    source_digest = hashlib.sha256() if start_offset == 0 else None
+    with source_path.open("rb") as source, index_path.open("r+b") as index:
+        _verify_archive(source, manifest)
+        _verify_index_extent(index, manifest)
+        index.seek(manifest["committed_index_bytes"])
+        # Discard only uncommitted derived suffix from an interrupted publish.
+        index.truncate()
         source.seek(start_offset)
-        while True:
+        while source.tell() < source_size:
             byte_offset = source.tell()
-            payload = source.readline()
+            payload = source.readline(source_size - byte_offset)
             if not payload:
                 break
             if not payload.endswith(b"\n"):
                 # Leave an incomplete trailing record for the next pass.
                 break
             last_complete_offset = source.tell()
+            if source_digest is not None:
+                source_digest.update(payload)
             chain = hashlib.sha256(chain + hashlib.sha256(payload).digest()).digest()
             row_number += 1
             try:
@@ -136,9 +149,13 @@ def update_collector_replay_index(source_path: Path, index_path: Path, manifest_
             if entry is None:
                 new_invalid += 1
                 continue
-            index.write(json.dumps(entry, sort_keys=True, separators=(",", ":")) + "\n")
+            index.write((json.dumps(entry, sort_keys=True, separators=(",", ":")) + "\n").encode())
             new_indexed += 1
+        index.flush()
+        os.fsync(index.fileno())
     final_source_size = source_path.stat().st_size
+    if last_complete_offset == start_offset and final_source_size == manifest["source_size_bytes"]:
+        return {**manifest, "new_indexed_rows": 0, "new_invalid_rows": 0, "manifest_path": str(manifest_path)}
     manifest["updated_at"] = datetime.now(timezone.utc).isoformat()
     manifest["source_size_bytes"] = final_source_size
     manifest["indexed_source_bytes"] = last_complete_offset
@@ -146,10 +163,13 @@ def update_collector_replay_index(source_path: Path, index_path: Path, manifest_
     manifest["indexed_rows"] = int(manifest.get("indexed_rows") or 0) + new_indexed
     manifest["invalid_rows"] = int(manifest.get("invalid_rows") or 0) + new_invalid
     manifest["append_chain_sha256"] = chain.hex()
-    manifest["unindexed_trailing_bytes"] = source_size - last_complete_offset
-    manifest["source_sha256"] = None
+    manifest["unindexed_trailing_bytes"] = final_source_size - last_complete_offset
+    if last_complete_offset != start_offset:
+        manifest["source_sha256"] = source_digest.hexdigest() if source_digest is not None else None
     manifest["source_integrity"] = "per_indexed_row_payload_sha256"
-    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    manifest["committed_index_bytes"] = index_path.stat().st_size
+    manifest["index_sha256"] = _sha256_file(index_path)
+    atomic_write_json(manifest_path, manifest)
     return {**manifest, "new_indexed_rows": new_indexed, "new_invalid_rows": new_invalid, "manifest_path": str(manifest_path)}
 
 
@@ -172,17 +192,27 @@ def load_indexed_collector_rows(
     selected_market_ids = {str(market_id) for market_id in market_ids or () if str(market_id)}
     selected_row_numbers = {int(row_number) for row_number in row_numbers or () if int(row_number) > 0}
     manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
-    if manifest.get("index_schema_name") != INDEX_SCHEMA_NAME:
-        raise ValueError("unsupported replay index schema")
+    _validate_manifest(manifest)
     source_path = Path(str(manifest.get("source_path") or ""))
+    if manifest["schema_version"] == 2:
+        _verify_index_path(Path(index_path), manifest)
     if not source_path.is_file():
         raise FileNotFoundError(source_path)
     yielded = 0
-    with source_path.open("rb") as source, Path(index_path).open(encoding="utf-8") as index:
-        for line in index:
+    with source_path.open("rb") as source, Path(index_path).open("rb") as index:
+        extent = manifest.get("committed_index_bytes")
+        if manifest.get("schema_version") == 2:
+            _verify_archive(source, manifest)
+            _verify_index_extent(index, manifest)
+        while extent is None or index.tell() < extent:
+            line = index.readline() if extent is None else index.readline(extent - index.tell())
+            if not line:
+                break
             entry = json.loads(line)
             if entry.get("schema_name") != INDEX_SCHEMA_NAME:
                 raise ValueError("invalid replay index row")
+            if manifest["schema_version"] == 2:
+                _validate_locator(entry, manifest)
             if selected_market_ids and str(entry.get("market_id") or "") not in selected_market_ids:
                 continue
             if selected_row_numbers and int(entry.get("row_number") or 0) not in selected_row_numbers:
@@ -194,8 +224,10 @@ def load_indexed_collector_rows(
             if hashlib.sha256(payload).hexdigest() != entry.get("payload_sha256"):
                 raise ValueError("raw collector payload differs from replay index")
             row = json.loads(payload)
-            if str(row.get("market_id") or "") != entry.get("market_id"):
-                raise ValueError("raw collector row does not match replay index market identity")
+            expected = _index_entry(row, row_number=entry["row_number"], byte_offset=entry["byte_offset"], payload=payload)
+            identity_fields = ("market_id", "shared_candidate_id", "shared_snapshot_id", "observed_at")
+            if expected is None or any(expected[key] != entry.get(key) for key in identity_fields):
+                raise ValueError("raw collector row does not match replay index row identity")
             yielded += 1
             yield dict(row)
 
@@ -235,3 +267,62 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _verify_index_extent(index: Any, manifest: Mapping[str, Any]) -> None:
+    """Verify only the committed compact prefix, never the raw archive."""
+    extent = manifest.get("committed_index_bytes")
+    if type(extent) is not int or extent < 0:
+        raise ValueError("invalid committed index extent")
+    index.seek(0)
+    remaining = extent
+    digest = hashlib.sha256()
+    while remaining:
+        chunk = index.read(min(1024 * 1024, remaining))
+        if not chunk:
+            raise ValueError("committed replay index is truncated")
+        digest.update(chunk)
+        remaining -= len(chunk)
+    if digest.hexdigest() != manifest.get("index_sha256"):
+        raise ValueError("committed replay index digest mismatch")
+    index.seek(0)
+
+
+def _archive_identity(stat: os.stat_result) -> dict[str, int]:
+    return {"device": stat.st_dev, "inode": stat.st_ino}
+
+
+def _verify_index_path(index_path: Path, manifest: Mapping[str, Any]) -> None:
+    if index_path.resolve() != Path(str(manifest.get("index_path") or "")):
+        raise ValueError("replay index path differs from committed checkpoint")
+
+
+def _validate_manifest(manifest: Any) -> None:
+    if (not isinstance(manifest, dict)
+            or manifest.get("schema_name") != "collector_replay_index_manifest"
+            or manifest.get("schema_version") not in (1, 2)
+            or manifest.get("index_schema_name") != INDEX_SCHEMA_NAME
+            or manifest.get("index_schema_version") != INDEX_SCHEMA_VERSION):
+        raise ValueError("unsupported replay index manifest schema")
+    if manifest["schema_version"] == 2:
+        for field in ("committed_index_bytes", "indexed_source_bytes", "source_rows_seen", "indexed_rows", "invalid_rows"):
+            if type(manifest.get(field)) is not int or manifest[field] < 0:
+                raise ValueError(f"invalid committed replay index field: {field}")
+
+
+def _validate_locator(entry: Mapping[str, Any], manifest: Mapping[str, Any]) -> None:
+    offset, length, number = (entry.get(key) for key in ("byte_offset", "byte_length", "row_number"))
+    if (entry.get("schema_version") != INDEX_SCHEMA_VERSION
+            or type(offset) is not int or type(length) is not int or type(number) is not int
+            or offset < 0 or length <= 0 or number <= 0
+            or number > manifest["source_rows_seen"]
+            or offset + length > manifest["indexed_source_bytes"]):
+        raise ValueError("replay index locator is outside committed extent")
+
+
+def _verify_archive(source: Any, manifest: Mapping[str, Any]) -> None:
+    stat = os.fstat(source.fileno())
+    if _archive_identity(stat) != manifest.get("archive_identity"):
+        raise ValueError("raw collector archive identity differs from committed checkpoint")
+    if stat.st_size < manifest["indexed_source_bytes"]:
+        raise ValueError("raw collector archive was truncated below committed extent")

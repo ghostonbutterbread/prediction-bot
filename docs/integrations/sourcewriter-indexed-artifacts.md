@@ -1,7 +1,7 @@
 # Indexed SourceWriter artifacts: implementation specification
 
 ## Status and ownership
-- Status: approved user objective; implementation pending; merge gated on verified parity and independent review.
+- Status: **incomplete tested prerequisite checkpoint; NOT merge-ready**. Collector committed-prefix foundation implemented; pointer-backed SourceWriter, both consumers, authoritative binding and full baseline/router parity remain pending.
 - Owner: Hermes parent; implementation delegated to one builder.
 - Canonical spec: this branch-local dossier. Durable accepted contract belongs in `docs/architecture/persistent-storage-contract.md`.
 - Branch: `feat/sourcewriter-indexed-artifacts`; worktree `/home/ryushe/worktrees/prediction-bot-sourcewriter-indexed-artifacts`.
@@ -32,6 +32,107 @@ The new implementation must reproduce baseline semantic results: accepted/reject
 - Two-codebase parity harness against frozen baseline537c626; machine-readable semantic diff must be empty and enumerated counts verified programmatically. Run from disposable export/checkouts without runtime Git dependence in committed tests. Include replay after a committed raw append and incremental/full equivalence.
 - Bounded resource fixture with large irrelevant raw payloads demonstrates output lacks full archive copies and does not call full-archive read_bytes/read. Report measured input/output bytes, peak memory and elapsed time for baseline/candidate; do not fabricate production-scale extrapolations. No multi-GB live run without separate resource preflight.
 - Full isolated test suite with explicit worktree PYTHONPATH and temporary storage; `git diff --check`; independent read-only review and narrow fix/re-review loop.
+
+## Checkpoint evidence and exact resume point
+
+This turn implements only the collector-owned committed-prefix prerequisite in
+`bot/collector_replay_index.py`, with regressions in
+`tests/test_collector_index_checkpoints.py`. It is working code exercised through
+the existing collector hook, not a placeholder pointer-backed publisher. The
+unchanged publisher still makes V2 full-copy generations: **do not run it on
+live/large input or activate it on the basis of this checkpoint**.
+
+- Code base on entry: spec commit `eb8e66f1a7c6c34de911ffc3d08b00099df8e640`
+  atop immutable baseline `537c6268d06c2313b8af63d341beff9f35b66e61`.
+- Selected TEMP storage root: `/mnt/data-collection/sourcewriter-indexed-tpv8yxcv`.
+  All synthetic fixtures, exports, logs and receipts remain there; no live raw
+  input was read or modified. Preflight reported 48G available on the volume.
+- Durable contract: `docs/architecture/persistent-storage-contract.md`, section
+  “Collector replay-index committed prefixes (manifest version 2)”.
+- Full isolated suite: **1127 run, 0 failures, 0 errors, 7 skips**;
+  `full-suite.json` and `full-suite.log` beneath the TEMP root. Elapsed
+  36.37547456799075 seconds; process peak RSS 731292 KiB. This is suite memory,
+  not SourceWriter workload memory. Python socket guard also inherited by
+  subprocesses via `sitecustomize.py` on the explicit PYTHONPATH.
+- Focused index suite: **23 run, 0 failures/errors** in
+  `green-partial-only.json`. RED/GREEN receipts are paired by suffix:
+  `initial-tail`, `frozen-extent`, `index-digest`, `interrupted-publication`,
+  `initial-publication`, `identity`, `locator-extents`, `concurrent-append`,
+  `idempotency-path`, `partial-only`. Additional invariant tests verify
+  malformed rows, append/full rebuild equality and legacy index read behavior.
+- `checkpoint-gates.json`: **index-only semantic diff [] across 64 complete
+  hydrated row identities/full-row hashes**. SourceWriter semantic diff is
+  null, SourceWriter parity and actual router E2E are `not_run`, merge gate
+  false. These are intentionally separate fields, not an empty full-pipeline
+  diff falsely presented as success.
+- `baseline-index-resource.json` and `candidate-index-resource.json` compare
+  index build + full indexed hydration ONLY on a single sealed 16785836-byte
+  fixture. Baseline: 26403 derived bytes, peak RSS 33512 KiB, 0.19510921090841293
+  seconds. Candidate: 26735 derived bytes, peak RSS 30832 KiB,
+  0.3042108869412914 seconds. Both read 16785836 raw bytes during indexing and
+  16785836 during hydration; max hydration request 262279 bytes. Both forbid
+  `Path.read_bytes` and negative-size raw `read`. This does **not** measure or
+  satisfy the SourceWriter resource gate. Probe cap: 1 GiB address space,
+  30 CPU seconds. No production extrapolation.
+- Review: independent read-only review dispatched for this prerequisite;
+  full implementation review/integration remains the parent's responsibility.
+- No beta/main changes, merges, pushes, runtime config edits, services,
+  schedulers, orders or activation. Only task-owned local files changed.
+
+Exact commands (run from the owning worktree):
+
+```bash
+W=/home/ryushe/worktrees/prediction-bot-sourcewriter-indexed-artifacts
+R=/mnt/data-collection/sourcewriter-indexed-tpv8yxcv
+P=/mnt/data-collection/prediction-bot/.venv/bin/python
+PYTHONPATH="$R/guard:$W" PREDICTION_BOT_COLLECTOR_ROOT="$R" TMPDIR="$R" \
+  "$P" "$R/run_tests.py" 'test_*.py' full-suite
+PYTHONPATH="$R/guard:$W" PREDICTION_BOT_COLLECTOR_ROOT="$R" TMPDIR="$R" \
+  "$P" "$R/run_tests.py" 'test_collector*index*.py' focused-rerun
+git diff --check
+```
+
+Index-only parity/resource reproduction (use fresh output labels on repeat;
+fixture preparation is exclusive-create and must not overwrite the sealed raw):
+
+```bash
+mkdir -p "$R/baseline-export"
+git archive 537c6268d06c2313b8af63d341beff9f35b66e61 bot | tar -x -C "$R/baseline-export"
+"$P" "$R/index_probe.py" --prepare --code-root "$W" --storage-root "$R" --label prepare
+PYTHONPATH="$R/guard" "$P" "$R/index_probe.py" --code-root "$R/baseline-export" --storage-root "$R" --label baseline
+PYTHONPATH="$R/guard" "$P" "$R/index_probe.py" --code-root "$W" --storage-root "$R" --label candidate
+"$P" "$R/compare_index.py"
+```
+
+`run_tests.py`, `guard/sitecustomize.py`, `index_probe.py`, and `compare_index.py`
+are retained TEMP-root receipt helpers, not committed final acceptance harnesses.
+The committed index regressions run from a disposable source export without Git.
+The required complete SourceWriter two-codebase harness remains to be written.
+
+### Remaining work, in dependency order (merge remains blocked)
+
+1. Add collector-owned locators/diagnostics for rejected raw rows so exporter
+   acceptance/rejection **reasons**, pending and unusable accounting stay exact.
+   Existing accepted-row iterator and invalid counts are insufficient. Add an
+   explicit verified relocation and legacy-index checkpoint migration contract;
+   current legacy updates fail closed instead of silently acquiring trust.
+2. Pin an independent resolution receipt/extent. Preserve the owning binder's
+   exact decision identity, conflict/late/VOID handling, and sanitization logic;
+   implement bounded iterable/external-memory export, binding, materialization
+   and global collapse without a second learning policy or raw payload exports.
+3. Add explicitly versioned pointer-backed promotion and BOTH real consumers
+   (`weather/source_history_manifest.py` and verified strict-scorecard loading
+   in `auto_source_router_promotion.py`); keep V2 generation compatibility and
+   V1 rejection. Pin receipt hashes, generation reuse and atomic `current`.
+4. Implement the committed full baseline537c626/candidate parity harness on
+   identical sealed collector + independent resolver + decision timelines.
+   Exercise actual router YES/NO/wrong/pending/unusable/duplicate/contradictory
+   and equal-time cases, all row identities/reasons, append/full equivalence.
+   Require an empty full-pipeline semantic diff, not this index-only receipt.
+5. Measure complete SourceWriter baseline/candidate resource behavior with
+   large irrelevant payloads; then full isolated suite, independent review and
+   narrow fixes/re-review. Parent alone may integrate after every gate passes;
+   this builder must not merge/push/modify beta.
 
 ## Merge and activation
 Before merge, commit implementation plus updated dossier containing exact commands/receipts, immutable baseline and implementation SHAs, review decision, parity verdict and remaining operational gates. Parent verifies artifacts and beta ancestry/status, preserves unrelated migration handoff, merges locally only if all correctness/resource gates pass, and reruns beta tests. Remove temporary dossier on integration; retain durable format contract and reproducible tests.
