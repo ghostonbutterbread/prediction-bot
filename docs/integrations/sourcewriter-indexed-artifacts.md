@@ -54,7 +54,13 @@ manifest unchanged on failure. It adds a compact structural scan, not a raw scan
 - `candidate-reviewfix-index-resource.json`: same 16785836-byte sealed fixture;
   26745 derived bytes, 30868 KiB peak RSS, 0.6701437160372734 seconds. Path-length
   metadata differs from the earlier output label; no raw copy was made.
-- Narrow independent re-review of this fix dispatched; approval pending.
+- Narrow independent read-only re-review completed: the precise P2 is closed
+  for version-2 committed-prefix indexes, with no concrete introduced issues
+  found. Reviewer inspected the two-file change against `4c77530` and relevant
+  helpers, including first-yield/filter/limit and pre-update rejection. Tests
+  were not independently rerun; the 25-pass focused and 1129-run full-suite
+  receipts above are builder-executed evidence. This closes only that finding,
+  **not** the incomplete full SourceWriter feature or its merge gate.
 - Fix implementation commit: `61c772fdba2436ebeda96d02f9d5caf5ea30c1ab`; all edits remain on the existing
   feature branch, with no propagation to beta/main or runtime.
 - Small follow-up JSON receipts, verified after copy:
