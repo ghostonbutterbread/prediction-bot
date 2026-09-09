@@ -232,6 +232,70 @@ def load_indexed_collector_rows(
             yield dict(row)
 
 
+def load_indexed_collector_rows_reverse(
+    index_path: Path, manifest_path: Path, *, max_rows: int | None = None,
+) -> Iterator[dict[str, Any]]:
+    """Yield newest committed raw rows first without materializing the archive.
+
+    Archive row number/locator order, rather than a producer timestamp, defines
+    newest.  The entire compact checkpoint is verified before the first raw
+    hydration so a checksum-consistent malformed index cannot influence a
+    bounded newest-row query.
+    """
+    if max_rows is not None and max_rows <= 0:
+        raise ValueError("max_rows must be positive")
+    manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    _validate_manifest(manifest)
+    if manifest.get("schema_version") != 2:
+        raise ValueError("legacy replay index does not support reverse committed reads")
+    checked_index = Path(index_path)
+    _verify_index_path(checked_index, manifest)
+    source_path = Path(str(manifest.get("source_path") or ""))
+    if not source_path.is_file():
+        raise FileNotFoundError(source_path)
+    yielded = 0
+    with source_path.open("rb") as source, checked_index.open("rb") as index:
+        _verify_archive(source, manifest)
+        _verify_index_extent(index, manifest)
+        for line in _iter_committed_index_lines_reverse(index, int(manifest["committed_index_bytes"])):
+            entry = json.loads(line)
+            # _verify_index_extent already performed structural validation; keep
+            # this local guard for future callers/refactors of the iterator.
+            _validate_locator(entry, manifest)
+            source.seek(int(entry["byte_offset"]))
+            payload = source.read(int(entry["byte_length"]))
+            if hashlib.sha256(payload).hexdigest() != entry.get("payload_sha256"):
+                raise ValueError("raw collector payload differs from replay index")
+            row = json.loads(payload)
+            expected = _index_entry(row, row_number=entry["row_number"], byte_offset=entry["byte_offset"], payload=payload)
+            identity_fields = ("market_id", "shared_candidate_id", "shared_snapshot_id", "observed_at")
+            if expected is None or any(expected[key] != entry.get(key) for key in identity_fields):
+                raise ValueError("raw collector row does not match replay index row identity")
+            yield dict(row)
+            yielded += 1
+            if max_rows is not None and yielded >= max_rows:
+                return
+
+
+def _iter_committed_index_lines_reverse(index: Any, extent: int) -> Iterator[bytes]:
+    """Yield newline-terminated compact index rows backwards within an extent."""
+    position, trailing = extent, b""
+    while position:
+        size = min(1024 * 1024, position)
+        position -= size
+        index.seek(position)
+        block = index.read(size)
+        parts = block.split(b"\n")
+        if trailing:
+            parts[-1] += trailing
+        trailing = parts[0]
+        for line in reversed(parts[1:]):
+            if line:
+                yield line + b"\n"
+    if trailing:
+        yield trailing + b"\n"
+
+
 def _index_entry(row: Mapping[str, Any], *, row_number: int, byte_offset: int, payload: bytes) -> dict[str, Any] | None:
     if shared_candidate_identity_mismatch(row):
         return None

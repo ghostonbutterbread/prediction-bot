@@ -645,9 +645,25 @@ def _source_router_decision(
         candidate_row["predicted_outcome"] = "YES"
         candidate_row["source_router_candidate_outcome_default"] = "market_yes_event"
     scoreboard_path = _source_reliability_scoreboard_path(lane)
+    direct_history_provenance: dict[str, Any] | None = None
     try:
-        strict_rows = _load_compatible_strict_scorecard_rows(scoreboard_path) if scoreboard_path else None
-    except ValueError as error:
+        direct_history = _direct_source_history_parameters(lane)
+        if direct_history is not None:
+            from bot.weather.source_router_direct_history import load_direct_strict_source_history
+            direct = load_direct_strict_source_history(
+                **direct_history, as_of_decision_time=_optional_text(candidate_row.get("observed_at")),
+            )
+            strict_rows = direct.scorecard_rows
+            direct_history_provenance = {
+                "mode": "committed_index_direct_read",
+                "accepted_limit": direct_history["accepted_limit"],
+                "counts": direct.counts,
+                "index_manifest_sha256": direct.index_manifest_sha256,
+                "resolution_sha256": direct.resolution_sha256,
+            }
+        else:
+            strict_rows = _load_compatible_strict_scorecard_rows(scoreboard_path) if scoreboard_path else None
+    except (OSError, ValueError) as error:
         return _strict_scorecard_verification_failed_decision(baseline, signal, scoreboard_path, detail=str(error))
     # Only the exact strict auto-promotion handoff is verified here. Existing
     # legacy scoreboards retain their historical loader and behavior unchanged.
@@ -722,8 +738,28 @@ def _source_router_decision(
             "source_observations": confidence_row.get("source_observations") or [],
             "data_quality": confidence_row.get("data_quality") or {},
             "scoreboard_path": scoreboard_path,
+            "direct_history": direct_history_provenance,
             "decision_contract": "shadow_lane_recommendation_only_no_accounting_mutation",
         },
+    }
+
+
+def _direct_source_history_parameters(lane: _LaneDefinition) -> dict[str, Any] | None:
+    """Read explicit direct-history paths; never infer persistent evidence roots."""
+    keys = ("collector_replay_index_path", "collector_replay_manifest_path", "strict_resolutions_path")
+    values = {key: _optional_text(lane.parameters.get(key)) for key in keys}
+    if not any(values.values()):
+        return None
+    if not all(values.values()):
+        raise ValueError("direct Source Router history requires index, manifest, and strict resolutions paths")
+    limit = lane.parameters.get("history_row_limit", 100)
+    if type(limit) is not int or limit <= 0:
+        raise ValueError("direct Source Router history_row_limit must be a positive integer")
+    return {
+        "index_path": values["collector_replay_index_path"],
+        "manifest_path": values["collector_replay_manifest_path"],
+        "strict_resolutions_path": values["strict_resolutions_path"],
+        "accepted_limit": limit,
     }
 
 

@@ -5,11 +5,36 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from bot.collector_replay_index import build_collector_replay_index, load_indexed_collector_rows, update_collector_replay_index
+from bot.collector_replay_index import (
+    build_collector_replay_index, load_indexed_collector_rows,
+    load_indexed_collector_rows_reverse, update_collector_replay_index,
+)
 from bot.prediction_lab_collect import PredictionLabCollectorDaemon
 
 
 class CollectorReplayIndexTests(unittest.TestCase):
+    def test_reverse_reader_returns_only_committed_rows_newest_first(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            raw_path, index_path, manifest_path = (
+                root / "market_snapshots.jsonl", root / "replay_index.jsonl", root / "replay_index.manifest.json",
+            )
+            rows = [
+                {"run_id": f"run-{number}", "market_id": f"KX{number}", "observed_at": f"2026-07-{number:02}T12:00:00+00:00"}
+                for number in range(1, 4)
+            ]
+            raw_path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+            build_collector_replay_index(raw_path, index_path, manifest_path)
+            frozen_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            with raw_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"run_id": "future", "market_id": "KXFUTURE", "observed_at": "2026-08-01T12:00:00+00:00"}) + "\n")
+
+            self.assertEqual(
+                list(load_indexed_collector_rows_reverse(index_path, manifest_path, max_rows=2)),
+                [rows[2], rows[1]],
+            )
+            self.assertEqual(json.loads(manifest_path.read_text(encoding="utf-8")), frozen_manifest)
+
     def test_index_references_raw_rows_without_copying_nested_payload_or_outcomes(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

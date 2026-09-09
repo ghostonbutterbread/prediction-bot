@@ -1,7 +1,7 @@
 # Indexed SourceWriter artifacts: implementation specification
 
 ## Status and ownership
-- Status: **incomplete tested prerequisite checkpoint; NOT merge-ready**. Collector committed-prefix foundation implemented; pointer-backed SourceWriter, both consumers, authoritative binding and full baseline/router parity remain pending.
+- Status: **direct-history implementation in progress; NOT merge-ready**. The prior broad pointer-backed SourceWriter scope was superseded on 2026-09-09 by the owner's narrower requirement: Source Router reads the newest 100 qualified observations from collector evidence through its committed index, without writing a copied history dataset.
 - Owner: Hermes parent; implementation delegated to one builder.
 - Canonical spec: this branch-local dossier. Durable accepted contract belongs in `docs/architecture/persistent-storage-contract.md`.
 - Branch: `feat/sourcewriter-indexed-artifacts`; worktree `/home/ryushe/worktrees/prediction-bot-sourcewriter-indexed-artifacts`.
@@ -84,6 +84,62 @@ PYTHONPATH="$R/guard" "$P" "$R/index_probe.py" --code-root "$W" --storage-root "
 The RED command describes the actual pre-fix execution, not an expectation that
 it will still fail on the fixed branch. Resource probes require a fresh label
 for repeat execution, as their output directories are exclusive-create.
+
+## Direct indexed-history scope (2026-09-09)
+
+The user replaced the broad persisted-SourceWriter migration with this bounded
+runtime contract:
+
+1. The Source Router takes explicit collector replay-index path, replay-manifest
+   path, finalized strict-resolution path, and `history_row_limit` (default 100)
+   lane parameters. It never guesses storage locations.
+2. It verifies the whole committed collector checkpoint, walks compact locators
+   newest-to-oldest in committed archive order, and hydrates rows only until it
+   has the newest 100 sanitized replay inputs. It does not use timestamp order
+   as a locator order and does not materialize collector/history/replay/outcome
+   datasets.
+3. It applies the existing sanitizer, independent authoritative binding, strict
+   source proof, decision-time chronology predicate, global duplicate collapse,
+   and scorecard aggregation in memory. Pending, unresolved, unusable, ambiguous,
+   and VOID evidence cannot become scorecard samples; incorrect eligible rows
+   remain in denominators.
+4. Existing V2 generated scorecard and legacy non-strict scoreboard paths remain
+   unchanged. V1 generated strict scorecards continue to reject. Direct mode
+   fails closed on incomplete configuration, invalid checkpoint/raw evidence,
+   invalid/missing decision cutoff, or resolution errors.
+5. No config/service/scheduler/lane activation is part of this branch. An owner
+   supplies the three explicit evidence paths in an ignored fresh-cohort paper
+   configuration only after review and merge.
+
+The prior full-copy generation pipeline remains a legacy compatibility path; it
+is deliberately not invoked by direct mode. Full historical accounting parity
+for raw rows omitted before indexing is out of scope for this narrower router
+feature and remains impossible with the accepted-only index format.
+
+### Direct implementation evidence (uncommitted review-fix checkpoint)
+
+- Router wiring uses only explicit `collector_replay_index_path`,
+  `collector_replay_manifest_path`, and `strict_resolutions_path` lane
+  parameters. The existing generated scorecard remains the fallback where no
+  direct tuple is configured.
+- The reader evaluates replay sanitization, finalized binding, strict source
+  proof, and the candidate decision-time boundary before the newest-window
+  cutoff, then collapses the selected independent observations and uses the
+  existing scorecard aggregation helper. The focused router test compares
+  legacy and direct action/direction under one sealed fixture.
+- Review `deleg_8a38b678` found two P1s and a P2. The worktree now normalizes
+  missing/tampered evidence to the router's verification SKIP, streams and
+  re-attests one stable strict-resolution receipt instead of hash-then-reread,
+  and retains only first-record plus ambiguity state per duplicated resolution
+  market. Re-review `deleg_1ec922e9` identified a same-inode/same-length rewrite
+  gap; the reader now also rejects changed descriptor/path mtime or ctime, with
+  a focused regression. Final re-review `deleg_89f5387c` found no concrete
+  remaining issue in that fix.
+- Isolated final full-suite receipt: `1136` tests, `0` failures/errors, `7`
+  skipped, `78.551s`; command used a fresh `PREDICTION_BOT_COLLECTOR_ROOT`,
+  project-first `PYTHONPATH`, and temporary `TMPDIR`. The compact receipt is
+  `derived_reports/sourcewriter_indexed_artifacts/direct-history-reviewfix/final-full-suite.json`.
+  It proves regression coverage, not production activation.
 
 ## Checkpoint evidence and exact resume point
 
@@ -171,30 +227,19 @@ are retained TEMP-root receipt helpers, not committed final acceptance harnesses
 The committed index regressions run from a disposable source export without Git.
 The required complete SourceWriter two-codebase harness remains to be written.
 
-### Remaining work, in dependency order (merge remains blocked)
+### Remaining direct-scope merge gates
 
-1. Add collector-owned locators/diagnostics for rejected raw rows so exporter
-   acceptance/rejection **reasons**, pending and unusable accounting stay exact.
-   Existing accepted-row iterator and invalid counts are insufficient. Add an
-   explicit verified relocation and legacy-index checkpoint migration contract;
-   current legacy updates fail closed instead of silently acquiring trust.
-2. Pin an independent resolution receipt/extent. Preserve the owning binder's
-   exact decision identity, conflict/late/VOID handling, and sanitization logic;
-   implement bounded iterable/external-memory export, binding, materialization
-   and global collapse without a second learning policy or raw payload exports.
-3. Add explicitly versioned pointer-backed promotion and BOTH real consumers
-   (`weather/source_history_manifest.py` and verified strict-scorecard loading
-   in `auto_source_router_promotion.py`); keep V2 generation compatibility and
-   V1 rejection. Pin receipt hashes, generation reuse and atomic `current`.
-4. Implement the committed full baseline537c626/candidate parity harness on
-   identical sealed collector + independent resolver + decision timelines.
-   Exercise actual router YES/NO/wrong/pending/unusable/duplicate/contradictory
-   and equal-time cases, all row identities/reasons, append/full equivalence.
-   Require an empty full-pipeline semantic diff, not this index-only receipt.
-5. Measure complete SourceWriter baseline/candidate resource behavior with
-   large irrelevant payloads; then full isolated suite, independent review and
-   narrow fixes/re-review. Parent alone may integrate after every gate passes;
-   this builder must not merge/push/modify beta.
+1. Expand focused direct-history tests to cover the 100-accepted cutoff across
+   sanitizer rejections, unresolved/ambiguous/VOID outcomes, strict-proof
+   failures, equal-time chronology exclusions, raw tampering, and frozen-prefix
+   append behavior; compare the direct scorecard/router result to the existing
+   writer under the same selected window.
+2. Run the isolated full suite with a temporary collector root and socket guard,
+   then record machine-readable focused/full/router-parity/resource receipts.
+3. Complete independent read-only review, resolve/re-review concrete findings,
+   update this dossier with the implementation SHA and exact path handoff, and
+   commit the coherent feature checkpoint. Parent alone decides whether to merge
+   it into beta; no activation or push belongs to this worktree.
 
 ## Merge and activation
 Before merge, commit implementation plus updated dossier containing exact commands/receipts, immutable baseline and implementation SHAs, review decision, parity verdict and remaining operational gates. Parent verifies artifacts and beta ancestry/status, preserves unrelated migration handoff, merges locally only if all correctness/resource gates pass, and reruns beta tests. Remove temporary dossier on integration; retain durable format contract and reproducible tests.

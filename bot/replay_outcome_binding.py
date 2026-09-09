@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections import Counter, defaultdict
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -143,26 +143,28 @@ class _ResolutionIndex:
 def _index_strict_resolutions(
     rows: Iterable[tuple[int, Mapping[str, Any] | None, bytes]],
 ) -> tuple[_ResolutionIndex, dict[str, int]]:
-    by_market_id: dict[str, list[tuple[int, Mapping[str, Any] | None, bytes]]] = defaultdict(list)
+    candidates: dict[str, tuple[int, Mapping[str, Any] | None, bytes]] = {}
+    ambiguous_counts: Counter[str] = Counter()
     stats: Counter[str] = Counter()
     for line_number, row, raw_line in rows:
         stats["records_seen"] += 1
         market_id = row.get("market_id") if isinstance(row, Mapping) else None
-        if isinstance(market_id, str) and market_id:
-            by_market_id[market_id].append((line_number, row, raw_line))
-        else:
+        if not isinstance(market_id, str) or not market_id:
             stats["invalid_records"] += 1
+            continue
+        if market_id in ambiguous_counts:
+            ambiguous_counts[market_id] += 1
+            continue
+        if market_id in candidates:
+            candidates.pop(market_id)
+            ambiguous_counts[market_id] = 2
+            continue
+        candidates[market_id] = (line_number, row, raw_line)
 
     accepted: dict[str, dict[str, Any]] = {}
-    ambiguous_market_ids: set[str] = set()
+    ambiguous_market_ids = set(ambiguous_counts)
     invalid_market_ids: set[str] = set()
-    for market_id, candidates in by_market_id.items():
-        if len(candidates) != 1:
-            ambiguous_market_ids.add(market_id)
-            stats["ambiguous_market_ids"] += 1
-            stats["ambiguous_resolution_records"] += len(candidates)
-            continue
-        line_number, row, raw_line = candidates[0]
+    for market_id, (line_number, row, raw_line) in candidates.items():
         normalized = _normalize_strict_resolution(row, market_id)
         if normalized is None:
             invalid_market_ids.add(market_id)
@@ -174,6 +176,8 @@ def _index_strict_resolutions(
             "raw_row_sha256": hashlib.sha256(raw_line).hexdigest(),
         }
         stats["accepted_records"] += 1
+    stats["ambiguous_market_ids"] = len(ambiguous_market_ids)
+    stats["ambiguous_resolution_records"] = sum(ambiguous_counts.values())
     return _ResolutionIndex(accepted, ambiguous_market_ids, invalid_market_ids), {
         key: int(stats[key])
         for key in ("records_seen", "accepted_records", "invalid_records", "ambiguous_market_ids", "ambiguous_resolution_records")
