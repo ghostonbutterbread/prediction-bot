@@ -1,7 +1,7 @@
 # Indexed SourceWriter artifacts: implementation specification
 
 ## Status and ownership
-- Status: **direct-history implementation in progress; NOT merge-ready**. The prior broad pointer-backed SourceWriter scope was superseded on 2026-09-09 by the owner's narrower requirement: Source Router reads the newest 100 qualified observations from collector evidence through its committed index, without writing a copied history dataset.
+- Status: **verified local implementation checkpoint; ready for parent integration review, NOT merged or activated**. The prior broad pointer-backed SourceWriter scope was superseded on 2026-09-09 by the owner's narrower requirement: Source Router reads the newest 100 qualified observations from collector evidence through its committed index, without writing a copied history dataset.
 - Owner: Hermes parent; implementation delegated to one builder.
 - Canonical spec: this branch-local dossier. Durable accepted contract belongs in `docs/architecture/persistent-storage-contract.md`.
 - Branch: `feat/sourcewriter-indexed-artifacts`; worktree `/home/ryushe/worktrees/prediction-bot-sourcewriter-indexed-artifacts`.
@@ -116,7 +116,7 @@ is deliberately not invoked by direct mode. Full historical accounting parity
 for raw rows omitted before indexing is out of scope for this narrower router
 feature and remains impossible with the accepted-only index format.
 
-### Direct implementation evidence (uncommitted review-fix checkpoint)
+### Direct implementation evidence (local checkpoint `2d45eec`)
 
 - Router wiring uses only explicit `collector_replay_index_path`,
   `collector_replay_manifest_path`, and `strict_resolutions_path` lane
