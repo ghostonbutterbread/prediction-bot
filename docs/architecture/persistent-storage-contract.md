@@ -63,6 +63,72 @@ independent market settlement
 
 Source observations must precede their authoritative settlement to become predictive history. A later decision may use only evidence already available at its immutable cutoff. Observation-only, unavailable, future-dated, or contradictory source targets are not forecasts. VOID releases synthetic reservations without being counted as a directional win/loss or economic P&L.
 
+## Collector replay-index committed prefixes (manifest version 2)
+
+This is the indexed-artifact foundation, **not yet a pointer-backed SourceWriter
+promotion contract**. The collector remains the only live index writer through
+its existing optional `prediction_lab_collect` hook. No worker is enabled by
+this change. The compact row schema remains version 1; the manifest is version
+2. Do not confuse these versions with SourceWriter generation versions.
+
+The version-2 manifest commits `committed_index_bytes` and `index_sha256` over
+exactly that compact-index prefix, `indexed_source_bytes` over complete raw
+JSONL rows, `source_rows_seen`, indexed/invalid counts, and raw archive device /
+inode identity. Each accepted-row locator retains byte offset/length, physical
+row number, full payload digest, market, candidate, snapshot, and observation
+identity. Initial and subsequent passes defer unterminated records, including
+parseable JSON lacking a newline. Each pass freezes its starting raw size;
+concurrent appends wait for the next pass. The deterministic append chain
+starts at SHA-256(empty), then folds SHA-256(previous-chain bytes + row-digest
+bytes) for **every complete raw row**, including invalid rows. Full build and
+append/update therefore produce identical compact-index bytes and chain over
+the same final raw extent. `source_sha256` is the whole complete-prefix digest
+only when computed from byte zero; after an append it is null, not a claimed
+whole-file hash.
+
+Writers serialize through the existing file-lock primitive. The first build
+publishes an empty checkpoint, then extends it; updates append/fsync compact
+rows before atomically replacing the manifest using `atomic_write_json`.
+Interrupted publication leaves a prior readable prefix. Retry verifies that
+prefix and truncates only an unpublished **derived index suffix**, never raw
+evidence. An unchanged update retains exact manifest bytes. This is a
+process-interruption guarantee, not a new power-loss or filesystem durability
+guarantee; the existing lock/atomic helpers retain their existing platform
+limitations.
+
+Readers may retain an exact manifest receipt and continue using its committed
+prefix after later appends. A future generation must seal/hash that receipt in
+its own immutable contract, rather than follow the mutable collector manifest.
+Reading verifies the committed compact digest before filtering/hydration, then
+validates strictly increasing row numbers and ordered non-overlapping byte
+ranges across the complete compact prefix before any filtered/limited result or
+update, then uses bounded offset/length raw reads and verifies payload plus full
+routing identity. Missing/truncated/replaced raw archives, changed selected payloads,
+wrong index paths, unsupported schemas, and invalid locators fail closed.
+Device/inode identity is local to the archive filesystem; relocation is **not
+supported yet**. There is no heuristic search or fallback to another archive.
+
+Memory is bounded by the largest individual decoded raw record plus a fixed
+compact hashing buffer, not by total raw archive size (filter sets are
+caller-owned). Updates read the new raw suffix but verify/hash the compact
+index prefix. Each load performs a bounded digest pass, a bounded structural
+validation pass, and a filtered hydration pass over the compact index (the
+last may stop early); updates validate their prior prefix in the same way and
+hash the extended compact index. None of these passes rereads the full raw
+archive. Verification is repeated **per load**, not cached per generation or
+process. This is not computationally incremental
+SourceWriter or a per-decision verification cache.
+
+Legacy collector manifest version 1 remains read-compatible for its original
+replay use, but cannot be silently extended/upgraded into a committed
+checkpoint: update reports an explicit offline migration prerequisite. Existing
+V2 copy-backed SourceWriter generations and V1 promotion rejection remain
+unchanged. Migration, verified relocation, rejected-row locators, bounded
+resolution binding/materialization/collapse, and both pointer-backed consumers
+are remaining integration gates. In particular, invalid-row counts alone do
+not preserve exporter rejection reasons; SourceWriter must not treat the
+accepted-row-only index iterator as a complete source archive.
+
 ## Composition diagnostics
 
 `paper_shadow_lane_compose_replay.py` and `paper_shadow_lane_composition_sweep.py` now default to:

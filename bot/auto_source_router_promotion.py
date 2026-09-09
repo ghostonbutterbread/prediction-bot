@@ -236,6 +236,12 @@ def _materialize_strict_finalized_scorecard(source_path: Path, output_path: Path
     """
     source_bytes = source_path.read_bytes()
     rows = [json.loads(line) for line in source_bytes.splitlines() if line.strip()]
+    output_path.write_bytes(b"".join(_canonical_bytes(row) for row in strict_scorecard_rows_from_history(rows, source_sha256=hashlib.sha256(source_bytes).hexdigest())))
+    return output_path
+
+
+def strict_scorecard_rows_from_history(rows: list[Mapping[str, Any]], *, source_sha256: str) -> list[dict[str, Any]]:
+    """Aggregate collapsed strict rows into the router's existing scorecard shape."""
     slices: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
     for row in rows:
         if not isinstance(row, dict):
@@ -260,7 +266,6 @@ def _materialize_strict_finalized_scorecard(source_path: Path, output_path: Path
         })
 
     scorecard_rows: list[dict[str, Any]] = []
-    source_sha256 = hashlib.sha256(source_bytes).hexdigest()
     for (source_id, city_id, market_kind, contract_shape, source_name), aggregate in sorted(slices.items()):
         sample_count = int(aggregate["sample_count"])
         scorecard_rows.append({
@@ -284,8 +289,7 @@ def _materialize_strict_finalized_scorecard(source_path: Path, output_path: Path
                 "settled_observations": sorted(aggregate["settled_observations"], key=lambda value: value["settlement_ts"]),
             },
         })
-    output_path.write_bytes(b"".join(_canonical_bytes(row) for row in scorecard_rows))
-    return output_path
+    return scorecard_rows
 
 
 def _rebase_staged_metadata_paths(staging_dir: Path, generation_dir: Path) -> None:
