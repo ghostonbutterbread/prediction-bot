@@ -1,8 +1,8 @@
 # Source Router distinct-event history budgets
 
-Status: implemented checkpoint; independent review and full-suite run pending; NOT merged, pushed, or activated.
+Status: implemented and tested; narrow source-name repair independently ACCEPTED; NOT merged, pushed, or activated.
 Branch/worktree: `fix/source-router-distinct-history-buckets` / `/home/ryushe/worktrees/prediction-bot-source-router-distinct-history-buckets`.
-Implementation checkpoint: `3eadc0a0262b1b99934abfafb8a8fed32dc110c3`; current tip includes a later dossier-only handoff commit. Review both the implementation and later handoff changes.
+Latest implementation checkpoint: `f3736fb54a0d193146c93e3dfba93e5efa26adf1`, following base implementation `3eadc0a0262b1b99934abfafb8a8fed32dc110c3`. Current tip includes a later dossier-only review receipt.
 Base/target: beta `696900651abbd108f4285dee45ceee09cdf77d28` / beta, never main.
 Owner: parent Hermes, Discord thread 1547354226093461644. Kanban mutation remains blocked by the known child-context misclassification; do not bypass its guard.
 
@@ -14,7 +14,7 @@ The direct-history module is beta-owned and absent from main. Repository AGENTS 
 - Canonical lane config `history_events_per_bucket` (default 100); `history_row_limit` is a compatibility alias with corrected event-unit semantics. Both must be positive integers; conflicting values fail closed.
 - Python API retains `accepted_limit`; its documented meaning is now the per-bucket event budget, not a raw-row limit.
 - Each bucket independently selects newest eligible event units in committed archive order. The reader scans the committed archive and retains the earliest eligible source-as-of / captured-observation representative of each selected event, without choosing by outcome.
-- Canonical weather event identity is strict city + target date + measurement kind. This prevents optional event-ticker metadata from splitting one physical event. Event ticker/id and exact contract ID remain labeled fallbacks when the canonical fields are absent.
+- Canonical weather event identity is strict city + target date + measurement kind. This prevents optional event-ticker metadata from splitting one physical event. The helper supports event ticker/id and contract-ID fallbacks when canonical fields are absent; current ledger propagation supplies event_ticker, not event_id. No separate event_id propagation is claimed.
 - Shape buckets remain separate. Opposite threshold contracts and repeated polls of one weather event within one bucket count once. Existing proof/implied-side support is unchanged; this does NOT add range-contract outcome inference.
 - Memory scales with retained event budget × discovered bucket count, not poll count. Coverage reports populated buckets, selected units, shortfall, representative-market count, event/contract-only units and source date bounds. It does not claim exhaustive available-unit counts or invent history for absent buckets.
 - Actual lane decision provenance includes selection-unit meaning, canonical limit, per-bucket coverage, counts and evidence hashes.
@@ -27,7 +27,7 @@ The direct-history module is beta-owned and absent from main. Repository AGENTS 
 - Existing direct-history fixture dates corrected to match their three distinct market/event dates rather than falsely sharing one weather target date. Writer parity still passes on that valid distinct-event cohort.
 - Cleanup is separately completed: parent readback verified all 45 retirement targets absent and all 324 preserved bundle hashes matching. Receipt: `source_router_retention/cleanup_20260909T230326Z_ae373a42/REPORT.md` under derived_reports.
 
-## Source-name aggregation review repair (verified checkpoint; independent re-review pending)
+## Source-name aggregation review repair (independently accepted)
 - Confirmed defect: direct selection retained two event units for `nws`, but the legacy scorer grouped `NWS` and `National Weather Service` separately; the four-dimensional reliability lookup overwrote one score and returned sample_count 1.
 - Direct-history-only repair: after event/representative selection, copy selected rows with the lexicographically smallest selected display name per bucket before collapse/scoring. No change to event identity, selection, raw files, legacy scorer/table behavior, configuration, or activation.
 - Regression: `test_source_router_history_buckets.DistinctHistoryBucketTests.test_display_name_changes_preserve_combined_lookup_evidence` exercises committed temporary history through actual `SourceReliabilityTable.lookup`. Swapping the two display names preserves days 2/3, sample_count 2, combined accuracy 0.5, and both provenance observations; an older alphabetically earlier label cannot enter the budget or select the canonical name. Same-name control also passes.
@@ -36,7 +36,7 @@ The direct-history module is beta-owned and absent from main. Repository AGENTS 
 - Parent full-suite rerun after repair: 1145 tests in 36.742 seconds, OK with 7 skipped; exit code 0. Exact guarded runner above with `--full`; receipt `full_after_name_fix.log` in the external router_bucket_fix report directory. Independent re-review dispatched as `deleg_c523fead`. No merge, push, or deployment.
 
 ## Open gates / exact resume
-1. Read independent re-review result (`deleg_c523fead`) for the source-name repair. Original review disposition is recorded externally in `router_bucket_fix/review_disposition.md`; event-metadata and alias-conflict defects already have passing regressions.
+1. Independent re-review `deleg_c523fead`: ACCEPT, no remaining correctness findings in the narrow repair. Nine focused tests passed; independent actual lookup confirmed sample_count 2 / accuracy 0.5 and unchanged selected provenance and fixture bytes. Original review disposition is recorded externally in `router_bucket_fix/review_disposition.md`; event-metadata and alias-conflict defects already have passing regressions.
 2. Add explicit city/kind/shape separation and representative/cutoff coverage where the review finds gaps; verify actual lane provenance assertions.
 3. Before any runtime activation, benchmark the full committed-history scan on retained actual evidence. New semantics deliberately remove the old global early exit; per-decision full-history hydration may be too expensive. Do not call this production-latency-ready without a measured budget and a verified indexed/batched read strategy if needed. No actual archive benchmark has run for this checkpoint.
 4. Full multi-month lane P&L remains a separate experiment with existing replay clock/price provenance blockers. No live-readiness or P&L improvement claim follows from these unit tests.
