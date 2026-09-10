@@ -165,6 +165,35 @@ class PaperShadowLaneComposeReplayTests(unittest.TestCase):
         self.assertEqual(result["summary"]["pnl"]["winning_buy_rows"], 1)
         self.assertAlmostEqual(result["summary"]["pnl"]["total_pnl_usd"], 2.6923)
 
+    def test_wallet_intent_fails_closed_without_selected_side_price_evidence(self):
+        stable = _lane_row(policy="control_stable", candidate_id="wallet-side-price", market_id="KXWALLET-SIDE-PRICE", action="BUY_YES", size=5.0, yes_price=0.40)
+        router = _lane_row(policy="shadow_source_router", candidate_id="wallet-side-price", market_id="KXWALLET-SIDE-PRICE", action="BUY_NO", size=5.0, model_probability=0.30)
+        price = _lane_row(policy="shadow_price", candidate_id="wallet-side-price", market_id="KXWALLET-SIDE-PRICE", action="BUY_YES", size=5.0)
+        price["entry_price"] = 0.40  # Price lane's recorded YES price is not NO-side evidence.
+        result = compose_lane_replay(lane_rows=[stable, router, price], config={"composition": {"name": "no_side_price", "base_lane": "control_stable", "action_lane": "shadow_source_router", "price_lane": "shadow_price", "sizing_lane": "control_stable"}})
+        self.assertEqual(result["composition_rows"][0]["entry_price"], 0.40)
+        self.assertEqual(result["wallet_intents"], [])
+
+    def test_wallet_intent_fails_closed_when_required_veto_has_mismatched_snapshot(self):
+        stable = _lane_row(policy="control_stable", candidate_id="wallet-veto-identity", market_id="KXWALLET-VETO-IDENTITY", action="BUY_YES", size=5.0, yes_price=0.40)
+        veto = _lane_row(policy="shadow_veto", candidate_id="wallet-veto-identity", market_id="KXWALLET-VETO-IDENTITY", action="BUY_YES", size=5.0, yes_price=0.40)
+        veto["shared_snapshot_id"] = "wrong-snapshot"
+        result = compose_lane_replay(lane_rows=[stable, veto], config={"composition": {"name": "veto_identity", "base_lane": "control_stable", "action_lane": "control_stable", "price_lane": "control_stable", "sizing_lane": "control_stable", "vetoes": [{"lane": "shadow_veto", "mode": "require_agreement", "required": True}]}})
+        self.assertEqual(result["wallet_intents"], [])
+
+    def test_wallet_intent_fails_closed_when_declared_action_owner_falls_back(self):
+        stable = _lane_row(policy="control_stable", candidate_id="wallet-action-owner", market_id="KXWALLET-ACTION-OWNER", action="BUY_YES", size=5.0, yes_price=0.40)
+        result = compose_lane_replay(lane_rows=[stable], config={"composition": {"name": "action_owner_fallback", "base_lane": "control_stable", "action_lane": "missing_action", "price_lane": "control_stable", "sizing_lane": "control_stable", "fallback_to_base": True}})
+        self.assertEqual(result["composition_rows"][0]["action"], "BUY_YES")
+        self.assertEqual(result["wallet_intents"], [])
+
+    def test_wallet_intent_fails_closed_without_action_owner_probability(self):
+        stable = _lane_row(policy="control_stable", candidate_id="wallet-probability-owner", market_id="KXWALLET-PROBABILITY-OWNER", action="BUY_YES", size=5.0, yes_price=0.40)
+        action = _lane_row(policy="shadow_action", candidate_id="wallet-probability-owner", market_id="KXWALLET-PROBABILITY-OWNER", action="BUY_YES", size=5.0, yes_price=0.40)
+        action.pop("model_probability")
+        result = compose_lane_replay(lane_rows=[stable, action], config={"composition": {"name": "probability_owner", "base_lane": "control_stable", "action_lane": "shadow_action", "price_lane": "shadow_action", "sizing_lane": "control_stable"}})
+        self.assertEqual(result["wallet_intents"], [])
+
     def test_wallet_intent_fails_closed_without_configured_price_lane(self):
         stable = _lane_row(policy="control_stable", candidate_id="wallet-price-lane", market_id="KXWALLET-PRICE-LANE", action="BUY_YES", size=5.0, yes_price=0.40)
         result = compose_lane_replay(

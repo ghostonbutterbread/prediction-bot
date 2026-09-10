@@ -164,6 +164,7 @@ def _compose_candidate(
     action = _action(action_row)
     side = _side_from_action(action)
     veto_reason = _veto_reason(lane_map, composition, selected_side=side)
+    veto_rows = _selected_veto_rows(lane_map, composition)
     if veto_reason:
         action = "SKIP"
         side = None
@@ -242,6 +243,7 @@ def _compose_candidate(
         base_row=base_row,
         sizing_row=sizing_row,
         price_row=price_row,
+        veto_rows=veto_rows,
         future_inputs=future_inputs,
     )
     if wallet_intent is not None:
@@ -257,17 +259,32 @@ def _sealed_wallet_intent(
     base_row: Mapping[str, Any],
     sizing_row: Mapping[str, Any],
     price_row: Mapping[str, Any],
+    veto_rows: tuple[tuple[Mapping[str, Any], Mapping[str, Any]], ...],
     future_inputs: Mapping[str, Any],
 ) -> dict[str, Any] | None:
     """Create an outcome-free wallet input only when all decision-time fields exist."""
     action = str(composed_row.get("action") or "")
+    selected_side = _side_from_action(action)
+    configured_action_lane = str(composition.get("action_lane") or "")
+    configured_sizing_lane = str(composition.get("sizing_lane") or "")
     configured_price_lane = str(composition.get("price_lane") or "")
-    if action not in {"BUY_YES", "BUY_NO"} or _first_text(_field(price_row, "policy")) != configured_price_lane or _has_outcome_like_field((action_row, base_row, sizing_row, price_row, future_inputs)) or not _matching_component_identity(base_row, action_row, sizing_row, price_row):
+    all_component_rows = (base_row, action_row, sizing_row, price_row, *(row for _, row in veto_rows))
+    if (
+        action not in {"BUY_YES", "BUY_NO"}
+        or _first_text(_field(action_row, "policy")) != configured_action_lane
+        or _first_text(_field(sizing_row, "policy")) != configured_sizing_lane
+        or _first_text(_field(price_row, "policy")) != configured_price_lane
+        or _has_outcome_like_field((all_component_rows, future_inputs))
+        or not _matching_component_identity(*all_component_rows)
+    ):
         return None
     question = _first_text(_field(action_row, "question"), _field(base_row, "question"), future_inputs.get("question"))
-    model_probability = _number(_field(action_row, "model_probability"), _field(base_row, "model_probability"))
-    confidence = _number(_field(action_row, "confidence"), _field(base_row, "confidence"))
+    model_probability = _number(_field(action_row, "model_probability"))
+    confidence = _number(_field(action_row, "confidence"))
     entry_price = _number(composed_row.get("entry_price"))
+    selected_side_price = _selected_side_price(price_row, selected_side)
+    if selected_side_price is None or entry_price != selected_side_price:
+        return None
     exchange = _first_text(_field(action_row, "exchange"), _field(base_row, "exchange"), _field(sizing_row, "exchange"), _field(price_row, "exchange"))
     route = _market_route(action_row, base_row, sizing_row, price_row)
     shared_candidate_id = _first_text(composed_row.get("shared_candidate_id"))
@@ -297,7 +314,18 @@ def _sealed_wallet_intent(
         "model_probability": model_probability,
         "confidence": confidence,
         "source_context": {"market_route": route},
-        "provenance": {"composition_name": composition["name"], "action_lane": composition["action_lane"], "price_lane": composition["price_lane"], "sizing_lane": composition["sizing_lane"], "source_decision_id": source_decision_id, "composition_sha256": hashlib.sha256(json.dumps(composition, sort_keys=True, separators=(",", ":")).encode()).hexdigest()},
+        "provenance": {
+            "composition_name": composition["name"],
+            "action_lane": composition["action_lane"],
+            "price_lane": composition["price_lane"],
+            "sizing_lane": composition["sizing_lane"],
+            "source_decision_id": source_decision_id,
+            "vetoes": [
+                {"lane": str(spec.get("lane") or ""), "mode": str(spec.get("mode") or "skip_on_conflict"), "decision_id": _first_text(_field(row, "decision_id"))}
+                for spec, row in veto_rows
+            ],
+            "composition_sha256": hashlib.sha256(json.dumps(composition, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+        },
         "non_mutating": True,
         "paper_only": True,
     }
@@ -364,6 +392,20 @@ def _veto_reason(
     return None
 
 
+def _selected_veto_rows(
+    lane_map: Mapping[str, list[Mapping[str, Any]]], composition: Mapping[str, Any]
+) -> tuple[tuple[Mapping[str, Any], Mapping[str, Any]], ...]:
+    """Return only veto rows that actually participated in the composition."""
+    selected: list[tuple[Mapping[str, Any], Mapping[str, Any]]] = []
+    for spec in composition.get("vetoes", []):
+        if not isinstance(spec, Mapping):
+            continue
+        row = _select_lane_row(lane_map, str(spec.get("lane") or ""))
+        if row is not None:
+            selected.append((spec, row))
+    return tuple(selected)
+
+
 def _normalize_composition(config: Mapping[str, Any]) -> dict[str, Any]:
     raw = config.get("composition") if isinstance(config.get("composition"), Mapping) else config
     name = str(raw.get("name") or "lane_composition")
@@ -427,6 +469,20 @@ def _composition_notional(composition: Mapping[str, Any], sizing_row: Mapping[st
         )
         or 0.0
     )
+
+
+def _selected_side_price(row: Mapping[str, Any] | None, side: str | None) -> float | None:
+    """Use a generic recorded price only when its recorded action proves its side."""
+    if row is None or side not in {"YES", "NO"}:
+        return None
+    future = _future_inputs(row)
+    ask_key = "best_yes_ask" if side == "YES" else "best_no_ask"
+    direct_quote = _number(future.get(ask_key))
+    if direct_quote is not None:
+        return direct_quote
+    if _side_from_action(_action(row)) != side:
+        return None
+    return _number(future.get("estimated_fill_price"), future.get("entry_price"), _field(row, "entry_price"), _field(row, "price"))
 
 
 def _side_price(row: Mapping[str, Any] | None, side: str | None) -> float | None:
