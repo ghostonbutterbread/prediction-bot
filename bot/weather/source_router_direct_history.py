@@ -105,7 +105,14 @@ def load_direct_strict_source_history(
                 representatives[event] = observation
             else:
                 outside_budget += 1
-    settled = [row for events in buckets.values() for row in events.values()]
+    settled = []
+    for events in buckets.values():
+        # The legacy scorer also groups by display name, unlike router lookup.
+        # Canonicalize only selected in-memory rows so a rename cannot split a
+        # four-dimensional bucket. Do this after event/representative selection;
+        # labels must neither choose events nor discard their evidence.
+        source_name = min(str(row.get('source_name') or 'unknown') for row in events.values())
+        settled.extend({**row, 'source_name': source_name} for row in events.values())
     settled.sort(key=_history_representative_key)
     accepted = {row['canonical_input_sha256'] for row in settled}
     bound_count = len(accepted)

@@ -66,6 +66,39 @@ class DistinctHistoryBucketTests(unittest.TestCase):
         self.assertEqual(coverage['shortfall'], 2)
         self.assertEqual(coverage['source_id'], 'nws')
 
+    def test_display_name_changes_preserve_combined_lookup_evidence(self):
+        from bot.weather.source_reliability import SourceReliabilityTable
+        from bot.weather.source_scoreboard import MarketContext, SourceForecastObservation
+
+        observation = SourceForecastObservation(
+            source_id='nws', source_name='NWS', forecast_temp_f=75.0,
+            actual_temp_f=None,
+            market=MarketContext(city_id='seattle_wa', market_kind='high', contract_shape='tail'),
+        )
+        for names in (('NWS', 'National Weather Service'),
+                      ('National Weather Service', 'NWS'), ('NWS', 'NWS')):
+            with self.subTest(names=names):
+                rows = [snapshot(day) for day in (1, 2, 3)]
+                for row, name in zip(rows, ('AAA outside budget', *names)):
+                    source = row['decision_artifact']['source_context']['data']['weather_source_snapshot']['sources'][0]
+                    source['source_name'] = name
+                # Selected days 2 and 3 contain one incorrect and one correct
+                # forecast. Day 1 is older and must not enter via its name.
+                rows[1]['decision_artifact']['source_context']['data']['weather_source_snapshot']['sources'][0]['forecast_high'] = 65.0
+                result = self.run_history(rows)
+                [coverage] = result.bucket_coverage
+                self.assertEqual(coverage['selected_units'], 2)
+                self.assertEqual(coverage['earliest_source_as_of'][:10], '2026-08-02')
+                self.assertEqual(coverage['latest_source_as_of'][:10], '2026-08-03')
+                stats = SourceReliabilityTable(result.scorecard_rows).lookup(observation)
+                self.assertIsNotNone(stats)
+                self.assertEqual(stats.sample_count, 2)
+                self.assertEqual(stats.direction_accuracy, 0.5)
+                [scorecard] = result.scorecard_rows
+                self.assertEqual(scorecard['source_name'], 'NWS')
+                self.assertEqual(scorecard['threshold_correct_count'], 1)
+                self.assertEqual(len(scorecard['provenance']['settled_observations']), 2)
+
     def test_each_source_gets_its_own_event_budget(self):
         rows = [snapshot(day) for day in (1, 2, 3)]
         for row in rows:
