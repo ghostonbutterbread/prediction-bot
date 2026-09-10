@@ -77,7 +77,13 @@ class DirectSourceRouterHistoryTests(unittest.TestCase):
                 row = _collector_row(market_id=f"KXHIGHSEA-26AUG{number:02}-T70")
                 row["shared_snapshot_id"] = f"snapshot-{number}"
                 row["observed_at"] = f"2026-08-0{number}T12:00:00+00:00"
-                row["decision_artifact"]["source_context"]["data"]["weather_source_snapshot"]["sources"][0]["source_as_of"] = f"2026-08-0{number}T11:54:00+00:00"
+                snapshot = row["decision_artifact"]["source_context"]["data"]["weather_source_snapshot"]
+                date = f"2026-08-{number:02}"
+                snapshot["market_date"] = date
+                snapshot["sources"][0]["source_as_of"] = f"{date}T11:54:00+00:00"
+                snapshot["sources"][0]["target_mapping"].update(
+                    market_target_date=date, source_target_date=date,
+                )
                 rows.append(row)
             _write_jsonl(archive, rows)
             # The newest raw record can be replay-sanitized, but without an
@@ -105,7 +111,13 @@ class DirectSourceRouterHistoryTests(unittest.TestCase):
                 row = _collector_row(market_id=f"KXHIGHSEA-26AUG{number:02}-T70")
                 row["shared_snapshot_id"] = f"snapshot-{number}"
                 row["observed_at"] = f"2026-08-0{number}T12:00:00+00:00"
-                row["decision_artifact"]["source_context"]["data"]["weather_source_snapshot"]["sources"][0]["source_as_of"] = f"2026-08-0{number}T11:54:00+00:00"
+                snapshot = row["decision_artifact"]["source_context"]["data"]["weather_source_snapshot"]
+                date = f"2026-08-{number:02}"
+                snapshot["market_date"] = date
+                snapshot["sources"][0]["source_as_of"] = f"{date}T11:54:00+00:00"
+                snapshot["sources"][0]["target_mapping"].update(
+                    market_target_date=date, source_target_date=date,
+                )
                 rows.append(row)
             _write_jsonl(archive, rows)
             # It has enough compact identity fields to be indexed, but not the
