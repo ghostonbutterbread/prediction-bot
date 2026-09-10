@@ -1,11 +1,12 @@
 # Composed-lane synthetic-wallet integration dossier
 
-- **Status:** feature
+- **Status:** reviewed; approved for beta merge
 - **Owner:** Hermes
 - **Branch:** `feat/composed-lane-synthetic-wallet`
 - **Base commit:** `4ca50c30c39707fd13e4b657d6299667cd761580`
-- **Intended integration target:** `main` (per repository guidance; no merge or activation is authorized by this task)
-- **Last updated:** 2026-09-02
+- **Intended integration target:** `beta`; beta integration does not activate any runtime
+- **Checkpoint commit:** `19ba1a1` (`fix: seal all composed decision inputs`)
+- **Last updated:** 2026-09-09
 - **Inspiration / canonical references:** `docs/architecture/collector-first-replay-lane-contract.md`; `scripts/paper_shadow_lane_compose_replay.py`; user request in Discord thread `1544788048519110787`.
 
 ## Intent
@@ -24,8 +25,8 @@ It remains a synthetic fixture tracer, not archive-backed parity. It does not wr
 
 ## Evidence and review
 
-- Tests and commands: `PYTHONPATH="$PWD" python3 -m unittest tests.test_composed_lane_wallet tests.test_paper_shadow_lane_compose_replay -v` — 22 passed; isolated full suite `PYTHONPATH="$PWD" python3 -m unittest discover -s tests` — 1,055 passed, 7 skipped.
-- Independent reviews: `deleg_b2d8dafe` established that the current composer is fixed-notional only; `deleg_01870599` identified shared-core/replay binding seams; `deleg_c55b10cd` found nested-outcome leakage, ambiguous resolution handling, VOID attribution, and stale dossier defects. The first three are fixed in this slice. The adapter design review (`deleg_184d2367`) required fail-closed recorded exchange/route identity; the adapter refuses missing recorded exchange rather than defaulting it, and includes every selected component in identity/outcome checks. Final review `deleg_ddddebe8` found a missing configured-price owner could be misrepresented; it is fixed and covered by a fail-closed regression test.
+- Tests and commands: `PYTHONPATH="$PWD" python3 -m unittest tests.test_composed_lane_wallet tests.test_paper_shadow_lane_compose_replay -v` — 26 passed; isolated full suite `PYTHONPATH="$PWD" python3 -m unittest discover -s tests` — 1,059 passed, 7 skipped; `python3 -m py_compile scripts/paper_shadow_lane_compose_replay.py bot/composed_lane_wallet.py`; `git diff --check`.
+- Independent reviews: `deleg_b2d8dafe` established that the current composer is fixed-notional only; `deleg_01870599` identified shared-core/replay binding seams; `deleg_c55b10cd` found nested-outcome leakage, ambiguous resolution handling, VOID attribution, and stale dossier defects. The first three are fixed in this slice. The adapter design review (`deleg_184d2367`) required fail-closed recorded exchange/route identity; the adapter refuses missing recorded exchange rather than defaulting it, and includes every selected component in identity/outcome checks. Final review `deleg_ddddebe8` found a missing configured-price owner could be misrepresented; it is fixed and covered by a fail-closed regression test. Astra 6 review (`20260909_212520_d2728b`) approved `19ba1a1` after additionally requiring selected-side price evidence, veto sealing/provenance, and exact action/sizing/price ownership without probability/confidence fallback.
 - Replay/cohort/fixture evidence: synthetic fixtures only; no historical cohort replay executed.
 - Merge/ancestry evidence: branch created from local `main` at `4ca50c3`; first checkpoint is `843a942`.
 
