@@ -23,6 +23,7 @@ def _lane_row(
     size: float | None = None,
     yes_price: float | None = None,
     no_price: float | None = None,
+    model_probability: float = 0.7,
 ) -> dict:
     future_inputs = {
         "shared_candidate_id": candidate_id,
@@ -35,11 +36,22 @@ def _lane_row(
     }
     return {
         "policy": policy,
+        "decision_id": f"{policy}:{candidate_id}",
+        "run_id": "test-run",
+        "shared_snapshot_id": "test-snapshot",
         "shared_candidate_id": candidate_id,
         "market_id": market_id,
+        "observed_at": "2026-09-01T12:00:00+00:00",
+        "question": f"Will {market_id} occur?",
+        "exchange": "kalshi",
         "action": action,
+        "confidence": 0.9,
+        "model_probability": model_probability,
         "approved_position_size_usd": size,
-        "provenance": {"future_pnl_inputs": {key: value for key, value in future_inputs.items() if value is not None}},
+        "provenance": {
+            "market_route": {"allowed": True, "handler_id": "weather"},
+            "future_pnl_inputs": {key: value for key, value in future_inputs.items() if value is not None},
+        },
     }
 
 
@@ -152,6 +164,128 @@ class PaperShadowLaneComposeReplayTests(unittest.TestCase):
         self.assertEqual(row["entry_price"], 0.65)
         self.assertEqual(result["summary"]["pnl"]["winning_buy_rows"], 1)
         self.assertAlmostEqual(result["summary"]["pnl"]["total_pnl_usd"], 2.6923)
+
+    def test_wallet_intent_fails_closed_without_selected_side_price_evidence(self):
+        stable = _lane_row(policy="control_stable", candidate_id="wallet-side-price", market_id="KXWALLET-SIDE-PRICE", action="BUY_YES", size=5.0, yes_price=0.40)
+        router = _lane_row(policy="shadow_source_router", candidate_id="wallet-side-price", market_id="KXWALLET-SIDE-PRICE", action="BUY_NO", size=5.0, model_probability=0.30)
+        price = _lane_row(policy="shadow_price", candidate_id="wallet-side-price", market_id="KXWALLET-SIDE-PRICE", action="BUY_YES", size=5.0)
+        price["entry_price"] = 0.40  # Price lane's recorded YES price is not NO-side evidence.
+        result = compose_lane_replay(lane_rows=[stable, router, price], config={"composition": {"name": "no_side_price", "base_lane": "control_stable", "action_lane": "shadow_source_router", "price_lane": "shadow_price", "sizing_lane": "control_stable"}})
+        self.assertEqual(result["composition_rows"][0]["entry_price"], 0.40)
+        self.assertEqual(result["wallet_intents"], [])
+
+    def test_wallet_intent_fails_closed_when_required_veto_has_mismatched_snapshot(self):
+        stable = _lane_row(policy="control_stable", candidate_id="wallet-veto-identity", market_id="KXWALLET-VETO-IDENTITY", action="BUY_YES", size=5.0, yes_price=0.40)
+        veto = _lane_row(policy="shadow_veto", candidate_id="wallet-veto-identity", market_id="KXWALLET-VETO-IDENTITY", action="BUY_YES", size=5.0, yes_price=0.40)
+        veto["shared_snapshot_id"] = "wrong-snapshot"
+        result = compose_lane_replay(lane_rows=[stable, veto], config={"composition": {"name": "veto_identity", "base_lane": "control_stable", "action_lane": "control_stable", "price_lane": "control_stable", "sizing_lane": "control_stable", "vetoes": [{"lane": "shadow_veto", "mode": "require_agreement", "required": True}]}})
+        self.assertEqual(result["wallet_intents"], [])
+
+    def test_wallet_intent_fails_closed_when_declared_action_owner_falls_back(self):
+        stable = _lane_row(policy="control_stable", candidate_id="wallet-action-owner", market_id="KXWALLET-ACTION-OWNER", action="BUY_YES", size=5.0, yes_price=0.40)
+        result = compose_lane_replay(lane_rows=[stable], config={"composition": {"name": "action_owner_fallback", "base_lane": "control_stable", "action_lane": "missing_action", "price_lane": "control_stable", "sizing_lane": "control_stable", "fallback_to_base": True}})
+        self.assertEqual(result["composition_rows"][0]["action"], "BUY_YES")
+        self.assertEqual(result["wallet_intents"], [])
+
+    def test_wallet_intent_fails_closed_without_action_owner_probability(self):
+        stable = _lane_row(policy="control_stable", candidate_id="wallet-probability-owner", market_id="KXWALLET-PROBABILITY-OWNER", action="BUY_YES", size=5.0, yes_price=0.40)
+        action = _lane_row(policy="shadow_action", candidate_id="wallet-probability-owner", market_id="KXWALLET-PROBABILITY-OWNER", action="BUY_YES", size=5.0, yes_price=0.40)
+        action.pop("model_probability")
+        result = compose_lane_replay(lane_rows=[stable, action], config={"composition": {"name": "probability_owner", "base_lane": "control_stable", "action_lane": "shadow_action", "price_lane": "shadow_action", "sizing_lane": "control_stable"}})
+        self.assertEqual(result["wallet_intents"], [])
+
+    def test_wallet_intent_fails_closed_without_configured_price_lane(self):
+        stable = _lane_row(policy="control_stable", candidate_id="wallet-price-lane", market_id="KXWALLET-PRICE-LANE", action="BUY_YES", size=5.0, yes_price=0.40)
+        result = compose_lane_replay(
+            lane_rows=[stable],
+            config={"composition": {"name": "missing_price_lane", "base_lane": "control_stable", "action_lane": "control_stable", "price_lane": "missing_price", "sizing_lane": "control_stable", "fallback_to_base": False}},
+        )
+        self.assertEqual(len(result["composition_rows"]), 1)
+        self.assertEqual(result["composition_rows"][0]["entry_price"], 0.40)
+        self.assertEqual(result["wallet_intents"], [])
+
+    def test_wallet_intent_fails_closed_without_recorded_exchange(self):
+        stable = _lane_row(policy="control_stable", candidate_id="wallet-exchange", market_id="KXWALLET-EXCHANGE", action="BUY_YES", size=5.0, yes_price=0.40)
+        stable.pop("exchange")
+        result = compose_lane_replay(
+            lane_rows=[stable],
+            config={"composition": {"name": "missing_exchange", "base_lane": "control_stable", "action_lane": "control_stable", "price_lane": "control_stable", "sizing_lane": "control_stable"}},
+        )
+        self.assertEqual(len(result["composition_rows"]), 1)
+        self.assertEqual(result["wallet_intents"], [])
+
+    def test_composition_emits_sealed_wallet_intent_with_source_router_action_and_stable_size(self):
+        lane_rows = [
+            _lane_row(policy="control_stable", candidate_id="wallet-1", market_id="KXWALLET-1", action="BUY_YES", size=5.0, yes_price=0.40, no_price=0.65),
+            _lane_row(policy="shadow_source_router", candidate_id="wallet-1", market_id="KXWALLET-1", action="BUY_NO", size=10.0, yes_price=0.40, no_price=0.65),
+        ]
+        result = compose_lane_replay(
+            lane_rows=lane_rows,
+            config={"composition": {"name": "router_action_stable_size", "base_lane": "control_stable", "action_lane": "shadow_source_router", "price_lane": "shadow_source_router", "sizing_lane": "control_stable"}},
+        )
+
+        self.assertEqual(len(result["wallet_intents"]), 1)
+        intent = result["wallet_intents"][0]
+        self.assertEqual(intent["action"], "BUY_NO")
+        self.assertEqual(intent["entry_price"], 0.65)
+        self.assertEqual(intent["model_probability"], 0.7)
+        self.assertEqual(intent["source_context"]["market_route"]["handler_id"], "weather")
+        self.assertEqual(intent["provenance"]["action_lane"], "shadow_source_router")
+        self.assertEqual(intent["provenance"]["sizing_lane"], "control_stable")
+        self.assertNotIn("outcome", intent)
+
+    def test_composition_emits_sealed_wallet_intent_without_source_router(self):
+        lane_rows = [
+            _lane_row(policy="control_stable", candidate_id="wallet-stable", market_id="KXWALLET-STABLE", action="BUY_YES", size=5.0, yes_price=0.40, no_price=0.65),
+            _lane_row(policy="shadow_confidence_floor", candidate_id="wallet-stable", market_id="KXWALLET-STABLE", action="BUY_YES", size=5.0, yes_price=0.40, no_price=0.65),
+        ]
+        result = compose_lane_replay(
+            lane_rows=lane_rows,
+            config={"composition": {"name": "stable_confidence", "base_lane": "control_stable", "action_lane": "shadow_confidence_floor", "price_lane": "control_stable", "sizing_lane": "control_stable"}},
+        )
+
+        self.assertEqual(len(result["wallet_intents"]), 1)
+        self.assertEqual(result["wallet_intents"][0]["provenance"]["action_lane"], "shadow_confidence_floor")
+        self.assertNotIn("shadow_source_router", result["wallet_intents"][0]["provenance"].values())
+
+    def test_source_router_veto_conflict_emits_no_wallet_intent(self):
+        stable = _lane_row(policy="control_stable", candidate_id="wallet-veto", market_id="KXWALLET-VETO", action="BUY_YES", size=5.0, yes_price=0.40)
+        router = _lane_row(policy="shadow_source_router", candidate_id="wallet-veto", market_id="KXWALLET-VETO", action="BUY_NO", size=10.0, yes_price=0.40, no_price=0.40, model_probability=0.30)
+        result = compose_lane_replay(lane_rows=[stable, router], config={"composition": {"name": "router_veto", "base_lane": "control_stable", "action_lane": "control_stable", "price_lane": "control_stable", "sizing_lane": "control_stable", "vetoes": [{"lane": "shadow_source_router", "mode": "require_agreement"}]}})
+        self.assertEqual(result["composition_rows"][0]["action"], "SKIP")
+        self.assertEqual(result["wallet_intents"], [])
+
+    def test_wallet_intent_fails_closed_when_selected_lanes_have_mismatched_snapshot(self):
+        stable = _lane_row(policy="control_stable", candidate_id="wallet-mismatch", market_id="KXWALLET-MISMATCH", action="BUY_YES", size=5.0, yes_price=0.40)
+        router = _lane_row(policy="shadow_source_router", candidate_id="wallet-mismatch", market_id="KXWALLET-MISMATCH", action="BUY_YES", size=10.0, yes_price=0.40)
+        router["shared_snapshot_id"] = "other-snapshot"
+        result = compose_lane_replay(lane_rows=[stable, router], config={"composition": {"name": "mismatch", "base_lane": "control_stable", "action_lane": "shadow_source_router", "price_lane": "shadow_source_router", "sizing_lane": "control_stable"}})
+        self.assertEqual(result["wallet_intents"], [])
+
+    def test_composed_wallet_intent_runs_through_synthetic_wallet(self):
+        from bot.composed_lane_wallet import evaluate_composed_intents
+        from bot.risk import RiskDecision
+
+        class FixedKelly:
+            def calculate(self, win_probability, entry_price, bankroll): return 10.0
+        class ApprovingRisk:
+            def check_trade(self, signal, position_size, *, available_cash=None):
+                return RiskDecision(approved=True, adjusted_size=position_size, original_size=position_size)
+
+        lane_rows = [
+            _lane_row(policy="control_stable", candidate_id="wallet-e2e", market_id="KXWALLET-E2E", action="BUY_YES", size=5.0, yes_price=0.50),
+            _lane_row(policy="shadow_source_router", candidate_id="wallet-e2e", market_id="KXWALLET-E2E", action="BUY_NO", size=10.0, yes_price=0.50, no_price=0.40, model_probability=0.30),
+        ]
+        composed = compose_lane_replay(lane_rows=lane_rows, config={"composition": {"name": "router_e2e", "base_lane": "control_stable", "action_lane": "shadow_source_router", "price_lane": "shadow_source_router", "sizing_lane": "control_stable"}})
+        intent = composed["wallet_intents"][0]
+        result = evaluate_composed_intents(
+            intents=[intent],
+            resolutions=[{"decision_id": intent["decision_id"], "shared_candidate_id": intent["shared_candidate_id"], "run_id": intent["run_id"], "market_id": intent["market_id"], "outcome": "NO", "settlement_ts": "2026-09-01T13:00:00+00:00", "authoritative": True, "resolution_row_sha256": "c" * 64}],
+            starting_balance_usd=100.0, kelly_sizer=FixedKelly(), risk_policy=ApprovingRisk(), min_edge=0.01, min_confidence=0.5, max_entry_price=0.99,
+        )
+        self.assertEqual(result["decision_rows"][0]["action"], "BUY_NO")
+        self.assertEqual(result["settlement_rows"][0]["outcome"], "NO")
+        self.assertEqual(result["summary"]["final_balance_usd"], 115.0)
 
     def test_vetoes_side_conflict_without_mutating_source_rows(self):
         lane_rows = [
