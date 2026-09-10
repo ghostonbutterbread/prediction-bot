@@ -2,6 +2,7 @@
 
 Status: implemented checkpoint; independent review and full-suite run pending; NOT merged, pushed, or activated.
 Branch/worktree: `fix/source-router-distinct-history-buckets` / `/home/ryushe/worktrees/prediction-bot-source-router-distinct-history-buckets`.
+Implementation checkpoint: `3eadc0a0262b1b99934abfafb8a8fed32dc110c3`; current tip includes a later dossier-only handoff commit. Review both the implementation and later handoff changes.
 Base/target: beta `696900651abbd108f4285dee45ceee09cdf77d28` / beta, never main.
 Owner: parent Hermes, Discord thread 1547354226093461644. Kanban mutation remains blocked by the known child-context misclassification; do not bypass its guard.
 
