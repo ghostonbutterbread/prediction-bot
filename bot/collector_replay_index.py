@@ -19,6 +19,7 @@ from bot.file_ops import atomic_write_json, locked_file
 
 INDEX_SCHEMA_NAME = "collector_replay_index"
 INDEX_SCHEMA_VERSION = 1
+_REVERSE_RAW_READ_BYTES = 1024 * 1024
 
 
 def build_collector_replay_index(
@@ -257,13 +258,30 @@ def load_indexed_collector_rows_reverse(
     with source_path.open("rb") as source, checked_index.open("rb") as index:
         _verify_archive(source, manifest)
         _verify_index_extent(index, manifest)
+        block, block_start = b"", 0
         for line in _iter_committed_index_lines_reverse(index, int(manifest["committed_index_bytes"])):
             entry = json.loads(line)
             # _verify_index_extent already performed structural validation; keep
             # this local guard for future callers/refactors of the iterator.
             _validate_locator(entry, manifest)
-            source.seek(int(entry["byte_offset"]))
-            payload = source.read(int(entry["byte_length"]))
+            offset, length = int(entry["byte_offset"]), int(entry["byte_length"])
+            end = offset + length
+            if length > _REVERSE_RAW_READ_BYTES:
+                # The dict-returning API must materialize one oversized record,
+                # but never retain it as a cache or grow the read window for it.
+                block = b""
+                source.seek(offset)
+                payload = source.read(length)
+            else:
+                if offset < block_start or end > block_start + len(block):
+                    # Read backwards within the committed prefix. A window may
+                    # include gaps/unindexed bytes or part of the previous row;
+                    # only exact validated locators are hydrated and hashed.
+                    block = b""
+                    block_start = max(0, end - _REVERSE_RAW_READ_BYTES)
+                    source.seek(block_start)
+                    block = source.read(end - block_start)
+                payload = block[offset - block_start:end - block_start]
             if hashlib.sha256(payload).hexdigest() != entry.get("payload_sha256"):
                 raise ValueError("raw collector payload differs from replay index")
             row = json.loads(payload)
