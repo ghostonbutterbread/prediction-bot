@@ -657,6 +657,9 @@ def _source_router_decision(
             direct_history_provenance = {
                 "mode": "committed_index_direct_read",
                 "accepted_limit": direct_history["accepted_limit"],
+                "history_events_per_bucket": direct_history["accepted_limit"],
+                "selection_unit": "distinct_event_per_source_city_kind_shape",
+                "bucket_coverage": direct.bucket_coverage,
                 "counts": direct.counts,
                 "index_manifest_sha256": direct.index_manifest_sha256,
                 "resolution_sha256": direct.resolution_sha256,
@@ -752,9 +755,13 @@ def _direct_source_history_parameters(lane: _LaneDefinition) -> dict[str, Any] |
         return None
     if not all(values.values()):
         raise ValueError("direct Source Router history requires index, manifest, and strict resolutions paths")
-    limit = lane.parameters.get("history_row_limit", 100)
-    if type(limit) is not int or limit <= 0:
-        raise ValueError("direct Source Router history_row_limit must be a positive integer")
+    limit_keys = ('history_events_per_bucket', 'history_row_limit')
+    for key in limit_keys:
+        if key in lane.parameters and (type(lane.parameters[key]) is not int or lane.parameters[key] <= 0):
+            raise ValueError(f'direct Source Router {key} must be a positive integer')
+    if all(key in lane.parameters for key in limit_keys) and lane.parameters[limit_keys[0]] != lane.parameters[limit_keys[1]]:
+        raise ValueError('conflicting direct Source Router history limit aliases')
+    limit = lane.parameters.get('history_events_per_bucket', lane.parameters.get('history_row_limit', 100))
     return {
         "index_path": values["collector_replay_index_path"],
         "manifest_path": values["collector_replay_manifest_path"],

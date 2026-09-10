@@ -29,6 +29,7 @@ class DirectSourceHistoryResult:
     counts: dict[str, int]
     index_manifest_sha256: str
     resolution_sha256: str
+    bucket_coverage: list[dict[str, Any]]
 
 
 def load_direct_strict_source_history(
@@ -39,14 +40,18 @@ def load_direct_strict_source_history(
     accepted_limit: int = 100,
     as_of_decision_time: str | None = None,
 ) -> DirectSourceHistoryResult:
-    """Read newest accepted collector inputs and derive strict router rows in memory.
+    """Select up to accepted_limit distinct events per source/city/kind/shape.
 
+    ``accepted_limit`` is a compatibility spelling for an event budget, not a
+    raw-row budget. Repeated polls and correlated contracts share one unit.
+    Selection uses newest committed archive order; each selected event keeps
+    its earliest eligible source observation, never its best outcome.
     No derived history, replay input, outcome, or scorecard artifact is written.
-    The compact index validates the whole committed checkpoint before it yields a
-    raw row.  "Newest" is committed archive order, never a producer timestamp.
+    The whole committed index is validated and scanned: a global early exit
+    would starve sparse buckets. Memory scales with buckets times the budget.
     """
-    if accepted_limit <= 0:
-        raise ValueError("accepted_limit must be positive")
+    if type(accepted_limit) is not int or accepted_limit <= 0:
+        raise ValueError("accepted_limit must be a positive integer")
     index_file, manifest_file = Path(index_path).resolve(), Path(manifest_path).resolve()
     if not index_file.is_file() or not manifest_file.is_file():
         raise ValueError("committed collector replay index and manifest must be readable files")
@@ -57,8 +62,8 @@ def load_direct_strict_source_history(
     if not isinstance(as_of_decision_time, str) or not as_of_decision_time:
         raise ValueError("direct Source Router history requires an immutable decision timestamp")
     resolution_index, resolution_sha256 = _load_stable_resolution_index(resolution_path)
-    accepted: list[dict[str, Any]] = []
-    settled: list[dict[str, Any]] = []
+    buckets: dict[tuple[str, ...], dict[tuple[str, ...], dict[str, Any]]] = {}
+    qualified_observations = repeat_observations = outside_budget = 0
     rejections: Counter[str] = Counter()
     settlement_counts: Counter[str] = Counter()
     inspected = 0
@@ -85,16 +90,34 @@ def load_direct_strict_source_history(
             row for row in candidate_settled
             if is_eligible_for_future_history(row, as_of_decision_time)
         ]
-        if not candidate_settled:
-            continue
-        accepted.append(built.record)
-        settled.extend(candidate_settled)
-        bound_count += len(outcomes)
-        if len(accepted) == accepted_limit:
-            break
-    accepted.reverse()
-    settled.reverse()
+        qualified_observations += len(candidate_settled)
+        for observation in candidate_settled:
+            bucket = tuple(str(observation.get(key) or '').strip().casefold() for key in
+                           ('source_id', 'city_id', 'market_kind', 'contract_shape'))
+            event = _history_event_key(observation)
+            representatives = buckets.setdefault(bucket, {})
+            previous = representatives.get(event)
+            if previous is not None:
+                repeat_observations += 1
+                if _history_representative_key(observation) < _history_representative_key(previous):
+                    representatives[event] = observation
+            elif len(representatives) < accepted_limit:
+                representatives[event] = observation
+            else:
+                outside_budget += 1
+    settled = []
+    for events in buckets.values():
+        # The legacy scorer also groups by display name, unlike router lookup.
+        # Canonicalize only selected in-memory rows so a rename cannot split a
+        # four-dimensional bucket. Do this after event/representative selection;
+        # labels must neither choose events nor discard their evidence.
+        source_name = min(str(row.get('source_name') or 'unknown') for row in events.values())
+        settled.extend({**row, 'source_name': source_name} for row in events.values())
+    settled.sort(key=_history_representative_key)
+    accepted = {row['canonical_input_sha256'] for row in settled}
+    bound_count = len(accepted)
     collapsed, collapse_counts = collapse_strict_source_history_rows(settled)
+    collapse_counts['collapsed_repeat_polls'] += repeat_observations
     # Keep aggregation behavior centralized with the legacy generation writer.
     from bot.auto_source_router_promotion import strict_scorecard_rows_from_history
     source_sha256 = hashlib.sha256(_canonical_jsonl(collapsed)).hexdigest()
@@ -109,12 +132,52 @@ def load_direct_strict_source_history(
             "bound_outcomes": bound_count,
             "settled_strict_observations": len(settled),
             "collapsed_observations": len(collapsed),
+            "qualified_source_observations": qualified_observations,
+            "repeat_observations_in_selected_events": repeat_observations,
+            "observations_outside_bucket_budget": outside_budget,
+            "history_events_per_bucket": accepted_limit,
             **{f"rejection_{key}": int(value) for key, value in sorted(rejections.items())},
             **{f"settlement_{key}": int(value) for key, value in sorted(settlement_counts.items())},
             **{f"collapse_{key}": int(value) for key, value in sorted(collapse_counts.items())},
         },
         index_manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
         resolution_sha256=resolution_sha256,
+        bucket_coverage=[
+            {
+                **dict(zip(('source_id', 'city_id', 'market_kind', 'contract_shape'), bucket)),
+                'requested_units': accepted_limit,
+                'selected_units': len(events),
+                'shortfall': max(0, accepted_limit - len(events)),
+                'selected_market_count': len({row['market_id'] for row in events.values()}),
+                'event_units': sum(key[0] != 'contract_only' for key in events),
+                'contract_only_units': sum(key[0] == 'contract_only' for key in events),
+                'earliest_source_as_of': min(events.values(), key=_history_representative_key)['source_as_of'],
+                'latest_source_as_of': max(events.values(), key=_history_representative_key)['source_as_of'],
+            }
+            for bucket, events in sorted(buckets.items())
+        ],
+    )
+
+
+def _history_event_key(row: Mapping[str, Any]) -> tuple[str, ...]:
+    # Strict city/target-date/kind proof identifies the physical weather event.
+    # Optional exchange event metadata must not split the same event on repolls.
+    if row.get('city_id') and row.get('market_date') and row.get('market_kind'):
+        return ('city_date_kind', str(row['city_id']).casefold(), str(row['market_date']),
+                str(row['market_kind']).casefold())
+    event = row.get('event_ticker') or row.get('event_id')
+    if event:
+        return ('event', str(event).strip().casefold())
+    return ('contract_only', str(row['market_id']))
+
+
+def _history_representative_key(row: Mapping[str, Any]) -> tuple[Any, ...]:
+    from datetime import datetime
+    return (
+        datetime.fromisoformat(str(row['source_as_of']).replace('Z', '+00:00')),
+        datetime.fromisoformat(str(row['input_observed_at']).replace('Z', '+00:00')),
+        str(row.get('source_provenance', {}).get('source_record_sha256') or ''),
+        str(row.get('market_id') or ''), str(row['canonical_input_sha256']),
     )
 
 
