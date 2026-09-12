@@ -46,12 +46,17 @@ def _temperature_clause(text: str, *, inherited_unit: bool = False):
     clause = text[start:end].strip()
     pair = _RANGE.fullmatch(clause)
     joined = re.fullmatch(rf"{_COMPARISON.pattern}\s+and\s+{_COMPARISON.pattern}", clause, re.I)
-    # Inherit only for a temperature predicate or a bare numeric subtitle, not
+    # Inherit for temperature predicates and bounded subtitle grammar, not
     # incidental numbers in explanatory prose (e.g. report pages 2-3).
     bare = re.fullmatch(r"\s*(?:between\s+)?", text[:start], re.I) and re.fullmatch(
         r"\s*(?:inclusive\s*)?[?.!]?\s*", text[end:], re.I)
+    # Recognize an outside numeric condition using the same contract context as
+    # affirmative clauses. This is evidence recognition, NOT complement parsing:
+    # retain 'outside' in the remainder and let the origin reconcile/reject it.
+    # Nonnumeric 'Outside range' and report prose supply no such predicate.
+    outside = re.fullmatch(r"\s*outside\s*", text[:start], re.I)
     if not _TEMPERATURE.search(clause) and not (
-        inherited_unit and (re.search(r"\btemperature\b", text, re.I) or bare)
+        inherited_unit and (re.search(r"\btemperature\b", text, re.I) or bare or outside)
     ):
         return None
     if not pair and not joined:

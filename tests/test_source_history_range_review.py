@@ -124,6 +124,34 @@ CASES += [
 ]
 
 
+# Numeric NO conditions remain unscored until complement semantics are supported.
+# Agreement with YES bounds is not agreement with the affirmative predicate.
+CASES += [
+    (f'no_complement_{bounds}_{prefix}_{unit}', QUESTION,
+     {'no_subtitle': f'{prefix}{bounds}{unit}'}, .5, 'range_unsupported_rules', None)
+    for bounds in ('0-1', '2-3', '-3 to -2', '.2-.3')
+    for prefix in ('Outside ', 'Outside', 'Temperature outside ')
+    for unit in ('', '°F', ' F', ' degrees Fahrenheit')
+]
+for origin in ORIGINS:
+    fields = {origin: 'Maximum temperature between 0 and 1°F inclusive.',
+              'no_subtitle': 'Outside 2-3'}
+    question = fields.pop('question', 'Will Seattle high temperature be 0-1?')
+    CASES.append((f'no_complement_context_{origin}', question, fields,
+                  .5, 'range_unsupported_rules', None))
+CASES += [
+    ('no_complement_strike_context', 'Will Seattle high temperature be 0-1?',
+     {'floor_strike': 0, 'cap_strike': 1, 'no_subtitle': 'Outside 2-3'},
+     .5, 'range_unsupported_rules', None),
+]
+CASES += [
+    (f'no_incidental_{text}', QUESTION, {'no_subtitle': text}, .5, 'supported', 'YES')
+    for text in ('', 'Outside range', 'See pages 2-3 of the report.',
+                 'Report published at 4 PM.', 'Report for August 3, 2026.',
+                 'Outside report pages 2-3.')
+]
+
+
 class ReviewRangeTests(unittest.TestCase):
     def test_parser_review_cases(self):
         for name, question, metadata, forecast, status, implied in CASES:
@@ -149,7 +177,7 @@ class ReviewRangeTests(unittest.TestCase):
                 writer = auto_populate_source_router_history(collector_snapshots_path=raw,
                     strict_resolutions_path=resolutions, output_root=root/'data/derived_reports/history', storage_root=root)
                 manifest_data = json.loads(writer.manifest_path.read_text())
-                self.assertEqual(manifest_data['source_projection'], 'all_candidates_range_forecast_v6')
+                self.assertEqual(manifest_data['source_projection'], 'all_candidates_range_forecast_v7')
                 identity = {
                     'schema_name': 'auto_source_router_history_promotion', 'schema_version': 2,
                     'collector_snapshots_sha256': hashlib.sha256(before[0]).hexdigest(),
@@ -158,8 +186,8 @@ class ReviewRangeTests(unittest.TestCase):
                 def generation(version):
                     value = dict(identity, source_projection=f'all_candidates_range_forecast_v{version}')
                     return hashlib.sha256((json.dumps(value, sort_keys=True, separators=(',', ':')) + '\n').encode()).hexdigest()
-                self.assertEqual(writer.generation_dir.name, generation(6))
-                for old_version in (3, 4, 5):
+                self.assertEqual(writer.generation_dir.name, generation(7))
+                for old_version in (3, 4, 5, 6):
                     self.assertNotEqual(writer.generation_dir.name, generation(old_version))
                 history = [json.loads(x) for x in writer.history_path.read_text().splitlines()]
                 scores = load_verified_strict_scorecard_rows(writer.scoreboard_path)

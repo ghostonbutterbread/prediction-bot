@@ -26,7 +26,7 @@ Returned `floor_strike`, `cap_strike`, `strike_type`, rules and subtitles surviv
 
 Supported explicit direct comparison sentences override default endpoint inclusion; matching rules/printed bounds must agree. Unknown/conditional/negated rules, conflicting bounds/endpoint rules, reversed/incomplete/nonfinite strikes, unsupported units and explicit unproven quantization fail closed with named interval statuses. Only supported direct-comparison grammar is implemented, not arbitrary legal-text interpretation. No quantizer is invented; future captured quantization rules still need a separately proven implementation.
 
-SourceWriter generation hash and published manifest now declare `all_candidates_range_forecast_v6`, avoiding reuse of generations produced by the reviewed defective parser (including v5). Publication/service activation remains separate.
+SourceWriter generation hash and published manifest now declare `all_candidates_range_forecast_v7`, avoiding reuse of generations produced by the reviewed defective parser (including v6). Publication/service activation remains separate.
 
 ## Files
 
@@ -193,3 +193,24 @@ Historical commands (owned-worktree cwd): `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=
 `cross-origin-comparison.json` asserts required cohort counts and four byte-identical before/after eligible/independent files against `clause-final-independent-historical-run`. Final repaired hashes remain eligible `f9003b0a1ef359d767470089f12d9235d3561efedfdb53ac3b6ca0207f1f7848` and independent `8b2e44b95fede13775fbb3968e2909b04f4c6053ed8a03855949a16a09cbdc6f`. The original unchanged probe also ran successfully to `cross-origin-original-probe-final.json`: original two contradictory subtitles now have no implied outcome and zero writer/direct strict samples. Test/replay/probe receipts are hashed in `cross-origin-receipts.json`.
 
 Final `git diff --check` is clean (an extra dossier EOF blank line in the checkpoint was removed in this handoff-only commit). Parent should independently review `ba8076a4..eba521d7` plus this dossier-only tip, reconcile the full original-base diff, rerun the original repro and suites, and separately verify beta compatibility. No independent approval, merge, push, deployment, runtime/config/raw mutation or trading claim is made.
+
+## NO-subtitle inherited complement repair (current handoff; supersedes above)
+
+Started at clean dossier tip `c5bf3689215cc6dac4d5b501b9585f8a067050cd`, implementation `eba521d7b1896f6b7de9cd55c1ec9007e9e263e8`. Read `cross-origin-independent-review.md` and its exact NO-side probe/regression before edits. This feature owns the defect; parent retains Kanban, fresh independent review, current-beta compatibility and integration authority. Work remains on the same explicitly pinned owned branch; no upstream/integration/runtime changes.
+
+The shared clause recognizer now retains a numeric `outside` subtitle under the already-resolved market Fahrenheit context. This is bounded prefix-plus-numeric-clause recognition, not a word rejection blacklist or general NLP. It leaves the operator in the remainder for origin-specific reconciliation. NO-side numeric conditions return `range_unsupported_rules` until a complement grammar is implemented: **both `Outside 0-1` and contradictory `Outside 2-3` are unscored**, with or without a repeated unit/Temperature. NO bounds are never inserted as YES bounds. Empty, nonnumeric `Outside range`, dates and incidental report-page prose stay nonbinding. The existing affirmative unit/bound/inclusion/measurement families remain intact.
+
+Only production owners changed: `bot/weather/thresholds.py` recognition and `bot/auto_source_router_promotion.py` generation/manifest **v7**, with actual generation hashes tested distinct from v3/v4/v5/v6. `tests/test_source_history_range_review.py` adds numeric NO complement families, shared unit context from each affirmative origin and strikes, signed/unsupported leading-dot bounds, explicit/unitless spellings and incidental positive controls. Parser and real raw→sanitizer→exact resolution→writer/direct history consume these fixtures. No proof/chronology/VOID/dedup, executable pricing, action, risk or Kelly owner changed.
+
+Receipts use unique `no-complement-builder-*` names under the existing report root; originals remain untouched. All Python test commands run from the owned worktree with `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD:$PWD/tests`:
+- Unchanged `cross-origin-independent-no-side-red.py`: **2 tests / 3 failures** before the repair (`no-complement-builder-red.log`): parser, writer and direct strict admission independently reproduce.
+- Expanded committed family before repair: **4 tests / 45 failures**, `no-complement-builder-family-red.log`.
+- An initial family GREEN attempt hit the 180-second execution guard without a result; its partial `no-complement-builder-family-green.log` is preserved, not a passing receipt. No service was changed; the subsequent complete focused/full runs supersede that attempt.
+- `python3 -m unittest discover -s tests -p 'test_source*.py'`: **76 tests OK**, 111.576s, `no-complement-builder-focused.log`.
+- `python3 -m unittest discover -s tests`: **1,181 tests OK, 7 skipped**, 60.564s, `no-complement-builder-full.log`.
+- Unchanged exact NO-side regression: **2 tests OK**, 0.074s, `no-complement-builder-exact-green.log`.
+- Unchanged previous cross-origin and same-clause regressions: **2 tests OK each**, 0.094s / 0.183s, `no-complement-builder-prior-origin-green.log` / `no-complement-builder-prior-grammar-green.log`.
+- Unchanged reviewer NO-side probe: all three variants now `range_unsupported_rules`, no implied outcome, **zero writer and direct samples**, in `no-complement-builder-probe.json`.
+- `git diff --check` passes.
+
+Checkpoint purpose: commit tested code plus this dossier so the clean-SHA historical runner can execute. Required next gate is the same 120-original-SKIP historical differential, independent stdlib verification, asserted 111 inputs / 888 pending / 24 tail + 23 range, protected hashes and byte-identical eligible/independent cohort comparison, in a fresh `no-complement-builder-historical-run`. The current checkpoint does not yet claim that gate passed; append the actual results after execution. Fresh independent read-only review remains mandatory before any beta integration.
