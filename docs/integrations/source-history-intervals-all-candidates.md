@@ -8,7 +8,7 @@
 - Accepted quote-independent implementation: `6c7b361f0204c19640f8a1b20343e7cdae143e69`; resumed checkpoint `4323e1963c57aef9e945e736c90e92c32f95affb`.
 - Target **beta only**, explicit user instruction supersedes stale main-based local guidance. Parent owns Kanban, independent review and integration. No merge/push/deploy authority.
 - Initial status clean; fetched origin beta without changing working tree. No sibling branch or worktree edits.
-- Status: independent-review parser blockers repaired with RED→GREEN regressions and isolated focused/full receipts. **Fresh independent rereview remains required before beta integration**; historical rerun against this repair is the next checkpoint step.
+- Status: independent-review parser blockers repaired with RED→GREEN regressions, isolated focused/full receipts and a completed hash-verified historical differential preserving all valid range gains. **Fresh independent rereview remains required before beta integration**.
 
 ## Intent and implemented contract
 
@@ -38,7 +38,7 @@ Additional changes relative to resumed checkpoint:
 - `bot/auto_source_router_promotion.py`: generation semantics version and visible manifest tag.
 - `tests/test_source_history_ranges.py`: parser boundaries, explicit-rule precedence/rejection, producer/sanitizer transport, raw-to-writer/direct high/low SKIP/quoted/absent-price/duplicate/VOID/cutoff fixtures.
 
-## Actual verification receipts
+## Prior implementation receipts (superseded by repair below)
 
 Report root: `/mnt/data-collection/prediction-bot/data/derived_reports/source_history_fix_20260912`.
 
@@ -77,14 +77,30 @@ Actual TDD receipts in the report root:
 - Same environment, `python3 -m unittest discover -s tests`: **1,180 tests OK, 7 skipped**, 32.757s, `repair-full-verified.log`.
 - `git diff --check` passed. No executable pricing/action/edge/Kelly/risk gate changed. Quote-independent patch `6c7b361` remains intact.
 
-## Historical evidence / next checkpoint
+## Historical evidence: completed repair differential
 
-The prior completed historical differential supersedes the former pending-approval note: baseline 24 tail; range implementation 47 = 24 tail + 23 range, from 120 hash-verified original SKIP rows, 111 inputs and 888 pending observations. Those prior counts do not by themselves verify this repair.
+Actual clean implementation tested: `6cfd1defd9847a504246058d4945e31577e7979c`; baseline archive: `ada72a2b85a2e37058ffbd94cb40a64640530cd9`. New output directory: `repair-historical-range-run/` beneath the report root.
 
-Read both actual scripts (`historical-range-repro.py`, `historical-range-verify.py`) before rerunning. Repro requires an exact clean commit and creates a new run directory; verifier also writes a root-level gains artifact. After this implementation checkpoint, derive uniquely named repair copies changing only the fixed commit/run destination and redirecting verifier gains output into the new run. Preserve original scripts, raw inputs and all prior receipts. Verify the new differential and record its exact count/provenance output in the dossier-only recovery commit.
+Read both actual scripts (`historical-range-repro.py`, `historical-range-verify.py`) and `proof.py` before execution. Derived `repair-historical-range-repro.py` changes only FIXED and the default new run name; `repair-historical-range-verify.py` changes only the default run name and redirects its root-level gains write into the new run. Original scripts, protected raw inputs and old receipts were not overwritten; no prepare/archive rescan was invoked.
+
+Executed from the owned worktree (both exit 0):
+```bash
+PYTHONDONTWRITEBYTECODE=1 HISTORICAL_RANGE_RUN_NAME=repair-historical-range-run python3 /mnt/data-collection/prediction-bot/data/derived_reports/source_history_fix_20260912/repair-historical-range-repro.py
+PYTHONDONTWRITEBYTECODE=1 HISTORICAL_RANGE_RUN_NAME=repair-historical-range-run python3 /mnt/data-collection/prediction-bot/data/derived_reports/source_history_fix_20260912/repair-historical-range-verify.py
+```
+Logs: `repair-historical-range-repro.log`, `repair-historical-range-verify.log`. Repro intentionally refuses an existing run and requires the exact clean implementation commit; future reruns must preserve these artifacts and use a new derived run/explicit verified checkpoint, not overwrite the old run.
+
+Stdlib verifier result (`repair-historical-range-run/independent-verification.json`):
+- 120 original SKIP rows / 120 byte hashes verified; 9,735,875 selected bytes; 6 protected input hashes unchanged.
+- Both arms: 111 inputs, 888 pending observations.
+- Baseline: 126 settled, 762 unusable, 24 pre-cutoff independent tail contributions; 39 strict settlements excluded by cutoff.
+- Repaired: 252 settled, 636 unusable, **47 pre-cutoff independent = 24 tail + 23 range**; 75 strict settlements excluded by cutoff.
+- All 23 range gains preserved (14 high / 9 low; 11 NWS / 12 Open-Meteo; 12 markets / 12 physical events). All 47 eligible repaired observations lack a positive book ask. This remains quote-independent source correctness, not executable trading evidence.
+- Exact identity/provenance, settled-before-cutoff, implied interval membership, independent keys and selected-corpus direct/materialized semantics verified. Tail semantics unchanged.
+- `repair-comparison.json` additionally compares prior completed range run: mode counts match exactly and both before/after eligible + independent row arrays are identical. No historical count changed after the parser repair. It retains script and new test/probe receipt hashes; `provenance.json` retains exact source commits, protected hashes and subprocess commands.
 
 ## Recovery / next action
 
-Previous range checkpoint `295b13358cc69ed2ce23c20d93599767a9c8b124` and reviewed tip `fcc92059b52d0b4ffdb118a8eacbb81222d444bb` remain reachable. This repair commit contains parser, version, tests and this dossier; a subsequent dossier-only handoff will name its immutable SHA and historical receipts. Fresh independent review is still REQUIRED; earlier green tests/review do not approve this repair. Parent owns the Kanban/review/integration gate and must check current beta compatibility separately.
+Recovery/implementation checkpoint: **`6cfd1defd9847a504246058d4945e31577e7979c`** on `fix/source-history-intervals-all-candidates` contains the repair, tests, v3 generation identity and dossier. Current tip additionally contains a later dossier-only historical-evidence/recovery commit; verify that diff separately. Previous range checkpoint `295b13358cc69ed2ce23c20d93599767a9c8b124` and reviewed tip `fcc92059b52d0b4ffdb118a8eacbb81222d444bb` remain reachable. Fresh independent review is still REQUIRED; earlier green tests/review do not approve this repair. Parent owns the Kanban/review/integration gate and must check current beta compatibility separately. Resume with fresh read-only review of `fcc92059..6cfd1def`, exact reviewer probe and new regressions, full base-to-tip contract boundaries, and historical receipts above.
 
 No merge, push, runtime/service/config changes, raw ledger/index changes, wallet or trading actions. Historical results remain source-correctness diagnostics, not exchange quantization parity, executable P&L or promotion evidence.
