@@ -30,6 +30,7 @@ def extract_forecast_interval(question: str, metadata: dict | None = None) -> di
     evidence = []
     intervals = []
     comparisons = []
+    measurement_kinds = {metadata['market_kind']} if metadata.get('market_kind') in {'high', 'low'} else set()
 
     def result(status):
         return {"status": status, "convention": RANGE_FORECAST_CONVENTION,
@@ -60,8 +61,16 @@ def extract_forecast_interval(question: str, metadata: dict | None = None) -> di
         evidence.append({"origin": origin, "text": text})
         # A calendar date is never a temperature interval.
         text = re.sub(r"\b\d{4}-\d{2}-\d{2}\b", " ", text)
-        if re.search(r"°\s*C\b|\bcelsius\b", text, re.I):
+        if re.search(r"°\s*C\b|\bcelsius\b|\bkelvin\b|\brankine\b", text, re.I):
             return result("range_unsupported_unit")
+        # Bare degrees are legacy Fahrenheit evidence, not a prefix match for
+        # an attached unsupported unit (e.g. °K or °Rankine).
+        if any(unit.casefold() != 'f' for unit in re.findall(r"°([a-z]+)\b", text, re.I)) or re.search(r"°\s+K\b", text, re.I):
+            return result("range_unsupported_unit")
+        for kind in re.findall(r"\b(maximum|minimum|highest|lowest|high|low)\s+temperature\b", text, re.I):
+            measurement_kinds.add('high' if kind.lower() in {'maximum', 'highest', 'high'} else 'low')
+        if len(measurement_kinds) > 1:
+            return result("range_conflicting_measurement")
         if re.search(r"\bround\w*\b|\bquantiz\w*\b|\btruncat\w*\b", text, re.I):
             return result("range_quantization_unproven")
         pairs = [(float(m[0]), float(m[1])) for m in _RANGE.findall(text)]
@@ -73,19 +82,23 @@ def extract_forecast_interval(question: str, metadata: dict | None = None) -> di
             direct_rule = rf"{prefix}(?:{_COMPARISON.pattern}\s+and\s+{_COMPARISON.pattern}|between\s+{_RANGE.pattern}\s*,?\s*inclusive)\s*[.]?"
             if not re.fullmatch(direct_rule, text.strip(), re.I):
                 return result("range_unsupported_rules")
-            if found:
-                lo = [(float(v), "equal" in op.lower()) for op, v in found if op.lower().startswith("greater")]
-                hi = [(float(v), "equal" in op.lower()) for op, v in found if op.lower().startswith("less")]
-                if len(lo) != 1 or len(hi) != 1:
-                    return result("range_ambiguous_rules")
-                pairs.append((lo[0][0], hi[0][0]))
-                comparisons.append((lo[0][1], hi[0][1]))
-            elif pairs and re.search(r"\binclusive\b", text, re.I):
-                comparisons.append((True, True))
-            else:
-                return result("range_unsupported_rules")
-        elif re.search(r"\b(?:exclusive|excluding|not|outside|except|unless)\b|[<>]", text, re.I):
-            return result("range_ambiguous_rules")
+        else:
+            # Remove understood predicates before checking leftover operators;
+            # "or equal to" belongs to a comparison, "or 4°F" does not.
+            remainder = _RANGE.sub(' ', _COMPARISON.sub(' ', text))
+            if re.search(r"\b(?:exclusive|excluding|not|outside|except|unless|if|or)\b|[<>]", remainder, re.I):
+                return result("range_ambiguous_rules")
+        if found:
+            lo = [(float(v), "equal" in op.lower()) for op, v in found if op.lower().startswith("greater")]
+            hi = [(float(v), "equal" in op.lower()) for op, v in found if op.lower().startswith("less")]
+            if len(lo) != 1 or len(hi) != 1 or not re.search(
+                rf"{_COMPARISON.pattern}\s+and\s+{_COMPARISON.pattern}", text, re.I,
+            ):
+                return result("range_ambiguous_rules")
+            pairs.append((lo[0][0], hi[0][0]))
+            comparisons.append((lo[0][1], hi[0][1]))
+        elif pairs and re.search(r"\binclusive\b", text, re.I):
+            comparisons.append((True, True))
         intervals.extend(pairs)
     if not intervals:
         return result("range_missing_bounds")
@@ -125,7 +138,9 @@ def infer_question_side(question: str, metadata: dict[str, Any] | None = None) -
         return "above"
     if " below " in f" {normalized} " or "<" in normalized:
         return "below"
-    if _RANGE.search(normalized) or " between " in f" {normalized} " or re.search(r"\b\d+\s*(?:to|-)\s*\d+\b", normalized):
+    if (_RANGE.search(normalized)
+            or re.search(rf"{_COMPARISON.pattern}\s+and\s+{_COMPARISON.pattern}", normalized, re.I)
+            or " between " in f" {normalized} " or re.search(r"\b\d+\s*(?:to|-)\s*\d+\b", normalized)):
         return "range"
     return "binary_bucket"
 

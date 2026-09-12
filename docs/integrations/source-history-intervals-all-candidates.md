@@ -8,7 +8,7 @@
 - Accepted quote-independent implementation: `6c7b361f0204c19640f8a1b20343e7cdae143e69`; resumed checkpoint `4323e1963c57aef9e945e736c90e92c32f95affb`.
 - Target **beta only**, explicit user instruction supersedes stale main-based local guidance. Parent owns Kanban, independent review and integration. No merge/push/deploy authority.
 - Initial status clean; fetched origin beta without changing working tree. No sibling branch or worktree edits.
-- Status: range implementation and isolated tests complete; **requested new historical differential receipt blocked by a pending tool approval**. Not integration-ready until that receipt and independent rereview are completed.
+- Status: independent-review parser blockers repaired with RED→GREEN regressions and isolated focused/full receipts. **Fresh independent rereview remains required before beta integration**; historical rerun against this repair is the next checkpoint step.
 
 ## Intent and implemented contract
 
@@ -26,7 +26,7 @@ Returned `floor_strike`, `cap_strike`, `strike_type`, rules and subtitles surviv
 
 Supported explicit direct comparison sentences override default endpoint inclusion; matching rules/printed bounds must agree. Unknown/conditional/negated rules, conflicting bounds/endpoint rules, reversed/incomplete/nonfinite strikes, unsupported units and explicit unproven quantization fail closed with named interval statuses. Only supported direct-comparison grammar is implemented, not arbitrary legal-text interpretation. No quantizer is invented; future captured quantization rules still need a separately proven implementation.
 
-SourceWriter generation hash and published manifest now declare `all_candidates_range_forecast_v2`, avoiding reuse of old byte-identical history generations. Publication/service activation remains separate.
+SourceWriter generation hash and published manifest now declare `all_candidates_range_forecast_v3`, avoiding reuse of generations produced by the reviewed defective parser. Publication/service activation remains separate.
 
 ## Files
 
@@ -57,19 +57,34 @@ Final isolated commands, cwd owned worktree and `PYTHONDONTWRITEBYTECODE=1 PYTHO
 
 New pipeline fixture verifies both quoted and quote-less SKIPs, exact YES receipts, separate captured high=0.5 / low=-0.5 forecasts for [0,1], three polls collapsing to two independent high/low contributions, two raw inputs unchanged, derived/direct scorecard equality for this selected fixture, strict settlement `<` (equal excluded, one second later admitted), and three VOID receipts with no history. It checks nested output sentinel removal and absent quotes staying absent. Existing target-proof/exact identity regression suite remains intact. This does not assert universal direct/materialized independence-policy equivalence.
 
-## Historical evidence: old results versus pending new results
+## Independent-review blocker repair (2026-09-12)
 
-Prior independent review verified 120 original byte locators, all original actions SKIP, 111 exported inputs, 888 pending observations, 24 pre-cutoff independent tail contributions, and selected-corpus direct/materialized parity. Those are **pre-range results**, not this implementation's recovery counts.
+Read `independent-range-review.md`, exact `independent-range-probe.py` and its JSON receipts before edits. Re-executed the unchanged reviewer probe: `repair-review-probe-before.json` confirms all five variants admitted one strict sample. Owning defect was introduced by `295b133` on this feature branch, not its beta ancestor; repaired here once. No descendant propagation or other branch edits are authorized; parent owns later beta integration.
 
-A tool approval is pending for a bounded differential script that would:
-1. Derive a separate `range-proof.py` from existing audited `proof.py`, changing only history opt-in/output arm naming.
-2. Extract immutable `4323e196` code into `/tmp/prediction-range-baseline-4323e19` via `git archive` (no branch/worktree mutation).
-3. Run old and new implementations with the same existing `bounded_original_rows.jsonl`, captured resolutions and existing index, cutoff `2026-09-03T00:00:00+00:00`, separate `range-before`/`range-after` reports.
+Minimal owner changes:
+- `thresholds.py`: apply recognized lower/upper comparisons from questions and all retained subtitles as well as rules; compare their bounds and endpoint semantics. Recognize the paired-comparison question as range-shaped for strict source proof.
+- Reconcile high/maximum versus low/minimum temperature wording across retained evidence and recorded `market_kind`; contradictory evidence is unscored, never switches forecasts.
+- Reject attached unsupported degree-unit names and Kelvin/Rankine rather than accepting a bare-degree prefix. Preserve legitimate bare degrees, Fahrenheit and dated questions.
+- Reject residual disjunction/conditional/negated operators outside understood predicates; `or equal to` remains part of an understood comparison.
+- Bump only the source-history projection identity/manifest to v3 so identical raw bytes cannot reuse a defective v2 generation.
+- New `tests/test_source_history_range_review.py`: exact five reviewer variants plus supported/conflicting question comparisons, all retained origins, supported units/dated shapes and reversed measurement mismatch. Real raw→export→exact resolution→SourceWriter strict scoreboard and direct-history checks retain raw/resolution bytes. Existing chronology/VOID/dedup/quote-less SKIP tests remain unchanged.
 
-**The approval-gated batch made zero tool calls. It has not run and must not be represented as evidence.** Do not silently reissue it: the tool explicitly requires awaiting the user's approval decision. No new recovered-range total or current-capture coverage total is claimed yet. Resume by resolving that pending approval, then run/read the original-byte verifier, reconcile old/new interval counts and identical hashes, verify selected real-corpus direct/materialized parity and no imputed quotes. Expand only via bounded locators/current small capture if the cohort is insufficient; no huge raw scan.
+Actual TDD receipts in the report root:
+- `repair-review-red.log`: 3 new tests, **19 failing subtests**, including all five exact reviewer cases at parser and SourceWriter boundaries, before implementation edits.
+- `repair-review-green.log`: range-focused 10 tests OK (0.644s).
+- `repair-review-probe-after.json`: unchanged reviewer script now yields NO at zero for explicit open endpoints (one valid strict sample); conflicting bounds, wrong measurement, °K and compound question yield zero strict samples.
+- Final isolated `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD:$PWD/tests python3 -m unittest discover -s tests -p 'test_source*.py'`: **75 tests OK**, 2.290s, `repair-focused-verified.log` (includes direct/materialized semantic scorecard equality).
+- Same environment, `python3 -m unittest discover -s tests`: **1,180 tests OK, 7 skipped**, 32.757s, `repair-full-verified.log`.
+- `git diff --check` passed. No executable pricing/action/edge/Kelly/risk gate changed. Quote-independent patch `6c7b361` remains intact.
+
+## Historical evidence / next checkpoint
+
+The prior completed historical differential supersedes the former pending-approval note: baseline 24 tail; range implementation 47 = 24 tail + 23 range, from 120 hash-verified original SKIP rows, 111 inputs and 888 pending observations. Those prior counts do not by themselves verify this repair.
+
+Read both actual scripts (`historical-range-repro.py`, `historical-range-verify.py`) before rerunning. Repro requires an exact clean commit and creates a new run directory; verifier also writes a root-level gains artifact. After this implementation checkpoint, derive uniquely named repair copies changing only the fixed commit/run destination and redirecting verifier gains output into the new run. Preserve original scripts, raw inputs and all prior receipts. Verify the new differential and record its exact count/provenance output in the dossier-only recovery commit.
 
 ## Recovery / next action
 
-Recovery checkpoint: `295b13358cc69ed2ce23c20d93599767a9c8b124` contains the range implementation, tests and updated dossier on `fix/source-history-intervals-all-candidates`. The branch tip additionally contains a later dossier-only checkpoint annotation; review it separately. Preserve accepted patch `6c7b361`. Parent must independently rereview the new commit, complete the blocked bounded evidence run, and inspect whether any exact captured rules need a narrowly supported grammar extension. Do not call the full user acceptance complete before the historical receipts exist.
+Previous range checkpoint `295b13358cc69ed2ce23c20d93599767a9c8b124` and reviewed tip `fcc92059b52d0b4ffdb118a8eacbb81222d444bb` remain reachable. This repair commit contains parser, version, tests and this dossier; a subsequent dossier-only handoff will name its immutable SHA and historical receipts. Fresh independent review is still REQUIRED; earlier green tests/review do not approve this repair. Parent owns the Kanban/review/integration gate and must check current beta compatibility separately.
 
-No services/configs, raw ledgers, active index, wallet, trading controls, or other worktrees changed. No merge, push or deployment. Quote capture, stale publication behavior and unrelated throughput work remain deferred. This dossier is branch-local temporary handoff metadata, not permanent beta/main history.
+No merge, push, runtime/service/config changes, raw ledger/index changes, wallet or trading actions. Historical results remain source-correctness diagnostics, not exchange quantization parity, executable P&L or promotion evidence.
