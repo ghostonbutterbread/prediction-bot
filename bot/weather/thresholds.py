@@ -17,11 +17,42 @@ _UNIT = rf"(?:(?:°\s*|degrees?\b\s*)(?:Fahrenheit\b|F\b|{_BARE_DEGREE_END})|Fah
 _UNIT_MARKER = re.compile(r"°|degrees?\b", re.I)
 _TEMPERATURE = re.compile(rf"{_NUMBER}\s*(?:°|degrees?\b|Fahrenheit\b|F\b)", re.I)
 _RANGE = re.compile(
-    rf"(?<![\w.])({_NUMBER})\s*(?:{_UNIT}\s*)?(?:-|–|to|and)\s*({_NUMBER})\s*{_UNIT}", re.I,
+    rf"(?<![\w.])({_NUMBER})\s*(?:{_UNIT}\s*)?(?:-|–|to|and)\s*({_NUMBER})\s*(?:{_UNIT})?", re.I,
 )
 _COMPARISON = re.compile(
-    rf"(greater than(?: or equal to)?|less than(?: or equal to)?)\s*({_NUMBER})\s*{_UNIT}", re.I,
+    rf"(greater than(?: or equal to)?|less than(?: or equal to)?)\s*({_NUMBER})\s*(?:{_UNIT})?", re.I,
 )
+# Dates are context, not temperature predicates. Remove only complete supported
+# calendar forms, not everything following 'on' (which can hide another bound).
+_MONTH = r"(?:January|February|March|April|May|June|July|August|September|October|November|December)"
+_DATE = re.compile(rf"\b(?:\d{{4}}-\d{{2}}-\d{{2}}|{_MONTH}\s+\d{{1,2}}(?:st|nd|rd|th)?(?:,?\s+\d{{4}})?)(?![\w°])", re.I)
+# Lex numbers more broadly than the supported bound grammar: an unsupported
+# leading-dot decimal must be rejected, not disappear from the clause envelope.
+_CLAUSE_TOKEN = re.compile(rf"greater than(?: or equal to)?|less than(?: or equal to)?|[+-]?(?:\d+(?:\.\d+)?|\.\d+)\s*(?:{_UNIT})?", re.I)
+
+
+def _temperature_clause(text: str):
+    """Bounded numeric clause envelope, then full grammar consumption.
+
+    Ordinary location/question prose surrounds the numeric clause. Complete
+    calendar dates have already been removed. Every remaining numeric token,
+    including a unitless point/comparison/range, must belong to ONE interval.
+    Do not truncate at conjunctions, punctuation or context prepositions.
+    """
+    tokens = list(_CLAUSE_TOKEN.finditer(text))
+    if not tokens:
+        return None
+    start, end = tokens[0].start(), tokens[-1].end()
+    clause = text[start:end].strip()
+    pair = _RANGE.fullmatch(clause)
+    joined = re.fullmatch(rf"{_COMPARISON.pattern}\s+and\s+{_COMPARISON.pattern}", clause, re.I)
+    if not _TEMPERATURE.search(clause):
+        return None
+    if not pair and not joined:
+        return ([], [], text, False)
+    pairs = [(float(pair[1]), float(pair[2]))] if pair else []
+    found = _COMPARISON.findall(clause) if joined else []
+    return pairs, found, text[:start] + ' ' + text[end:], True
 
 
 def extract_forecast_interval(question: str, metadata: dict | None = None) -> dict:
@@ -66,7 +97,7 @@ def extract_forecast_interval(question: str, metadata: dict | None = None) -> di
             continue
         evidence.append({"origin": origin, "text": text})
         # A calendar date is never a temperature interval.
-        text = re.sub(r"\b\d{4}-\d{2}-\d{2}\b", " ", text)
+        text = _DATE.sub(" ", text)
         if any(not re.match(_UNIT, text[m.start():], re.I) for m in _UNIT_MARKER.finditer(text)):
             return result("range_unsupported_unit")
         for kind in re.findall(r"\b(maximum|minimum|highest|lowest|high|low)\s+temperature\b", text, re.I):
@@ -75,24 +106,20 @@ def extract_forecast_interval(question: str, metadata: dict | None = None) -> di
             return result("range_conflicting_measurement")
         if re.search(r"\bround\w*\b|\bquantiz\w*\b|\btruncat\w*\b", text, re.I):
             return result("range_quantization_unproven")
-        pairs = [(float(m[0]), float(m[1])) for m in _RANGE.findall(text)]
-        found = _COMPARISON.findall(text)
+        parsed = _temperature_clause(text)
+        pairs, found, remainder, complete = parsed or ([], [], text, True)
         if origin.startswith("rules_"):
             # Only direct comparison sentences are implemented. Do not turn a
             # matching substring in conditional/negated prose into a contract.
             prefix = r"(?:the\s+)?(?:(?:maximum|minimum|high|low)\s+)?temperature\s+(?:is\s+)?"
             direct_rule = rf"{prefix}(?:{_COMPARISON.pattern}\s+and\s+{_COMPARISON.pattern}|between\s+{_RANGE.pattern}\s*,?\s*inclusive)\s*[.]?"
-            if not re.fullmatch(direct_rule, text.strip(), re.I):
+            if not complete or not parsed or not re.fullmatch(direct_rule, text.strip(), re.I):
                 return result("range_unsupported_rules")
         else:
-            # One origin must express one interval, not a union/intersection of
-            # independently matching predicates (even identical ranges). Strip
-            # understood predicates, then require every temperature literal to
-            # have been consumed. The connector spelling is immaterial; normal
-            # question/date prose is not a temperature predicate.
-            remainder = _RANGE.sub(' ', _COMPARISON.sub(' ', text))
-            if (len(pairs) > 1 or (pairs and found)
-                    or ((intervals or pairs or found) and _TEMPERATURE.search(remainder))
+            # A lone point has no range bounds. With other range evidence it
+            # conflicts; multiple numeric predicates must fully parse together.
+            if ((not complete and (intervals or _RANGE.search(text) or _COMPARISON.search(text)
+                                   or len(re.findall(_NUMBER, text)) > 1))
                     or re.search(r"\b(?:exclusive|excluding|not|outside|except|unless|if|or)\b|[<>]", remainder, re.I)):
                 return result("range_ambiguous_rules")
         if found:

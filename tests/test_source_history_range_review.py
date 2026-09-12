@@ -51,6 +51,32 @@ CASES += [
      {}, 0, 'supported', 'YES'),
 ]
 
+# Unit inheritance belongs to the whole clause, including unsupported suffixes.
+CASES += [
+    (f'inherited_suffix_{base}_{joiner}_{suffix}',
+     f'Will Seattle high temperature be {base} {joiner} {suffix}?',
+     {}, .5, 'range_ambiguous_rules', None)
+    for base in ('0-1°F', 'greater than 0°F and less than 1°F')
+    for joiner in ('and', '/', ',', ';', 'plus')
+    for suffix in ('4', '-4.5', '.4', '4-5', '-5 to -4', 'greater than 4',
+                   'less than or equal to 4', '4°F')
+]
+CASES += [
+    (f'valid_inherited_{predicate}_{context}',
+     f'Will Seattle high temperature {context} be {predicate}?',
+     {}, .5, 'supported', 'YES')
+    for predicate in ('greater than 0°F and less than 1',
+                      'greater than 0 and less than 1°F',
+                      '0°F to 1', 'between 0°F and 1')
+    for context in ('on August 3, 2026', 'on 2026-08-03', 'in Seattle')
+]
+CASES += [
+    ('dated_suffix', 'Will Seattle high temperature be 0-1°F in Seattle on August 3, 2026?',
+     {}, .5, 'supported', 'YES'),
+    ('predicate_after_date', 'Will Seattle high temperature be 0-1°F on August 3, 2026 and 4?',
+     {}, .5, 'range_ambiguous_rules', None),
+]
+
 
 class ReviewRangeTests(unittest.TestCase):
     def test_parser_review_cases(self):
@@ -77,7 +103,7 @@ class ReviewRangeTests(unittest.TestCase):
                 writer = auto_populate_source_router_history(collector_snapshots_path=raw,
                     strict_resolutions_path=resolutions, output_root=root/'data/derived_reports/history', storage_root=root)
                 manifest_data = json.loads(writer.manifest_path.read_text())
-                self.assertEqual(manifest_data['source_projection'], 'all_candidates_range_forecast_v4')
+                self.assertEqual(manifest_data['source_projection'], 'all_candidates_range_forecast_v5')
                 identity = {
                     'schema_name': 'auto_source_router_history_promotion', 'schema_version': 2,
                     'collector_snapshots_sha256': hashlib.sha256(before[0]).hexdigest(),
@@ -86,8 +112,9 @@ class ReviewRangeTests(unittest.TestCase):
                 def generation(version):
                     value = dict(identity, source_projection=f'all_candidates_range_forecast_v{version}')
                     return hashlib.sha256((json.dumps(value, sort_keys=True, separators=(',', ':')) + '\n').encode()).hexdigest()
-                self.assertEqual(writer.generation_dir.name, generation(4))
-                self.assertNotEqual(writer.generation_dir.name, generation(3))
+                self.assertEqual(writer.generation_dir.name, generation(5))
+                for old_version in (3, 4):
+                    self.assertNotEqual(writer.generation_dir.name, generation(old_version))
                 history = [json.loads(x) for x in writer.history_path.read_text().splitlines()]
                 scores = load_verified_strict_scorecard_rows(writer.scoreboard_path)
                 expected_count = int(implied is not None)

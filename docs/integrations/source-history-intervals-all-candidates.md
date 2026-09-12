@@ -26,7 +26,7 @@ Returned `floor_strike`, `cap_strike`, `strike_type`, rules and subtitles surviv
 
 Supported explicit direct comparison sentences override default endpoint inclusion; matching rules/printed bounds must agree. Unknown/conditional/negated rules, conflicting bounds/endpoint rules, reversed/incomplete/nonfinite strikes, unsupported units and explicit unproven quantization fail closed with named interval statuses. Only supported direct-comparison grammar is implemented, not arbitrary legal-text interpretation. No quantizer is invented; future captured quantization rules still need a separately proven implementation.
 
-SourceWriter generation hash and published manifest now declare `all_candidates_range_forecast_v4`, avoiding reuse of generations produced by the reviewed defective parser. Publication/service activation remains separate.
+SourceWriter generation hash and published manifest now declare `all_candidates_range_forecast_v5`, avoiding reuse of generations produced by the reviewed defective parser (including v4). Publication/service activation remains separate.
 
 ## Files
 
@@ -128,5 +128,24 @@ Completed the clean-checkpoint historical rerun:
 - No `proof.prepare()`, original archive rescan, prior receipt overwrite, raw/index mutation, service/config changes, merge, push or deployment. This is a derived source-correctness diagnostic, not executable P&L, settlement quantization parity or promotion evidence.
 
 **Next action:** parent obtains fresh independent read-only review of `8bb9f0c4..f89dd4d0`, reconciles the full beta-base-to-tip contract and new historical receipts, and separately checks current-beta compatibility. Earlier reviews do not approve this repair. Prior implementation `6cfd1defd9847a504246058d4945e31577e7979c` and review tip `8bb9f0c4d71eb408f1be24ae34139aa93fa205ff` remain reachable; no integration authority was exercised.
+
+## Complete numeric clause repair (current handoff; supersedes above)
+
+Started from clean `f7163b3b8a75610aabd7f9c74098382c747807b4`; first read `final-boundary-independent-review.md` and its exact RED harness. This is the feature-owned B1 repair, not an ancestor/runtime change. Parent retains Kanban, fresh independent review and beta compatibility/integration authority. No fetch/current-beta compatibility claim is needed for this explicitly pinned, non-integrating repair.
+
+- Replace subtraction of matching substrings with a bounded numeric-clause parser: lex the complete numeric/comparison envelope, then **fullmatch** one printed interval or exactly two joined comparisons. Numeric endpoints may inherit Fahrenheit from either endpoint. An extra point, range or comparator extends the envelope and fails the whole grammar, regardless of connector or repeated unit. The lexer recognizes unsupported leading-dot decimals too, so they cannot disappear from residual validation.
+- Only complete ISO calendar dates and English full-month/day/optional-year forms are removed as outside temperature context. Never drop everything after `on`, `in`, punctuation or a conjunction. Named location/question prose outside the numeric envelope is preserved; unknown numeric context fails closed. This is bounded interval grammar, not general date/location NLP or compound interval evaluation.
+- Keep existing measurement/unit/quantization/conflict checks, explicit endpoint semantics, retained evidence and strict direct-sentence rules. Keep lone point-without-range status unchanged. All existing valid/invalid fixtures remain in the suites.
+- Parameterized new cases cover both interval/comparison bases, comparator/point/range unit-inheritance suffixes, signed and leading-dot decimals, multiple connectors, legitimate inheritance at either bound, dates before/after the interval, location prose and a predicate after a date. Every case executes the parser and the real writer/indexed-direct strict history consumers; independent subtests expose both consumers on RED.
+- v5 manifest/generation identity prevents selecting a defective v4 materialization with identical inputs. Tests independently compute the actual v5 directory hash and prove inequality with v3 and v4. This does not invalidate unrelated external pointers or publish any live generation.
+
+Actual isolated receipts (report root above; cwd owned worktree, `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD:$PWD/tests`):
+- Unchanged `final-boundary-independent-grammar-red.py`: `clause-reviewer-red.log`, **2 tests / 9 failing subtests** before source edits. Same unchanged script after repair: `clause-reviewer-green-final.log`, **2 tests OK**, all three supplied cases blocked through both consumers.
+- New family harness before source edits: `clause-family-red.log`, **4 tests / 189 failing subtests**. Additional leading-dot residual regression exposed **30 failing subtests** (`clause-leading-decimal-red.log`) and was repaired by lexical rather than connector changes.
+- `python3 -m unittest discover -s tests -p 'test_source*.py'`: `clause-focused-final.log`, **76 tests OK**, 9.311s.
+- `python3 -m unittest discover -s tests`: `clause-full-final.log`, **1,181 tests OK, 7 skipped**, 40.901s.
+- `git diff --check` passes. Existing quote-independent SKIPs, provenance, VOID, strict chronology, deterministic collapse and consumer parity fixtures remain passing; no pricing/action/risk path changed.
+
+At this implementation checkpoint, the clean-commit historical rerun is still required: derive `clause-historical-repro.py` from the inspected final-boundary script, change only FIXED to the new implementation SHA and default destination to a fresh `clause-historical-run`, then run its stdlib verifier. Preserve all previous receipts and raw/index bytes. Add the resulting provenance/count/identity receipts in a dossier-only commit before handing off for fresh independent review. **No independent approval is claimed.**
 
 No merge, push, runtime/service/config changes, raw ledger/index changes, wallet or trading actions. Historical results remain source-correctness diagnostics, not exchange quantization parity, executable P&L or promotion evidence.
