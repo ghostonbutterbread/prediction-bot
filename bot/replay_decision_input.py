@@ -158,6 +158,9 @@ _MARKET_ROUTE_V1 = {
     },
 }
 _MARKET_METADATA_V1 = {
+    "strike_type": _SCALAR, "floor_strike": _SCALAR, "cap_strike": _SCALAR,
+    "rules_primary": _SCALAR, "rules_secondary": _SCALAR,
+    "subtitle": _SCALAR, "market_subtitle": _SCALAR, "yes_subtitle": _SCALAR, "no_subtitle": _SCALAR,
     "market_group": _SCALAR, "market_family": _SCALAR, "series": _SCALAR,
     "series_ticker": _SCALAR, "event_ticker": _SCALAR, "category": _SCALAR,
     "market_id": _SCALAR, "ticker": _SCALAR, "market_date": _SCALAR, "city_id": _SCALAR,

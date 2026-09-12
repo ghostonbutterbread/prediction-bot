@@ -1,54 +1,75 @@
-# Source history: quote-independent projection; range scoring blocked
+# Source history: quote-independent history and range forecast classification
 
-## Ownership and integration boundary
+## Ownership / boundary
 
-- Owner: explicitly authorized prediction-history builder subagent; parent owns Kanban and independent review.
 - Branch: `fix/source-history-intervals-all-candidates`.
-- Worktree: `/home/ryushe/worktrees/prediction-bot-source-history-intervals-all-candidates`.
-- Base: freshly fetched `origin/beta` = local `beta` = `ada72a2b85a2e37058ffbd94cb40a64640530cd9`.
-- Target: **beta only**, explicit current user direction supersedes stale AGENTS.md main-based lane guidance. No merge/push authority; no main promotion or runtime activation.
-- Status: **partial implementation / evidence-blocked range task**, recoverable checkpoint required for parent review.
-- Existing registered worktrees were preserved. No branch reused. `perf/source-router-history-throughput` has unique commits (including `3b90d7b`) and overlaps the direct-history module conceptually; it was not imported or changed. Distinct-history-buckets, SourceWriter-default and SourceWriter-indexed-artifact tips have no commits unique to beta in the inspected ranges. Parent must reconcile future throughput integration separately.
+- Owned worktree: `/home/ryushe/worktrees/prediction-bot-source-history-intervals-all-candidates`.
+- Original beta base: `ada72a2b85a2e37058ffbd94cb40a64640530cd9`.
+- Accepted quote-independent implementation: `6c7b361f0204c19640f8a1b20343e7cdae143e69`; resumed checkpoint `4323e1963c57aef9e945e736c90e92c32f95affb`.
+- Target **beta only**, explicit user instruction supersedes stale main-based local guidance. Parent owns Kanban, independent review and integration. No merge/push/deploy authority.
+- Initial status clean; fetched origin beta without changing working tree. No sibling branch or worktree edits.
+- Status: range implementation and isolated tests complete; **requested new historical differential receipt blocked by a pending tool approval**. Not integration-ready until that receipt and independent rereview are completed.
 
 ## Intent and implemented contract
 
-User authorized (1) range/bucket source correctness with proven bounds/rounding and (2) source history independent of hypothetical trading gates. Only (2)'s demonstrated quote-dependency repair is implemented here.
+Source correctness is independent of actions, quotes, edge, price guards, risk and Kelly. The accepted patch remains intact: both direct history and SourceWriter opt into blind quote-independent replay projection; strict executable/default projection remains unchanged. Absent prices are not imputed. Confidence rank is not converted into probability.
 
-Both production history consumers called the ordinary replay sanitizer, which rejects entirely absent quotes/asks. Neither inspected production history path gates on action, trade approval, edge, Kelly or risk. Existing real SKIPs already contribute when other evidence passes. Do not attribute the separate collector_source_router_replay research price/edge policy to production correctness.
+The new range owner is `bot/weather/thresholds.py`, reused by canonical pending/implied-outcome materialization. It retains two recorded bounds, origin/text evidence, endpoint policy and a named convention, not merely a scalar threshold. The existing per-source forecast extractor still selects the captured high or low and its target proof. Pending records retain interval evidence; exact independently bound outcomes produce YES/NO source correctness. Direct and materialized consumers share this owner.
 
-- Added opt-in `source_history_only` projection to the existing sanitizer/exporter. It keeps exact identity, source proof, blind allowlists and provenance, tags the derived purpose, and permits absent prices without imputing them.
-- Direct history and materialized SourceWriter explicitly opt in. Default replay behavior and strict executable replay remain price-dependent.
-- Revised SourceWriter generation identity so byte-identical inputs cannot reuse a generation built with the earlier price gate.
-- No source probability/rank conversion, quote-capture change, PnL change or trade-gate relaxation.
-- Existing `_source_router_decision` loads history before its lane action/price/edge gates; this ordering was inspected and is unchanged.
-- Exact outcome binding, VOID handling, strict settlement-before-future-decision admission and independent collapse are unchanged.
+### Forecast classification is not observation quantization
 
-Changed product paths: `bot/replay_decision_input.py`, `bot/collector_replay_inputs.py`, `bot/auto_source_router_promotion.py`, `bot/weather/source_router_direct_history.py`. Tests: `tests/test_source_history_all_candidates.py`.
+`recorded_interval_unrounded_forecast_v1` uses the existing repository closed, unrounded point-forecast convention (`weather_pro`, `historical_provider`, offline characterization of `audit_paper_resolution`). Question/subtitle wording anchored to temperature units can establish a range; no invented explicit inclusivity fields are required. Zero, negative and decimal bounds are supported. Ticker/scalar reconstruction is forbidden.
 
-## Verified evidence
+Each retained interval explicitly says `forecast_transform: none`, `observation_quantization: not_established`, and `exchange_settlement_parity_verified: false`. In particular **91.5 predicts NO for [92,93]**. This is not proof that an official station observation of 91.5 would settle NO. Legacy rows are source-forecast diagnostics under this declared methodology, not verified exchange quantization parity.
 
-Persistent report root:
-`/mnt/data-collection/prediction-bot/data/derived_reports/source_history_fix_20260912`
+Returned `floor_strike`, `cap_strike`, `strike_type`, rules and subtitles survive raw/SDK producer conversion and the replay allowlist. Producer paths covered by the code change: daily raw listings, direct raw listings, raw converter (including direct listing/fallback), and SDK event objects. Existing source-context metadata transport remains unchanged. No new API call or quote-capture repair.
 
-- `REPORT.md`, `proof.py`, `original_byte_receipts.json`, `before/report.json`, `after/report.json` document reproducible read-only raw hydration and derived-only processing.
-- Full captured compact prefix: 219,999 rows. Outcome-blind B/T-stratified 120 original locators, all hashes match, 9,735,875 bytes hydrated; every original main action is SKIP.
-- Identical before/after: 111 projected inputs, 888 pending source observations, 24 strict eligible pre-cutoff tail source contributions, all 24 from original SKIPs; zero eligible ranges. Materialized/direct semantic parity true in both versions. Strict settled chronology excludes 39 at cutoff `2026-09-03T00:00:00+00:00`; no later-settled warmup imported.
-- **No observed real-data recovered samples** in this selection. The real baseline already admits its SKIPs; missing-price recovery is proven by the controlled regression, not invented corpus gains.
-- Final baseline regression replay against beta: 1 expected failure with `rejection_invalid_decision_time_price=1`; fixed real SourceWriter and direct reader both return one matching source sample for that quote-less risk SKIP.
-- Focused: `PYTHONPATH=. python3 -m unittest discover -s tests -p 'test_source*.py'`: 65 tests, OK.
-- Full: `PYTHONPATH=. python3 -m unittest discover -s tests`: 1,170 tests run, OK, 7 skipped, 40.583s. Logs are persistent `focused-tests.log`, `full-tests.log`, `baseline-red.log`.
+Supported explicit direct comparison sentences override default endpoint inclusion; matching rules/printed bounds must agree. Unknown/conditional/negated rules, conflicting bounds/endpoint rules, reversed/incomplete/nonfinite strikes, unsupported units and explicit unproven quantization fail closed with named interval statuses. Only supported direct-comparison grammar is implemented, not arbitrary legal-text interpretation. No quantizer is invented; future captured quantization rules still need a separately proven implementation.
+
+SourceWriter generation hash and published manifest now declare `all_candidates_range_forecast_v2`, avoiding reuse of old byte-identical history generations. Publication/service activation remains separate.
+
+## Files
+
+Additional changes relative to resumed checkpoint:
+- `bot/weather/thresholds.py`: interval extraction and unrounded membership; signed range side recognition.
+- `bot/weather/source_observation_ledger.py`: pending interval transport, range/bucket implied side and named unusable reason.
+- `bot/replay_decision_input.py`: minimal decision-time contract metadata allowlist.
+- `bot/exchanges/kalshi.py`: returned contract metadata retention across raw and SDK paths.
+- `bot/auto_source_router_promotion.py`: generation semantics version and visible manifest tag.
+- `tests/test_source_history_ranges.py`: parser boundaries, explicit-rule precedence/rejection, producer/sanitizer transport, raw-to-writer/direct high/low SKIP/quoted/absent-price/duplicate/VOID/cutoff fixtures.
+
+## Actual verification receipts
+
+Report root: `/mnt/data-collection/prediction-bot/data/derived_reports/source_history_fix_20260912`.
+
+Read `independent-review.md`, `range-evidence-review.md`, companion `range-existing-semantics-probe.json` (17 prior characterization assertions), existing proof script, locator/report metadata, and implementation seams. No archive-wide scan or archive absence claim.
+
+TDD:
+- New parser/metadata tests added first; `range-red.log` records missing helper import on the old implementation, not a passing range implementation.
+- Additional conditional/negated rules tests reproduced four semantic failures before the direct-sentence grammar restriction (tool output).
+- Signed `-3 to -2°F` side regression reproduced `binary_bucket` before recognizing the signed unit-anchored range (tool output).
+- Intermediate range pipeline fixture used an incorrect raw VOID status/count key; corrected to the existing finalized raw receipt plus `kalshi_result=void`. This was a test-harness issue, not a product VOID regression.
+
+Final isolated commands, cwd owned worktree and `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD:$PWD/tests`:
+- `python3 -m unittest discover -s tests -p 'test_source*.py'`: **72 tests OK**, 1.509s, `range-focused-final.log`.
+- `python3 -m unittest discover -s tests`: **1,177 tests OK, 7 skipped**, 32.820s, `range-full-final.log`.
 - `git diff --check`: passed.
 
-TDD caveat for reviewer: initial quote-less fixture mistakenly used zero (the old sanitizer allows zero), and initial integration fixture lacked a compact-index snapshot identity / had inconsistent target date. These were corrected. The saved final baseline red receipt isolates the real missing-price gate. The new projection call failed for its absent keyword before implementation; generation-identity assertion separately failed before its fix. Range and strict-mode safety tests are characterization/additional coverage, not claimed RED→GREEN range implementation.
+New pipeline fixture verifies both quoted and quote-less SKIPs, exact YES receipts, separate captured high=0.5 / low=-0.5 forecasts for [0,1], three polls collapsing to two independent high/low contributions, two raw inputs unchanged, derived/direct scorecard equality for this selected fixture, strict settlement `<` (equal excluded, one second later admitted), and three VOID receipts with no history. It checks nested output sentinel removal and absent quotes staying absent. Existing target-proof/exact identity regression suite remains intact. This does not assert universal direct/materialized independence-policy equivalence.
 
-## Range blocker and exact resume point
+## Historical evidence: old results versus pending new results
 
-No interval scoring change was made. Questions preserve visible ranges, but none of the 120 hydrated rows contains keys matching strike/bound/round/rules/inclusive. This is not a proof of absence in all 17GB. The pending owner retains only scalar threshold/question_side/shape; `_source_implied_outcome` supports above/below. A recorded range question alone has not established the exact requested settlement rounding/tie contract.
+Prior independent review verified 120 original byte locators, all original actions SKIP, 111 exported inputs, 888 pending observations, 24 pre-cutoff independent tail contributions, and selected-corpus direct/materialized parity. Those are **pre-range results**, not this implementation's recovery counts.
 
-Resume by obtaining a bounded immutable original market/rules receipt proving lower and upper bounds, inclusivity and rounding. Add raw→sanitized→pending→implied-side regression fixtures (decimal forecasts, endpoints, ties, negative temperatures, missing/conflicting proof), then implement the shared shape-aware scorer and rerun identical corpus before/after. Do not infer two bounds or rounding from the scalar threshold. Existing unproven ranges remain unusable, covered by a safety regression. Parent must independently decide whether the partial price fix is acceptable separately; **do not mark both requested fixes complete**.
+A tool approval is pending for a bounded differential script that would:
+1. Derive a separate `range-proof.py` from existing audited `proof.py`, changing only history opt-in/output arm naming.
+2. Extract immutable `4323e196` code into `/tmp/prediction-range-baseline-4323e19` via `git archive` (no branch/worktree mutation).
+3. Run old and new implementations with the same existing `bounded_original_rows.jsonl`, captured resolutions and existing index, cutoff `2026-09-03T00:00:00+00:00`, separate `range-before`/`range-after` reports.
 
-## Activation, deferred work and recovery
+**The approval-gated batch made zero tool calls. It has not run and must not be represented as evidence.** Do not silently reissue it: the tool explicitly requires awaiting the user's approval decision. No new recovered-range total or current-capture coverage total is claimed yet. Resume by resolving that pending approval, then run/read the original-byte verifier, reconcile old/new interval counts and identical hashes, verify selected real-corpus direct/materialized parity and no imputed quotes. Expand only via bounded locators/current small capture if the cohort is insufficient; no huge raw scan.
 
-No service, runtime config, wallet, raw archive, active index or beta working-tree changes. Stale publication and executable ask capture are separate existing issues and were not repaired. No merge, push or deployment. Parent independent review remains outstanding.
+## Recovery / next action
 
-Recovery checkpoint: implementation and tests are committed as `6c7b361f0204c19640f8a1b20343e7cdae143e69` on `fix/source-history-intervals-all-candidates`. The current branch tip includes a later dossier-only handoff commit; review it separately from that implementation commit. Resume from this owned branch, not the dirty storage checkout. The next action is independent parent review and immutable range-rule evidence discovery, not integration or activation. This document is temporary branch-local integration metadata and must not be promoted as a permanent beta/main status board.
+Implementation checkpoint will be recorded by a follow-up dossier-only commit, since a commit cannot contain its own SHA. Preserve accepted patch `6c7b361`. Parent must independently rereview the new commit, complete the blocked bounded evidence run, and inspect whether any exact captured rules need a narrowly supported grammar extension. Do not call the full user acceptance complete before the historical receipts exist.
+
+No services/configs, raw ledgers, active index, wallet, trading controls, or other worktrees changed. No merge, push or deployment. Quote capture, stale publication behavior and unrelated throughput work remain deferred. This dossier is branch-local temporary handoff metadata, not permanent beta/main history.

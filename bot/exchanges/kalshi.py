@@ -362,6 +362,7 @@ class KalshiExchange(BaseExchange):
                                     metadata={
                                         "status": m.get('status', ''),
                                         "source": "daily_series",
+                                        **_contract_metadata(m),
                                         "series": series_ticker,
                                     },
                                     yes_bid=_dollars_from_raw(m, 'yes_bid'),
@@ -418,6 +419,7 @@ class KalshiExchange(BaseExchange):
                             metadata={
                                 "status": m.get('status', ''),
                                 "source": "direct",
+                                **_contract_metadata(m),
                             },
                             yes_bid=_dollars_from_raw(m, 'yes_bid'),
                             no_bid=_dollars_from_raw(m, 'no_bid'),
@@ -500,6 +502,7 @@ class KalshiExchange(BaseExchange):
                                     "event_ticker": event_ticker,
                                     "status": getattr(m, 'status', ''),
                                     "source": "events",
+                                    **_contract_metadata(m),
                                 }
                             )
 
@@ -946,6 +949,15 @@ def _parse_dt_raw(dt_str) -> Optional[datetime]:
         return None
 
 
+def _contract_metadata(data) -> dict:
+    """Preserve returned decision-time contract fields, including zero strikes."""
+    fields = ("strike_type", "floor_strike", "cap_strike", "rules_primary",
+              "rules_secondary", "subtitle", "yes_subtitle", "no_subtitle")
+    if isinstance(data, dict):
+        return {key: data[key] for key in fields if key in data}
+    return {key: getattr(data, key) for key in fields if hasattr(data, key)}
+
+
 def _market_from_raw(
     data: dict,
     *,
@@ -962,6 +974,7 @@ def _market_from_raw(
 
     question = data.get("title") or data.get("subtitle") or ticker
     market_metadata = {
+        **_contract_metadata(data),
         "status": data.get("status", ""),
         "result": data.get("result"),
         "outcome": data.get("outcome"),

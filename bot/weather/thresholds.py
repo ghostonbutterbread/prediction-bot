@@ -1,7 +1,114 @@
 from __future__ import annotations
 
+import math
 import re
 from typing import Any
+
+
+# Same point-forecast predicate as weather_pro and historical_provider: no
+# transformation of forecasts into hypothetical official station observations.
+RANGE_FORECAST_CONVENTION = "recorded_interval_unrounded_forecast_v1"
+_NUMBER = r"[+-]?\d+(?:\.\d+)?"
+_UNIT = r"(?:°\s*(?:[FC]\b)?|degrees?\b(?:\s+Fahrenheit)?)"
+_RANGE = re.compile(
+    rf"(?<![\w.])({_NUMBER})\s*(?:{_UNIT}\s*)?(?:-|–|to|and)\s*({_NUMBER})\s*{_UNIT}", re.I,
+)
+_COMPARISON = re.compile(
+    rf"(greater than(?: or equal to)?|less than(?: or equal to)?)\s*({_NUMBER})\s*{_UNIT}", re.I,
+)
+
+
+def extract_forecast_interval(question: str, metadata: dict | None = None) -> dict:
+    """Retain recorded bounds; never reconstruct a bucket from its ticker.
+
+    Printed weather ranges and strike pairs use the repository closed/unrounded
+    forecast convention. Recognized explicit comparison rules take precedence
+    over default inclusivity, but conflicting bounds/rules fail closed. Unknown
+    quantization stays unscored: a forecast is not an official observation.
+    """
+    metadata = metadata or {}
+    evidence = []
+    intervals = []
+    comparisons = []
+
+    def result(status):
+        return {"status": status, "convention": RANGE_FORECAST_CONVENTION,
+                "forecast_transform": "none", "unit": "F",
+                "exchange_settlement_parity_verified": False,
+                "observation_quantization": "not_established", "evidence": evidence}
+
+    lower, upper = metadata.get("floor_strike"), metadata.get("cap_strike")
+    if lower is not None or upper is not None:
+        evidence.append({"origin": "market_strikes", "floor_strike": lower, "cap_strike": upper,
+                         "strike_type": metadata.get("strike_type")})
+        if lower is None or upper is None:
+            return result("range_incomplete_strikes")
+        try:
+            pair = float(lower), float(upper)
+        except (TypeError, ValueError):
+            return result("range_invalid_bounds")
+        if not all(math.isfinite(x) for x in pair):
+            return result("range_nonfinite_bounds")
+        if metadata.get("strike_type") not in (None, "", "between"):
+            return result("range_conflicting_strike_type")
+        intervals.append(pair)
+
+    for origin in ("question", "subtitle", "market_subtitle", "yes_subtitle", "rules_primary", "rules_secondary"):
+        text = str(question or "") if origin == "question" else str(metadata.get(origin) or "")
+        if not text:
+            continue
+        evidence.append({"origin": origin, "text": text})
+        # A calendar date is never a temperature interval.
+        text = re.sub(r"\b\d{4}-\d{2}-\d{2}\b", " ", text)
+        if re.search(r"°\s*C\b|\bcelsius\b", text, re.I):
+            return result("range_unsupported_unit")
+        if re.search(r"\bround\w*\b|\bquantiz\w*\b|\btruncat\w*\b", text, re.I):
+            return result("range_quantization_unproven")
+        pairs = [(float(m[0]), float(m[1])) for m in _RANGE.findall(text)]
+        found = _COMPARISON.findall(text)
+        if origin.startswith("rules_"):
+            # Only direct comparison sentences are implemented. Do not turn a
+            # matching substring in conditional/negated prose into a contract.
+            prefix = r"(?:the\s+)?(?:(?:maximum|minimum|high|low)\s+)?temperature\s+(?:is\s+)?"
+            direct_rule = rf"{prefix}(?:{_COMPARISON.pattern}\s+and\s+{_COMPARISON.pattern}|between\s+{_RANGE.pattern}\s*,?\s*inclusive)\s*[.]?"
+            if not re.fullmatch(direct_rule, text.strip(), re.I):
+                return result("range_unsupported_rules")
+            if found:
+                lo = [(float(v), "equal" in op.lower()) for op, v in found if op.lower().startswith("greater")]
+                hi = [(float(v), "equal" in op.lower()) for op, v in found if op.lower().startswith("less")]
+                if len(lo) != 1 or len(hi) != 1:
+                    return result("range_ambiguous_rules")
+                pairs.append((lo[0][0], hi[0][0]))
+                comparisons.append((lo[0][1], hi[0][1]))
+            elif pairs and re.search(r"\binclusive\b", text, re.I):
+                comparisons.append((True, True))
+            else:
+                return result("range_unsupported_rules")
+        elif re.search(r"\b(?:exclusive|excluding|not|outside|except|unless)\b|[<>]", text, re.I):
+            return result("range_ambiguous_rules")
+        intervals.extend(pairs)
+    if not intervals:
+        return result("range_missing_bounds")
+    if any(lo > hi for lo, hi in intervals):
+        return result("range_reversed_bounds")
+    if len(set(intervals)) != 1:
+        return result("range_conflicting_bounds")
+    if len(set(comparisons)) > 1:
+        return result("range_conflicting_rules")
+    lower, upper = intervals[0]
+    lower_inclusive, upper_inclusive = comparisons[0] if comparisons else (True, True)
+    return {**result("supported"), "lower": lower, "upper": upper,
+            "lower_inclusive": lower_inclusive, "upper_inclusive": upper_inclusive,
+            "endpoint_basis": "recorded_comparison_rules" if comparisons else "repository_closed_forecast_convention"}
+
+
+def infer_range_forecast_outcome(value: float | None, interval: dict | None) -> str | None:
+    if value is None or not math.isfinite(value) or not interval or interval.get("status") != "supported":
+        return None
+    lower, upper = interval["lower"], interval["upper"]
+    above_lower = value >= lower if interval["lower_inclusive"] else value > lower
+    below_upper = value <= upper if interval["upper_inclusive"] else value < upper
+    return "YES" if above_lower and below_upper else "NO"
 
 
 QUESTION_SIDES = {"above", "below", "range", "binary_bucket"}
@@ -18,7 +125,7 @@ def infer_question_side(question: str, metadata: dict[str, Any] | None = None) -
         return "above"
     if " below " in f" {normalized} " or "<" in normalized:
         return "below"
-    if " between " in f" {normalized} " or re.search(r"\b\d+\s*(?:to|-)\s*\d+\b", normalized):
+    if _RANGE.search(normalized) or " between " in f" {normalized} " or re.search(r"\b\d+\s*(?:to|-)\s*\d+\b", normalized):
         return "range"
     return "binary_bucket"
 

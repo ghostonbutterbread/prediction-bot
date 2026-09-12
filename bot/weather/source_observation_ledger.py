@@ -19,7 +19,10 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from bot.replay_decision_input import verify_replay_decision_input_record_v1
 from bot.weather.source_scoreboard import extract_source_forecast_observations
-from bot.weather.thresholds import infer_direction_from_value, infer_predicted_outcome
+from bot.weather.thresholds import (
+    infer_direction_from_value, infer_predicted_outcome,
+    extract_forecast_interval, infer_range_forecast_outcome,
+)
 
 
 SCHEMA_VERSION = 1
@@ -141,7 +144,9 @@ def materialize_source_observation_ledger(
             continue
         implied = _source_implied_outcome(pending)
         if implied is None:
-            unusable_rows.append(_unusable_row(pending, "unavailable_source_implied_side", outcome=outcome))
+            unusable_rows.append(_unusable_row(pending, pending.get("forecast_interval", {}).get("status")
+                if pending.get("forecast_interval", {}).get("status") not in {None, "supported"}
+                else "unavailable_source_implied_side", outcome=outcome))
             continue
         settled_rows.append({
             **pending,
@@ -320,6 +325,8 @@ def _pending_rows_for_input(row: Mapping[str, Any], identity: Mapping[str, Any])
                     "canonical_input_sha256": identity["canonical_input_sha256"],
                 },
                 "forecast_temp_f": observation.forecast_temp_f, "threshold": observation.market.threshold,
+                **({"forecast_interval": extract_forecast_interval(market.get("question"), metadata)}
+                   if observation.market.contract_shape in {"range", "bucket"} else {}),
                 "question_side": observation.market.question_side, "city_id": observation.market.city_id or "unknown",
                 "market_kind": observation.market.market_kind or "unknown", "contract_shape": observation.market.contract_shape or "unknown",
                 "event_ticker": _first_text(_mapping_text(metadata, "event_ticker"), _nested_text(metadata, "market_route", "evidence", "event_ticker")),
@@ -591,6 +598,8 @@ def _void_row(pending: Mapping[str, Any], outcome: Mapping[str, Any]) -> dict[st
 
 
 def _source_implied_outcome(row: Mapping[str, Any]) -> str | None:
+    if row.get("contract_shape") in {"range", "bucket"} or row.get("question_side") == "range":
+        return infer_range_forecast_outcome(_number(row.get("forecast_temp_f")), row.get("forecast_interval"))
     direction = infer_direction_from_value(_number(row.get("forecast_temp_f")), _number(row.get("threshold")))
     return infer_predicted_outcome(str(row.get("question_side") or ""), direction)
 
