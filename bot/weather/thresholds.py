@@ -31,7 +31,7 @@ _DATE = re.compile(rf"\b(?:\d{{4}}-\d{{2}}-\d{{2}}|{_MONTH}\s+\d{{1,2}}(?:st|nd|
 _CLAUSE_TOKEN = re.compile(rf"greater than(?: or equal to)?|less than(?: or equal to)?|[+-]?(?:\d+(?:\.\d+)?|\.\d+)\s*(?:{_UNIT})?", re.I)
 
 
-def _temperature_clause(text: str):
+def _temperature_clause(text: str, *, inherited_unit: bool = False):
     """Bounded numeric clause envelope, then full grammar consumption.
 
     Ordinary location/question prose surrounds the numeric clause. Complete
@@ -46,7 +46,13 @@ def _temperature_clause(text: str):
     clause = text[start:end].strip()
     pair = _RANGE.fullmatch(clause)
     joined = re.fullmatch(rf"{_COMPARISON.pattern}\s+and\s+{_COMPARISON.pattern}", clause, re.I)
-    if not _TEMPERATURE.search(clause):
+    # Inherit only for a temperature predicate or a bare numeric subtitle, not
+    # incidental numbers in explanatory prose (e.g. report pages 2-3).
+    bare = re.fullmatch(r"\s*(?:between\s+)?", text[:start], re.I) and re.fullmatch(
+        r"\s*(?:inclusive\s*)?[?.!]?\s*", text[end:], re.I)
+    if not _TEMPERATURE.search(clause) and not (
+        inherited_unit and (re.search(r"\btemperature\b", text, re.I) or bare)
+    ):
         return None
     if not pair and not joined:
         return ([], [], text, False)
@@ -91,14 +97,22 @@ def extract_forecast_interval(question: str, metadata: dict | None = None) -> di
             return result("range_conflicting_strike_type")
         intervals.append(pair)
 
-    for origin in ("question", "subtitle", "market_subtitle", "yes_subtitle", "rules_primary", "rules_secondary"):
-        text = str(question or "") if origin == "question" else str(metadata.get(origin) or "")
+    origins = ('question', 'subtitle', 'market_subtitle', 'yes_subtitle',
+               'rules_primary', 'rules_secondary', 'no_subtitle')
+    texts = {origin: str(question or '') if origin == 'question' else str(metadata.get(origin) or '')
+             for origin in origins}
+    # Resolve context before consuming any origin: the only unit marker may be
+    # in a later subtitle/rule. Strikes retain their existing Fahrenheit contract.
+    inherited_unit = bool(intervals) or any(_TEMPERATURE.search(_DATE.sub(' ', text)) for text in texts.values())
+    incomplete_clause = False
+    for origin, text in texts.items():
         if not text:
             continue
         evidence.append({"origin": origin, "text": text})
         # A calendar date is never a temperature interval.
         text = _DATE.sub(" ", text)
-        if any(not re.match(_UNIT, text[m.start():], re.I) for m in _UNIT_MARKER.finditer(text)):
+        if (any(not re.match(_UNIT, text[m.start():], re.I) for m in _UNIT_MARKER.finditer(text))
+                or re.search(rf'{_NUMBER}\s*(?:Celsius|C|Kelvin|K|Rankine|R|Reaumur)\b', text, re.I)):
             return result("range_unsupported_unit")
         for kind in re.findall(r"\b(maximum|minimum|highest|lowest|high|low)\s+temperature\b", text, re.I):
             measurement_kinds.add('high' if kind.lower() in {'maximum', 'highest', 'high'} else 'low')
@@ -106,9 +120,19 @@ def extract_forecast_interval(question: str, metadata: dict | None = None) -> di
             return result("range_conflicting_measurement")
         if re.search(r"\bround\w*\b|\bquantiz\w*\b|\btruncat\w*\b", text, re.I):
             return result("range_quantization_unproven")
-        parsed = _temperature_clause(text)
+        parsed = _temperature_clause(text, inherited_unit=inherited_unit)
+        if origin == 'no_subtitle':
+            # NO-side predicates are not affirmative intervals. Numeric claims
+            # require complement grammar, which is not implemented; prose does
+            # not supply bounds. Never silently add them as YES-side evidence.
+            if parsed:
+                return result('range_unsupported_rules')
+            continue
         pairs, found, remainder, complete = parsed or ([], [], text, True)
+        incomplete_clause |= not complete
         if origin.startswith("rules_"):
+            if not parsed and not re.search(r'\b(?:temperature|interval|between|greater|less)\b', text, re.I):
+                continue
             # Only direct comparison sentences are implemented. Do not turn a
             # matching substring in conditional/negated prose into a contract.
             prefix = r"(?:the\s+)?(?:(?:maximum|minimum|high|low)\s+)?temperature\s+(?:is\s+)?"
@@ -136,6 +160,8 @@ def extract_forecast_interval(question: str, metadata: dict | None = None) -> di
         intervals.extend(pairs)
     if not intervals:
         return result("range_missing_bounds")
+    if incomplete_clause:
+        return result("range_ambiguous_rules")
     if any(lo > hi for lo, hi in intervals):
         return result("range_reversed_bounds")
     if len(set(intervals)) != 1:

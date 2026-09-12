@@ -26,7 +26,7 @@ Returned `floor_strike`, `cap_strike`, `strike_type`, rules and subtitles surviv
 
 Supported explicit direct comparison sentences override default endpoint inclusion; matching rules/printed bounds must agree. Unknown/conditional/negated rules, conflicting bounds/endpoint rules, reversed/incomplete/nonfinite strikes, unsupported units and explicit unproven quantization fail closed with named interval statuses. Only supported direct-comparison grammar is implemented, not arbitrary legal-text interpretation. No quantizer is invented; future captured quantization rules still need a separately proven implementation.
 
-SourceWriter generation hash and published manifest now declare `all_candidates_range_forecast_v5`, avoiding reuse of generations produced by the reviewed defective parser (including v4). Publication/service activation remains separate.
+SourceWriter generation hash and published manifest now declare `all_candidates_range_forecast_v6`, avoiding reuse of generations produced by the reviewed defective parser (including v5). Publication/service activation remains separate.
 
 ## Files
 
@@ -166,3 +166,23 @@ Completed the final clean-checkpoint historical differential in **`clause-calend
 **Next action: fresh independent read-only review of `f7163b3b..908ff2b3` plus the dossier-only tip, reconciling the full original-beta-base-to-tip diff and the final `clause-calendar-*` acceptance receipts.** Initial `clause-historical-run` is deliberately preserved as failed acceptance evidence. Parent must obtain a new verdict and separately check current-beta compatibility before integration; no earlier passing tests or review waive this gate. **No independent approval is claimed.**
 
 No merge, push, runtime/service/config changes, raw ledger/index changes, wallet or trading actions. Historical results remain source-correctness diagnostics, not exchange quantization parity, executable P&L or promotion evidence.
+
+## Cross-origin inheritance repair (current handoff; supersedes above)
+
+Started from `ba8076a446a78d913e138a896bfd1f205d731c61`. Read the clause-final independent BLOCK report and exact probe/RED script first; original reproduction confirms 2 tests / 6 failures (`cross-origin-original-red.log`). Fetched origin beta read-only; no integration or runtime checkout changes. Parent owns independent review and beta integration.
+
+- Resolve the existing Fahrenheit context across all affirmative contract-text origins before parsing any origin, including unitless questions whose unit appears only in a later subtitle/rule. Temperature predicates and bare numeric subtitles inherit that context; unrelated numeric report prose does not. Reconcile all parsed bounds, explicit inclusivity and measurement using the shared owner, without replacing explicit endpoints by printed defaults.
+- Audit covers question, subtitle, market_subtitle, yes_subtitle, rules_primary and rules_secondary uniformly. Existing strike-pair Fahrenheit semantics remain intact. The retained no_subtitle is NO-side, not another affirmative interval: relevant numeric predicates remain unscored pending complement grammar, while ordinary `Outside range` prose remains valid. No invented metadata fields, general NLP or compound-interval evaluator.
+- Unsupported explicit non-Fahrenheit names/letters cannot disappear merely because the degree marker is absent. An unresolved point before later interval evidence now rejects independently of field order. Complete-clause/date regressions remain intact.
+- Explanatory/empty returned rule prose without an interval predicate is nonbinding; unknown interval rules, conditional/negated numeric rules and quantization stay unscored. No raw, executable quote, risk, action or settlement gate changes.
+- Parameterized parser and real writer/direct fixtures cover every ordered pair of affirmative origins: agreement, conflicting bounds, unitless open comparisons, explicit unit conflict and measurement conflict; additional explicit-inclusivity conflicts, bare subtitles, empty/nonpredicate/numeric report prose and NO-side cases. Generation/manifest v6 is independently hash-tested against v3/v4/v5.
+
+Receipts under the existing derived report root, explicit owned-worktree `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD:$PWD/tests`:
+- `cross-origin-family-red.log`: 4 tests / 266 failures before implementation. The initial cross-subtitle valid fixture lacked a range-shaped question and thus correctly failed strict source-target proof; fixed its question to a unitless dated range rather than relaxing production proof. Rules that explicitly declare closed endpoints correctly conflict with open endpoints; fixture expectation corrected.
+- `cross-origin-explicit-units-red.log`: 4 tests / 140 failures for C/Celsius without degree markers, prior to unit repair.
+- `python3 -m unittest discover -s tests -p 'test_source*.py'`: **76 tests OK**, 20.128s, `cross-origin-focused-final.log`.
+- `python3 -m unittest discover -s tests`: **1,181 tests OK, 7 skipped**, 50.203s, `cross-origin-full-final.log`.
+- Unchanged `clause-final-independent-cross-origin-red.py`: **2 tests OK**, 0.116s, `cross-origin-original-green-final.log`; both original forms excluded by both strict consumers.
+- Unchanged `final-boundary-independent-grammar-red.py`: **2 tests OK**, 0.198s, `cross-origin-prior-grammar-green.log`.
+- `git diff --check` passes. Historical differential must run on this committed clean checkpoint using a fresh `cross-origin-historical-run` and the independently read verifier; acceptance requires the same 120 original hashes, 24 tail + 23 range and eligible/independent identity parity, not verifier success alone. Fresh independent review remains mandatory.
+

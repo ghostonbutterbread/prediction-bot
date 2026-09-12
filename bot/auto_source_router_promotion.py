@@ -71,7 +71,7 @@ def auto_populate_source_router_history(
     snapshot_sha256 = hashlib.sha256(snapshot_bytes).hexdigest()
     resolution_sha256 = hashlib.sha256(resolution_bytes).hexdigest()
     generation_id = hashlib.sha256(_canonical_bytes({
-        "source_projection": "all_candidates_range_forecast_v5",
+        "source_projection": "all_candidates_range_forecast_v6",
         "schema_name": "auto_source_router_history_promotion",
         "schema_version": PIPELINE_SCHEMA_VERSION,
         "collector_snapshots_sha256": snapshot_sha256,
@@ -135,7 +135,7 @@ def auto_populate_source_router_history(
         "schema_name": "auto_source_router_history_promotion",
         "schema_version": PIPELINE_SCHEMA_VERSION,
         "mode": "derived_only_post_resolver_source_router_history",
-        "source_projection": "all_candidates_range_forecast_v5",
+        "source_projection": "all_candidates_range_forecast_v6",
         "non_mutating": True,
         "network_access": False,
         "orders_wallets_or_trading_mutated": False,

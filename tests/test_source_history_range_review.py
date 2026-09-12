@@ -85,6 +85,45 @@ CASES += [
 ]
 
 
+# Every affirmative origin shares the contract unit, independent of field order.
+ORIGINS = ('question', 'subtitle', 'market_subtitle', 'yes_subtitle', 'rules_primary', 'rules_secondary')
+for unit_origin in ORIGINS:
+    for predicate_origin in ORIGINS:
+        if unit_origin == predicate_origin:
+            continue
+        for text, status, implied in (
+            ('Temperature between 0 and 1 inclusive.', 'supported', 'YES'),
+            ('Temperature greater than 0 and less than 1.', 'supported', 'YES'),
+            ('Temperature between 2 and 3 inclusive.', 'range_conflicting_bounds', None),
+            ('Temperature greater than 2 and less than 3.', 'range_conflicting_bounds', None),
+            ('Temperature between 0 and 1°C inclusive.', 'range_unsupported_unit', None),
+            ('Temperature between 0 and 1 Celsius inclusive.', 'range_unsupported_unit', None),
+            ('Temperature between 0 and 1 C inclusive.', 'range_unsupported_unit', None),
+            ('Minimum temperature between 0 and 1 inclusive.', 'range_conflicting_measurement', None),
+        ):
+            fields = {unit_origin: 'Maximum temperature 0-1°F', predicate_origin: text}
+            # Returned rules use their supported direct-sentence grammar.
+            if unit_origin.startswith('rules_'):
+                fields[unit_origin] = 'Maximum temperature between 0 and 1°F inclusive.'
+                if text == 'Temperature greater than 0 and less than 1.':
+                    status, implied = 'range_conflicting_rules', None
+            question = fields.pop('question', 'Will Seattle high temperature be 0-1 on August 3, 2026?')
+            CASES.append((f'cross_{unit_origin}_{predicate_origin}_{text}', question, fields, .5, status, implied))
+for origin in ORIGINS[1:]:
+    for text in ('', 'See the station report.', 'Report published at 4 PM.', 'See pages 2-3 of the report.'):
+        CASES.append((f'irrelevant_{origin}_{text}', QUESTION, {origin: text}, .5, 'supported', 'YES'))
+    if not origin.startswith('rules_'):
+        CASES.append((f'bare_cross_{origin}', QUESTION, {origin: '2-3'}, .5, 'range_conflicting_bounds', None))
+    CASES.append((f'inclusion_conflict_{origin}',
+                  'Will Seattle high temperature be greater than 0°F and less than 1°F?',
+                  {origin: 'Temperature between 0 and 1 inclusive.'}, .5, 'range_conflicting_rules', None))
+CASES += [
+    ('no_side_prose', QUESTION, {'no_subtitle': 'Outside range'}, .5, 'supported', 'YES'),
+    ('no_side_numeric', QUESTION, {'no_subtitle': '2-3'}, .5, 'range_unsupported_rules', None),
+    ('point_before_range', 'Will Seattle high temperature be 4°F?', {'yes_subtitle': '0-1'}, .5, 'range_ambiguous_rules', None),
+]
+
+
 class ReviewRangeTests(unittest.TestCase):
     def test_parser_review_cases(self):
         for name, question, metadata, forecast, status, implied in CASES:
@@ -110,7 +149,7 @@ class ReviewRangeTests(unittest.TestCase):
                 writer = auto_populate_source_router_history(collector_snapshots_path=raw,
                     strict_resolutions_path=resolutions, output_root=root/'data/derived_reports/history', storage_root=root)
                 manifest_data = json.loads(writer.manifest_path.read_text())
-                self.assertEqual(manifest_data['source_projection'], 'all_candidates_range_forecast_v5')
+                self.assertEqual(manifest_data['source_projection'], 'all_candidates_range_forecast_v6')
                 identity = {
                     'schema_name': 'auto_source_router_history_promotion', 'schema_version': 2,
                     'collector_snapshots_sha256': hashlib.sha256(before[0]).hexdigest(),
@@ -119,8 +158,8 @@ class ReviewRangeTests(unittest.TestCase):
                 def generation(version):
                     value = dict(identity, source_projection=f'all_candidates_range_forecast_v{version}')
                     return hashlib.sha256((json.dumps(value, sort_keys=True, separators=(',', ':')) + '\n').encode()).hexdigest()
-                self.assertEqual(writer.generation_dir.name, generation(5))
-                for old_version in (3, 4):
+                self.assertEqual(writer.generation_dir.name, generation(6))
+                for old_version in (3, 4, 5):
                     self.assertNotEqual(writer.generation_dir.name, generation(old_version))
                 history = [json.loads(x) for x in writer.history_path.read_text().splitlines()]
                 scores = load_verified_strict_scorecard_rows(writer.scoreboard_path)
