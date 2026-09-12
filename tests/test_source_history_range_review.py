@@ -68,13 +68,20 @@ CASES += [
     for predicate in ('greater than 0°F and less than 1',
                       'greater than 0 and less than 1°F',
                       '0°F to 1', 'between 0°F and 1')
-    for context in ('on August 3, 2026', 'on 2026-08-03', 'in Seattle')
+    for context in ('on August 3, 2026', 'on 2026-08-03', 'in Seattle', 'on Aug 3, 2026')
 ]
 CASES += [
     ('dated_suffix', 'Will Seattle high temperature be 0-1°F in Seattle on August 3, 2026?',
      {}, .5, 'supported', 'YES'),
     ('predicate_after_date', 'Will Seattle high temperature be 0-1°F on August 3, 2026 and 4?',
      {}, .5, 'range_ambiguous_rules', None),
+]
+CASES += [
+    (f'calendar_{month}_{suffix}',
+     f'Will Seattle high temperature be 0-1°F on {month} 3, 2026{suffix}?',
+     {}, .5, 'range_ambiguous_rules' if suffix else 'supported', None if suffix else 'YES')
+    for month in ('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Sept', 'Oct', 'Nov', 'Dec', 'Aug.')
+    for suffix in ('', ' and 4')
 ]
 
 

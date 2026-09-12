@@ -24,7 +24,7 @@ _COMPARISON = re.compile(
 )
 # Dates are context, not temperature predicates. Remove only complete supported
 # calendar forms, not everything following 'on' (which can hide another bound).
-_MONTH = r"(?:January|February|March|April|May|June|July|August|September|October|November|December)"
+_MONTH = r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?"
 _DATE = re.compile(rf"\b(?:\d{{4}}-\d{{2}}-\d{{2}}|{_MONTH}\s+\d{{1,2}}(?:st|nd|rd|th)?(?:,?\s+\d{{4}})?)(?![\w°])", re.I)
 # Lex numbers more broadly than the supported bound grammar: an unsupported
 # leading-dot decimal must be rejected, not disappear from the clause envelope.
