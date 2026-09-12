@@ -1,4 +1,5 @@
 """Independent-review regressions through parser and both history consumers."""
+import hashlib
 import json
 from pathlib import Path
 import tempfile
@@ -27,6 +28,28 @@ CASES = [
     ('question_conflicting_comparisons', 'Will Seattle high temperature be greater than 2°F and less than 3°F?',
      {'floor_strike': 0, 'cap_strike': 1}, .5, 'range_conflicting_bounds', None),
 ]
+# Boundary families, not a denylist of the reviewer's exact spellings/operators.
+CASES += [
+    (f'unsupported_{marker}_{unit}', f'Will Seattle high temperature be 0-1{marker}{unit}?',
+     {}, .5, 'range_unsupported_unit', None)
+    for marker in ('°', '° ', ' degrees ')
+    for unit in ('R', 'K', 'C', 'Rankine', 'Kelvin', 'Celsius', 'Reaumur', 'XYZ')
+]
+CASES += [
+    (f'trailing_{joiner}_{predicate}', f'Will Seattle high temperature be 0-1°F {joiner} {predicate}?',
+     {}, 4 if joiner == '/' else .5, 'range_ambiguous_rules', None)
+    for joiner in ('and', '/', 'or', ',', ';', 'plus')
+    for predicate in ('4°F', '4 degrees Fahrenheit', '0-1°F')
+]
+CASES += [
+    (f'valid_{unit}', f'Will Seattle high temperature be -1.5 to 0{unit} on August 3, 2026?',
+     {}, 0, 'supported', 'YES')
+    for unit in ('°', ' degrees', '°F', '° F', '°Fahrenheit', ' degrees Fahrenheit', ' F', ' Fahrenheit')
+]
+CASES += [
+    ('valid_bare_comparisons', 'Will Seattle high temperature be greater than -1.5° and less than or equal to 0° on 2026-08-03?',
+     {}, 0, 'supported', 'YES'),
+]
 
 
 class ReviewRangeTests(unittest.TestCase):
@@ -54,13 +77,24 @@ class ReviewRangeTests(unittest.TestCase):
                 writer = auto_populate_source_router_history(collector_snapshots_path=raw,
                     strict_resolutions_path=resolutions, output_root=root/'data/derived_reports/history', storage_root=root)
                 manifest_data = json.loads(writer.manifest_path.read_text())
-                self.assertEqual(manifest_data['source_projection'], 'all_candidates_range_forecast_v3')
+                self.assertEqual(manifest_data['source_projection'], 'all_candidates_range_forecast_v4')
+                identity = {
+                    'schema_name': 'auto_source_router_history_promotion', 'schema_version': 2,
+                    'collector_snapshots_sha256': hashlib.sha256(before[0]).hexdigest(),
+                    'strict_resolutions_sha256': hashlib.sha256(before[1]).hexdigest(),
+                }
+                def generation(version):
+                    value = dict(identity, source_projection=f'all_candidates_range_forecast_v{version}')
+                    return hashlib.sha256((json.dumps(value, sort_keys=True, separators=(',', ':')) + '\n').encode()).hexdigest()
+                self.assertEqual(writer.generation_dir.name, generation(4))
+                self.assertNotEqual(writer.generation_dir.name, generation(3))
                 history = [json.loads(x) for x in writer.history_path.read_text().splitlines()]
                 scores = load_verified_strict_scorecard_rows(writer.scoreboard_path)
                 expected_count = int(implied is not None)
-                self.assertEqual(len(history), expected_count)
-                self.assertEqual(sum(r['sample_count'] for r in scores or []), expected_count)
-                if history:
+                with self.subTest(consumer='writer'):
+                    self.assertEqual(len(history), expected_count)
+                    self.assertEqual(sum(r['sample_count'] for r in scores or []), expected_count)
+                if history and implied is not None:
                     self.assertEqual(history[0]['source_implied_outcome'], implied)
                     self.assertEqual(history[0]['market_kind'], 'high')
                     self.assertEqual(history[0]['forecast_interval']['status'], status)
@@ -100,6 +134,14 @@ class ReviewRangeTests(unittest.TestCase):
             'rules_primary': 'Minimum temperature between 0 and 1°F inclusive.'})['status'], 'range_conflicting_measurement')
         self.assertEqual(extract_forecast_interval('Will Seattle low temperature be 0-1°F?', {
             'rules_primary': 'Maximum temperature between 0 and 1°F inclusive.'})['status'], 'range_conflicting_measurement')
+
+    def test_boundary_checks_across_retained_origins(self):
+        for origin in ('subtitle', 'market_subtitle', 'yes_subtitle', 'rules_primary', 'rules_secondary'):
+            for text in ('Temperature 0-1° R', 'Temperature 0-1°F and 4°F', 'Temperature 0-1°F / 4°F'):
+                with self.subTest(origin=origin, text=text):
+                    interval = extract_forecast_interval(QUESTION, {origin: text})
+                    self.assertNotEqual(interval['status'], 'supported')
+                    self.assertIsNone(infer_range_forecast_outcome(.5, interval))
 
 
 if __name__ == '__main__':

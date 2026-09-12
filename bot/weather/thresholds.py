@@ -9,7 +9,13 @@ from typing import Any
 # transformation of forecasts into hypothetical official station observations.
 RANGE_FORECAST_CONVENTION = "recorded_interval_unrounded_forecast_v1"
 _NUMBER = r"[+-]?\d+(?:\.\d+)?"
-_UNIT = r"(?:°\s*(?:[FC]\b)?|degrees?\b(?:\s+Fahrenheit)?)"
+# An omitted unit is legacy Fahrenheit only at a grammatical boundary. An
+# arbitrary word after a degree marker is a unit token, never a bare-degree
+# prefix. These continuations are range/comparison syntax or question prose.
+_BARE_DEGREE_END = r"(?=\s*(?:$|[?.,;:!)/–-]|\d|\b(?:on|in|at|for|to|and|or|inclusive|exclusiv\w*|less|greater)\b))"
+_UNIT = rf"(?:(?:°\s*|degrees?\b\s*)(?:Fahrenheit\b|F\b|{_BARE_DEGREE_END})|Fahrenheit\b|F\b)"
+_UNIT_MARKER = re.compile(r"°|degrees?\b", re.I)
+_TEMPERATURE = re.compile(rf"{_NUMBER}\s*(?:°|degrees?\b|Fahrenheit\b|F\b)", re.I)
 _RANGE = re.compile(
     rf"(?<![\w.])({_NUMBER})\s*(?:{_UNIT}\s*)?(?:-|–|to|and)\s*({_NUMBER})\s*{_UNIT}", re.I,
 )
@@ -61,11 +67,7 @@ def extract_forecast_interval(question: str, metadata: dict | None = None) -> di
         evidence.append({"origin": origin, "text": text})
         # A calendar date is never a temperature interval.
         text = re.sub(r"\b\d{4}-\d{2}-\d{2}\b", " ", text)
-        if re.search(r"°\s*C\b|\bcelsius\b|\bkelvin\b|\brankine\b", text, re.I):
-            return result("range_unsupported_unit")
-        # Bare degrees are legacy Fahrenheit evidence, not a prefix match for
-        # an attached unsupported unit (e.g. °K or °Rankine).
-        if any(unit.casefold() != 'f' for unit in re.findall(r"°([a-z]+)\b", text, re.I)) or re.search(r"°\s+K\b", text, re.I):
+        if any(not re.match(_UNIT, text[m.start():], re.I) for m in _UNIT_MARKER.finditer(text)):
             return result("range_unsupported_unit")
         for kind in re.findall(r"\b(maximum|minimum|highest|lowest|high|low)\s+temperature\b", text, re.I):
             measurement_kinds.add('high' if kind.lower() in {'maximum', 'highest', 'high'} else 'low')
@@ -83,10 +85,15 @@ def extract_forecast_interval(question: str, metadata: dict | None = None) -> di
             if not re.fullmatch(direct_rule, text.strip(), re.I):
                 return result("range_unsupported_rules")
         else:
-            # Remove understood predicates before checking leftover operators;
-            # "or equal to" belongs to a comparison, "or 4°F" does not.
+            # One origin must express one interval, not a union/intersection of
+            # independently matching predicates (even identical ranges). Strip
+            # understood predicates, then require every temperature literal to
+            # have been consumed. The connector spelling is immaterial; normal
+            # question/date prose is not a temperature predicate.
             remainder = _RANGE.sub(' ', _COMPARISON.sub(' ', text))
-            if re.search(r"\b(?:exclusive|excluding|not|outside|except|unless|if|or)\b|[<>]", remainder, re.I):
+            if (len(pairs) > 1 or (pairs and found)
+                    or ((intervals or pairs or found) and _TEMPERATURE.search(remainder))
+                    or re.search(r"\b(?:exclusive|excluding|not|outside|except|unless|if|or)\b|[<>]", remainder, re.I)):
                 return result("range_ambiguous_rules")
         if found:
             lo = [(float(v), "equal" in op.lower()) for op, v in found if op.lower().startswith("greater")]

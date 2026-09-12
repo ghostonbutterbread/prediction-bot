@@ -26,7 +26,7 @@ Returned `floor_strike`, `cap_strike`, `strike_type`, rules and subtitles surviv
 
 Supported explicit direct comparison sentences override default endpoint inclusion; matching rules/printed bounds must agree. Unknown/conditional/negated rules, conflicting bounds/endpoint rules, reversed/incomplete/nonfinite strikes, unsupported units and explicit unproven quantization fail closed with named interval statuses. Only supported direct-comparison grammar is implemented, not arbitrary legal-text interpretation. No quantizer is invented; future captured quantization rules still need a separately proven implementation.
 
-SourceWriter generation hash and published manifest now declare `all_candidates_range_forecast_v3`, avoiding reuse of generations produced by the reviewed defective parser. Publication/service activation remains separate.
+SourceWriter generation hash and published manifest now declare `all_candidates_range_forecast_v4`, avoiding reuse of generations produced by the reviewed defective parser. Publication/service activation remains separate.
 
 ## Files
 
@@ -100,6 +100,25 @@ Stdlib verifier result (`repair-historical-range-run/independent-verification.js
 - `repair-comparison.json` additionally compares prior completed range run: mode counts match exactly and both before/after eligible + independent row arrays are identical. No historical count changed after the parser repair. It retains script and new test/probe receipt hashes; `provenance.json` retains exact source commits, protected hashes and subprocess commands.
 
 ## Recovery / next action
+
+### Final boundary repair (supersedes the prior recovery instructions below)
+
+Read `final-independent-review.md` and the exact additional probe before editing the clean `8bb9f0c4d71eb408f1be24ae34139aa93fa205ff` tip. The same feature-owned parser still admitted `0-1° R`, `0-1°F and 4°F`, and `0-1°F / 4°F`; no ancestor or sibling worktree was changed.
+
+- Replace token-specific unsupported-unit checks with supported F/Fahrenheit grammar and an explicit bare-degree continuation boundary. Attached and spaced unknown degree-unit tokens cannot fall back to bare Fahrenheit. Preserve bare-degree question/date and range/comparison continuations.
+- Require each parsed origin to contain one interval predicate. Reject unconsumed temperature literals regardless of connector spelling, multiple independently parsed ranges (including identical ones), and mixed range/comparison predicates. Keep existing conditional/negated-prose rejection and strict full-sentence rules grammar. No arbitrary metadata scan or new contract fields.
+- `tests/test_source_history_range_review.py` now parameterizes unsupported degree units across attached/spaced/speIled-degree forms and trailing temperature predicates across conjunctions, punctuation and words. The exact three reviewer variants are included. Each case exercises parser, real SourceWriter and indexed direct history; writer assertions use a nested subtest so a failing writer does not prevent the direct RED reproduction. Positive pipeline cases retain Fahrenheit variants, bare degrees, dated question prose, signed decimal/zero endpoints and explicit comparisons. Existing high/low, VOID, strict cutoff, dedup and quote/executable-price tests are unchanged.
+- Bump source-history generation semantics to v4; regression independently recomputes each actual v4 generation hash and proves it differs from v3 for identical raw/resolution bytes. Existing external references to old generations are not automatically rebuilt or deployed.
+
+Actual isolated receipts in the report root, `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD:$PWD/tests`, cwd owned worktree:
+- `boundary-red.log`: initial boundary additions before owner edits, 3 tests / **69 failing subtests**, including all three supplied cases through writer and direct history.
+- `boundary-green-verified.log`: `python3 -m unittest test_source_history_range_review test_source_history_ranges`, **11 tests OK**, 3.588s.
+- `boundary-focused.log`: `python3 -m unittest discover -s tests -p 'test_source*.py'`, **76 tests OK**, 5.089s.
+- `boundary-full.log`: `python3 -m unittest discover -s tests`, **1,181 tests OK, 7 skipped**, 35.677s.
+- `boundary-additional-probe.json`: unchanged final reviewer script, all three cases unscored with zero writer/direct strict samples. `boundary-original-probe.json`: unchanged original five-case script retains the repaired outcomes.
+- `git diff --check` passes. Intermediate failures exposed a missing newline in the test's independent canonical hash and the prior missing-bounds status for a lone temperature literal; both corrected before the above verified receipts. No production price/history gates were changed.
+
+Implementation checkpoint is the commit containing this section and the three source/test files; a following dossier-only receipt will name its immutable SHA. **Historical rerun pending this clean checkpoint**: derive `boundary-historical-range-repro.py` from the read repair script by changing only FIXED and its default run name to `boundary-historical-range-run`; similarly derive the verifier with only the new default run name. Execute both in the owned worktree, then compare eligible/independent arrays against prior runs. Do not invoke `proof.prepare()`, rescan, overwrite original scripts/receipts, or alter raw/index bytes. Rereview and current-beta compatibility remain parent-owned gates; no integration authorization.
 
 Recovery/implementation checkpoint: **`6cfd1defd9847a504246058d4945e31577e7979c`** on `fix/source-history-intervals-all-candidates` contains the repair, tests, v3 generation identity and dossier. Current tip additionally contains a later dossier-only historical-evidence/recovery commit; verify that diff separately. Previous range checkpoint `295b13358cc69ed2ce23c20d93599767a9c8b124` and reviewed tip `fcc92059b52d0b4ffdb118a8eacbb81222d444bb` remain reachable. Fresh independent review is still REQUIRED; earlier green tests/review do not approve this repair. Parent owns the Kanban/review/integration gate and must check current beta compatibility separately. Resume with fresh read-only review of `fcc92059..6cfd1def`, exact reviewer probe and new regressions, full base-to-tip contract boundaries, and historical receipts above.
 
