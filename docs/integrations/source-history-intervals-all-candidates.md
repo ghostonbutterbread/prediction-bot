@@ -70,6 +70,6 @@ A tool approval is pending for a bounded differential script that would:
 
 ## Recovery / next action
 
-Implementation checkpoint will be recorded by a follow-up dossier-only commit, since a commit cannot contain its own SHA. Preserve accepted patch `6c7b361`. Parent must independently rereview the new commit, complete the blocked bounded evidence run, and inspect whether any exact captured rules need a narrowly supported grammar extension. Do not call the full user acceptance complete before the historical receipts exist.
+Recovery checkpoint: `295b13358cc69ed2ce23c20d93599767a9c8b124` contains the range implementation, tests and updated dossier on `fix/source-history-intervals-all-candidates`. The branch tip additionally contains a later dossier-only checkpoint annotation; review it separately. Preserve accepted patch `6c7b361`. Parent must independently rereview the new commit, complete the blocked bounded evidence run, and inspect whether any exact captured rules need a narrowly supported grammar extension. Do not call the full user acceptance complete before the historical receipts exist.
 
 No services/configs, raw ledgers, active index, wallet, trading controls, or other worktrees changed. No merge, push or deployment. Quote capture, stale publication behavior and unrelated throughput work remain deferred. This dossier is branch-local temporary handoff metadata, not permanent beta/main history.
