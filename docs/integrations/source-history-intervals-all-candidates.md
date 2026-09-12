@@ -8,7 +8,22 @@
 - Accepted quote-independent implementation: `6c7b361f0204c19640f8a1b20343e7cdae143e69`; resumed checkpoint `4323e1963c57aef9e945e736c90e92c32f95affb`.
 - Target **beta only**, explicit user instruction supersedes stale main-based local guidance. Parent owns Kanban, independent review and integration. No merge/push/deploy authority.
 - Initial status clean; fetched origin beta without changing working tree. No sibling branch or worktree edits.
-- Status: independent-review parser blockers repaired with RED→GREEN regressions, isolated focused/full receipts and a completed hash-verified historical differential preserving all valid range gains. **Fresh independent rereview remains required before beta integration**.
+- Status: **Independently APPROVED; beta integration BLOCKED by active-runtime source boundary.** The final integration checkpoint below supersedes earlier pending-review/authority statements. Production implementation remains unchanged.
+
+## Final integration checkpoint — APPROVED / runtime boundary BLOCKED
+
+Parent authorized this integrating subagent for local beta integration conditional on no activation, superseding builder-only authority above. No push authorized.
+
+- Independent **APPROVE**: report-root `no-complement-independent-review.md`, SHA-256 `0c8ca91e355892716749f18d2d82ea61e4e0045ff8fa8fd2418f99e2454777a8`. Exact reviewed tip `cf522fdd6c735c10aefd601de36a2de6ec1dafe4`, implementation/recovery `1daa60cc0c0b0f36194692f3324ec360fead901f`. Verified implementation-to-tip changes only this dossier; this final checkpoint is likewise dossier-only. Earlier pending-review statements below are historical, superseded by this approval.
+- Fetched origin beta: local beta and origin/beta remain `ada72a2b85a2e37058ffbd94cb40a64640530cd9`, exact merge base. Beta...reviewed-tip is 0/15; beta is clean. Current candidate code therefore includes exact current beta without divergent changes. No active-tree merge preflight was attempted.
+- Fresh owned-worktree isolated commands, `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PWD:$PWD/tests"`: `python3 -m unittest discover -s tests -p 'test_source*.py'` **76 tests OK, 22.522s**; `python3 -m unittest discover -s tests` **1181 tests OK, 7 skipped, 52.260s**. Both exit 0; report-root `integration-focused.log` and `integration-full.log`. Explicit thresholds import resolves beneath owned worktree; base diff check passes.
+- Recomputed **39/39** artifact hashes in final independent historical verifier. Approved historical receipt retains 120 original SKIPs, 111 inputs, 888 pending, 24 tail + 23 range independent contributions. Original raw-locator verification belongs to that prior independent execution; this integration checkpoint did not rescan raw inputs or rebuild a corpus. Both consumers retain quote independence; numeric NO complements remain explicitly unsupported/unscored, including consistent bounds. Historical source-correctness diagnostics are not P&L or settlement-parity claims.
+
+**Blocker:** active service `prediction-lab-strict-source-cohort-20260823.service`, PID 57787, start `2026-09-12 13:05:28 PDT`, executes storage `.venv/bin/python` with `/home/ryushe/projects/prediction-bot-beta-integration/scripts/prediction_lab_collect.py`. PROJECT_ROOT selects beta; cwd is `/mnt/data-collection/prediction-bot`. Launcher lines 11–15 prepend beta for imports. `Restart=on-failure` and `RestartSec=30` allow automatic activation of changed checkout files without an agent restart; lazy imports/later reads cannot be excluded. Thus a filesystem merge is unsafe under no-activation authority. Checkout revision is verified; exact loaded in-memory revision is not independently attested and must not be equated with HEAD.
+
+No merge, push, service/config/order/wallet/raw/index changes. No postmerge verification claim. Retain approved branch/worktree and dossier because unique commits are not contained in beta. Parent Kanban identity gate was not bypassed. Final checkpoint SHA and verification are in report-root `integration-receipt.json` and `integration-report.md`.
+
+**Resume condition:** owner explicitly approves controlled runtime/source separation or a maintenance activation boundary before any canonical-beta file update. Then re-fetch/check ancestry and cleanliness, perform isolated compatibility checks, integrate beta only, exclude this task dossier from the merge while retaining feature history, verify actual merged HEAD and focused/full suites, and retire only clean contained work. No new correctness-review loop is required for this dossier-only handoff. This is a completed blocked checkpoint, not integration or deployment.
 
 ## Intent and implemented contract
 
