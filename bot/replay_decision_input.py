@@ -214,19 +214,26 @@ class ReplayDecisionInputBuildResult:
 
 def build_replay_decision_input_v1(
     raw_snapshot_row: Mapping[str, Any] | Any, *, strict: bool = False,
+    source_history_only: bool = False,
 ) -> ReplayDecisionInputBuildResult:
     """Build a blind replay input from immutable collector evidence.
 
     The default accepts legacy collector rows after rebuilding only reviewed
     decision-time fields.  ``strict=True`` retains the original v1 contract
     for callers that need every v1 provenance and context field present.
+    ``source_history_only=True`` admits collected forecasts without a quote:
+    source correctness has no executable-price requirement. It preserves the
+    same identity, source-target and blind allowlist checks, tags the purpose,
+    and never invents a fill or relaxes strict executable replay.
     """
+    if strict and source_history_only:
+        raise ValueError("source history projection is not strict executable replay")
     mismatch = shared_candidate_identity_mismatch(raw_snapshot_row)
     if mismatch:
         return _failure(mismatch, mismatch.removesuffix("_mismatch"), "recorded root and shared candidate identities conflict")
     if strict:
         return _build_replay_decision_input_strict_v1(raw_snapshot_row)
-    return _build_replay_decision_input_sanitized_v1(raw_snapshot_row)
+    return _build_replay_decision_input_sanitized_v1(raw_snapshot_row, source_history_only=source_history_only)
 
 
 def _build_replay_decision_input_strict_v1(raw_snapshot_row: Mapping[str, Any] | Any) -> ReplayDecisionInputBuildResult:
@@ -360,7 +367,9 @@ def _build_replay_decision_input_strict_v1(raw_snapshot_row: Mapping[str, Any] |
     return ReplayDecisionInputBuildResult(record=record, canonical_input_json=canonical_input_json)
 
 
-def _build_replay_decision_input_sanitized_v1(raw_snapshot_row: Mapping[str, Any] | Any) -> ReplayDecisionInputBuildResult:
+def _build_replay_decision_input_sanitized_v1(
+    raw_snapshot_row: Mapping[str, Any] | Any, *, source_history_only: bool = False,
+) -> ReplayDecisionInputBuildResult:
     """Rebuild a usable legacy row without carrying historical outputs forward."""
     if not isinstance(raw_snapshot_row, Mapping):
         return _failure("invalid_snapshot_row", "$", "collector snapshot row must be a mapping")
@@ -430,7 +439,7 @@ def _build_replay_decision_input_sanitized_v1(raw_snapshot_row: Mapping[str, Any
         return ReplayDecisionInputBuildResult(record=None, errors=tuple(errors))
 
     prices = _available_decision_time_prices(row, execution_snapshot)
-    if not prices:
+    if not prices and not source_history_only:
         return _failure(
             "invalid_decision_time_price", "yes_price",
             "a valid decision-time quote or executable ask is required",
@@ -504,6 +513,8 @@ def _build_replay_decision_input_sanitized_v1(raw_snapshot_row: Mapping[str, Any
         },
         "sanitization": {"omitted_fields": _sorted_omitted_fields(omitted_fields)},
     }
+    if source_history_only:
+        record["input_purpose"] = "source_correctness_history"
     if source_context_as_of is not None:
         record["source_inputs"]["recorded_as_of"] = source_context_as_of
         record["source_inputs"]["source_context"]["as_of"] = source_context_as_of
