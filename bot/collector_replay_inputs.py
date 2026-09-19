@@ -42,6 +42,7 @@ def export_collector_replay_inputs(
     max_rows: int | None = None,
     accepted_limit: int | None = None,
     storage_root: str | Path | None = None,
+    source_history_only: bool = False,
 ) -> CollectorReplayInputExportResult:
     """Export successful default-sanitized replay inputs from collector JSONL.
 
@@ -51,6 +52,8 @@ def export_collector_replay_inputs(
     JSON row is passed once to ``build_replay_decision_input_v1`` using its
     default legacy-compatible sanitized mode.  Source order and reobservations
     are retained exactly; no rows are deduplicated.
+    ``source_history_only`` opts into quote-independent source correctness
+    projection. Ordinary replay export retains its existing price requirement.
     """
     if max_rows is not None and max_rows < 0:
         raise ValueError("max_rows must be non-negative")
@@ -85,7 +88,8 @@ def export_collector_replay_inputs(
             continue
 
         # Keep this as the only builder call for each selected collector row.
-        result = build_replay_decision_input_v1(row)
+        result = (build_replay_decision_input_v1(row, source_history_only=True)
+                  if source_history_only else build_replay_decision_input_v1(row))
         if result.ok:
             assert result.record is not None
             accepted_records.append(result.record)
@@ -125,6 +129,7 @@ def export_collector_replay_inputs(
         "max_rows": max_rows,
         "accepted_limit": accepted_limit,
         "selection_mode": selection_mode,
+        "source_history_only": source_history_only,
         "selected_row_count": selected_row_count,
         "inspected_row_count": selected_row_count,
         "accepted_row_count": len(accepted_records),

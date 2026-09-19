@@ -70,7 +70,7 @@ def load_direct_strict_source_history(
     bound_count = 0
     for raw in load_indexed_collector_rows_reverse(Path(index_path), Path(manifest_path)):
         inspected += 1
-        built = build_replay_decision_input_v1(raw)
+        built = build_replay_decision_input_v1(raw, source_history_only=True)
         if not built.ok or built.record is None:
             for error in built.errors or ():
                 rejections[error.code] += 1

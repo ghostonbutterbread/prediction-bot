@@ -71,6 +71,7 @@ def auto_populate_source_router_history(
     snapshot_sha256 = hashlib.sha256(snapshot_bytes).hexdigest()
     resolution_sha256 = hashlib.sha256(resolution_bytes).hexdigest()
     generation_id = hashlib.sha256(_canonical_bytes({
+        "source_projection": "all_candidates_range_forecast_v7",
         "schema_name": "auto_source_router_history_promotion",
         "schema_version": PIPELINE_SCHEMA_VERSION,
         "collector_snapshots_sha256": snapshot_sha256,
@@ -95,6 +96,7 @@ def auto_populate_source_router_history(
         exported = export_collector_replay_inputs(
             source_archive=materialized_snapshots, output_dir=staging_dir / "replay_inputs",
             storage_root=storage_root,
+            source_history_only=True,
         )
         bound = bind_replay_finalized_outcomes(
             replay_inputs_path=exported.records_path,
@@ -133,6 +135,7 @@ def auto_populate_source_router_history(
         "schema_name": "auto_source_router_history_promotion",
         "schema_version": PIPELINE_SCHEMA_VERSION,
         "mode": "derived_only_post_resolver_source_router_history",
+        "source_projection": "all_candidates_range_forecast_v7",
         "non_mutating": True,
         "network_access": False,
         "orders_wallets_or_trading_mutated": False,
