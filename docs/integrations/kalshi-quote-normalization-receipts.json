@@ -1,0 +1,146 @@
+{
+  "branch": "fix/kalshi-quote-normalization",
+  "base": "4ca50c30c39707fd13e4b657d6299667cd761580",
+  "target": "beta",
+  "evidence_root": "/mnt/data-collection/prediction-bot/data/derived_reports/price_normalization_20260921T044200Z",
+  "test_interpreter": "/mnt/data-collection/prediction-bot/.venv/bin/python",
+  "sandbox": "Landlock scratch-only writes; seccomp connect/send denial; source-copy hash checks; candidate copy first on PYTHONPATH; TMPDIR outside source/data; sanitized environment",
+  "tests": [
+    {
+      "label": "red-shapes-isolated",
+      "modules": [
+        "test_kalshi_quotes"
+      ],
+      "exit_code": 1,
+      "elapsed_seconds": 0.935147084062919,
+      "result": {
+        "testsRun": 2,
+        "failures": 4,
+        "errors": 0,
+        "skipped": 0,
+        "success": false,
+        "loaded_source": "/home/ryushe/worktrees/prediction-bot-kalshi-quote-normalization/bot/exchanges/kalshi.py"
+      },
+      "log_sha256": "fe5aa6fb079c05af635d21575a3083261439dbe06e60b43a56e22a0d69af82ee"
+    },
+    {
+      "label": "red-validity",
+      "modules": [
+        "test_kalshi_quotes"
+      ],
+      "exit_code": 1,
+      "elapsed_seconds": 0.8851284380070865,
+      "result": {
+        "testsRun": 7,
+        "failures": 41,
+        "errors": 0,
+        "skipped": 0,
+        "success": false,
+        "loaded_source": "/home/ryushe/worktrees/prediction-bot-kalshi-quote-normalization/bot/exchanges/kalshi.py"
+      },
+      "log_sha256": "dc2ca799af7d837a5caf515363e14a0b695a0bf343ecfdcb59d9b5ed0f10c4f3"
+    },
+    {
+      "label": "final-baseline-red",
+      "modules": [
+        "test_kalshi_quotes"
+      ],
+      "exit_code": 1,
+      "elapsed_seconds": 1.4525452449452132,
+      "result": {
+        "testsRun": 8,
+        "failures": 83,
+        "errors": 4,
+        "skipped": 0,
+        "success": false,
+        "loaded_source": "/tmp/kalshi-quotes-tests-lxf5dywd/source/bot/exchanges/kalshi.py"
+      },
+      "log_sha256": "ecdae15c9eea4c88c80a4898479c783343f240210cb43190256d070101ddfc8d"
+    },
+    {
+      "label": "final-focused",
+      "modules": [
+        "test_kalshi_quotes",
+        "test_kalshi_direct",
+        "test_prediction_lab_collect",
+        "test_collector_replay_inputs",
+        "test_source_observation_ledger"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 4.863636929891072,
+      "result": {
+        "testsRun": 105,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "success": true,
+        "loaded_source": "/tmp/kalshi-quotes-tests-xi1nymq4/source/bot/exchanges/kalshi.py"
+      },
+      "log_sha256": "97c1987abd7931c55bc8b4b73445a975a0db854fbc909279fa1ac6615d5c943e"
+    },
+    {
+      "label": "final-full",
+      "modules": [
+        "unittest discover -s tests"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 25.05393322603777,
+      "result": {
+        "testsRun": 1052,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 7,
+        "success": true,
+        "loaded_source": "/tmp/kalshi-quotes-tests-b97dkp32/source/bot/exchanges/kalshi.py"
+      },
+      "log_sha256": "c5d2a532b1bd2c273e1526cf178b5381b99967f594b707523eb4e726b0fca9e2"
+    }
+  ],
+  "tested_source_sha256": {
+    "bot/exchanges/kalshi.py": "850ea3ab7c58e814c5b81cba1fb3d05eea0f986c4e7951d95dcad45ec7dcaf75",
+    "tests/test_kalshi_quotes.py": "9669538eda922126160999c9c2baedbbbbdc917ddaf341eb0c77cf59b9568f5c",
+    "tests/test_kalshi_direct.py": "8e367a5d32b83b663bac3167c5fcf43103fab97fe2ef5240e641d639bd04b561"
+  },
+  "artifacts_sha256": {
+    "run_tests.py": "b9bf59daf2b40cdaf7b35b2c55d77fff9e0aea67d6fa03db9f674b27b294060a",
+    "audit_history.py": "501bba0f1ac9b3f8b7faeb7c1c8d2cb95d7b382ab86959073ddd972b4420a7c1",
+    "historical_quote_summary.json": "05aa4dc618fc41e6b7357d7cabfb17d1d608c3f9284764a0b3b9da55bce0dcfa",
+    "historical_quote_audit.jsonl": "4217be554ba9eec2449647bb986774cbaa287f671112cb073a7f758f0958a994"
+  },
+  "historical_recoverability": {
+    "non_mutating": true,
+    "cohort": "prior frozen selected cohort plus its last complete snapshot; not an all-history census",
+    "counts": {
+      "prior_selected:rows": 6000,
+      "prior_selected:rows_with_explicit_ask_fields": 6000,
+      "prior_selected:rows_with_positive_explicit_asks": 0,
+      "prior_selected:rows_with_nonempty_quote_arrays": 0,
+      "prior_selected:rows_with_generic_price_fields": 6000,
+      "prior_latest_snapshot:rows": 461,
+      "prior_latest_snapshot:rows_with_explicit_ask_fields": 461,
+      "prior_latest_snapshot:rows_with_positive_explicit_asks": 0,
+      "prior_latest_snapshot:rows_with_nonempty_quote_arrays": 0,
+      "prior_latest_snapshot:rows_with_generic_price_fields": 461
+    },
+    "unique_raw_rows": 6461,
+    "prior_inputs_sha256": {
+      "frozen.manifest.json": "7d971a6348b4367b0e194ecb04bf77ddc30ba62b57a9709fc8e8ff6c2f7998b9",
+      "selected_locators.jsonl": "4758a96ff2f48da20375a536ce48dc30d755cee1acfa6ab0494441671cf0effa",
+      "original_quote_deep_audit.jsonl": "3e0964821cd7aed7aa0f631d6d5e1ca38ac9282fa6e0a0b3c3ba0cda67a1af70",
+      "quote_deep_audit_summary.json": "ddc71a592e763a3180df0e1b0e59e38f21fe4253d706bd5e01ec637bfeb5908b",
+      "threshold30-readonly-summary.json": "41d87bc2014f489df9d2905eb139511315850bdfd3c3894ff5304ea892851908"
+    },
+    "source_path": "/mnt/data-collection/prediction-bot/data/beta_shadow/forward_20260829T063405Z_beta_strict_source/paper/prediction_lab/market_snapshots.jsonl",
+    "frozen_source_extent": 45942653539,
+    "audit_sha256": "4217be554ba9eec2449647bb986774cbaa287f671112cb073a7f758f0958a994",
+    "threshold30_asof_max_bucket": 17,
+    "threshold30_asof_bucket_sets_meeting_30": 0,
+    "projection_created": false,
+    "conclusion": "No positive explicit recorded asks in this bounded cohort. Generic yes_price/no_price remain reference-only: current producer code is not proof of the historical original API field, unit, or quote timestamp. No historical executable prices imputed; uninspected older archive coverage remains unknown."
+  },
+  "runtime_changes": false,
+  "raw_changes": false,
+  "merged": false,
+  "pushed": false,
+  "independent_review": "parent-owned; not performed by builder"
+}

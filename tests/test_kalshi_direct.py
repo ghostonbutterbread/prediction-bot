@@ -28,10 +28,11 @@ def _raw_market(ticker: str, title: str, *, series_ticker: str, yes_ask: float =
         "title": title,
         "series_ticker": series_ticker,
         "status": "open",
-        "yes_ask": yes_ask,
-        "no_ask": round(1 - yes_ask, 2),
-        "yes_bid": round(max(0.0, yes_ask - 0.03), 2),
-        "no_bid": round(min(1.0, 1 - yes_ask - 0.03), 2),
+        # Synthetic modern API fields: dollar amounts must carry the suffix.
+        "yes_ask_dollars": yes_ask,
+        "no_ask_dollars": round(1 - yes_ask, 2),
+        "yes_bid_dollars": round(max(0.0, yes_ask - 0.03), 2),
+        "no_bid_dollars": round(min(1.0, 1 - yes_ask - 0.03), 2),
         "volume_fp": 1250,
         "liquidity": 5000,
         "event_ticker": f"{series_ticker}-EVENT",
@@ -97,6 +98,8 @@ class KalshiDirectMarketTests(unittest.TestCase):
         self.assertTrue(all(m.metadata["source"] == "direct_series" for m in markets))
         self.assertTrue(all(m.metadata["series"] == "KXHIGHNY" for m in markets))
         self.assertTrue(all(m.metadata["market_group"] == "weather" for m in markets))
+        self.assertTrue(all((m.yes_price, m.no_price, m.yes_bid, m.no_bid) ==
+                            (0.56, 0.44, 0.53, 0.41) for m in markets))
 
     def test_get_markets_direct_collects_weather_series_even_when_generic_pages_are_sports(self):
         exchange = self._exchange()

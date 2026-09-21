@@ -344,8 +344,8 @@ class KalshiExchange(BaseExchange):
                             for m in data.get('markets', []):
                                 if len(markets) >= limit:
                                     break
-                                yes_price = _dollars_from_raw(m, 'yes_ask')
-                                no_price = _dollars_from_raw(m, 'no_ask')
+                                yes_price = _quote_from_raw(m, 'yes_ask')
+                                no_price = _quote_from_raw(m, 'no_ask')
                                 if yes_price <= 0 or yes_price >= 1:
                                     continue
                                 close_time = _parse_dt_raw(m.get('close_time'))
@@ -364,8 +364,8 @@ class KalshiExchange(BaseExchange):
                                         "source": "daily_series",
                                         "series": series_ticker,
                                     },
-                                    yes_bid=_dollars_from_raw(m, 'yes_bid'),
-                                    no_bid=_dollars_from_raw(m, 'no_bid'),
+                                    yes_bid=_quote_from_raw(m, 'yes_bid'),
+                                    no_bid=_quote_from_raw(m, 'no_bid'),
                                 )
                                 if self._market_allowed(market):
                                     markets.append(market)
@@ -397,8 +397,8 @@ class KalshiExchange(BaseExchange):
                         break
 
                     for m in raw:
-                        yes_price = _dollars_from_raw(m, 'yes_ask')
-                        no_price = _dollars_from_raw(m, 'no_ask')
+                        yes_price = _quote_from_raw(m, 'yes_ask')
+                        no_price = _quote_from_raw(m, 'no_ask')
 
                         if yes_price <= 0 or yes_price >= 1:
                             continue
@@ -419,8 +419,8 @@ class KalshiExchange(BaseExchange):
                                 "status": m.get('status', ''),
                                 "source": "direct",
                             },
-                            yes_bid=_dollars_from_raw(m, 'yes_bid'),
-                            no_bid=_dollars_from_raw(m, 'no_bid'),
+                            yes_bid=_quote_from_raw(m, 'yes_bid'),
+                            no_bid=_quote_from_raw(m, 'no_bid'),
                         )
                         if self._market_allowed(market):
                             markets.append(market)
@@ -650,13 +650,17 @@ class KalshiExchange(BaseExchange):
                 return None
             resp.raise_for_status()
             data = resp.json()
+            if isinstance(data, dict):
+                data = data.get("market", data)
+            if not isinstance(data, dict):
+                return None
 
-            yes_bid = float(data.get("yes_bid", 0)) / 100 if data.get("yes_bid") else 0
-            yes_ask = float(data.get("yes_ask", 0)) / 100 if data.get("yes_ask") else 0
-            no_bid = float(data.get("no_bid", 0)) / 100 if data.get("no_bid") else 0
-            no_ask = float(data.get("no_ask", 0)) / 100 if data.get("no_ask") else 0
+            yes_bid = _quote_from_raw(data, "yes_bid")
+            yes_ask = _quote_from_raw(data, "yes_ask")
+            no_bid = _quote_from_raw(data, "no_bid")
+            no_ask = _quote_from_raw(data, "no_ask")
 
-            mid_yes = (yes_bid + yes_ask) / 2 if yes_ask > 0 else 0
+            mid_yes = (yes_bid + yes_ask) / 2 if yes_ask > 0 and yes_bid > 0 else 0
             spread = yes_ask - yes_bid if yes_ask > 0 and yes_bid > 0 else 0
 
             return {
@@ -922,6 +926,25 @@ def _parse_dt(dt) -> Optional[datetime]:
         return None
 
 
+def _quote_from_raw(data: dict, key: str) -> float:
+    """Normalize an explicit bid/ask, never a reference or opposite-side price.
+
+    Non-null dollar fields take precedence, including zero or invalid values.
+    Unsuffixed fields are legacy cents, regardless of magnitude. Missing/invalid
+    quotes use the existing 0.0 sentinel; valid endpoints [0, 1] are retained,
+    leaving trade eligibility to consumers. A malformed side cannot erase others.
+    """
+    dollars = data.get(f"{key}_dollars")
+    value = dollars if dollars is not None else data.get(key)
+    if value is None or isinstance(value, bool):
+        return 0.0
+    try:
+        price = float(value) / (1 if dollars is not None else 100)
+        return round(price, 4) if 0 <= price <= 1 else 0.0
+    except (ValueError, TypeError, OverflowError):
+        return 0.0
+
+
 def _dollars_from_raw(data: dict, key: str) -> float:
     """Extract dollar value from raw API JSON (already in dollars)."""
     # Try with _dollars suffix first (raw API format), then without
@@ -978,14 +1001,14 @@ def _market_from_raw(
         id=ticker,
         exchange="kalshi",
         question=question,
-        yes_price=_dollars_from_raw(data, 'yes_ask'),
-        no_price=_dollars_from_raw(data, 'no_ask'),
+        yes_price=_quote_from_raw(data, 'yes_ask'),
+        no_price=_quote_from_raw(data, 'no_ask'),
         volume=float(data.get('volume_fp', 0) or 0),
         liquidity=_dollars_from_raw(data, 'liquidity'),
         closes_at=_parse_dt_raw(data.get('close_time')),
         category=category or data.get('series_ticker') or data.get('market_type') or 'binary',
         metadata=market_metadata,
         close_price=_dollars_from_raw({"close_price": close_price}, 'close_price') if close_price is not None else None,
-        yes_bid=_dollars_from_raw(data, 'yes_bid'),
-        no_bid=_dollars_from_raw(data, 'no_bid'),
+        yes_bid=_quote_from_raw(data, 'yes_bid'),
+        no_bid=_quote_from_raw(data, 'no_bid'),
     )
