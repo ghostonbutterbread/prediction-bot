@@ -1,13 +1,16 @@
 # Kalshi quote normalization — branch-local integration dossier
 
-- Status: local gates complete; pending recoverable implementation commit, then parent review.
+- Status: **committed, review-ready**; independent parent review pending.
 - Owner: focused quote-normalization builder; parent owns Kanban `t_0bab6b93`, independent review and release.
 - Branch / owning ref: `fix/kalshi-quote-normalization`.
 - Worktree: `/home/ryushe/worktrees/prediction-bot-kalshi-quote-normalization`.
 - Base: `4ca50c30c39707fd13e4b657d6299667cd761580` (`main`, lowest applicable owning ancestor).
 - Intended integration target: **`beta` only**, observed at `02daa963`; NOT main.
 - Updated: 2026-09-21 UTC.
-- Immutable implementation checkpoint: pending first commit; replaced in subsequent dossier-only handoff.
+- Immutable implementation/recovery checkpoint: `d3970f5db31c4c82c324a88edff7ad57d7efc79f`.
+- Implementation commits: that checkpoint only; branch tip adds a dossier-only handoff commit.
+- Review range: `4ca50c3..fix/kalshi-quote-normalization`; verify the later handoff commit separately.
+- Handoff worktree state: clean after committing this dossier update.
 - Inspiration: parent task's zero-ask beta replay and `beta_combined_lane_run_20260920T000332Z` evidence.
 
 ## Ownership and boundary
