@@ -1,6 +1,11 @@
 # Kalshi quote normalization — branch-local integration dossier
 
-- Status: **committed, review-ready**; independent parent review pending.
+- Status: **independent review APPROVE accepted by parent; authorized beta rollout in progress**.
+- Accepted review: `independent-review.md` / `independent-review-receipt.json` in the report directory below; reviewed tip `a649588a7b9de5ed08a150b9cd9641ab41940627`, unchanged implementation `d3970f5db31c4c82c324a88edff7ad57d7efc79f`.
+- Prospective-beta gate: 135 focused / 1189 full / 8 independent adversarial tests, zero failures/errors; full suite has 7 expected absent-local-config skip entries. Complete tested hash inventory: `independent-beta-full-archive.json`.
+- Parent accepted review and authorized local beta-only merge plus same-observer stop/resume. No push or main promotion. Runtime inspection approval resumed successfully on 2026-09-24; historical blocked receipt preserved.
+- Remaining rollout gates: fence same collector before live-source edits; compare exact merged source inventory to accepted prospective beta; rerun isolated focused/full merged-tree tests; resume same observer; require actual fresh completed publication, explicit YES/NO ask coverage and bounded v2/raw hash verification. Recovery predecessor is beta `02daa963f32a12ec22bfad1b2d04348ccc5f35d5`.
+- Fresh operational receipts: `rollout-execution-20260924.json` and `rollout-report-20260924.md`; sourcewriter and standalone resolver remain disabled. Older archive/settlement guards are not waived.
 - Owner: focused quote-normalization builder; parent owns Kanban `t_0bab6b93`, independent review and release.
 - Branch / owning ref: `fix/kalshi-quote-normalization`.
 - Worktree: `/home/ryushe/worktrees/prediction-bot-kalshi-quote-normalization`.
@@ -123,10 +128,8 @@ and rerunning the beta comparison remain parent-owned, not claimed complete here
 
 ## Review, activation and resume gates
 
-- Independent review: **parent-owned, pending**; no nested reviewer launched.
-- Integration: parent reviews exact branch range, preserves beta contract metadata,
-  tests any combined beta candidate in isolation, then separately decides merge.
-  No merge preflight was run in the live-imported beta checkout.
+- Independent review: **APPROVE accepted by parent**; see accepted immutable receipt above. No nested reviewer launched during rollout.
+- Integration: authorized parent-delegated local beta merge, preserving the exact reviewed prospective-beta source inventory and contract metadata. Run actual merged-tree isolated tests before resuming the existing observer; do not push or promote main.
 - Activation: separately authorized collector rollout and fresh quote-bearing
   snapshot proof required. Code merge alone does not activate the repair.
 - Deferred live evidence: optional public read-only quote smoke plus a newly
