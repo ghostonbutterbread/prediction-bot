@@ -21,7 +21,7 @@ from typing import Any
 from bot.collector_paths import auto_source_router_history_root, derived_reports_root
 from bot.collector_replay_inputs import export_collector_replay_inputs
 from bot.replay_outcome_binding import bind_replay_finalized_outcomes
-from bot.weather.source_history_manifest import materialize_strict_source_history_collapse
+from bot.weather.source_history_manifest import materialize_strict_source_history_collapse, relocated_v1_generation_path
 from bot.weather.source_observation_ledger import materialize_source_observation_ledger
 
 # V2 re-materializes history under strict capture/source/settlement chronology
@@ -304,11 +304,15 @@ def _rebase_staged_metadata_paths(staging_dir: Path, generation_dir: Path) -> No
 
 def _result_from_manifest(manifest: dict[str, Any], manifest_path: Path, *, reused: bool) -> AutoSourceRouterPromotionResult:
     runtime = manifest.get("runtime_consumption") or {}
+    generation_dir = manifest_path.parent.resolve()
+    version = manifest.get("schema_version")
     counts = {key: int((manifest.get("counts") or {}).get(key) or 0) for key in ("pending", "unresolved", "invalid", "eligible", "collapsed")}
     return AutoSourceRouterPromotionResult(
-        status=str(manifest.get("status")), reused=reused, generation_dir=manifest_path.parent,
-        history_path=Path(str(runtime["history_ledger_path"])), scoreboard_path=Path(str(runtime["scoreboard_path"])),
-        manifest_path=manifest_path, history_manifest_path=Path(str(runtime["history_manifest_path"])), counts=counts,
+        status=str(manifest.get("status")), reused=reused, generation_dir=generation_dir,
+        history_path=_generation_path(runtime["history_ledger_path"], generation_dir, label="runtime history_ledger_path", schema_version=version),
+        scoreboard_path=_generation_path(runtime["scoreboard_path"], generation_dir, label="runtime scoreboard_path", schema_version=version),
+        manifest_path=manifest_path,
+        history_manifest_path=_generation_path(runtime["history_manifest_path"], generation_dir, label="runtime history_manifest_path", schema_version=version), counts=counts,
     )
 
 
@@ -334,8 +338,10 @@ def _validate_current_generation(root: Path) -> None:
     _validate_generation(target / MANIFEST_FILENAME)
 
 
-def _generation_path(value: Any, generation_dir: Path, *, label: str) -> Path:
-    path = Path(str(value)).expanduser().resolve()
+def _generation_path(value: Any, generation_dir: Path, *, label: str, schema_version: Any = None) -> Path:
+    path = relocated_v1_generation_path(str(value), generation_dir, schema_version=schema_version)
+    if path is None:
+        path = Path(str(value)).expanduser().resolve()
     if path.parent == generation_dir or generation_dir in path.parents:
         return path
     raise ValueError(f"{label} path is outside generation: {path}")
@@ -358,7 +364,7 @@ def load_verified_strict_scorecard_rows(scoreboard_path: str | Path) -> list[dic
     generation_dir, expected_scoreboard = binding
     manifest, scoreboard_bytes = _validate_generation_with_scorecard_bytes(generation_dir / MANIFEST_FILENAME)
     actual_scoreboard = _generation_path(
-        manifest["runtime_consumption"]["scoreboard_path"], generation_dir, label="runtime scoreboard_path",
+        manifest["runtime_consumption"]["scoreboard_path"], generation_dir, label="runtime scoreboard_path", schema_version=manifest.get("schema_version"),
     )
     if actual_scoreboard != expected_scoreboard:
         raise ValueError("strict scorecard path does not match its published generation")
@@ -393,6 +399,7 @@ def _strict_scorecard_generation_binding(scoreboard_path: str | Path) -> tuple[P
 def _validate_generation_with_scorecard_bytes(manifest_path: Path) -> tuple[dict[str, Any], bytes]:
     manifest = _load_manifest(manifest_path)
     generation_dir = manifest_path.parent.resolve()
+    version = manifest.get("schema_version")
     artifacts = manifest.get("artifacts")
     hashes = manifest.get("artifact_sha256")
     expected = {"replay_inputs", "finalized_outcomes", "unbound_outcomes", "history_ledger", "unusable_observations", "scoreboard", "strict_independent_history"}
@@ -400,7 +407,7 @@ def _validate_generation_with_scorecard_bytes(manifest_path: Path) -> tuple[dict
         raise ValueError("promotion manifest is missing artifact integrity data")
     scoreboard_bytes: bytes | None = None
     for name in expected:
-        path = _generation_path(artifacts.get(name), generation_dir, label=f"artifact {name}")
+        path = _generation_path(artifacts.get(name), generation_dir, label=f"artifact {name}", schema_version=version)
         if name == "scoreboard" and path.is_file():
             scoreboard_bytes = path.read_bytes()
             digest = _sha256_bytes(scoreboard_bytes)
@@ -415,33 +422,44 @@ def _validate_generation_with_scorecard_bytes(manifest_path: Path) -> tuple[dict
     if not isinstance(source_history, dict):
         raise ValueError("promotion manifest is missing source history manifest")
     for name, key in (("history_ledger", "history_ledger_path"), ("scoreboard", "scoreboard_path"), ("source_history_manifest", "history_manifest_path")):
-        if _generation_path(runtime.get(key), generation_dir, label=f"runtime {key}") != _generation_path(
-            artifacts.get(name) if name != "source_history_manifest" else source_history.get("path"), generation_dir, label=name,
+        if _generation_path(runtime.get(key), generation_dir, label=f"runtime {key}", schema_version=version) != _generation_path(
+            artifacts.get(name) if name != "source_history_manifest" else source_history.get("path"), generation_dir, label=name, schema_version=version,
         ):
             raise ValueError(f"promotion manifest {key} does not match its artifact")
-    history_manifest_path = _generation_path(source_history.get("path"), generation_dir, label="source history manifest")
+    history_manifest_path = _generation_path(source_history.get("path"), generation_dir, label="source history manifest", schema_version=version)
     if not history_manifest_path.is_file() or _sha256_file(history_manifest_path) != hashes.get("source_history_manifest"):
         raise ValueError("source history manifest hash mismatch")
-    _validate_source_history_manifest(history_manifest_path, generation_dir)
+    _validate_source_history_manifest(history_manifest_path, generation_dir, promotion_version=version)
     if scoreboard_bytes is None:
         raise ValueError("strict scorecard is missing")
     _parse_strict_scorecard_rows(scoreboard_bytes)
     return manifest, scoreboard_bytes
 
 
-def _validate_source_history_manifest(path: Path, generation_dir: Path) -> None:
+def _validate_source_history_manifest(path: Path, generation_dir: Path, *, promotion_version: Any) -> None:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as error:
         raise ValueError("source history manifest is invalid JSON") from error
     if not isinstance(value, dict) or value.get("schema_name") != "source_history_manifest":
         raise ValueError("source history manifest is invalid")
+    if type(value.get("schema_version")) is not int or value["schema_version"] != 1:
+        raise ValueError("source history manifest contract invalid: schema_version")
+    for field in ("historical_counterfactual_only", "non_mutating"):
+        if value.get(field) is not True:
+            raise ValueError(f"source history manifest contract invalid: {field}")
+    for field, expected_value in (("join_key", "market_id"), ("availability_field", "settlement_ts")):
+        if value.get(field) != expected_value:
+            raise ValueError(f"source history manifest contract invalid: {field}")
+    if not isinstance(value.get("eligibility_filter"), str) or not value["eligibility_filter"].strip():
+        raise ValueError("source history manifest contract invalid: eligibility_filter")
     declared_hashes = value.get("sha256")
     expected = {"source_ledger", "strict_resolution", "raw_archive", "replay_index", "replay_manifest"}
     if not isinstance(declared_hashes, dict) or set(declared_hashes) != expected:
         raise ValueError("source history manifest is missing hashes")
+    relocation_version = 1 if type(promotion_version) is int and promotion_version == 1 and type(value.get("schema_version")) is int and value["schema_version"] == 1 else None
     for name, digest in declared_hashes.items():
-        artifact = _generation_path(value.get(f"{name}_path"), generation_dir, label=f"source history {name}")
+        artifact = _generation_path(value.get(f"{name}_path"), generation_dir, label=f"source history {name}", schema_version=relocation_version)
         if not artifact.is_file() or _sha256_file(artifact) != digest:
             raise ValueError(f"source history manifest artifact hash mismatch: {name}")
 
@@ -512,6 +530,8 @@ def _load_manifest(path: Path) -> dict[str, Any]:
         raise ValueError(f"promotion manifest is invalid JSON: {path}") from error
     if not isinstance(value, dict) or value.get("schema_name") != "auto_source_router_history_promotion":
         raise ValueError(f"promotion manifest is invalid: {path}")
+    if type(value.get("schema_version")) is not int or value["schema_version"] not in (1, PIPELINE_SCHEMA_VERSION):
+        raise ValueError("unsupported promotion manifest schema version")
     return value
 
 

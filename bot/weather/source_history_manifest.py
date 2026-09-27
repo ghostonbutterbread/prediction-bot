@@ -45,6 +45,41 @@ _REQUIRED_PATHS = {
     "replay_manifest": "replay_manifest_path",
 }
 
+_V1_OBSOLETE_GENERATIONS = Path(
+    "/home/ryushe/projects/prediction-bot-beta-integration/data/derived_reports/auto_source_router_history/generations"
+)
+
+
+def relocated_v1_generation_path(value: str | Path, generation_dir: Path, *, schema_version: Any) -> Path | None:
+    """Map only the published v1 checkout prefix to the same contained generation.
+
+    This translates locators, not integrity: callers still hash every artifact.
+    """
+    declared = Path(value).expanduser()
+    if (type(schema_version) is not int or schema_version != 1 or not declared.is_absolute()
+            or generation_dir.parent.name != "generations"
+            or generation_dir.parent.parent.name != "auto_source_router_history"):
+        return None
+    if ".." in declared.parts:
+        raise ValueError("v1 generation locator contains parent traversal")
+    try:
+        relative = declared.relative_to(_V1_OBSOLETE_GENERATIONS)
+    except ValueError:
+        # A different lexical prefix must not gain v1 authority merely by
+        # symlinking into this generation; direct contained paths stay valid.
+        if not declared.is_relative_to(generation_dir) and declared.resolve().is_relative_to(generation_dir):
+            raise ValueError("unrecognized v1 generation locator")
+        return None
+    if not relative.parts or relative.parts[0] != generation_dir.name:
+        raise ValueError("relocated v1 generation id mismatch")
+    suffix = Path(*relative.parts[1:])
+    if not suffix.parts:
+        return None
+    resolved = (generation_dir / suffix).resolve()
+    if generation_dir not in resolved.parents:
+        raise ValueError(f"relocated v1 path is outside generation: {resolved}")
+    return resolved
+
 
 def load_source_history_manifest(path: str | Path) -> SourceHistoryManifest:
     """Load a paper-only historical evidence manifest after hash verification."""
@@ -57,7 +92,8 @@ def load_source_history_manifest(path: str | Path) -> SourceHistoryManifest:
         raise SourceHistoryManifestError(f"history manifest is not valid JSON: {manifest_path}") from exc
     if not isinstance(payload, Mapping):
         raise SourceHistoryManifestError("history manifest must be a JSON object")
-    if payload.get("schema_name") != "source_history_manifest" or payload.get("schema_version") != 1:
+    if (payload.get("schema_name") != "source_history_manifest"
+            or type(payload.get("schema_version")) is not int or payload["schema_version"] != 1):
         raise SourceHistoryManifestError("unsupported source history manifest schema")
     if payload.get("historical_counterfactual_only") is not True:
         raise SourceHistoryManifestError("history manifest must be historical_counterfactual_only")
@@ -81,7 +117,13 @@ def load_source_history_manifest(path: str | Path) -> SourceHistoryManifest:
             raise SourceHistoryManifestError(f"history manifest missing {path_key}")
         if not isinstance(expected, str) or len(expected) != 64:
             raise SourceHistoryManifestError(f"history manifest missing sha256 for {digest_key}")
-        source_path = Path(raw_path).expanduser()
+        relocated = None
+        if manifest_path.name == "source_history_manifest.json":
+            try:
+                relocated = relocated_v1_generation_path(raw_path, manifest_path.parent, schema_version=payload["schema_version"])
+            except ValueError as exc:
+                raise SourceHistoryManifestError(str(exc)) from exc
+        source_path = relocated or Path(raw_path).expanduser()
         if not source_path.is_absolute():
             source_path = manifest_path.parent / source_path
         source_path = source_path.resolve()

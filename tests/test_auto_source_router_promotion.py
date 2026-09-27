@@ -10,13 +10,19 @@ from pathlib import Path
 from unittest.mock import patch
 
 from bot.collector_paths import COLLECTOR_ROOT_ENV, auto_source_router_history_root
-from bot.auto_source_router_promotion import auto_populate_source_router_history
+from bot.auto_source_router_promotion import (
+    _validate_current_generation, auto_populate_source_router_history,
+    load_verified_strict_scorecard_rows,
+)
+from bot.weather.source_history_manifest import SourceHistoryManifestError, load_source_history_manifest
 from bot.paper_shadow_lanes import _LaneDefinition, _source_router_decision
+from bot.paper_shadow_lanes import _load_compatible_strict_scorecard_rows
 from bot.weather.collector_source_router_replay import run_collector_source_router_replay
 from scripts.weather_source_router_replay import _load_router_ledger_rows
 
 
 ROOT = Path(__file__).resolve().parents[1]
+OBSOLETE_GENERATIONS = Path("/home/ryushe/projects/prediction-bot-beta-integration/data/derived_reports/auto_source_router_history/generations")
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -86,6 +92,295 @@ class AutoSourceRouterPromotionTests(unittest.TestCase):
             strict_resolutions_path=self.resolutions,
             output_root=self.output_root,
         )
+
+    def relocated_v1_generation(self):
+        """Generate tiny complete evidence, then change only v1 locator metadata."""
+        self.output_root = self.derived_root / "auto_source_router_history"
+        row = _collector_row()
+        first = self.run_pipeline([row], [_strict_resolution(row["market_id"])])
+        # The current producer emits v2. Its tiny synthetic output stands in for
+        # a published v1 after changing the promotion version, not its evidence.
+        generation_dir = first.generation_dir
+        old_dir = OBSOLETE_GENERATIONS / generation_dir.name
+
+        def stale(value):
+            return str(old_dir / Path(value).relative_to(generation_dir))
+
+        nested = json.loads(first.history_manifest_path.read_text(encoding="utf-8"))
+        for key in ("source_ledger", "strict_resolution", "raw_archive", "replay_index", "replay_manifest"):
+            nested[f"{key}_path"] = stale(nested[f"{key}_path"])
+        nested_bytes = (json.dumps(nested, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode()
+        first.history_manifest_path.write_bytes(nested_bytes)
+
+        promotion = json.loads(first.manifest_path.read_text(encoding="utf-8"))
+        promotion["schema_version"] = 1
+        for key, value in promotion["artifacts"].items():
+            promotion["artifacts"][key] = stale(value)
+        for key in ("history_ledger_path", "scoreboard_path", "history_manifest_path"):
+            promotion["runtime_consumption"][key] = stale(promotion["runtime_consumption"][key])
+        promotion["source_history_manifest"]["path"] = stale(promotion["source_history_manifest"]["path"])
+        promotion["artifact_sha256"]["source_history_manifest"] = hashlib.sha256(nested_bytes).hexdigest()
+        first.manifest_path.write_text(json.dumps(promotion, sort_keys=True) + "\n", encoding="utf-8")
+        return first, promotion, nested
+
+    def test_relocated_v1_rejects_unsupported_promotion_schema_even_with_contained_artifacts(self) -> None:
+        first, promotion, nested = self.relocated_v1_generation()
+        # Contained paths isolate the schema contract from the locator guard.
+        old_dir = OBSOLETE_GENERATIONS / first.generation_dir.name
+        def contained(value):
+            return str(first.generation_dir / Path(value).relative_to(old_dir))
+        promotion["artifacts"] = {key: contained(value) for key, value in promotion["artifacts"].items()}
+        promotion["runtime_consumption"] = {
+            key: contained(value) if key in ("history_ledger_path", "history_manifest_path", "scoreboard_path") else value
+            for key, value in promotion["runtime_consumption"].items()
+        }
+        promotion["source_history_manifest"]["path"] = str(first.history_manifest_path)
+        for key in ("source_ledger", "strict_resolution", "raw_archive", "replay_index", "replay_manifest"):
+            nested[f"{key}_path"] = contained(nested[f"{key}_path"])
+        nested_bytes = (json.dumps(nested, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode()
+        first.history_manifest_path.write_bytes(nested_bytes)
+        promotion["artifact_sha256"]["source_history_manifest"] = hashlib.sha256(nested_bytes).hexdigest()
+        for version in (None, True, 3):
+            with self.subTest(version=version):
+                promotion["schema_version"] = version
+                first.manifest_path.write_text(json.dumps(promotion), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "unsupported promotion manifest schema"):
+                    _validate_current_generation(self.output_root)
+
+    def test_relocated_v1_rejects_unqualified_nested_manifest_with_updated_digest(self) -> None:
+        first, promotion, nested = self.relocated_v1_generation()
+        failures = (
+            ("schema_version", 2), ("schema_version", None), ("schema_version", True),
+            ("historical_counterfactual_only", False), ("non_mutating", False),
+            ("historical_counterfactual_only", 1), ("non_mutating", 1),
+            ("historical_counterfactual_only", 1.0), ("non_mutating", 1.0),
+            ("join_key", "candidate_id"), ("availability_field", "resolved_at"),
+            ("eligibility_filter", ""),
+        )
+        for field, invalid in failures:
+            with self.subTest(field=field, invalid=invalid):
+                changed = {**nested, field: invalid}
+                payload = (json.dumps(changed, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode()
+                first.history_manifest_path.write_bytes(payload)
+                promotion["artifact_sha256"]["source_history_manifest"] = hashlib.sha256(payload).hexdigest()
+                first.manifest_path.write_text(json.dumps(promotion), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "source history manifest contract"):
+                    _validate_current_generation(self.output_root)
+
+    def test_relocated_v1_current_verified_scorecard_and_reuse_resolve_present_paths(self) -> None:
+        first, promotion, _ = self.relocated_v1_generation()
+        _validate_current_generation(self.output_root)
+        rows = load_verified_strict_scorecard_rows(first.scoreboard_path)
+        self.assertIsNotNone(rows)
+        assert rows is not None
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["schema_name"], "strict_finalized_source_router_scorecard")
+        reused = auto_populate_source_router_history(
+            collector_snapshots_path=self.archive, strict_resolutions_path=self.resolutions,
+            output_root=self.output_root,
+        )
+        self.assertTrue(reused.reused)
+        self.assertEqual((reused.history_path, reused.scoreboard_path, reused.history_manifest_path),
+                         (first.history_path, first.scoreboard_path, first.history_manifest_path))
+        self.assertNotEqual(str(reused.history_path), promotion["runtime_consumption"]["history_ledger_path"])
+
+    def test_relocated_v1_standalone_history_manifest_loads_verified_present_paths(self) -> None:
+        first, _, _ = self.relocated_v1_generation()
+        loaded = load_source_history_manifest(first.history_manifest_path)
+        self.assertEqual(loaded.source_ledger_path, first.history_path)
+        self.assertTrue(loaded.raw_archive_path.is_file())
+
+    def test_relocated_v1_does_not_use_preexisting_obsolete_location(self) -> None:
+        first, _, nested = self.relocated_v1_generation()
+        # Patch the known-prefix constant only inside this synthetic fixture:
+        # never create or read anything at the real obsolete checkout prefix.
+        old_generations = self.root / "obsolete-checkout" / "generations"
+        old_ledger = old_generations / first.generation_dir.name / first.history_path.relative_to(first.generation_dir)
+        old_ledger.parent.mkdir(parents=True)
+        old_ledger.write_bytes(first.history_path.read_bytes())
+        nested["source_ledger_path"] = str(old_ledger)
+        for key in ("strict_resolution", "raw_archive", "replay_index", "replay_manifest"):
+            nested[f"{key}_path"] = str(first.generation_dir / Path(nested[f"{key}_path"]).relative_to(
+                OBSOLETE_GENERATIONS / first.generation_dir.name
+            ))
+        first.history_manifest_path.write_text(json.dumps(nested), encoding="utf-8")
+        with patch("bot.weather.source_history_manifest._V1_OBSOLETE_GENERATIONS", old_generations):
+            loaded = load_source_history_manifest(first.history_manifest_path)
+        self.assertEqual(loaded.source_ledger_path, first.history_path)
+
+    def test_relocated_v1_stays_incompatible_with_forward_paper_v2_lane(self) -> None:
+        first, _, _ = self.relocated_v1_generation()
+        with self.assertRaisesRegex(ValueError, "incompatible Source Router history schema version 1"):
+            _load_compatible_strict_scorecard_rows(first.scoreboard_path)
+
+    def test_relocated_v1_rejects_unrecognized_old_prefix(self) -> None:
+        first, promotion, nested = self.relocated_v1_generation()
+        promotion["artifacts"]["scoreboard"] = promotion["artifacts"]["scoreboard"].replace(
+            "/prediction-bot-beta-integration/", "/another-checkout/"
+        )
+        first.manifest_path.write_text(json.dumps(promotion), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "outside generation"):
+            _validate_current_generation(self.output_root)
+        nested["source_ledger_path"] = nested["source_ledger_path"].replace(
+            "/prediction-bot-beta-integration/", "/another-checkout/"
+        )
+        first.history_manifest_path.write_text(json.dumps(nested), encoding="utf-8")
+        with self.assertRaisesRegex(SourceHistoryManifestError, "does not exist"):
+            load_source_history_manifest(first.history_manifest_path)
+
+    def test_relocated_v1_rejects_different_generation_id(self) -> None:
+        first, promotion, nested = self.relocated_v1_generation()
+        other_id = "f" * 64 if first.generation_dir.name != "f" * 64 else "e" * 64
+        promotion["artifacts"]["scoreboard"] = promotion["artifacts"]["scoreboard"].replace(first.generation_dir.name, other_id)
+        first.manifest_path.write_text(json.dumps(promotion), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "relocated v1 generation id mismatch"):
+            _validate_current_generation(self.output_root)
+        nested["source_ledger_path"] = nested["source_ledger_path"].replace(first.generation_dir.name, other_id)
+        first.history_manifest_path.write_text(json.dumps(nested), encoding="utf-8")
+        with self.assertRaisesRegex(SourceHistoryManifestError, "relocated v1 generation id mismatch"):
+            load_source_history_manifest(first.history_manifest_path)
+
+    def test_relocated_v1_rejects_foreign_generation_id_symlinked_to_current(self) -> None:
+        first, promotion, nested = self.relocated_v1_generation()
+        other_id = "f" * 64 if first.generation_dir.name != "f" * 64 else "e" * 64
+        old_generations = self.root / "obsolete-checkout" / "generations"
+        old_generations.mkdir(parents=True)
+        (old_generations / other_id).symlink_to(first.generation_dir, target_is_directory=True)
+        original = OBSOLETE_GENERATIONS / first.generation_dir.name
+
+        def foreign(value):
+            return str(old_generations / other_id / Path(value).relative_to(original))
+
+        promotion["artifacts"] = {key: foreign(value) for key, value in promotion["artifacts"].items()}
+        for key in ("history_ledger_path", "history_manifest_path", "scoreboard_path"):
+            promotion["runtime_consumption"][key] = foreign(promotion["runtime_consumption"][key])
+        promotion["source_history_manifest"]["path"] = foreign(promotion["source_history_manifest"]["path"])
+        for key in ("source_ledger", "strict_resolution", "raw_archive", "replay_index", "replay_manifest"):
+            nested[f"{key}_path"] = foreign(nested[f"{key}_path"])
+        nested_bytes = (json.dumps(nested, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode()
+        first.history_manifest_path.write_bytes(nested_bytes)
+        promotion["artifact_sha256"]["source_history_manifest"] = hashlib.sha256(nested_bytes).hexdigest()
+        first.manifest_path.write_text(json.dumps(promotion), encoding="utf-8")
+        with patch("bot.weather.source_history_manifest._V1_OBSOLETE_GENERATIONS", old_generations):
+            with self.assertRaisesRegex(ValueError, "relocated v1 generation id mismatch"):
+                _validate_current_generation(self.output_root)
+            with self.assertRaisesRegex(SourceHistoryManifestError, "relocated v1 generation id mismatch"):
+                load_source_history_manifest(first.history_manifest_path)
+
+    def test_relocated_v1_rejects_parent_segment_before_foreign_id_symlink(self) -> None:
+        first, promotion, nested = self.relocated_v1_generation()
+        old_generations = self.root / "obsolete-checkout" / "generations"
+        old_generations.mkdir(parents=True)
+        (old_generations / first.generation_dir.name).mkdir()
+        other_id = "f" * 64 if first.generation_dir.name != "f" * 64 else "e" * 64
+        (old_generations / other_id).symlink_to(first.generation_dir, target_is_directory=True)
+        original = OBSOLETE_GENERATIONS / first.generation_dir.name
+
+        def evasive(value):
+            return str(old_generations / first.generation_dir.name / ".." / other_id / Path(value).relative_to(original))
+
+        promotion["artifacts"] = {key: evasive(value) for key, value in promotion["artifacts"].items()}
+        for key in ("history_ledger_path", "history_manifest_path", "scoreboard_path"):
+            promotion["runtime_consumption"][key] = evasive(promotion["runtime_consumption"][key])
+        promotion["source_history_manifest"]["path"] = evasive(promotion["source_history_manifest"]["path"])
+        for key in ("source_ledger", "strict_resolution", "raw_archive", "replay_index", "replay_manifest"):
+            nested[f"{key}_path"] = evasive(nested[f"{key}_path"])
+        nested_bytes = (json.dumps(nested, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode()
+        first.history_manifest_path.write_bytes(nested_bytes)
+        promotion["artifact_sha256"]["source_history_manifest"] = hashlib.sha256(nested_bytes).hexdigest()
+        first.manifest_path.write_text(json.dumps(promotion), encoding="utf-8")
+        with patch("bot.weather.source_history_manifest._V1_OBSOLETE_GENERATIONS", old_generations):
+            with self.assertRaisesRegex(ValueError, "v1 generation locator contains parent traversal"):
+                _validate_current_generation(self.output_root)
+            with self.assertRaisesRegex(SourceHistoryManifestError, "v1 generation locator contains parent traversal"):
+                load_source_history_manifest(first.history_manifest_path)
+
+    def test_relocated_v1_rejects_unrelated_prefix_symlinked_to_current(self) -> None:
+        first, promotion, nested = self.relocated_v1_generation()
+        unrelated = self.root / "unrelated-checkout" / "generations" / first.generation_dir.name
+        unrelated.parent.mkdir(parents=True)
+        unrelated.symlink_to(first.generation_dir, target_is_directory=True)
+        old_dir = OBSOLETE_GENERATIONS / first.generation_dir.name
+
+        def aliased(value):
+            return str(unrelated / Path(value).relative_to(old_dir))
+
+        promotion["artifacts"] = {key: aliased(value) for key, value in promotion["artifacts"].items()}
+        for key in ("history_ledger_path", "history_manifest_path", "scoreboard_path"):
+            promotion["runtime_consumption"][key] = aliased(promotion["runtime_consumption"][key])
+        promotion["source_history_manifest"]["path"] = aliased(promotion["source_history_manifest"]["path"])
+        for key in ("source_ledger", "strict_resolution", "raw_archive", "replay_index", "replay_manifest"):
+            nested[f"{key}_path"] = aliased(nested[f"{key}_path"])
+        nested_bytes = (json.dumps(nested, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode()
+        first.history_manifest_path.write_bytes(nested_bytes)
+        promotion["artifact_sha256"]["source_history_manifest"] = hashlib.sha256(nested_bytes).hexdigest()
+        first.manifest_path.write_text(json.dumps(promotion), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "unrecognized v1 generation locator"):
+            _validate_current_generation(self.output_root)
+        with self.assertRaisesRegex(SourceHistoryManifestError, "unrecognized v1 generation locator"):
+            load_source_history_manifest(first.history_manifest_path)
+
+    def test_relocated_v1_rejects_symlink_escape_even_when_external_bytes_match(self) -> None:
+        first, _, _ = self.relocated_v1_generation()
+        external = self.root / "matching-ledger.jsonl"
+        external.write_bytes(first.history_path.read_bytes())
+        first.history_path.unlink()
+        first.history_path.symlink_to(external)
+        with self.assertRaisesRegex(ValueError, "outside generation"):
+            _validate_current_generation(self.output_root)
+        with self.assertRaisesRegex(SourceHistoryManifestError, "outside generation"):
+            load_source_history_manifest(first.history_manifest_path)
+
+    def test_relocated_v1_rejects_missing_and_changed_artifact_bytes(self) -> None:
+        first, _, _ = self.relocated_v1_generation()
+        original = first.scoreboard_path.read_bytes()
+        first.scoreboard_path.unlink()
+        with self.assertRaisesRegex(ValueError, "artifact hash mismatch: scoreboard"):
+            _validate_current_generation(self.output_root)
+        first.scoreboard_path.write_bytes(original + b" ")
+        with self.assertRaisesRegex(ValueError, "artifact hash mismatch: scoreboard"):
+            _validate_current_generation(self.output_root)
+        first.history_path.write_bytes(first.history_path.read_bytes() + b" ")
+        with self.assertRaisesRegex(SourceHistoryManifestError, "sha256 mismatch for source_ledger"):
+            load_source_history_manifest(first.history_manifest_path)
+
+    def test_relocated_v1_rejects_malformed_scorecard_even_if_hash_is_updated(self) -> None:
+        first, promotion, _ = self.relocated_v1_generation()
+        malformed = b"{invalid json}\n"
+        first.scoreboard_path.write_bytes(malformed)
+        promotion["artifact_sha256"]["scoreboard"] = hashlib.sha256(malformed).hexdigest()
+        first.manifest_path.write_text(json.dumps(promotion), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "strict scorecard is invalid JSON"):
+            _validate_current_generation(self.output_root)
+
+    def test_relocated_v1_requires_runtime_and_artifact_path_equality(self) -> None:
+        first, promotion, _ = self.relocated_v1_generation()
+        promotion["runtime_consumption"]["scoreboard_path"] = promotion["runtime_consumption"]["history_ledger_path"]
+        first.manifest_path.write_text(json.dumps(promotion), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "scoreboard_path does not match"):
+            _validate_current_generation(self.output_root)
+
+    def test_new_promotion_version_cannot_use_v1_relocation(self) -> None:
+        first, promotion, nested = self.relocated_v1_generation()
+        promotion["schema_version"] = 3
+        first.manifest_path.write_text(json.dumps(promotion), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "unsupported promotion manifest schema"):
+            _validate_current_generation(self.output_root)
+        nested["schema_version"] = 2
+        first.history_manifest_path.write_text(json.dumps(nested), encoding="utf-8")
+        with self.assertRaisesRegex(SourceHistoryManifestError, "unsupported source history manifest schema"):
+            load_source_history_manifest(first.history_manifest_path)
+
+    def test_boolean_schema_version_is_not_v1_relocation_authority(self) -> None:
+        first, promotion, nested = self.relocated_v1_generation()
+        promotion["schema_version"] = True
+        first.manifest_path.write_text(json.dumps(promotion), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "unsupported promotion manifest schema"):
+            _validate_current_generation(self.output_root)
+        nested["schema_version"] = True
+        first.history_manifest_path.write_text(json.dumps(nested), encoding="utf-8")
+        with self.assertRaisesRegex(SourceHistoryManifestError, "unsupported source history manifest schema"):
+            load_source_history_manifest(first.history_manifest_path)
 
     def test_default_output_root_uses_the_collector_volume(self) -> None:
         row = _collector_row()
