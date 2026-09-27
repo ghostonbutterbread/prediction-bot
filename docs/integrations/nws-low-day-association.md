@@ -2,7 +2,7 @@
 
 - **Owner / branch:** Hermes, Kanban `t_ebcc5d16`; `fix/nws-low-day-association`
 - **Base / target:** `f4fa746e0484c083ee0ea5c019caae33058bb925` → `beta` (review gate required)
-- **Latest immutable implementation checkpoint:** `b4468621bd1fa072283770d9e136fb2d8269d5a1` (previous corrections: `e39bc31f9027db0598b6246d76c740cc1e760423`, `3e29295ce39b699b6c27324d0da2bfd5d37cd473`; branch tip will include this later dossier-only handoff commit)
+- **Latest immutable implementation checkpoint:** `8e597e1cf150679499eadbd76c4462b91a4efccb` (previous corrections: `b4468621bd1fa072283770d9e136fb2d8269d5a1`, `e39bc31f9027db0598b6246d76c740cc1e760423`, `3e29295ce39b699b6c27324d0da2bfd5d37cd473`; branch tip will include this later dossier-only handoff commit)
 - **Status:** fourth independent review blocked integration on explicit full-calendar-day low false rejection. Narrow test-first correction passes focused/full isolated tests; fresh independent review and beta-first compatibility pending. No merge/push/deploy/runtime activation.
 
 ## Defect and intent
@@ -33,4 +33,4 @@ Third-review correction: inspect retained NWS bounds in all recorded aliases, in
 
 ## Handoff
 
-Branch `fix/nws-low-day-association` remains based on `f4fa746e0484c083ee0ea5c019caae33058bb925`, target `beta` (locally `02c5580b61fa4c30a54c4f80884cac329d21af0c`; fetched `origin/beta` still `295f69cf3199782d192a95950ed101779adea3db`). The prior implementation checkpoint is `b4468621bd1fa072283770d9e136fb2d8269d5a1`; record the current correction's immutable implementation checkpoint in a follow-on dossier-only commit. Obtain a fresh independent read-only review on the resulting exact tip. On acceptance, stage a non-committing beta-first merge from clean current beta, run focused/full tests and diff check, abort preflight, then integrate without this branch-local dossier. The source-authority assumption and other audit findings remain on audit card `t_500d82fb`, not part of this branch. Keep all raw snapshots, wallets, orders, services, and ignored runtime config untouched.
+Branch `fix/nws-low-day-association` remains based on `f4fa746e0484c083ee0ea5c019caae33058bb925`, latest implementation checkpoint `8e597e1cf150679499eadbd76c4462b91a4efccb`, target `beta` (locally `02c5580b61fa4c30a54c4f80884cac329d21af0c`; fetched `origin/beta` still `295f69cf3199782d192a95950ed101779adea3db`). Obtain a fresh independent read-only review on the exact tip including this later dossier-only handoff commit. On acceptance, stage a non-committing beta-first merge from clean current beta, run focused/full tests and diff check, abort preflight, then integrate without this branch-local dossier. The source-authority assumption and other audit findings remain on audit card `t_500d82fb`, not part of this branch. Keep all raw snapshots, wallets, orders, services, and ignored runtime config untouched.
