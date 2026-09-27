@@ -1298,8 +1298,8 @@ class PredictionLab:
         forecast_name = str(weather_data.get("forecast_driver") or "").lower()
         source_keys = [source_name.lower() for source_name in source_names]
         forecast_driver_present = bool(forecast_name and forecast_name in source_keys)
-        recorded_primary = next((str(item.get("source_name") or "").lower() for item in raw_details
-                                 if isinstance(item, dict) and item.get("weight") == 1.0), None)
+        recorded_primary = next((name for name, detail in detail_by_name.items()
+                                 if name and detail.get("weight") == 1.0), None)
         equal_source_weight = (round(1.0 / len(source_names), 6)
                                if source_names and forecast_name == "equal_source_average" else None)
         sources: list[dict[str, Any]] = []
@@ -1308,8 +1308,11 @@ class PredictionLab:
             detail = detail_by_name.get(key, {})
             role = detail.get("role") or ("forecast_primary" if key == (forecast_name if forecast_driver_present else recorded_primary)
                                            else "cross_validation")
-            if role == "settlement_primary":
-                role = "forecast_primary"  # Legacy forecast weight, not rule authority.
+            if role == "settlement_primary" or (
+                role == "cross_validation"
+                and key == (forecast_name if forecast_driver_present else recorded_primary)
+            ):
+                role = "forecast_primary"  # A recorded forecast primary is not settlement authority.
             weight = detail.get("weight") if "weight" in detail else None
             contribution = detail.get("contribution") if "contribution" in detail else None
             weight_note = detail.get("weight_note")

@@ -93,6 +93,30 @@ class WeatherSettlementAuthorityTests(unittest.TestCase):
         self.assertEqual([(row["source_name"], row["role"], row.get("weight")) for row in rows],
                          [("nws", "forecast_primary", 1.0), ("open-meteo", "cross_validation", 0.0)])
 
+    def test_recorded_primary_weight_overrides_stale_cross_validation_role(self):
+        rows = PredictionLab._weather_snapshot_sources(
+            {"source_details": [
+                {"source_name": "nws", "role": "cross_validation", "weight": 1.0},
+                {"source_name": "open-meteo", "role": "cross_validation", "weight": 0.0},
+            ]}, settlement_source="the_weather_company", market_date="2026-09-24",
+            as_of="2026-09-23T12:00:00Z", station_resolution={}, source_agreement=None,
+        )
+        self.assertEqual([(row["role"], row["weight"]) for row in rows],
+                         [("forecast_primary", 1.0), ("cross_validation", 0.0)])
+
+    def test_recorded_primary_weight_recovers_source_and_name_aliases(self):
+        for alias in ("source", "name"):
+            with self.subTest(alias=alias):
+                rows = PredictionLab._weather_snapshot_sources(
+                    {"source_details": [
+                        {alias: "nws", "weight": 1.0},
+                        {alias: "open-meteo"},
+                    ]}, settlement_source="the_weather_company", market_date="2026-09-24",
+                    as_of="2026-09-23T12:00:00Z", station_resolution={}, source_agreement=None,
+                )
+                self.assertEqual([(row["source_name"], row["role"], row.get("weight")) for row in rows],
+                                 [("nws", "forecast_primary", 1.0), ("open-meteo", "cross_validation", 0.0)])
+
     def test_paper_label_diagnostics_do_not_substitute_settlement_provider_or_night_proxy_for_daily_actual(self):
         from bot.paper_shadow_lanes import _label_target, _label_source_name, _label_source_classification
 
