@@ -291,6 +291,29 @@ class WeatherSourceScoreboardTests(unittest.TestCase):
         self.assertEqual(report["summary"]["observations_scored"], 0)
         self.assertIn("date_validation_failed:unit_mismatch", report["slices"][0]["missing"])
 
+    def test_root_only_failed_date_validation_prevents_scoring(self):
+        row = weather_row(actual_temp=68.0, sources=[{"source_name": "nws", "forecast_high": 72.0}])
+        row["date_validation"] = {"ok": False, "reason": "root_flag"}
+
+        observation = extract_source_forecast_observations(row)[0]
+        report = build_source_scoreboard([row])
+
+        self.assertIsNone(observation.actual_temp_f)
+        self.assertIn("date_validation_failed:root_flag", observation.missing_reasons)
+        self.assertEqual(report["summary"]["observations_scored"], 0)
+
+    def test_root_failure_is_not_masked_by_populated_nested_validation(self):
+        row = weather_row(actual_temp=68.0, sources=[{"source_name": "nws", "forecast_high": 72.0}])
+        row["date_validation"] = {"ok": False, "reason": "root_mismatch"}
+        row["decision_artifact"]["strategy_trace"]["raw_signals"]["live"]["data"]["date_validation"] = {
+            "ok": True, "market_date": "2026-05-15", "weather_date": "2026-05-15",
+        }
+
+        observation = extract_source_forecast_observations(row)[0]
+
+        self.assertIsNone(observation.actual_temp_f)
+        self.assertIn("date_validation_failed:root_mismatch", observation.missing_reasons)
+
     def test_nested_source_context_weather_snapshot_is_parsed(self):
         row = {
             "market_id": "KXHIGHNY-26MAY15-T80",

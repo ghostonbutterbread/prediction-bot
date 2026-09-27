@@ -783,15 +783,17 @@ def _live_signal_data(row: dict[str, Any]) -> dict[str, Any]:
 def _date_validation_problem(row: dict[str, Any], market: MarketContext) -> str | None:
     weather_snapshot = _extract_weather_snapshot(row)
     live_data = _live_signal_data(row)
-    date_validation = _first_dict(
+    validations = (
         weather_snapshot.get("date_validation"),
         live_data.get("date_validation"),
         _dict_at(row, "weather", "date_validation"),
         row.get("date_validation"),
     )
-    if date_validation and date_validation.get("ok") is False:
-        reason = _string_or_none(date_validation.get("reason")) or "explicit_false"
-        return f"date_validation_failed:{reason}"
+    date_validation = next((value for value in validations if isinstance(value, dict) and value), {})
+    for validation in validations:
+        if isinstance(validation, dict) and validation.get("ok") is False:
+            reason = _string_or_none(validation.get("reason")) or "explicit_false"
+            return f"date_validation_failed:{reason}"
 
     weather_date = _string_or_none(
         date_validation.get("weather_date")
