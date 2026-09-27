@@ -1,13 +1,13 @@
 # Synthetic Kelly conflicting-resolution receipts — integration dossier
 
-- **Status:** fourth independent review blocked beta integration: the paper-shadow producer projected outcome availability into settlement time, allowing unsupported Kelly P&L. Isolated producer-boundary correction passes focused/full suites; fresh review and beta-first compatibility pending; no merge/push/runtime activation
+- **Status:** fifth independent review blocked beta integration: the paper-shadow producer still erased conflicting authority and pre-grouped wrong-market receipts. Test-first producer-boundary reconciliation passes focused/full suites; fresh review and beta-first compatibility pending; no merge/push/runtime activation
 - **Owner:** Hermes, Kanban `t_5fc5d6e8` (parent audit `t_500d82fb`)
 - **Branch / owning ref:** `fix/kelly-conflicting-resolution-receipts`
 - **Base commit:** `02c5580b61fa4c30a54c4f80884cac329d21af0c`
 - **Intended integration target:** `beta`
 - **Last updated:** 2026-09-27
-- **Latest immutable implementation checkpoint:** `6f03f0c92a0fe43e598be788cb4239621b7e041a` (current tip will include a later dossier-only commit)
-- **Feature implementation commits:** `05dd7ff93531c829d0f3ee61bc7d75ac6eb72ff7` (initial), `aa255df87316ac0786be97b1f5263211ce666a69` (first review correction), `a12af53372cd3b16a5013572972acaf4dfe74938` (second), `3ece90b8d3aaa3ddb5f58a718ec7575b2ca2b5e9` (third), `6f03f0c92a0fe43e598be788cb4239621b7e041a` (fourth)
+- **Latest immutable implementation checkpoint:** `65a00a85d9e9b7af7279b5891098d49debfd4bf3` (current tip will include a later dossier-only commit)
+- **Feature implementation commits:** `05dd7ff93531c829d0f3ee61bc7d75ac6eb72ff7` (initial), `aa255df87316ac0786be97b1f5263211ce666a69` (first review correction), `a12af53372cd3b16a5013572972acaf4dfe74938` (second), `3ece90b8d3aaa3ddb5f58a718ec7575b2ca2b5e9` (third), `6f03f0c92a0fe43e598be788cb4239621b7e041a` (fourth), `65a00a85d9e9b7af7279b5891098d49debfd4bf3` (fifth)
 - **Inspiration:** the same decision's equally timed YES and NO settlement receipts produced $110 or $90 in the sequential synthetic wallet depending on input order.
 
 ## Intent and implemented contract
@@ -24,6 +24,8 @@ Third-review correction: compare the receipt's market ID against the correspondi
 
 Fourth-review correction: the paper-shadow receipt producer carries `settlement_ts` only when that field was actually recorded at the resolution root or nested level. Keep `outcome_known_at` as a separate availability clock rather than filling in a missing settlement timestamp. The untimed legacy fixed-notional directional diagnostic stays intact, while the Kelly sequential-capital consumer must keep the position pending. Explicit settlement times still settle (including VOID refunds) under the existing chronology, identity and ambiguity rules.
 
+Fifth-review correction: before projecting one producer receipt, reconcile all supplied root/nested outcome, settlement, outcome-known, and market-status assertions; a contradictory or nonfinal source must not become valid fixed-notional P&L or synthetic Kelly capital release. Filter wrong-market and otherwise invalid same-candidate receipts before grouping viable authority, without rejecting a valid same-market row merely because an unrelated row shares its candidate. Viable opposing outcomes or distinct settlement instants remain ambiguous. Equivalent duplicates select a recorded settlement over an untimed row, preserve the latest supplied outcome-known availability, and choose reproducible provenance rather than input order. Single invalid rows retain explicit blockers; missing optional legacy fields remain usable for their existing diagnostic.
+
 ## Evidence and review
 
 - RED against base behavior: opposing YES/NO receipts at one decision/time settled a $10 stake as +$10 or -$10 depending on order; `PENDING` outcome booked -$10; explicit `market_status=active` booked +$10; contradictory nested market/outcome/settlement aliases could book P&L; outcome-known time alone was used as settlement.
@@ -39,6 +41,8 @@ Fourth-review correction: the paper-shadow receipt producer carries `settlement_
 - Third-review RED/GREEN: all six orders of valid exact M1/YES, wrong-market M2/NO, and equivalent flat M1/YES failed before correction, then settled once on M1 with zero ambiguity and $110 available cash at the next decision. Focused worktree-first `tests.test_collector_lane_replay_kelly tests.test_beta_handoff_identity_audit -q` **38 tests OK**; `git diff --check` passed. Final worktree-first discovery process `proc_4898ca9befd3` exited **0**, **1,235 tests OK (7 skipped), 272.338s**, receipt `/home/ryushe/.hermes/cache/scratch/prediction-kelly-market-identity-full-20260927.log`.
 - Fourth independent read-only review `deleg_5cdb6739` **blocked integration** at tip `c518ba07b82c43e537cda2f3cfbd3ddb2b9cbca7`: `build_paper_shadow_lane_resolution_rows` imputed missing `settlement_ts` from `outcome_known_at=13:00`; Kelly then released a $10 reservation and booked +$10 synthetic P&L, whereas the same direct resolution stayed pending. The wrong-market correction passed six receipt-order probes and focused 38 OK.
 - Fourth-review RED/GREEN: producer-to-wallet regression failed with the imputed time, then passed after the producer stopped substituting availability for settlement. Both BUY_YES/BUY_NO, YES/NO/VOID, root/nested timestamp cases preserve the untimed fixed-notional diagnostic but leave the synthetic wallet position pending when only outcome-known time is present; explicit settlement still resolves. Worktree-first focused `tests.test_beta_handoff_identity_audit tests.test_collector_lane_replay_kelly tests.test_paper_shadow_lanes tests.test_beta_paper_lifecycle_audit -q` **118 OK (1 skipped)**; `git diff --check` passed. Full discovery `proc_759b50e6db32` exited **0**, **1,236 tests OK (7 skipped), 62.551s**, receipt `/home/ryushe/.hermes/cache/scratch/prediction-kelly-producer-time-provenance-full-20260927.log`.
+- Fifth independent read-only review `deleg_b7382ac3` **blocked integration** at tip `cdb5376501e84cd35cc095fc6c3654d276f036b4`. The outcome-known-only fix held, but producer projection erased nested NO or a conflicting later settlement against root YES/13:00, or omitted `market_status=active`, booking unsupported +$10 synthetic P&L. A wrong-market same-candidate receipt suppressed valid exact-market authority in both orders, falsely reserving $10. Reviewer reran focused **118 OK (1 skipped)** and inspected the **1,236/7** full receipt.
+- Fifth-review RED/GREEN: contradictory root/nested outcome/clock and active status were initially emitted as `blocker=None`; wrong-market candidate receipts and invalid identity/clock/status neighbors suppressed a valid exact receipt; two valid same-outcome but distinct settlement instants were chosen by order; equivalent receipts discarded a later outcome-known clock; and an untimed duplicate displaced a recorded settlement. Each failed before its narrow correction. Focused worktree-first `tests.test_beta_handoff_identity_audit tests.test_collector_lane_replay_kelly tests.test_paper_shadow_lanes tests.test_beta_paper_lifecycle_audit -q` **124 OK (1 skipped)**; `git diff --check` passed. Full discovery `proc_341c520a63c4` exited **0**, **1,242 tests OK (7 skipped), 84.788s**, receipt `/home/ryushe/.hermes/cache/scratch/prediction-kelly-producer-reconciliation-full-20260927.log`.
 - Fresh independent read-only review and beta-first compatibility against then-current beta are required before integration.
 - No raw evidence, service, live balance/order, config, or runtime changes.
 
@@ -50,8 +54,8 @@ Fourth-review correction: the paper-shadow receipt producer carries `settlement_
 ## Interruption / resume handoff
 
 - **Branch:** `fix/kelly-conflicting-resolution-receipts` from `02c5580b61fa4c30a54c4f80884cac329d21af0c` → `beta`.
-- **Checkpoint:** latest implementation `6f03f0c92a0fe43e598be788cb4239621b7e041a`; this branch's tip includes a later dossier-only handoff commit.
-- **Exact resume:** obtain fresh independent read-only review of corrected code and verified full-suite receipt on the clean branch tip; beta-first compatibility follows only after acceptance. Do not merge before review. No deployment from this code task.
+- **Checkpoint:** latest committed implementation `65a00a85d9e9b7af7279b5891098d49debfd4bf3`; fifth-review code/tests passed full discovery.
+- **Exact resume:** obtain fresh independent read-only review on the clean exact tip. Beta-first compatibility against current local beta `80b715e46f88aa11c978a5edd5dcb1b0c31f06a0` follows only after acceptance. Do not merge before review. No deployment from this code task.
 - **Working-tree state at handoff:** clean after the dossier-only handoff checkpoint; no raw or runtime modifications.
 
 ## Decision gates
@@ -67,3 +71,4 @@ Fourth-review correction: the paper-shadow receipt producer carries `settlement_
 - 2026-09-27 — second independent review blocked identity completeness and three-receipt order dependence. Test-first correction focused 37 OK and full 1,234 OK (7 skipped); fresh review pending. No integration decision.
 - 2026-09-27 — third independent review blocked wrong-market false conflict. Test-first correction focused 38 OK and full 1,235 OK (7 skipped); fresh review pending. No integration decision.
 - 2026-09-27 — fourth independent review blocked producer-imputed settlement time. Test-first producer-boundary correction focused 118 OK (1 skipped) and full 1,236 OK (7 skipped); fresh review pending. No integration decision.
+- 2026-09-27 — fifth independent review blocked producer-erased assertions and wrong-market suppression. Test-first producer reconciliation focused 124 OK (1 skipped) and full 1,242 OK (7 skipped); fresh review pending. No integration decision.
