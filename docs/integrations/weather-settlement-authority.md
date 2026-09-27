@@ -7,8 +7,8 @@
 - **Base commit:** `28fbc7f41f89a8680a7490e7f3e6934f66913761`
 - **Intended integration target:** local `beta` (currently `28fbc7f41f89a8680a7490e7f3e6934f66913761`; fetched `origin/beta` at `295f69cf3199782d192a95950ed101779adea3db`, behind local integration)
 - **Last updated:** 2026-09-27
-- **Latest immutable recovery checkpoint:** `267749d25d5ddd7b09663d460c5ab0969a209a21`
-- **Feature implementation commit(s):** `1f0ac294de7844d73c686c664c4405346e785546`, `267749d25d5ddd7b09663d460c5ab0969a209a21`
+- **Latest immutable recovery checkpoint:** `584c9d603fcc499fa7b404dc6d5c31db4e4bfd4c`
+- **Feature implementation commit(s):** `1f0ac294de7844d73c686c664c4405346e785546`, `267749d25d5ddd7b09663d460c5ab0969a209a21`, `584c9d603fcc499fa7b404dc6d5c31db4e4bfd4c`
 
 ## Intent and contract
 
@@ -22,7 +22,9 @@ Correct the false hardcoded NWS settlement authority for Kalshi daily weather ma
 - `git diff --check`: clean. Existing `test_source_observation_ledger` confirms nighttime NWS `/forecast` low is `partial_day_low_proxy_not_full_day` in strict history. Synthetic tests of KXLOWTPHX-26SEP24-T73 and KXLOWTPHX-26AUG01-T85 assert rule classification, not historical decision-time rule availability.
 - `deleg_761c42c4` **BLOCKED** clean tip `84062627fe4f6e6a89e2f9fbc9506cdfda8a07e1` for false authority on negated attribution (TWC or NWS) and contradictory legacy `weight: 1.0`/`cross_validation` role. Both targeted regressions failed before correction and passed afterward; affirmative exact-rule positives remain. Independently reviewed focus: 246 OK (1 skipped); reviewer's full rerun timed out, so do not claim independent full success.
 - Corrected feature focused: `PYTHONPATH=$PWD:$PWD/tests python -m unittest test_weather_settlement_authority test_weather_forecast_targeting test_replay_decision_input test_prediction_lab_collect test_paper_shadow_lanes test_beta_data_flow_e2e test_source_observation_ledger -q`: **248 OK, 1 skipped**. Full isolated discover: **1,336 OK, 7 skipped**, receipt `/home/ryushe/.hermes/cache/scratch/weather-authority-review-correction-full-20260927.log`. New exact-tip independent verdict remains pending.
-- Independent read-only review: pending again on corrected tip; no non-committing beta preflight or integration yet.
+- `deleg_ed36c285` **BLOCKED** corrected tip `154756dfbea7c8e4fa63db558409ab07a1f97ba7`: passive negation (`will not be determined according to TWC`, `will not be reported by NWS`) still produced false authority through the sealed input. It also identified a misleading paper diagnostic: an explicitly observed NWS daily archive under a TWC-settled market was classified settlement-derived. The reviewer independently ran **248 focused OK, 1 skipped** and **1,336 full OK, 7 skipped**. Both new cases were reproduced RED, then corrected GREEN: passive negation stays unknown; the TWC/NWS archive classification is independent only for explicit observation/archive-like labels, not forecast/proxy or NWS-settled labels.
+- After this correction the isolated focused suite passed **248 OK, 1 skipped** and full discover passed **1,336 OK, 7 skipped**; full receipt `/home/ryushe/.hermes/cache/scratch/weather-authority-passive-negation-full-20260927.log`. A new exact-tip independent verdict is required before beta preflight.
+- Independent read-only review: pending again on the latest correction; no non-committing beta preflight or integration yet.
 
 ## Blockers, deferred work and decision gates
 
@@ -33,8 +35,8 @@ Correct the false hardcoded NWS settlement authority for Kalshi daily weather ma
 ## Handoff
 
 - **Owning feature branch/ref:** `fix/market-weather-settlement-authority`
-- **Latest immutable recovery checkpoint:** `267749d25d5ddd7b09663d460c5ab0969a209a21`
-- **Feature implementation commit(s):** `1f0ac294de7844d73c686c664c4405346e785546`, `267749d25d5ddd7b09663d460c5ab0969a209a21`
+- **Latest immutable recovery checkpoint:** `584c9d603fcc499fa7b404dc6d5c31db4e4bfd4c`
+- **Feature implementation commit(s):** `1f0ac294de7844d73c686c664c4405346e785546`, `267749d25d5ddd7b09663d460c5ab0969a209a21`, `584c9d603fcc499fa7b404dc6d5c31db4e4bfd4c`
 - **Exact resume point:** inspect code commit and this later dossier commit, obtain independent review, then beta preflight only on explicit integration assignment.
 - **Working-tree state at handoff:** expected clean after separate commits.
 
