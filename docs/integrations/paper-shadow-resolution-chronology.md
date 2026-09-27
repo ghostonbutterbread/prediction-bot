@@ -4,7 +4,8 @@
 - **Branch / worktree:** `fix/paper-shadow-resolution-chronology`; `/home/ryushe/worktrees/prediction-bot-paper-untimed-resolution`.
 - **Base / target:** local beta `fa84310b4d7dc5035294db72a2c87ee6fbe171ae` → `beta`. This branch is not a runtime lane or deployment.
 - **Implementation:** `c6766b5d0a7e85c91b2259f5d07be0e5896db5af` (production guard and RED→GREEN/regression fixtures).
-- **Status:** isolated correction passes tests; independent feature review pending. No merge, push, or activation.
+- **Directional follow-up:** `d9ef371b5c87130de84450ff21296d9e67aa6044` (separate raw router direction from economic PnL eligibility).
+- **Status:** first independent review BLOCKED the directional summary; isolated correction and fresh review pending. No merge, push, or activation.
 
 ## Defect and intended contract
 
@@ -15,6 +16,8 @@ On the clean beta base, a single market-ID-only YES outcome lacking `settlement_
 - Read-only in-memory reproduction on beta `fa84310`: `matched_by=market_id`, `settlement_ts=None`, `blocker=None`, `pnl_usd=15.0`, synthetic Kelly settlements `0`.
 - RED: three market-only untimed cases (no clock, `resolved_at` only, `outcome_known_at` only) each falsely returned `blocker=None` while the timed and exact-candidate controls passed. GREEN: they retain the directional match/outcome but return `missing_settlement_timestamp` and no PnL, with no Kelly settlement. Timed market-only and exact-candidate legacy diagnostic remain calculable. Existing economic fixtures now carry a real post-decision settlement clock; the collector auto-resolution mock without one intentionally loses economic PnL while keeping the finalized outcome. Focused 147 tests pass (1 skipped).
 - Final isolated full suite: **1,306 OK (7 skipped)** in `/home/ryushe/.hermes/cache/scratch/prediction-market-only-untimed-full-final-20260927.log`; original market-only source-scoreboard fixtures were updated to carry chronology, while the auto-resolve fixture without a settlement clock explicitly expects a blocked economic claim.
-- Next: independent read-only feature review, clean beta-first noncommitting merge/checks/review before intentional local integration.
+- Independent review `deleg_78832df1` **BLOCKED** tip `1418be8` for a directional/economic conflation: `_summarize_source_router_resolution_rows` used the economic blocker to suppress `raw_router_resolved_buy_rows` and win rate even when the matched outcome and recommended side were known. The market-only PnL blocker itself passed the review's bounded YES/NO, clock, VOID, and invalid-economic probes; fixture changes were justified. This is not approval to stage beta.
+- RED→GREEN follow-up: a source-router BUY_YES `.40` with an untimed market-only YES outcome formerly gave `raw_router_resolved_buy_rows=0` and `raw_router_win_rate_pct=None`; now a valid matched YES/NO outcome contributes to **directional** counts regardless of the economic blocker, while the quote/size/settlement guard still controls PnL. A later timed positive control yields the same directional count and calculable PnL. A matched BUY_NO outcome with no quote counts direction; a nonfinal outcome does not. Targeted tests, **190 focused (1 skipped)**, and isolated full suite **1,308 (7 skipped)** pass at `/home/ryushe/.hermes/cache/scratch/prediction-market-only-directional-full-20260927.log`.
+- Next: obtain fresh independent read-only review of the new clean feature tip, then a separate exact-tree beta preflight/review before intentional local integration.
 - **Deferred:** historical cohort prevalence is not measured here; no raw archive inspection or rewrite. Runtime/source-router activation, actual-wallet accounting, and market-specific weather settlement authority are separate gates.
-- **Resume:** request independent feature review of the clean dossier tip. Do not merge or activate from a passing suite alone.
+- **Resume:** request fresh independent feature review of the clean dossier tip. Do not merge or activate from a passing suite alone.
