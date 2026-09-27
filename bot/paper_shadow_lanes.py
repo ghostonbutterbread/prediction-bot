@@ -2806,7 +2806,17 @@ def _future_pnl_inputs(
         or signal_side
     )
     hypothetical_book = _optional_text(signal.get("execution_snapshot_marker"), execution_snapshot.get("marker")) == "paper_shadow_source_scoreboard_hypothetical_execution"
-    unquoted_snapshot = bool(order_book_snapshot) and order_book_snapshot.get("source") not in (None, "", "book")
+    book_market_id = _optional_text(order_book_snapshot.get("market_id"))
+    candidate_market_id = _optional_text(signal.get("market_id"), shared_candidate.get("market_id"), market.get("id"))
+    book_as_of = _parse_timestamp(_optional_text(order_book_snapshot.get("as_of"), order_book_snapshot.get("observed_at")))
+    candidate_observed_at = _parse_timestamp(_optional_text(
+        signal.get("candidate_observed_at"), shared_candidate.get("observed_at"), source_row.get("observed_at"),
+    ))
+    unquoted_snapshot = bool(order_book_snapshot) and (
+        order_book_snapshot.get("source") not in (None, "", "book")
+        or bool(book_market_id and candidate_market_id and book_market_id != candidate_market_id)
+        or bool(book_as_of and candidate_observed_at and book_as_of > candidate_observed_at)
+    )
     if unquoted_snapshot and not hypothetical_book:
         # Normalization flattens snapshot prices into best_*_ask. A fallback
         # snapshot is a reference, not a recorded side-specific order-book ask.

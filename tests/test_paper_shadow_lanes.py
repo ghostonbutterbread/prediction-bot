@@ -1272,6 +1272,61 @@ parameters:
         self.assertEqual(_side_specific_price(future, "NO"), 0.58)
         self.assertEqual(future["entry_price"], 0.58)
 
+    def test_other_market_book_ask_cannot_price_shared_candidate(self):
+        from bot.paper_shadow_lanes import _future_pnl_inputs, _side_specific_price
+        from bot.shared_market_feed import build_shared_market_candidate_row, normalize_shared_candidate_input
+
+        candidate = build_shared_market_candidate_row(
+            run_id="r", market=self._market("M1"),
+            signal={"direction": "BUY_YES", "market_price": 0.44},
+            decision_artifact={"order_book_snapshot": {
+                "source": "book", "market_id": "M2",
+                "as_of": "2026-05-06T12:00:00+00:00",
+                "data": {"best_yes_ask": 0.44, "best_no_ask": 0.58},
+            }},
+            source_runtime="prediction_lab", observed_at="2026-05-06T12:00:00+00:00",
+        )
+        normalized = normalize_shared_candidate_input({"shared_candidate": candidate})
+        self.assertTrue(normalized.ok)
+        future = _future_pnl_inputs(
+            signal=normalized.signal, shared_candidate=candidate,
+            source_row={"action": "BUY_NO"},
+            source_reliability={"recommended_action": "BUY_NO"},
+        )
+        self.assertIsNone(_side_specific_price(future, "NO"))
+        self.assertNotIn("entry_price", future)
+
+    def test_book_ask_cannot_arrive_after_shared_candidate(self):
+        from bot.paper_shadow_lanes import _future_pnl_inputs, _side_specific_price
+        from bot.shared_market_feed import build_shared_market_candidate_row, normalize_shared_candidate_input
+
+        for as_of, expected in (
+            ("2026-05-08T12:00:00+00:00", None),
+            ("2026-05-06T05:00:00-07:00", 0.58),
+        ):
+            with self.subTest(as_of=as_of):
+                candidate = build_shared_market_candidate_row(
+                    run_id="r", market=self._market("M1"),
+                    signal={"direction": "BUY_YES", "market_price": 0.44},
+                    decision_artifact={"order_book_snapshot": {
+                        "source": "book", "market_id": "M1", "as_of": as_of,
+                        "data": {"best_yes_ask": 0.44, "best_no_ask": 0.58},
+                    }},
+                    source_runtime="prediction_lab", observed_at="2026-05-06T12:00:00+00:00",
+                )
+                normalized = normalize_shared_candidate_input({"shared_candidate": candidate})
+                self.assertTrue(normalized.ok)
+                future = _future_pnl_inputs(
+                    signal=normalized.signal, shared_candidate=candidate,
+                    source_row={"action": "BUY_NO"},
+                    source_reliability={"recommended_action": "BUY_NO"},
+                )
+                self.assertEqual(_side_specific_price(future, "NO"), expected)
+                if expected is None:
+                    self.assertNotIn("entry_price", future)
+                else:
+                    self.assertEqual(future["entry_price"], expected)
+
     def test_recovered_execution_snapshot_complement_is_not_book_no_ask(self):
         from bot.paper_shadow_lanes import (
             _future_pnl_inputs, _side_specific_price,
@@ -1366,6 +1421,7 @@ parameters:
 
     def test_old_recovered_book_label_does_not_launder_complement(self):
         from bot.paper_shadow_lanes import _future_pnl_inputs, _side_specific_price
+        from bot.prediction_lab_backfill import backfill_prediction_lab_row
         from bot.shared_market_feed import build_shared_market_candidate_row, normalize_shared_candidate_input
 
         market = SimpleNamespace(
@@ -1382,6 +1438,14 @@ parameters:
                 "path": "decision_artifact.execution_snapshot",
             }]},
         }
+        row = {"market_id": "M1", "observed_at": "2026-05-06T12:00:00+00:00",
+               "decision_artifact": artifact}
+        twice = backfill_prediction_lab_row(
+            backfill_prediction_lab_row(row, artifact_recovery=True).row,
+            artifact_recovery=True,
+        ).row
+        artifact = twice["decision_artifact"]
+        self.assertEqual(artifact["order_book_snapshot"]["source"], "synthetic")
         candidate = build_shared_market_candidate_row(
             run_id="r", market=market,
             signal={"direction": "BUY_YES", "market_price": 0.44},
