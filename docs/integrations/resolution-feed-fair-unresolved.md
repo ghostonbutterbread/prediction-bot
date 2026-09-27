@@ -1,6 +1,6 @@
 # Bounded unresolved resolution queue — integration dossier
 
-- **Status:** feature checkpoint; reviewer blocker fixed locally, fresh review and broad-suite gate pending
+- **Status:** feature checkpoint; corrected full suite passed, fresh independent re-review pending
 - **Owner:** Hermes, Kanban `t_eeedba96` (audit `t_500d82fb`)
 - **Branch / owning ref:** `fix/resolution-feed-fair-unresolved`
 - **Base commit:** `f4fa746e0484c083ee0ea5c019caae33058bb925`
@@ -20,7 +20,7 @@ Keep the collector-owned, deduplicated market-reference queue and central outcom
 - GREEN: `PYTHONPATH=<worktree> /mnt/data-collection/prediction-bot/.venv/bin/python -m unittest tests.test_resolution_feed -v` — 13 tests OK (6 missing ignored runtime configs skipped).
 - GREEN after reviewer blocker fix: `tests.test_resolution_feed` — 14 tests OK (6 ignored-config skips); 27 integrated collector/resolver/identity tests OK; `git diff --check` passed.
 - Independent review of initial checkpoint: **blocked** — with `max_incremental_markets=2` and `max_markets=1`, last-selected cursor skipped every second market. Reproduced RED with four markets/eight passes (`T70,T72` loop), then bounded pending selection by the effective fetch budget; fresh independent re-review pending.
-- Broad isolated discovery attempt: `PYTHONPATH=<worktree> /mnt/data-collection/prediction-bot/.venv/bin/python -m unittest discover -s tests` hit an agent-selected 300-second resource guard after simulator tests; log `/home/ryushe/.hermes/cache/scratch/prediction-resolver-fair-full-suite-20260927.log` contains no final summary or failure. **Incomplete, not a pass or a product latency requirement.** The isolated range-review module completed its four tests (516 generated cases) in 65.504 seconds, all OK; this does not by itself explain the broad timeout. The base beta suite previously completed 1,189 tests OK (7 skipped) in a different run.
+- Broad isolated discovery: `PYTHONPATH=<worktree> /mnt/data-collection/prediction-bot/.venv/bin/python -m unittest discover -s tests -q` completed on corrected checkpoint `29d672e` — **1,191 tests OK (7 skipped), 69.958 seconds**. Log `/home/ryushe/.hermes/cache/scratch/prediction-resolver-full-suite-corrected-20260927.log`. An earlier verbose invocation hit an agent-selected 300-second guard without a verdict; isolated range-review module passed four tests (516 generated cases) in 65.504 seconds. The completed quiet full suite is the actual gate receipt, not an inference from the earlier run.
 - Runtime/data action: none. Active resolver config and source archive unchanged.
 
 ## Blockers and deferred work
