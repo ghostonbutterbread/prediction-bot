@@ -1,13 +1,13 @@
 # Synthetic Kelly conflicting-resolution receipts — integration dossier
 
-- **Status:** third independent review blocked beta integration on a wrong-market receipt suppressing valid exact settlement; isolated test-first correction passes focused/full suites, fresh independent review and beta-first compatibility pending; no merge/push/runtime activation
+- **Status:** fourth independent review blocked beta integration: the paper-shadow producer projected outcome availability into settlement time, allowing unsupported Kelly P&L. Isolated producer-boundary correction passes focused/full suites; fresh review and beta-first compatibility pending; no merge/push/runtime activation
 - **Owner:** Hermes, Kanban `t_5fc5d6e8` (parent audit `t_500d82fb`)
 - **Branch / owning ref:** `fix/kelly-conflicting-resolution-receipts`
 - **Base commit:** `02c5580b61fa4c30a54c4f80884cac329d21af0c`
 - **Intended integration target:** `beta`
 - **Last updated:** 2026-09-27
-- **Latest immutable implementation checkpoint:** `3ece90b8d3aaa3ddb5f58a718ec7575b2ca2b5e9` (current tip will include a later dossier-only commit)
-- **Feature implementation commits:** `05dd7ff93531c829d0f3ee61bc7d75ac6eb72ff7` (initial), `aa255df87316ac0786be97b1f5263211ce666a69` (first review correction), `a12af53372cd3b16a5013572972acaf4dfe74938` (second), `3ece90b8d3aaa3ddb5f58a718ec7575b2ca2b5e9` (third)
+- **Latest immutable implementation checkpoint:** `6f03f0c92a0fe43e598be788cb4239621b7e041a` (current tip will include a later dossier-only commit)
+- **Feature implementation commits:** `05dd7ff93531c829d0f3ee61bc7d75ac6eb72ff7` (initial), `aa255df87316ac0786be97b1f5263211ce666a69` (first review correction), `a12af53372cd3b16a5013572972acaf4dfe74938` (second), `3ece90b8d3aaa3ddb5f58a718ec7575b2ca2b5e9` (third), `6f03f0c92a0fe43e598be788cb4239621b7e041a` (fourth)
 - **Inspiration:** the same decision's equally timed YES and NO settlement receipts produced $110 or $90 in the sequential synthetic wallet depending on input order.
 
 ## Intent and implemented contract
@@ -22,6 +22,8 @@ Second-review correction: nested exact receipts require the decision's own candi
 
 Third-review correction: compare the receipt's market ID against the corresponding decision before duplicate/conflict grouping, just as candidate/run and chronology are checked. A receipt for another market cannot settle this decision, nor make a valid exact-market authority ambiguous. Keep conflicting *valid* same-market outcomes/times pending; do not choose by order.
 
+Fourth-review correction: the paper-shadow receipt producer carries `settlement_ts` only when that field was actually recorded at the resolution root or nested level. Keep `outcome_known_at` as a separate availability clock rather than filling in a missing settlement timestamp. The untimed legacy fixed-notional directional diagnostic stays intact, while the Kelly sequential-capital consumer must keep the position pending. Explicit settlement times still settle (including VOID refunds) under the existing chronology, identity and ambiguity rules.
+
 ## Evidence and review
 
 - RED against base behavior: opposing YES/NO receipts at one decision/time settled a $10 stake as +$10 or -$10 depending on order; `PENDING` outcome booked -$10; explicit `market_status=active` booked +$10; contradictory nested market/outcome/settlement aliases could book P&L; outcome-known time alone was used as settlement.
@@ -35,6 +37,8 @@ Third-review correction: compare the receipt's market ID against the correspondi
 - Second-review RED/GREEN: the nested missing-decision-identity regression failed for missing candidate, run and both; four of six permutations failed on a mismatched partial run with an otherwise valid exact receipt. With decision-side identity checks before grouping, all six orders settle once on the exact match; the unsupported nested receipt stays pending. Focused worktree-first `tests.test_collector_lane_replay_kelly tests.test_beta_handoff_identity_audit -q` **37 tests OK**, `git diff --check` passed. Final isolated full discovery process exited **0**, **1,234 tests OK (7 skipped), 64.855s**, receipt `/home/ryushe/.hermes/cache/scratch/prediction-kelly-identity-match-full-20260927.log`.
 - Third independent read-only review `deleg_c686f1d2` **blocked integration** at tip `b5b0468b148bad5c26aea6aee93cc8b07dc402ab`: a receipt for market M2, linked to the same decision as a valid M1 receipt, suppressed M1 settlement with a false ambiguity and $10 reserved; the next decision saw $90 instead of $110 available cash. Earlier decision identity, legacy, VOID, status and chronology cases held; focused 37 OK.
 - Third-review RED/GREEN: all six orders of valid exact M1/YES, wrong-market M2/NO, and equivalent flat M1/YES failed before correction, then settled once on M1 with zero ambiguity and $110 available cash at the next decision. Focused worktree-first `tests.test_collector_lane_replay_kelly tests.test_beta_handoff_identity_audit -q` **38 tests OK**; `git diff --check` passed. Final worktree-first discovery process `proc_4898ca9befd3` exited **0**, **1,235 tests OK (7 skipped), 272.338s**, receipt `/home/ryushe/.hermes/cache/scratch/prediction-kelly-market-identity-full-20260927.log`.
+- Fourth independent read-only review `deleg_5cdb6739` **blocked integration** at tip `c518ba07b82c43e537cda2f3cfbd3ddb2b9cbca7`: `build_paper_shadow_lane_resolution_rows` imputed missing `settlement_ts` from `outcome_known_at=13:00`; Kelly then released a $10 reservation and booked +$10 synthetic P&L, whereas the same direct resolution stayed pending. The wrong-market correction passed six receipt-order probes and focused 38 OK.
+- Fourth-review RED/GREEN: producer-to-wallet regression failed with the imputed time, then passed after the producer stopped substituting availability for settlement. Both BUY_YES/BUY_NO, YES/NO/VOID, root/nested timestamp cases preserve the untimed fixed-notional diagnostic but leave the synthetic wallet position pending when only outcome-known time is present; explicit settlement still resolves. Worktree-first focused `tests.test_beta_handoff_identity_audit tests.test_collector_lane_replay_kelly tests.test_paper_shadow_lanes tests.test_beta_paper_lifecycle_audit -q` **118 OK (1 skipped)**; `git diff --check` passed. Full discovery `proc_759b50e6db32` exited **0**, **1,236 tests OK (7 skipped), 62.551s**, receipt `/home/ryushe/.hermes/cache/scratch/prediction-kelly-producer-time-provenance-full-20260927.log`.
 - Fresh independent read-only review and beta-first compatibility against then-current beta are required before integration.
 - No raw evidence, service, live balance/order, config, or runtime changes.
 
@@ -46,7 +50,7 @@ Third-review correction: compare the receipt's market ID against the correspondi
 ## Interruption / resume handoff
 
 - **Branch:** `fix/kelly-conflicting-resolution-receipts` from `02c5580b61fa4c30a54c4f80884cac329d21af0c` → `beta`.
-- **Checkpoint:** latest implementation `3ece90b8d3aaa3ddb5f58a718ec7575b2ca2b5e9`; this branch's tip includes a later dossier-only handoff commit.
+- **Checkpoint:** latest implementation `6f03f0c92a0fe43e598be788cb4239621b7e041a`; this branch's tip includes a later dossier-only handoff commit.
 - **Exact resume:** obtain fresh independent read-only review of corrected code and verified full-suite receipt on the clean branch tip; beta-first compatibility follows only after acceptance. Do not merge before review. No deployment from this code task.
 - **Working-tree state at handoff:** clean after the dossier-only handoff checkpoint; no raw or runtime modifications.
 
@@ -62,3 +66,4 @@ Third-review correction: compare the receipt's market ID against the correspondi
 - 2026-09-27 — independent review blocked unsupported P&L from decision alias/secondary-clock contradictions. Corrective focused 35 OK and full 1,232 OK (7 skipped); fresh review pending. No integration decision.
 - 2026-09-27 — second independent review blocked identity completeness and three-receipt order dependence. Test-first correction focused 37 OK and full 1,234 OK (7 skipped); fresh review pending. No integration decision.
 - 2026-09-27 — third independent review blocked wrong-market false conflict. Test-first correction focused 38 OK and full 1,235 OK (7 skipped); fresh review pending. No integration decision.
+- 2026-09-27 — fourth independent review blocked producer-imputed settlement time. Test-first producer-boundary correction focused 118 OK (1 skipped) and full 1,236 OK (7 skipped); fresh review pending. No integration decision.
