@@ -41,10 +41,16 @@ def replay_recorded_collector_lane_with_kelly(
 
     ordered_decisions = sorted((dict(row) for row in decisions), key=lambda row: _timestamp(row, "observed_at"))
     decision_times: dict[str, datetime | None] = {}
+    decision_identities: dict[str, tuple[str, str]] = {}
     for ordinal, decision in enumerate(ordered_decisions, start=1):
         decision_id = str(decision.get("decision_id") or f"collector-kelly:{ordinal}")
         decision_times[decision_id] = None if decision_id in decision_times else _timestamp(decision, "observed_at")
-    resolutions_by_decision, conflicting_resolution_ids = _resolution_map(resolutions, decision_times=decision_times)
+        decision_identities[decision_id] = (
+            str(decision.get("shared_candidate_id") or ""), str(decision.get("run_id") or ""),
+        )
+    resolutions_by_decision, conflicting_resolution_ids = _resolution_map(
+        resolutions, decision_times=decision_times, decision_identities=decision_identities,
+    )
     cash = float(starting_balance_usd)
     positions: list[dict[str, Any]] = []
     decision_rows: list[dict[str, Any]] = []
@@ -241,6 +247,7 @@ def write_collector_lane_replay_kelly(
 
 def _resolution_map(
     rows: Iterable[Mapping[str, Any]], *, decision_times: Mapping[str, datetime | None],
+    decision_identities: Mapping[str, tuple[str, str]],
 ) -> tuple[dict[str, dict[str, Any]], set[str]]:
     result: dict[str, dict[str, Any]] = {}
     conflicting: set[str] = set()
@@ -263,6 +270,13 @@ def _resolution_map(
             continue
         shared_candidate_id = str(row.get("shared_candidate_id") or nested.get("shared_candidate_id") or "")
         run_id = str(row.get("run_id") or nested.get("run_id") or "")
+        decision_candidate_id, decision_run_id = decision_identities.get(decision_id, ("", ""))
+        if (nested and (not decision_candidate_id or not decision_run_id)) or any(
+            supplied and supplied != expected for supplied, expected in (
+                (shared_candidate_id, decision_candidate_id), (run_id, decision_run_id),
+            )
+        ):
+            continue
         if nested and any(
             row.get(field) not in (None, "") and nested.get(field) not in (None, "")
             and str(row[field]) != str(nested[field])

@@ -1,4 +1,5 @@
 import json
+from itertools import permutations
 import tempfile
 import unittest
 from pathlib import Path
@@ -131,6 +132,31 @@ class CollectorLaneReplayKellyTests(unittest.TestCase):
 
         self.assertEqual(result["summary"]["settled_positions"], 0)
         self.assertEqual(result["summary"]["open_positions"], 1)
+
+    def test_nested_exact_receipt_cannot_supply_missing_decision_identity(self):
+        receipt = {
+            "lane_decision_id": "lane-1", "shared_candidate_id": "candidate-1", "run_id": "run-1",
+            "market_id": "KXONE", "resolution": {
+                "matched": True, "matched_by": "shared_candidate_id", "outcome": "YES",
+                "settlement_ts": "2026-07-01T13:00:00+00:00", "resolution_row_id": "resolution-1",
+            },
+        }
+        for missing in ("shared_candidate_id", "run_id", "both"):
+            with self.subTest(missing=missing):
+                decision = {
+                    "decision_id": "lane-1", "shared_candidate_id": "candidate-1", "run_id": "run-1",
+                    "market_id": "KXONE", "observed_at": "2026-07-01T12:00:00+00:00",
+                    "action": "BUY_YES", "model_probability": 0.70, "entry_price": 0.50,
+                }
+                for field in (("shared_candidate_id", "run_id") if missing == "both" else (missing,)):
+                    decision.pop(field)
+                result = replay_recorded_collector_lane_with_kelly(
+                    decisions=[decision], resolutions=[receipt], starting_balance_usd=100.0,
+                )
+                self.assertEqual(result["settlement_rows"], [])
+                self.assertEqual(result["summary"]["ambiguous_resolution_decisions"], 0)
+                self.assertEqual(result["summary"]["reserved_capital_usd"], 10.0)
+                self.assertEqual(result["summary"]["final_balance_usd"], 100.0)
 
     def test_conflicting_exact_receipts_leave_synthetic_position_pending_in_either_order(self):
         decision = {
@@ -331,6 +357,33 @@ class CollectorLaneReplayKellyTests(unittest.TestCase):
             self.assertEqual(result["summary"]["settled_positions"], 1)
             self.assertEqual(result["summary"]["ambiguous_resolution_decisions"], 0)
             self.assertEqual(result["settlement_rows"][0]["resolution_receipt"]["resolution_row_id"], "receipt-exact")
+
+    def test_mismatched_partial_identity_cannot_change_exact_receipt_by_order(self):
+        decision = {
+            "decision_id": "lane-1", "shared_candidate_id": "candidate-1", "run_id": "run-1",
+            "market_id": "KXONE", "observed_at": "2026-07-01T12:00:00+00:00",
+            "action": "BUY_YES", "model_probability": 0.70, "entry_price": 0.50,
+        }
+        receipts = [
+            {"decision_id": "lane-1", "market_id": "KXONE", "shared_candidate_id": "candidate-1",
+             "outcome": "YES", "settlement_ts": "2026-07-01T13:00:00+00:00"},
+            {"decision_id": "lane-1", "market_id": "KXONE", "run_id": "run-2",
+             "outcome": "YES", "settlement_ts": "2026-07-01T13:00:00+00:00"},
+            {"lane_decision_id": "lane-1", "market_id": "KXONE",
+             "shared_candidate_id": "candidate-1", "run_id": "run-1", "resolution": {
+                 "matched": True, "matched_by": "shared_candidate_id", "outcome": "YES",
+                 "settlement_ts": "2026-07-01T13:00:00+00:00", "resolution_row_id": "receipt-exact",
+             }},
+        ]
+        for ordered in permutations(receipts):
+            with self.subTest(order=[r.get("run_id") for r in ordered]):
+                result = replay_recorded_collector_lane_with_kelly(
+                    decisions=[decision], resolutions=ordered, starting_balance_usd=100.0,
+                )
+                self.assertEqual(result["summary"]["settled_positions"], 1)
+                self.assertEqual(result["summary"]["ambiguous_resolution_decisions"], 0)
+                self.assertEqual(result["settlement_rows"][0]["resolution_receipt"]["resolution_row_id"], "receipt-exact")
+                self.assertEqual(result["summary"]["final_balance_usd"], 110.0)
 
     def test_conflicting_decision_id_aliases_cannot_settle_synthetic_pnl(self):
         decision = {

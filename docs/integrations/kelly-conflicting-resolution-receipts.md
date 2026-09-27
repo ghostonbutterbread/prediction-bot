@@ -1,6 +1,6 @@
 # Synthetic Kelly conflicting-resolution receipts — integration dossier
 
-- **Status:** initial independent review blocked beta integration on decision-ID alias and secondary-clock validity gaps; isolated test-first correction passed focused and final full suites, fresh independent review and beta-first compatibility pending; no merge/push/runtime activation
+- **Status:** second independent review blocked beta integration on missing decision identity and order-dependent partial receipt reconciliation; isolated test-first correction passed focused/full suites, fresh independent review and beta-first compatibility pending; no merge/push/runtime activation
 - **Owner:** Hermes, Kanban `t_5fc5d6e8` (parent audit `t_500d82fb`)
 - **Branch / owning ref:** `fix/kelly-conflicting-resolution-receipts`
 - **Base commit:** `02c5580b61fa4c30a54c4f80884cac329d21af0c`
@@ -18,6 +18,8 @@ Reject explicit non-final market status and non-YES/NO/VOID outcome rather than 
 
 Review correction: conflicting outer `decision_id`/`lane_decision_id` aliases invalidate that receipt instead of choosing either identifier. Reconcile every retained settlement and outcome-known clock against the corresponding decision time **before** comparing authority candidates, so a pre-decision receipt cannot settle or inflate ambiguity when a valid later receipt exists. Preserve independently recorded settlement time but delay synthetic capital release until the later of settlement and outcome-known clocks (`available_at`). Equivalent duplicate receipts conservatively retain the latest such availability time regardless of input order. A repeated nonunique decision ID does not acquire an authoritative receipt by an arbitrary last-wins time lookup.
 
+Second-review correction: nested exact receipts require the decision's own candidate and run IDs, not merely those supplied by the receipt. Before duplicate/conflict grouping, reject a receipt whose supplied nonempty candidate or run ID contradicts (or cannot be verified against) the decision. An omitted identity in a flat legacy receipt remains admissible, and a matching partial legacy duplicate does not displace a richer exact receipt. This ensures an unrelated partial receipt cannot make a valid exact receipt settle in some input orders but not others.
+
 ## Evidence and review
 
 - RED against base behavior: opposing YES/NO receipts at one decision/time settled a $10 stake as +$10 or -$10 depending on order; `PENDING` outcome booked -$10; explicit `market_status=active` booked +$10; contradictory nested market/outcome/settlement aliases could book P&L; outcome-known time alone was used as settlement.
@@ -27,6 +29,8 @@ Review correction: conflicting outer `decision_id`/`lane_decision_id` aliases in
 - Independent read-only review `deleg_deafe3da` **blocked beta integration** of the first checkpoint `cf25d06c21659d581b1ea6a9b0b91396a827891b`: flat receipt with `decision_id=d` and `lane_decision_id=other` booked unsupported +$10; a pre-decision secondary `outcome_known_at` of 11:00 alongside settlement 13:00 booked +$10 for a 12:00 decision; a pre-decision receipt alongside a later valid one made ambiguity count 1 and kept capital pending instead of accepting the later authority. Reviewer verified baseline conflicting receipts, equivalent duplicates, VOID, and legacy flat receipt; focused 31 OK.
 - Follow-up RED/GREEN: contradictory decision aliases and pre-decision outcome-known time each booked +$10; a 13:00 settlement with 14:00 outcome-known time released capital before a 13:30 decision (110 instead of 90 available cash). Repaired at the receipt-mapping/chronology boundary. Invalid pre-decision receipt plus valid later receipt now settles once with ambiguity count zero in either order; equivalent duplicate receipts with differing later known-at times use the later availability deterministically. Focused worktree-first `tests.test_collector_lane_replay_kelly tests.test_beta_handoff_identity_audit -q` **35 tests OK**, `git diff --check` passed.
 - First follow-up full discovery run hit a 360s command timeout before a suite verdict; its log `/home/ryushe/.hermes/cache/scratch/prediction-kelly-review-clock-full-20260927.log` is **incomplete**, not a test failure. Tracked background retry `proc_aba5974ef5e6` exited **0**; final worktree-first full discovery passed **1,232 tests OK (7 skipped), 123.566s**, receipt `/home/ryushe/.hermes/cache/scratch/prediction-kelly-review-clock-full-retry-20260927.log`.
+- Second independent read-only review `deleg_c367c9b6` **blocked beta integration** at tip `294a2c37d949d064e5628443a9083eb327bfa87a`: a nested exact receipt booked +$10 against a decision lacking its candidate/run ID; three same-outcome receipts (partial candidate, conflicting partial run, exact candidate/run) yielded +$10 or reserved pending by permutation. Previous alias, clock, conflict, VOID and legacy behavior passed focused 35 OK.
+- Second-review RED/GREEN: the nested missing-decision-identity regression failed for missing candidate, run and both; four of six permutations failed on a mismatched partial run with an otherwise valid exact receipt. With decision-side identity checks before grouping, all six orders settle once on the exact match; the unsupported nested receipt stays pending. Focused worktree-first `tests.test_collector_lane_replay_kelly tests.test_beta_handoff_identity_audit -q` **37 tests OK**, `git diff --check` passed. Final isolated full discovery process exited **0**, **1,234 tests OK (7 skipped), 64.855s**, receipt `/home/ryushe/.hermes/cache/scratch/prediction-kelly-identity-match-full-20260927.log`.
 - Fresh independent read-only review and beta-first compatibility against then-current beta are required before integration.
 - No raw evidence, service, live balance/order, config, or runtime changes.
 
@@ -38,8 +42,8 @@ Review correction: conflicting outer `decision_id`/`lane_decision_id` aliases in
 ## Interruption / resume handoff
 
 - **Branch:** `fix/kelly-conflicting-resolution-receipts` from `02c5580b61fa4c30a54c4f80884cac329d21af0c` → `beta`.
-- **Checkpoint:** latest implementation `aa255df87316ac0786be97b1f5263211ce666a69`; this branch's current tip includes a later dossier-only handoff commit.
-- **Exact resume:** obtain fresh independent read-only review of corrected code and verified full-suite receipt on the clean branch tip; beta-first compatibility follows only after acceptance. Do not merge before review. No deployment from this code task.
+- **Checkpoint:** prior implementation `aa255df87316ac0786be97b1f5263211ce666a69`; record the current implementation commit in a later dossier-only handoff commit.
+- **Exact resume:** obtain fresh independent read-only review of the corrected code and verified 1,234-test full-suite receipt on the clean branch tip; beta-first compatibility follows only after acceptance. Do not merge before review. No deployment from this code task.
 - **Working-tree state at handoff:** clean after the dossier-only handoff checkpoint; no raw or runtime modifications.
 
 ## Decision gates
@@ -52,3 +56,4 @@ Review correction: conflicting outer `decision_id`/`lane_decision_id` aliases in
 
 - 2026-09-27 — reproduced order-dependent synthetic settlement; test-first correction passed focused/full isolated suites; review and beta compatibility pending.
 - 2026-09-27 — independent review blocked unsupported P&L from decision alias/secondary-clock contradictions. Corrective focused 35 OK and full 1,232 OK (7 skipped); fresh review pending. No integration decision.
+- 2026-09-27 — second independent review blocked identity completeness and three-receipt order dependence. Test-first correction focused 37 OK and full 1,234 OK (7 skipped); fresh review pending. No integration decision.
