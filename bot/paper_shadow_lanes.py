@@ -2128,8 +2128,9 @@ def _build_lane_resolution_row(
         future_inputs.get("stable_requested_position_size_usd"),
     )
     observed_at = _optional_text(row.get("observed_at"), future_inputs.get("observed_at"))
+    assertion_blocker = _resolution_assertion_blocker(resolution)
     chronology_blocker = _resolution_chronology_blocker(resolution, observed_at)
-    blocker = resolution_blocker or chronology_blocker or _resolution_row_blocker(action=action, outcome=outcome, side=side, fill_price=fill_price, stake=stake)
+    blocker = resolution_blocker or chronology_blocker or assertion_blocker or _resolution_row_blocker(action=action, outcome=outcome, side=side, fill_price=fill_price, stake=stake)
     if quote_only_buy and blocker == "missing_fill_price":
         blocker = "quote_not_fill"
     pnl = _resolution_row_pnl(action=action, outcome=outcome, side=side, fill_price=fill_price, stake=stake) if blocker is None else None
@@ -2152,7 +2153,7 @@ def _build_lane_resolution_row(
         "requested_position_size_usd": _number(row.get("requested_position_size_usd"), future_inputs.get("requested_position_size_usd"), future_inputs.get("stable_requested_position_size_usd")),
         "approved_position_size_usd": _number(row.get("approved_position_size_usd"), future_inputs.get("approved_position_size_usd"), future_inputs.get("stable_approved_position_size_usd")),
         "resolution": {
-            "matched": resolution is not None and chronology_blocker is None,
+            "matched": resolution is not None and assertion_blocker is None and chronology_blocker is None,
             "match_source": _optional_text(resolution_match.get("matched_by")) if resolution is not None else ("future_pnl_inputs" if outcome is not None else None),
             "matched_by": _optional_text(resolution_match.get("matched_by")),
             "match_key": _optional_text(resolution_match.get("match_key")),
@@ -2163,7 +2164,7 @@ def _build_lane_resolution_row(
             "settlement_ts": _optional_text(
                 _mapping(resolution).get("settlement_ts"), _mapping(_mapping(resolution).get("resolution")).get("settlement_ts"),
             ),
-            "outcome_known_at": _optional_text(_mapping(resolution).get("outcome_known_at"), _mapping(_mapping(resolution).get("resolution")).get("outcome_known_at")),
+            "outcome_known_at": _optional_text(resolution_match.get("latest_outcome_known_at"), _mapping(resolution).get("outcome_known_at"), _mapping(_mapping(resolution).get("resolution")).get("outcome_known_at")),
             "run_id": _optional_text(_mapping(resolution).get("run_id"), _mapping(_mapping(resolution).get("resolution")).get("run_id")),
             "market_id": _optional_text(_mapping(resolution).get("market_id"), market_id),
             "shared_candidate_id": _optional_text(_mapping(resolution).get("shared_candidate_id"), shared_candidate_id),
@@ -2184,6 +2185,30 @@ def _build_lane_resolution_row(
         "source_inputs": {"future_pnl_inputs": future_inputs},
     }
 
+
+def _resolution_assertion_blocker(resolution: Mapping[str, Any] | None) -> str | None:
+    """Do not discard conflicting settlement assertions while projecting a receipt."""
+    sources = (_mapping(resolution), _mapping(_mapping(resolution).get("resolution")))
+    outcomes = [
+        _normalized_resolution_outcome({"outcome": source[key]})
+        for source in sources
+        for key in ("resolved_outcome", "actual_outcome", "outcome", "result", "settled_side", "settlement_value")
+        if source.get(key) not in (None, "")
+    ]
+    if any(outcome is None for outcome in outcomes):
+        return "invalid_resolution_outcome"
+    if len(set(outcomes)) > 1:
+        return "conflicting_resolution_outcome"
+    for field in ("settlement_ts", "outcome_known_at"):
+        values = [source[field] for source in sources if source.get(field) not in (None, "")]
+        if len(values) > 1 and len({_parse_timestamp(value) for value in values}) > 1:
+            return f"conflicting_resolution_{field}"
+    outcome = outcomes[0] if outcomes else None
+    allowed = {"void_resolution"} if outcome == "VOID" else {"finalized", "settled", "resolved"}
+    if any(str(source["market_status"]).strip().lower() not in allowed
+           for source in sources if source.get("market_status") not in (None, "")):
+        return "nonfinal_market_status"
+    return None
 
 def _resolution_chronology_blocker(resolution: Mapping[str, Any] | None, observed_at: Any) -> str | None:
     """Validate supplied settlement assertions without inferring missing history.
@@ -2375,6 +2400,55 @@ def _find_resolution(
         entry_indexes = list(_mapping(index.get(bucket_name)).get(key, []) or [])
         if not entry_indexes:
             continue
+        # A receipt for another market cannot dispute a matching-market
+        # authority merely because it shares a candidate or run identifier.
+        if market_id:
+            matching_market = []
+            for entry_index in entry_indexes:
+                candidate = _mapping(entries[entry_index].get("row"))
+                nested = _mapping(candidate.get("resolution"))
+                supplied = (candidate.get("market_id"), candidate.get("ticker"),
+                            nested.get("market_id"), nested.get("ticker"))
+                if all(value in (None, "") or str(value) == market_id for value in supplied):
+                    matching_market.append(entry_index)
+            if not matching_market:
+                return {
+                    "row": None, "blocker": "resolution_identity_mismatch",
+                    "matched_by": matched_by, "match_key": display_key,
+                    "candidate_match_count": len(entry_indexes),
+                }
+            entry_indexes = matching_market
+        # Reconcile only receipts that could settle this decision. An invalid
+        # authority cannot veto an otherwise valid receipt in the same bucket.
+        viable_indexes: list[int] = []
+        excluded: list[str] = []
+        for entry_index in entry_indexes:
+            candidate = _mapping(entries[entry_index].get("row"))
+            nested = _mapping(candidate.get("resolution"))
+            identity_values = (
+                (shared_candidate_id, candidate.get("shared_candidate_id"), nested.get("shared_candidate_id")),
+                (run_id, candidate.get("run_id"), nested.get("run_id")),
+                (market_id, candidate.get("market_id"), candidate.get("ticker"), nested.get("market_id"), nested.get("ticker")),
+                (shared_snapshot_id, candidate.get("shared_snapshot_id"), candidate.get("snapshot_id"), nested.get("shared_snapshot_id"), nested.get("snapshot_id")),
+            )
+            if any(len({str(value) for value in values if value not in (None, "")}) > 1
+                   for values in identity_values):
+                reason = "resolution_identity_mismatch"
+            else:
+                reason = (_resolution_chronology_blocker(candidate, observed_at)
+                          or _resolution_assertion_blocker(candidate)
+                          or ("missing_resolution" if _normalized_resolution_outcome(candidate) is None else None))
+            if reason:
+                excluded.append(reason)
+            else:
+                viable_indexes.append(entry_index)
+        if not viable_indexes:
+            return {
+                "row": None, "blocker": sorted(excluded)[0],
+                "matched_by": matched_by, "match_key": display_key,
+                "candidate_match_count": len(entry_indexes),
+            }
+        entry_indexes = viable_indexes
         if len(entry_indexes) > 1:
             outcomes = {
                 _normalized_resolution_outcome(entries[i].get("row"))
@@ -2390,42 +2464,43 @@ def _find_resolution(
                     "match_key": display_key,
                     "candidate_match_count": len(entry_indexes),
                 }
-        # A strong lookup key cannot override contradictory supplied identity.
-        # Missing optional legacy fields remain usable; explicit disagreements
-        # fail closed, including disagreements on a weaker fallback match.
-        for entry_index in entry_indexes:
-            candidate = _mapping(entries[entry_index].get("row"))
-            nested = _mapping(candidate.get("resolution"))
-            identity_values = {
-                "shared_candidate_id": (shared_candidate_id, candidate.get("shared_candidate_id"), nested.get("shared_candidate_id")),
-                "run_id": (run_id, candidate.get("run_id"), nested.get("run_id")),
-                "market_id": (market_id, candidate.get("market_id"), candidate.get("ticker"), nested.get("market_id"), nested.get("ticker")),
-                "shared_snapshot_id": (shared_snapshot_id, candidate.get("shared_snapshot_id"), candidate.get("snapshot_id"), nested.get("shared_snapshot_id"), nested.get("snapshot_id")),
-            }
-            if any(len({str(value) for value in values if value not in (None, "")}) > 1 for values in identity_values.values()):
+        if len(entry_indexes) > 1:
+            settlement_times: set[datetime | None] = set()
+            for entry_index in entry_indexes:
+                candidate = _mapping(entries[entry_index].get("row"))
+                value = _optional_text(candidate.get("settlement_ts"),
+                                       _mapping(candidate.get("resolution")).get("settlement_ts"))
+                if value is not None:
+                    settlement_times.add(_parse_timestamp(value))
+            if len(settlement_times) > 1:
                 return {
-                    "row": None, "blocker": "resolution_identity_mismatch",
+                    "row": None, "blocker": "ambiguous_resolution",
                     "matched_by": matched_by, "match_key": display_key,
                     "candidate_match_count": len(entry_indexes),
                 }
-        # Duplicate same-outcome receipts must not hide a supplied chronology
-        # contradiction just because the first row happened to be valid.
-        if len(entry_indexes) > 1:
-            for entry_index in entry_indexes:
-                chronology_blocker = _resolution_chronology_blocker(_mapping(entries[entry_index].get("row")), observed_at)
-                if chronology_blocker:
-                    return {
-                        "row": None, "blocker": chronology_blocker,
-                        "matched_by": matched_by, "match_key": display_key,
-                        "candidate_match_count": len(entry_indexes),
-                    }
-        entry = entries[entry_indexes[0]] if entry_indexes[0] < len(entries) else {}
+        known_values = [
+            str(source["outcome_known_at"])
+            for entry_index in entry_indexes
+            for candidate in (_mapping(entries[entry_index].get("row")),)
+            for source in (candidate, _mapping(candidate.get("resolution")))
+            if source.get("outcome_known_at") not in (None, "")
+        ]
+        latest_known_at = max(known_values, key=lambda value: (_parse_timestamp(value), value)) if known_values else None
+        def receipt_rank(entry_index: int) -> tuple[bool, str]:
+            candidate = _mapping(entries[entry_index].get("row"))
+            has_settlement = bool(_optional_text(
+                candidate.get("settlement_ts"), _mapping(candidate.get("resolution")).get("settlement_ts"),
+            ))
+            return (not has_settlement, json.dumps(candidate, sort_keys=True, default=str))
+
+        entry = entries[min(entry_indexes, key=receipt_rank)]
         return {
             "row": _mapping(entry.get("row")),
             "matched_by": matched_by,
             "match_key": display_key,
             "resolution_source_path": _optional_text(entry.get("resolution_source_path")),
             "candidate_match_count": len(entry_indexes),
+            "latest_outcome_known_at": latest_known_at,
         }
     return {"row": None, "matched_by": None, "match_key": None}
 

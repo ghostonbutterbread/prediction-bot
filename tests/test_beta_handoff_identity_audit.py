@@ -235,6 +235,103 @@ class BetaHandoffIdentityAuditTests(unittest.TestCase):
                     self.assertEqual(wallet["summary"]["settled_positions"], 0)
                     self.assertEqual(wallet["summary"]["open_positions"], 1)
 
+    def test_shadow_receipt_cannot_erase_conflicting_authority_or_active_status(self):
+        decision = self._frozen_decision()
+        for changes, blocker in (
+            ({"resolution": {"outcome": "NO"}}, "conflicting_resolution_outcome"),
+            ({"resolution": {"settlement_ts": "2026-09-08T14:00:00+00:00"}}, "conflicting_resolution_settlement_ts"),
+            ({"market_status": "active"}, "nonfinal_market_status"),
+            ({"resolution": {"market_status": "active"}}, "nonfinal_market_status"),
+        ):
+            with self.subTest(changes=changes):
+                resolution = {**self._independent_resolution(), **changes}
+                [receipt] = build_paper_shadow_lane_resolution_rows(
+                    lane_rows=[decision], resolution_rows=[resolution],
+                )
+                self.assertEqual(receipt["blocker"], blocker)
+                self.assertIsNone(receipt["pnl"])
+                self.assertFalse(receipt["resolution"]["matched"])
+                wallet = replay_recorded_collector_lane_with_kelly(
+                    decisions=[decision], resolutions=[receipt], starting_balance_usd=100.0,
+                )
+                self.assertEqual(wallet["settlement_rows"], [])
+                self.assertEqual(wallet["summary"]["reserved_capital_usd"], 10.0)
+
+    def test_wrong_market_candidate_receipt_cannot_suppress_exact_market_authority(self):
+        decision = self._frozen_decision()
+        exact = self._independent_resolution()
+        wrong_market = {**exact, "market_id": "market-B", "outcome": "NO", "resolution_id": "wrong-market"}
+        for resolutions in ([exact, wrong_market], [wrong_market, exact]):
+            with self.subTest(first=resolutions[0]["market_id"]):
+                [receipt] = build_paper_shadow_lane_resolution_rows(
+                    lane_rows=[decision], resolution_rows=resolutions,
+                )
+                self.assertIsNone(receipt["blocker"])
+                self.assertTrue(receipt["resolution"]["matched"])
+                self.assertEqual(receipt["resolution"]["resolution_row_id"], exact["resolution_id"])
+                wallet = replay_recorded_collector_lane_with_kelly(
+                    decisions=[decision], resolutions=[receipt], starting_balance_usd=100.0,
+                )
+                self.assertEqual(wallet["summary"]["ambiguous_resolution_decisions"], 0)
+                self.assertEqual(wallet["summary"]["settled_positions"], 1)
+                self.assertEqual(wallet["summary"]["final_balance_usd"], 115.0)
+
+    def test_distinct_valid_settlement_times_remain_ambiguous_before_wallet(self):
+        decision = self._frozen_decision()
+        early = self._independent_resolution()
+        late = {**early, "resolution_id": "resolution-late", "settlement_ts": "2026-09-08T14:00:00+00:00"}
+        for resolutions in ([early, late], [late, early]):
+            with self.subTest(first=resolutions[0]["resolution_id"]):
+                [receipt] = build_paper_shadow_lane_resolution_rows(
+                    lane_rows=[decision], resolution_rows=resolutions,
+                )
+                self.assertEqual(receipt["blocker"], "ambiguous_resolution")
+                self.assertIsNone(receipt["pnl"])
+                self.assertFalse(receipt["resolution"]["matched"])
+                wallet = replay_recorded_collector_lane_with_kelly(
+                    decisions=[decision], resolutions=[receipt], starting_balance_usd=100.0,
+                )
+                self.assertEqual(wallet["settlement_rows"], [])
+                self.assertEqual(wallet["summary"]["reserved_capital_usd"], 10.0)
+
+    def test_equivalent_receipts_preserve_latest_known_at_for_wallet_capacity(self):
+        decision = self._frozen_decision()
+        early = {**self._independent_resolution(), "outcome_known_at": "2026-09-08T13:00:00+00:00"}
+        late = {**early, "resolution_id": "resolution-late", "outcome_known_at": "2026-09-08T14:00:00+00:00"}
+        later_decision = {
+            "decision_id": "decision-B", "market_id": "market-B",
+            "observed_at": "2026-09-08T13:30:00+00:00", "action": "SKIP",
+        }
+        for resolutions in ([early, late], [late, early]):
+            with self.subTest(first=resolutions[0]["resolution_id"]):
+                [receipt] = build_paper_shadow_lane_resolution_rows(
+                    lane_rows=[decision], resolution_rows=resolutions,
+                )
+                self.assertIsNone(receipt["blocker"])
+                self.assertEqual(receipt["resolution"]["outcome_known_at"], late["outcome_known_at"])
+                wallet = replay_recorded_collector_lane_with_kelly(
+                    decisions=[decision, later_decision], resolutions=[receipt], starting_balance_usd=100.0,
+                )
+                self.assertEqual(wallet["decision_rows"][1]["available_cash_before_usd"], 90.0)
+                self.assertEqual(wallet["settlement_rows"][0]["available_at"], late["outcome_known_at"])
+
+    def test_untimed_duplicate_does_not_displace_recorded_settlement(self):
+        decision = self._frozen_decision()
+        timed = {**self._independent_resolution(), "resolution_id": "resolution-Z"}
+        untimed = {key: value for key, value in timed.items() if key != "settlement_ts"}
+        untimed["resolution_id"] = "resolution-A"
+        for resolutions in ([timed, untimed], [untimed, timed]):
+            with self.subTest(first=resolutions[0]["resolution_id"]):
+                [receipt] = build_paper_shadow_lane_resolution_rows(
+                    lane_rows=[decision], resolution_rows=resolutions,
+                )
+                self.assertIsNone(receipt["blocker"])
+                self.assertEqual(receipt["resolution"]["settlement_ts"], timed["settlement_ts"])
+                wallet = replay_recorded_collector_lane_with_kelly(
+                    decisions=[decision], resolutions=[receipt], starting_balance_usd=100.0,
+                )
+                self.assertEqual(wallet["summary"]["settled_positions"], 1)
+
     def test_real_shadow_receipt_keeps_settlement_distinct_from_outcome_availability(self):
         for action in ("BUY_YES", "BUY_NO"):
             for outcome in ("YES", "NO", "VOID"):
@@ -387,19 +484,40 @@ class BetaHandoffIdentityAuditTests(unittest.TestCase):
                 receipt = self._write_lane(row, history=history, signal_updates={"observed_at": observed_at})
                 self.assertEqual(receipt["action"], expected)
 
-    def test_duplicate_candidate_receipts_cannot_hide_explicit_contradictions(self):
+    def test_invalid_candidate_receipt_without_valid_authority_stays_blocked(self):
         decision = self._frozen_decision()
         for field, value, blocker in (("run_id", "wrong-run", "resolution_identity_mismatch"),
                                       ("settlement_ts", "2026-09-06T12:00:00Z", "settlement_not_after_decision")):
+            with self.subTest(field=field):
+                bad = {**self._independent_resolution(), field: value}
+                [receipt] = build_paper_shadow_lane_resolution_rows(lane_rows=[decision], resolution_rows=[bad])
+                self.assertEqual(receipt["blocker"], blocker)
+                self.assertIsNone(receipt["pnl"])
+                self.assertFalse(receipt["resolution"]["matched"])
+
+    def test_invalid_candidate_receipt_cannot_displace_valid_authority(self):
+        decision = self._frozen_decision()
+        for changes in (
+            {"run_id": "wrong-run"},
+            {"settlement_ts": "2026-09-06T12:00:00Z"},
+            {"resolution": {"outcome": "NO"}},
+            {"market_status": "active"},
+        ):
             for reversed_order in (False, True):
-                with self.subTest(field=field, reversed_order=reversed_order):
+                with self.subTest(changes=changes, reversed_order=reversed_order):
                     good = self._independent_resolution()
-                    bad = {**good, field: value}
+                    bad = {**good, "resolution_id": "invalid-authority", **changes}
                     resolutions = [bad, good] if reversed_order else [good, bad]
-                    [receipt] = build_paper_shadow_lane_resolution_rows(lane_rows=[decision], resolution_rows=resolutions)
-                    self.assertEqual(receipt["blocker"], blocker)
-                    self.assertIsNone(receipt["pnl"])
-                    self.assertFalse(receipt["resolution"]["matched"])
+                    [receipt] = build_paper_shadow_lane_resolution_rows(
+                        lane_rows=[decision], resolution_rows=resolutions,
+                    )
+                    self.assertIsNone(receipt["blocker"])
+                    self.assertEqual(receipt["resolution"]["resolution_row_id"], good["resolution_id"])
+                    wallet = replay_recorded_collector_lane_with_kelly(
+                        decisions=[decision], resolutions=[receipt], starting_balance_usd=100.0,
+                    )
+                    self.assertEqual(wallet["summary"]["settled_positions"], 1)
+                    self.assertEqual(wallet["summary"]["final_balance_usd"], 115.0)
 
 
 if __name__ == "__main__":
