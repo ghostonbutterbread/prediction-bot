@@ -58,9 +58,10 @@ def relocated_v1_generation_path(value: str | Path, generation_dir: Path, *, sch
     declared = Path(value).expanduser()
     if (type(schema_version) is not int or schema_version != 1 or not declared.is_absolute()
             or generation_dir.parent.name != "generations"
-            or generation_dir.parent.parent.name != "auto_source_router_history"
-            or ".." in declared.parts):
+            or generation_dir.parent.parent.name != "auto_source_router_history"):
         return None
+    if ".." in declared.parts:
+        raise ValueError("v1 generation locator contains parent traversal")
     try:
         relative = declared.relative_to(_V1_OBSOLETE_GENERATIONS)
     except ValueError:

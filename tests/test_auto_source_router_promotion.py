@@ -267,6 +267,34 @@ class AutoSourceRouterPromotionTests(unittest.TestCase):
             with self.assertRaisesRegex(SourceHistoryManifestError, "relocated v1 generation id mismatch"):
                 load_source_history_manifest(first.history_manifest_path)
 
+    def test_relocated_v1_rejects_parent_segment_before_foreign_id_symlink(self) -> None:
+        first, promotion, nested = self.relocated_v1_generation()
+        old_generations = self.root / "obsolete-checkout" / "generations"
+        old_generations.mkdir(parents=True)
+        (old_generations / first.generation_dir.name).mkdir()
+        other_id = "f" * 64 if first.generation_dir.name != "f" * 64 else "e" * 64
+        (old_generations / other_id).symlink_to(first.generation_dir, target_is_directory=True)
+        original = OBSOLETE_GENERATIONS / first.generation_dir.name
+
+        def evasive(value):
+            return str(old_generations / first.generation_dir.name / ".." / other_id / Path(value).relative_to(original))
+
+        promotion["artifacts"] = {key: evasive(value) for key, value in promotion["artifacts"].items()}
+        for key in ("history_ledger_path", "history_manifest_path", "scoreboard_path"):
+            promotion["runtime_consumption"][key] = evasive(promotion["runtime_consumption"][key])
+        promotion["source_history_manifest"]["path"] = evasive(promotion["source_history_manifest"]["path"])
+        for key in ("source_ledger", "strict_resolution", "raw_archive", "replay_index", "replay_manifest"):
+            nested[f"{key}_path"] = evasive(nested[f"{key}_path"])
+        nested_bytes = (json.dumps(nested, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode()
+        first.history_manifest_path.write_bytes(nested_bytes)
+        promotion["artifact_sha256"]["source_history_manifest"] = hashlib.sha256(nested_bytes).hexdigest()
+        first.manifest_path.write_text(json.dumps(promotion), encoding="utf-8")
+        with patch("bot.weather.source_history_manifest._V1_OBSOLETE_GENERATIONS", old_generations):
+            with self.assertRaisesRegex(ValueError, "v1 generation locator contains parent traversal"):
+                _validate_current_generation(self.output_root)
+            with self.assertRaisesRegex(SourceHistoryManifestError, "v1 generation locator contains parent traversal"):
+                load_source_history_manifest(first.history_manifest_path)
+
     def test_relocated_v1_rejects_unrelated_prefix_symlinked_to_current(self) -> None:
         first, promotion, nested = self.relocated_v1_generation()
         unrelated = self.root / "unrelated-checkout" / "generations" / first.generation_dir.name
