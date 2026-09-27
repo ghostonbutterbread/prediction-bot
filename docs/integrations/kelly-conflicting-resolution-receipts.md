@@ -1,6 +1,6 @@
 # Synthetic Kelly conflicting-resolution receipts — integration dossier
 
-- **Status:** seventh-review correction independently accepted for beta-first compatibility preflight at implementation `1aa825fe70eebdf63adae80a6ec80eaa02b35c54`; focused/full isolated suites pass. Beta compatibility, merge/push and runtime activation are separate gates and remain pending
+- **Status:** seventh-review correction independently accepted at implementation `1aa825fe70eebdf63adae80a6ec80eaa02b35c54`; isolated and beta-first compatibility suites pass. Local beta integration is ready; push and runtime activation remain separate decisions
 - **Owner:** Hermes, Kanban `t_5fc5d6e8` (parent audit `t_500d82fb`)
 - **Branch / owning ref:** `fix/kelly-conflicting-resolution-receipts`
 - **Base commit:** `02c5580b61fa4c30a54c4f80884cac329d21af0c`
@@ -52,19 +52,19 @@ Seventh-review correction: group the union of candidate and run–market receipt
 - Seventh independent read-only review `deleg_06fbb082` **blocked beta-first preflight** at clean tip `6b6f2e9ae75d6ec3dadefdb88147e393c86559a2`. A nested exact M1/YES receipt with candidate ID and a flat M1/NO receipt with the same run/settlement but no candidate each independently settled (+$15/−$10). Together, candidate-first lookup omitted the flat run–market authority and booked unsupported +$15 in either order. Previous nested M1 vs wrong-market M2 fix, candidate alias conflict, and legacy single-receipt cases held. Reviewer reran focused **125 OK (1 skipped)**, inspected full **1,243/7**, made no edits/runtime changes.
 - Seventh-review RED/GREEN: exact and legacy receipts each remained valid alone, but opposite outcomes together falsely emitted +$15 before correction. Candidate ∪ run–market grouping makes both orders ambiguous and leaves $10 reserved; agreeing legacy/exact receipts settle once and an explicit wrong-candidate receipt cannot displace valid authority. Worktree-first focused `tests.test_beta_handoff_identity_audit tests.test_collector_lane_replay_kelly tests.test_paper_shadow_lanes tests.test_beta_paper_lifecycle_audit -q` **126 OK (1 skipped)**; `git diff --check` passed. Full discovery `proc_0f676336b244` exited **0**, **1,244 tests OK (7 skipped), 316.817s**, receipt `/home/ryushe/.hermes/cache/scratch/prediction-kelly-union-authorities-full-20260927.log`.
 - Eighth independent read-only review `deleg_76311072` **ACCEPTED** exact clean tip `182537337dc09abb6f2d4bf849f5ab52e1ba701f` for beta-first preflight. Opposing viable exact/flat authorities remain pending with $10 reserved in both orders; equivalent receipts settle once; wrong-market and wrong-candidate neighbors cannot veto M1; selected match-key provenance, valid clock ambiguity, BUY_NO, VOID, legacy no-status cases held. Reviewer reran focused **126 OK (1 skipped)**, inspected full **1,244/7** receipt and diff; no edits, raw or runtime action. This is not integration or settlement-source authority.
-- Beta-first compatibility against current local beta is required before integration.
+- Beta-first noncommitting merge from clean local beta `80b715e46f88aa11c978a5edd5dcb1b0c31f06a0` accepted feature tip `236ffcc914fbd3debae01b136e2189b4fe75f19c` without conflict. Removed this branch-local dossier from the staged beta tree. `git diff --cached --check` passed. In beta checkout with `PYTHONPATH=$PWD`, focused producer/Kelly suite **126 OK (1 skipped)** at `/home/ryushe/.hermes/cache/scratch/prediction-beta-kelly-preflight-focused-20260927.log`; full discovery `proc_a206d49c5ff2` exited **0**, **1,265 tests OK (7 skipped), 68.781s**, receipt `/home/ryushe/.hermes/cache/scratch/prediction-beta-kelly-preflight-full-20260927.log`. Aborted the preflight cleanly; beta remains at `80b715e46f88aa11c978a5edd5dcb1b0c31f06a0` before a real local merge.
 - No raw evidence, service, live balance/order, config, or runtime changes.
 
 ## Blockers and deferred work
 
-- **Integration gate:** fresh independent verdict on conflict/duplicate/alias/clock/legacy compatibility; beta-first non-committing merge with focused/full tests and staged diff check. Retain this dossier only on the feature branch; exclude it from beta during integration.
+- **Integration gate:** accepted independent verdict and beta-first non-committing focused/full suites passed. Retain this dossier only on the feature branch; exclude it from beta during the local integration merge. Re-test beta after integration.
 - **Out-of-scope validity issues:** other paper-shadow source-side quote provenance and market-only P&L authority are separate audit items; no full strategy/wallet parity claim. Repeated decision rows and execution-grade fill provenance require separate evidence before performance claims.
 
 ## Interruption / resume handoff
 
 - **Branch:** `fix/kelly-conflicting-resolution-receipts` from `02c5580b61fa4c30a54c4f80884cac329d21af0c` → `beta`.
 - **Checkpoint:** latest committed implementation `1aa825fe70eebdf63adae80a6ec80eaa02b35c54`; seventh-review code/tests passed full discovery.
-- **Exact resume:** run a noncommitting beta-first merge preflight from clean local beta `80b715e46f88aa11c978a5edd5dcb1b0c31f06a0`, excluding this branch-only dossier, then focused/full compatibility and staged diff checks. Abort cleanly after preflight. Integrate locally only after it passes; do not deploy from this code task.
+- **Exact resume:** merge the accepted feature into clean local beta from `80b715e46f88aa11c978a5edd5dcb1b0c31f06a0`, exclude this branch-only dossier, verify the merge ancestry and post-merge focused/full suites, then close Kanban and retire only the clean contained worktree. Do not push or deploy from this code task.
 - **Working-tree state at handoff:** clean after the dossier-only handoff checkpoint; no raw or runtime modifications.
 
 ## Decision gates
@@ -84,3 +84,4 @@ Seventh-review correction: group the union of candidate and run–market receipt
 - 2026-09-27 — sixth independent review blocked nested candidate indexing and false wrong-market rejection. Test-first correction focused 125 OK (1 skipped) and full 1,243 OK (7 skipped); fresh review pending. No integration decision.
 - 2026-09-27 — seventh independent review blocked candidate-first suppression of opposing flat run–market authority. Test-first union correction focused 126 OK (1 skipped) and full 1,244 OK (7 skipped); fresh review pending. No integration decision.
 - 2026-09-27 — eighth independent review accepted `182537337dc09abb6f2d4bf849f5ab52e1ba701f` for beta-first preflight; focused 126 OK (1 skipped), prior full 1,244 OK (7 skipped). No integration/activation decision.
+- 2026-09-27 — beta-first noncommitting merge of accepted feature passed focused 126 OK (1 skipped), full 1,265 OK (7 skipped), staged diff check; aborted cleanly. Local beta merge next, no push/activation.
