@@ -1,6 +1,7 @@
 """Simulation engine — paper trades with full audit trail."""
 
 import logging
+import math
 import json
 from collections import Counter
 from datetime import datetime, timezone, timedelta
@@ -1744,8 +1745,10 @@ class Simulator:
                     return None
 
             def _shadow_price(value):
+                if isinstance(value, bool):
+                    return None
                 price = _shadow_float(value)
-                if price is None or price <= 0:
+                if price is None or not math.isfinite(price) or not 0 < price <= 1:
                     return None
                 return price
 

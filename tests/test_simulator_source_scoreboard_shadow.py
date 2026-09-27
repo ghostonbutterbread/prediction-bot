@@ -255,6 +255,24 @@ class SimulatorSourceScoreboardShadowTests(unittest.TestCase):
             self.assertEqual(writer_signal["paper_shadow_recorded_best_yes_ask"], 0.44)
             self.assertIsNone(writer_signal["paper_shadow_recorded_best_no_ask"])
 
+    def test_simulator_rejects_nonfinite_recorded_asks(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sim = Simulator(shadow_config(tmpdir, Path(tmpdir) / "scores.jsonl",
+                                          Path(tmpdir) / "decisions.jsonl"))
+            for bad_quote in (float("nan"), float("inf"), -float("inf"), 1.2):
+                with self.subTest(bad_quote=bad_quote):
+                    market = fake_weather_market()
+                    market.metadata["recorded_book_asks"]["best_no_ask"] = bad_quote
+                    inputs = {}
+                    sim._prepare_shadow_source_scoreboard_signal(
+                        {**weather_signal(), "market_id": market.id},
+                        market=market, order_book={"best_yes_ask": .44, "best_no_ask": bad_quote},
+                        inputs_by_shared_candidate_id=inputs,
+                    )
+                    self.assertTrue(inputs)
+                    writer_signal = next(iter(inputs.values()))["stable_paper"].signal
+                    self.assertIsNone(writer_signal["paper_shadow_recorded_best_no_ask"])
+
     def test_readiness_summary_counts_simulator_shadow_rows(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             scoreboard_path = Path(tmpdir) / "source_scoreboard_by_slice.jsonl"

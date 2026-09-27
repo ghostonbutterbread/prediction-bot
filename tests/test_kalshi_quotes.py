@@ -1,5 +1,6 @@
 """Synthetic public-API shapes; no recorded historical prices or live access."""
 import unittest
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -65,6 +66,41 @@ class KalshiQuoteTests(unittest.TestCase):
         )
         self.assertEqual(market.metadata["recorded_book_asks"],
                          {"best_yes_ask": None, "best_no_ask": None})
+
+    def test_sdk_detail_malformed_no_ask_is_not_a_recorded_quote(self):
+        market_payload = SimpleNamespace(
+            ticker="SYNTHETIC", title="Synthetic market", yes_ask_dollars=".44",
+            no_ask_dollars="NaN", yes_bid_dollars=".42", no_bid_dollars=None,
+            volume_fp=100, liquidity_dollars=100, close_time=None,
+        )
+        with patch("bot.exchanges.kalshi.call_with_retry",
+                   return_value=SimpleNamespace(market=market_payload)):
+            market = exchange_for_quotes().get_market("SYNTHETIC")
+        self.assertIsNotNone(market)
+        self.assertEqual(market.metadata["recorded_book_asks"],
+                         {"best_yes_ask": .44, "best_no_ask": None})
+        self.assertEqual(market.no_price, 0.0)
+
+    def test_sdk_events_malformed_no_ask_is_not_a_recorded_quote(self):
+        exchange = exchange_for_quotes()
+        close_time = datetime.now(timezone.utc) + timedelta(days=2)
+        market_payload = SimpleNamespace(
+            ticker="SYNTHETIC", title="Synthetic weather market", yes_ask_dollars=".44",
+            no_ask_dollars="NaN", volume_fp=100, liquidity_dollars=100,
+            close_time=close_time, status="open",
+        )
+        exchange.client.get_events = lambda **kwargs: SimpleNamespace(
+            events=[SimpleNamespace(event_ticker="SYNTHETIC", category="weather")], cursor=None,
+        )
+        exchange.client.get_markets = lambda **kwargs: SimpleNamespace(markets=[market_payload])
+        with patch("bot.exchanges.kalshi.http_get_with_retry",
+                   return_value=SimpleNamespace(status_code=503)), \
+             patch("bot.exchanges.kalshi.call_with_retry", side_effect=lambda fn, **kwargs: fn()), \
+             patch.object(exchange, "_market_allowed", return_value=True):
+            markets = exchange.get_markets(limit=1)
+        self.assertEqual(len(markets), 1)
+        self.assertEqual(markets[0].metadata["recorded_book_asks"],
+                         {"best_yes_ask": .44, "best_no_ask": None})
 
     def test_collector_persists_normalized_quotes_even_for_skips(self):
         import tempfile
