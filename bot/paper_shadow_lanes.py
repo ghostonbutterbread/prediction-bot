@@ -2343,11 +2343,16 @@ def _resolution_index(
         entry = {"row": dict(row), "resolution_source_path": source_path}
         entry_index = len(entries)
         entries.append(entry)
-        shared_candidate_id = _optional_text(row.get("shared_candidate_id"))
+        nested = _mapping(row.get("resolution"))
+        candidate_ids = {
+            _optional_text(row.get("shared_candidate_id")),
+            _optional_text(nested.get("shared_candidate_id")),
+        }
         market_id = _optional_text(row.get("market_id"), row.get("ticker"))
         run_id = _optional_text(row.get("run_id"))
-        if shared_candidate_id:
-            by_shared_candidate_id.setdefault(shared_candidate_id, []).append(entry_index)
+        for shared_candidate_id in candidate_ids:
+            if shared_candidate_id:
+                by_shared_candidate_id.setdefault(shared_candidate_id, []).append(entry_index)
         if run_id and market_id:
             by_run_market.setdefault((run_id, market_id), []).append(entry_index)
         if market_id:

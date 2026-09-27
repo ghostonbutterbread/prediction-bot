@@ -276,6 +276,30 @@ class BetaHandoffIdentityAuditTests(unittest.TestCase):
                 self.assertEqual(wallet["summary"]["settled_positions"], 1)
                 self.assertEqual(wallet["summary"]["final_balance_usd"], 115.0)
 
+    def test_nested_candidate_receipt_survives_wrong_market_root_candidate_neighbor(self):
+        decision = self._frozen_decision()
+        exact = self._independent_resolution()
+        del exact["shared_candidate_id"]
+        exact["resolution"] = {
+            "shared_candidate_id": decision["shared_candidate_id"],
+            "outcome": exact.pop("outcome"), "settlement_ts": exact.pop("settlement_ts"),
+        }
+        wrong_market = {**self._independent_resolution(), "market_id": "market-B",
+                        "outcome": "NO", "resolution_id": "wrong-market"}
+        for resolutions in ([exact], [exact, wrong_market], [wrong_market, exact]):
+            with self.subTest(order=[row["resolution_id"] for row in resolutions]):
+                [receipt] = build_paper_shadow_lane_resolution_rows(
+                    lane_rows=[decision], resolution_rows=resolutions,
+                )
+                self.assertIsNone(receipt["blocker"])
+                self.assertEqual(receipt["pnl"]["pnl_usd"], 15.0)
+                self.assertEqual(receipt["resolution"]["resolution_row_id"], exact["resolution_id"])
+                wallet = replay_recorded_collector_lane_with_kelly(
+                    decisions=[decision], resolutions=[receipt], starting_balance_usd=100.0,
+                )
+                self.assertEqual(wallet["summary"]["settled_positions"], 1)
+                self.assertEqual(wallet["summary"]["final_balance_usd"], 115.0)
+
     def test_distinct_valid_settlement_times_remain_ambiguous_before_wallet(self):
         decision = self._frozen_decision()
         early = self._independent_resolution()
