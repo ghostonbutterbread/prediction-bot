@@ -443,15 +443,12 @@ def _validate_source_history_manifest(path: Path, generation_dir: Path, *, promo
         raise ValueError("source history manifest is invalid JSON") from error
     if not isinstance(value, dict) or value.get("schema_name") != "source_history_manifest":
         raise ValueError("source history manifest is invalid")
-    required_contract = {
-        "historical_counterfactual_only": True,
-        "non_mutating": True,
-        "join_key": "market_id",
-        "availability_field": "settlement_ts",
-    }
     if type(value.get("schema_version")) is not int or value["schema_version"] != 1:
         raise ValueError("source history manifest contract invalid: schema_version")
-    for field, expected_value in required_contract.items():
+    for field in ("historical_counterfactual_only", "non_mutating"):
+        if value.get(field) is not True:
+            raise ValueError(f"source history manifest contract invalid: {field}")
+    for field, expected_value in (("join_key", "market_id"), ("availability_field", "settlement_ts")):
         if value.get(field) != expected_value:
             raise ValueError(f"source history manifest contract invalid: {field}")
     if not isinstance(value.get("eligibility_filter"), str) or not value["eligibility_filter"].strip():

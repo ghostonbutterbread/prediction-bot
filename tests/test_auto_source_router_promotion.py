@@ -152,6 +152,8 @@ class AutoSourceRouterPromotionTests(unittest.TestCase):
         failures = (
             ("schema_version", 2), ("schema_version", None), ("schema_version", True),
             ("historical_counterfactual_only", False), ("non_mutating", False),
+            ("historical_counterfactual_only", 1), ("non_mutating", 1),
+            ("historical_counterfactual_only", 1.0), ("non_mutating", 1.0),
             ("join_key", "candidate_id"), ("availability_field", "resolved_at"),
             ("eligibility_filter", ""),
         )
