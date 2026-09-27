@@ -2595,6 +2595,13 @@ def _summarize_source_router_resolution_rows(rows: Iterable[Mapping[str, Any]]) 
         outcome = _optional_text(resolution.get("outcome"))
         if outcome is not None:
             _increment_pnl_bucket(summary, "resolved_rows")
+        # Directional accuracy needs a valid matched outcome, not an eligible
+        # economic receipt. A missing quote/stake/settlement clock blocks PnL,
+        # but must not erase a correctly predicted YES/NO outcome.
+        if _is_buy_action(action) and resolution.get("matched") is True and outcome in {"YES", "NO"}:
+            resolved_buy_rows += 1
+            if _side_from_action(action) == outcome:
+                correct_side_rows += 1
 
         blocker = _optional_text(row.get("blocker"))
         if blocker:
@@ -2615,9 +2622,6 @@ def _summarize_source_router_resolution_rows(rows: Iterable[Mapping[str, Any]]) 
         payout = float(_number(pnl.get("payout_usd")) or 0.0)
         pnl_value = float(_number(pnl.get("pnl_usd")) or 0.0)
 
-        resolved_buy_rows += 1
-        if won:
-            correct_side_rows += 1
         _increment_pnl_bucket(summary, "buy_rows")
         _increment_pnl_bucket(summary, "pnl_calculable_rows")
         _increment_pnl_bucket(summary, "winning_buy_rows" if won else "losing_buy_rows")

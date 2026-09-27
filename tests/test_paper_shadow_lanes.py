@@ -4164,6 +4164,65 @@ parameters:
         self.assertEqual(router["action_counts"], {"BUY_NO": 1, "BUY_YES": 1, "SKIP": 1})
         self.assertEqual(report["by_lane"]["shadow_source_router"]["total_pnl_usd"], 20.0)
 
+    def test_source_router_directional_win_rate_does_not_require_market_only_settlement_clock(self):
+        lane = {
+            "policy": "shadow_source_router", "shared_candidate_id": "router-untimed",
+            "market_id": "KXROUTER-UNTIMED", "observed_at": "2026-09-07T12:00:00+00:00",
+            "action": "BUY_YES", "approved_position_size_usd": 10.0,
+            "provenance": {"future_pnl_inputs": {
+                "shared_candidate_id": "router-untimed", "market_id": "KXROUTER-UNTIMED",
+                "recommended_action": "BUY_YES", "side": "YES", "best_yes_ask": 0.4,
+            }},
+        }
+        for settlement_ts, economic_buys in ((None, 0), ("2026-09-08T12:00:00+00:00", 1)):
+            with self.subTest(settlement_ts=settlement_ts):
+                resolution = {"market_id": "KXROUTER-UNTIMED", "outcome": "YES"}
+                if settlement_ts:
+                    resolution["settlement_ts"] = settlement_ts
+                [receipt] = build_paper_shadow_lane_resolution_rows(
+                    lane_rows=[lane], resolution_rows=[resolution],
+                )
+                report = summarize_paper_shadow_lane_resolved_pnl(
+                    lane_rows=[lane], resolution_rows=[resolution],
+                )
+                router = report["source_router"]
+                self.assertTrue(receipt["resolution"]["matched"])
+                self.assertEqual(receipt["resolution"]["matched_by"], "market_id")
+                self.assertEqual(router["raw_router_resolved_buy_rows"], 1)
+                self.assertEqual(router["raw_router_correct_side_rows"], 1)
+                self.assertEqual(router["raw_router_win_rate_pct"], 100.0)
+                self.assertEqual(router["buy_rows"], economic_buys)
+                self.assertEqual(router["pnl_calculable_rows"], economic_buys)
+                self.assertEqual(receipt["blocker"], None if settlement_ts else "missing_settlement_timestamp")
+                self.assertEqual(receipt["pnl"] is not None, bool(settlement_ts))
+
+    def test_source_router_directional_metric_keeps_missing_quote_but_excludes_nonfinal_outcome(self):
+        lane = {
+            "policy": "shadow_source_router", "shared_candidate_id": "router-no-quote",
+            "market_id": "KXROUTER-NOQUOTE", "observed_at": "2026-09-07T12:00:00+00:00",
+            "action": "BUY_NO", "approved_position_size_usd": 10.0,
+            "provenance": {"future_pnl_inputs": {
+                "market_id": "KXROUTER-NOQUOTE", "recommended_action": "BUY_NO", "side": "NO",
+            }},
+        }
+        for market_status, matched, directional_buys in ((None, True, 1), ("open", False, 0)):
+            with self.subTest(market_status=market_status):
+                resolution = {"market_id": "KXROUTER-NOQUOTE", "outcome": "NO"}
+                if market_status:
+                    resolution["market_status"] = market_status
+                [receipt] = build_paper_shadow_lane_resolution_rows(
+                    lane_rows=[lane], resolution_rows=[resolution],
+                )
+                report = summarize_paper_shadow_lane_resolved_pnl(
+                    lane_rows=[lane], resolution_rows=[resolution],
+                )
+                router = report["source_router"]
+                self.assertEqual(receipt["resolution"]["matched"], matched)
+                self.assertEqual(router["raw_router_resolved_buy_rows"], directional_buys)
+                self.assertEqual(router["raw_router_correct_side_rows"], directional_buys)
+                self.assertEqual(router["buy_rows"], 0)
+                self.assertIsNone(receipt["pnl"])
+
     def test_source_scoreboard_resolved_pnl_reports_blockers_without_guessing(self):
         lane_rows = [
             {
