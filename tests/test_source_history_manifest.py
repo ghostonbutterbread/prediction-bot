@@ -57,6 +57,15 @@ class SourceHistoryManifestTests(unittest.TestCase):
             self.assertEqual(manifest.join_key, "market_id")
             self.assertEqual(manifest.source_ledger_path.name, "source_ledger.jsonl")
 
+    def test_existing_relative_locator_stays_valid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest_path = self._write_manifest(Path(tmp))
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            payload["source_ledger_path"] = "source_ledger.jsonl"
+            manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+            loaded = load_source_history_manifest(manifest_path)
+            self.assertEqual(loaded.source_ledger_path, manifest_path.parent / "source_ledger.jsonl")
+
     def test_collapse_keeps_earliest_source_as_of_per_strict_event_unit(self):
         base = {
             "eligible_for_source_history": True,
