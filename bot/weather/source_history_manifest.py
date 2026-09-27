@@ -62,9 +62,12 @@ def relocated_v1_generation_path(value: str | Path, generation_dir: Path, *, sch
             or ".." in declared.parts):
         return None
     try:
-        suffix = declared.relative_to(_V1_OBSOLETE_GENERATIONS / generation_dir.name)
+        relative = declared.relative_to(_V1_OBSOLETE_GENERATIONS)
     except ValueError:
         return None
+    if not relative.parts or relative.parts[0] != generation_dir.name:
+        raise ValueError("relocated v1 generation id mismatch")
+    suffix = Path(*relative.parts[1:])
     if not suffix.parts:
         return None
     resolved = (generation_dir / suffix).resolve()

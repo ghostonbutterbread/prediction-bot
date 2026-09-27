@@ -233,12 +233,39 @@ class AutoSourceRouterPromotionTests(unittest.TestCase):
         other_id = "f" * 64 if first.generation_dir.name != "f" * 64 else "e" * 64
         promotion["artifacts"]["scoreboard"] = promotion["artifacts"]["scoreboard"].replace(first.generation_dir.name, other_id)
         first.manifest_path.write_text(json.dumps(promotion), encoding="utf-8")
-        with self.assertRaisesRegex(ValueError, "outside generation"):
+        with self.assertRaisesRegex(ValueError, "relocated v1 generation id mismatch"):
             _validate_current_generation(self.output_root)
         nested["source_ledger_path"] = nested["source_ledger_path"].replace(first.generation_dir.name, other_id)
         first.history_manifest_path.write_text(json.dumps(nested), encoding="utf-8")
-        with self.assertRaisesRegex(SourceHistoryManifestError, "does not exist"):
+        with self.assertRaisesRegex(SourceHistoryManifestError, "relocated v1 generation id mismatch"):
             load_source_history_manifest(first.history_manifest_path)
+
+    def test_relocated_v1_rejects_foreign_generation_id_symlinked_to_current(self) -> None:
+        first, promotion, nested = self.relocated_v1_generation()
+        other_id = "f" * 64 if first.generation_dir.name != "f" * 64 else "e" * 64
+        old_generations = self.root / "obsolete-checkout" / "generations"
+        old_generations.mkdir(parents=True)
+        (old_generations / other_id).symlink_to(first.generation_dir, target_is_directory=True)
+        original = OBSOLETE_GENERATIONS / first.generation_dir.name
+
+        def foreign(value):
+            return str(old_generations / other_id / Path(value).relative_to(original))
+
+        promotion["artifacts"] = {key: foreign(value) for key, value in promotion["artifacts"].items()}
+        for key in ("history_ledger_path", "history_manifest_path", "scoreboard_path"):
+            promotion["runtime_consumption"][key] = foreign(promotion["runtime_consumption"][key])
+        promotion["source_history_manifest"]["path"] = foreign(promotion["source_history_manifest"]["path"])
+        for key in ("source_ledger", "strict_resolution", "raw_archive", "replay_index", "replay_manifest"):
+            nested[f"{key}_path"] = foreign(nested[f"{key}_path"])
+        nested_bytes = (json.dumps(nested, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode()
+        first.history_manifest_path.write_bytes(nested_bytes)
+        promotion["artifact_sha256"]["source_history_manifest"] = hashlib.sha256(nested_bytes).hexdigest()
+        first.manifest_path.write_text(json.dumps(promotion), encoding="utf-8")
+        with patch("bot.weather.source_history_manifest._V1_OBSOLETE_GENERATIONS", old_generations):
+            with self.assertRaisesRegex(ValueError, "relocated v1 generation id mismatch"):
+                _validate_current_generation(self.output_root)
+            with self.assertRaisesRegex(SourceHistoryManifestError, "relocated v1 generation id mismatch"):
+                load_source_history_manifest(first.history_manifest_path)
 
     def test_relocated_v1_rejects_symlink_escape_even_when_external_bytes_match(self) -> None:
         first, _, _ = self.relocated_v1_generation()
