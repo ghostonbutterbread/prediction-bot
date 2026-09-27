@@ -389,7 +389,9 @@ class NWSFeed:
             logger.debug(f"NWS observation error for {station}: {e}")
             return None
 
-    def get_forecast(self, city: str, *, target_date: str | None = None) -> Optional[WeatherSnapshot]:
+    def get_forecast(
+        self, city: str, *, target_date: str | None = None, measurement_kind: str | None = None,
+    ) -> Optional[WeatherSnapshot]:
         grid = self._resolve_forecast_grid(city)
         if not grid:
             return None
@@ -424,16 +426,35 @@ class NWSFeed:
                 high_period = next((p for p in dated_periods if p.get("isDaytime") is True), None)
                 if high_period is None:
                     return _unavailable_snapshot(city=city, source="nws", target_date=target, reason="target_date_missing_daytime_forecast_period", fetched_at=fetched_at)
-                low_period = next((p for p in dated_periods if p.get("isDaytime") is False), high_period)
+                # The night beginning on the target date forecasts the *next*
+                # morning. Prefer the night ending on the target morning for a
+                # daily low; never use the following morning for a low market.
+                morning_low = None
+                for period in periods:
+                    if period.get("isDaytime") is not False:
+                        continue
+                    try:
+                        end = datetime.fromisoformat(str(period.get("endTime")).replace("Z", "+00:00"))
+                    except ValueError:
+                        continue
+                    if end.tzinfo is not None and end.date().isoformat() == target:
+                        morning_low = period
+                        break
+                if measurement_kind == "low" and morning_low is None:
+                    return _unavailable_snapshot(city=city, source="nws", target_date=target, reason="target_date_missing_low_forecast_period", fetched_at=fetched_at)
+                low_period = morning_low or next((p for p in dated_periods if p.get("isDaytime") is False), high_period)
             else:
                 high_period = next((p for p in periods if p.get("isDaytime") is True), periods[0])
                 low_period = next((p for p in periods if p.get("isDaytime") is False), high_period)
             high = high_period.get("temperature")
             low = low_period.get("temperature")
-            if high is None or low is None:
+            if ((measurement_kind == "high" and high is None)
+                    or (measurement_kind == "low" and low is None)
+                    or (measurement_kind not in {"high", "low"} and (high is None or low is None))):
                 return _unavailable_snapshot(city=city, source="nws", target_date=target, reason="source_forecast_missing_temperature", fetched_at=fetched_at)
-            today = high_period
-            temp = high
+            selected_period = low_period if target and measurement_kind == "low" else high_period
+            today = selected_period
+            temp = selected_period.get("temperature")
             is_daytime = bool(today.get("isDaytime", True))
             period_name = today.get("name")
             period_start = today.get("startTime")
@@ -442,9 +463,9 @@ class NWSFeed:
 
             return WeatherSnapshot(
                 city=city.lower(),
-                high_temp_f=float(high),
-                low_temp_f=float(low),
-                current_temp_f=float(temp),
+                high_temp_f=float(high) if high is not None else None,
+                low_temp_f=float(low) if low is not None else None,
+                current_temp_f=float(temp) if temp is not None else None,
                 source="nws",
                 fetched_at=fetched_at,
                 forecast_hours_ahead=2,
@@ -466,7 +487,10 @@ class NWSFeed:
                     "target_mapping": {
                         "market_target_date": target,
                         "source_target_date": target,
-                        "mapping": "exact_source_local_nws_period" if target else None,
+                        "mapping": (
+                            "source_local_nws_night_low_proxy" if target and measurement_kind == "low"
+                            else "exact_source_local_nws_period" if target else None
+                        ),
                         "source_period_start": period_start,
                         "source_period_end": period_end,
                         "source_timezone": _timezone_offset_label(period_start),
@@ -595,21 +619,26 @@ class ProWeatherEngine:
         self._cache = {}
         self._cache_ttl = 600  # 10 min
 
-    def _snapshot_is_plausible(self, snapshot: WeatherSnapshot) -> bool:
+    def _snapshot_is_plausible(self, snapshot: WeatherSnapshot, measurement_kind: str | None = None) -> bool:
         if not snapshot.scoreable_forecast:
             return False
-        temps = [snapshot.high_temp_f, snapshot.low_temp_f, snapshot.current_temp_f]
+        temps = (
+            [snapshot.high_temp_f, snapshot.current_temp_f] if measurement_kind == "high"
+            else [snapshot.low_temp_f, snapshot.current_temp_f] if measurement_kind == "low"
+            else [snapshot.high_temp_f, snapshot.low_temp_f, snapshot.current_temp_f]
+        )
         return all(isinstance(temp, (int, float)) and TEMP_MIN_F <= temp <= TEMP_MAX_F for temp in temps)
 
     def get_forecast(
         self, city: str, *, target_date: str | None = None, require_target: bool = False,
+        measurement_kind: str | None = None,
     ) -> Optional[MultiSourceForecast]:
         """Get cross-validated forecast from all sources."""
         city_lower = city.lower().strip()
         target = _target_date_text(target_date)
 
         # Check cache
-        cache_key = (city_lower, target, require_target)
+        cache_key = (city_lower, target, require_target, measurement_kind)
         if cache_key in self._cache:
             cached, ts = self._cache[cache_key]
             if (datetime.now(timezone.utc) - ts).total_seconds() < self._cache_ttl:
@@ -635,15 +664,15 @@ class ProWeatherEngine:
         om = self.open_meteo.get_forecast(city_lower, target_date=target)
         if om:
             source_snapshots.append(om)
-            if self._snapshot_is_plausible(om):
+            if self._snapshot_is_plausible(om, measurement_kind):
                 snapshots.append(om)
             else:
                 logger.warning(f"Open-Meteo forecast unavailable for {city_lower}: {om.availability_reason or 'implausible_forecast'}")
 
-        nws = self.nws.get_forecast(city_lower, target_date=target)
+        nws = self.nws.get_forecast(city_lower, target_date=target, measurement_kind=measurement_kind)
         if nws:
             source_snapshots.append(nws)
-            if self._snapshot_is_plausible(nws):
+            if self._snapshot_is_plausible(nws, measurement_kind):
                 snapshots.append(nws)
             else:
                 logger.warning(f"NWS forecast unavailable for {city_lower}: {nws.availability_reason or 'implausible_forecast'}")
@@ -657,7 +686,7 @@ class ProWeatherEngine:
         )
         if owm:
             source_snapshots.append(owm)
-            if self._snapshot_is_plausible(owm):
+            if self._snapshot_is_plausible(owm, measurement_kind):
                 snapshots.append(owm)
             else:
                 logger.warning(f"OpenWeatherMap forecast unavailable for {city_lower}: {owm.availability_reason or 'implausible_forecast'}")
@@ -677,8 +706,8 @@ class ProWeatherEngine:
             local_station_observation = self.nws.get_station_observation(city_lower)
 
         # Cross-validate
-        highs = [s.high_temp_f for s in snapshots]
-        lows = [s.low_temp_f for s in snapshots]
+        highs = [s.high_temp_f for s in snapshots if s.high_temp_f is not None]
+        lows = [s.low_temp_f for s in snapshots if s.low_temp_f is not None]
 
         # NWS is the settlement source for Kalshi temperature markets.
         # Weight NWS more heavily when available, but use others for validation.
@@ -691,25 +720,29 @@ class ProWeatherEngine:
             avg_current = nws_snapshot.current_temp_f
             
             # Check if other sources agree with NWS
-            other_highs = [s.high_temp_f for s in snapshots if s.source != "nws"]
-            if other_highs:
-                # How close are other sources to NWS?
-                nws_agreement = 1 - (abs(avg_high - sum(other_highs)/len(other_highs)) / 10)
+            metric = "low_temp_f" if measurement_kind == "low" else "high_temp_f"
+            primary = getattr(nws_snapshot, metric)
+            other_values = [getattr(s, metric) for s in snapshots if s.source != "nws" and getattr(s, metric) is not None]
+            if other_values and primary is not None:
+                # Compare the metric being scored, not an unrelated high.
+                nws_agreement = 1 - (abs(primary - sum(other_values)/len(other_values)) / 10)
                 nws_agreement = max(0.3, min(1.0, nws_agreement))
             else:
                 nws_agreement = 0.85  # NWS alone is still good
         else:
             # No NWS — use average of available sources
-            avg_high = sum(highs) / len(highs)
-            avg_low = sum(lows) / len(lows)
+            avg_high = sum(highs) / len(highs) if highs else None
+            avg_low = sum(lows) / len(lows) if lows else None
             avg_current = sum(s.current_temp_f for s in snapshots) / len(snapshots)
             nws_agreement = 1.0
 
         # Source agreement: how much do sources agree?
         if len(snapshots) > 1:
-            high_spread = max(highs) - min(highs)
-            low_spread = max(lows) - min(lows)
-            agreement = max(0, 1 - (high_spread + low_spread) / 20)
+            high_spread = max(highs) - min(highs) if highs else 0.0
+            low_spread = max(lows) - min(lows) if lows else 0.0
+            spread = (low_spread if measurement_kind == "low" else high_spread
+                      if measurement_kind == "high" else high_spread + low_spread)
+            agreement = max(0, 1 - spread / 20)
         else:
             agreement = 1.0
 
@@ -724,17 +757,20 @@ class ProWeatherEngine:
         om_snapshot = next((s for s in snapshots if s.source == "open-meteo"), None)
         nws_open_meteo_gap = None
         if nws_snapshot and om_snapshot:
-            nws_open_meteo_gap = max(
-                abs(nws_snapshot.high_temp_f - om_snapshot.high_temp_f),
-                abs(nws_snapshot.low_temp_f - om_snapshot.low_temp_f),
+            metrics = ("low_temp_f",) if measurement_kind == "low" else (
+                ("high_temp_f",) if measurement_kind == "high" else ("high_temp_f", "low_temp_f")
             )
-            if nws_open_meteo_gap > 10:
+            gaps = [abs(getattr(nws_snapshot, metric) - getattr(om_snapshot, metric))
+                    for metric in metrics if getattr(nws_snapshot, metric) is not None
+                    and getattr(om_snapshot, metric) is not None]
+            nws_open_meteo_gap = max(gaps) if gaps else None
+            if nws_open_meteo_gap is not None and nws_open_meteo_gap > 10:
                 confidence = max(0.10, confidence - 0.15)
 
         result = MultiSourceForecast(
             city=city_lower,
-            high_temp_f=round(avg_high, 1),
-            low_temp_f=round(avg_low, 1),
+            high_temp_f=round(avg_high, 1) if avg_high is not None else None,
+            low_temp_f=round(avg_low, 1) if avg_low is not None else None,
             current_temp_f=round(avg_current, 1),
             sources_used=[s.source for s in snapshots],
             confidence=round(confidence, 2),
@@ -793,11 +829,14 @@ class ProWeatherEngine:
         if not city:
             return None
 
-        forecast = self.get_forecast(city, target_date=market_date, require_target=True)
+        q = question.lower()
+        is_high = "high" in q or "maximum" in q or "max" in q
+        forecast = self.get_forecast(
+            city, target_date=market_date, require_target=True,
+            measurement_kind="high" if is_high else "low",
+        )
         if not forecast or not forecast.sources_used:
             return None
-
-        q = question.lower()
 
         # Extract threshold
         temp_match = re.search(r'(\d+)°', question)
@@ -805,7 +844,6 @@ class ProWeatherEngine:
             return None
         threshold = float(temp_match.group(1))
 
-        is_high = "high" in q or "maximum" in q or "max" in q
         actual_temp = forecast.high_temp_f if is_high else forecast.low_temp_f
 
         if actual_temp is not None and not (TEMP_MIN_F <= actual_temp <= TEMP_MAX_F):

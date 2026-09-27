@@ -7,6 +7,8 @@ from pathlib import Path
 from bot.weather.source_observation_ledger import (
     is_eligible_for_future_history,
     materialize_source_observation_ledger,
+    source_correctness_target_proof,
+    strict_source_observation_proof,
 )
 from bot.weather.source_performance_materializer import materialize_source_performance_once
 
@@ -93,10 +95,10 @@ class SourceObservationLedgerTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tempdir.cleanup()
 
-    def _run(self, inputs: list[dict], outcomes: list[dict]) -> tuple[dict, dict[str, list[dict]]]:
+    def _run(self, inputs: list[dict], outcomes: list[dict], *, name: str = "") -> tuple[dict, dict[str, list[dict]]]:
         inputs_path = self.root / "inputs.jsonl"
         outcomes_path = self.root / "outcomes.jsonl"
-        output_dir = self.root / "derived"
+        output_dir = self.root / f"derived{name}"
         sealed_inputs = [_seal(record) for record in inputs]
         hashes = {str(before.get("canonical_input_sha256")): after["canonical_input_sha256"] for before, after in zip(inputs, sealed_inputs)}
         sealed_outcomes = [
@@ -345,6 +347,409 @@ class SourceObservationLedgerTests(unittest.TestCase):
         self.assertEqual(settled["source_provenance"]["source_record_sha256"], hashlib.sha256(
             json.dumps(snapshot["sources"][0], sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         ).hexdigest())
+
+    def test_low_period_ending_on_target_morning_preserves_exact_source_proof(self) -> None:
+        record = {
+            "source_evidence_version": 1, "evidence_type": "forecast", "scoreable_forecast": True,
+            "forecast_measurement_kind": "low", "forecast_date": "2026-08-03",
+            "forecast_start": "2026-08-02T18:00:00-07:00",
+            "forecast_end": "2026-08-03T06:00:00-07:00",
+            "target_mapping": {
+                "market_target_date": "2026-08-03", "source_target_date": "2026-08-03",
+                "source_period_start": "2026-08-02T18:00:00-07:00",
+                "source_period_end": "2026-08-03T06:00:00-07:00",
+                "source_timezone": "UTC-07:00",
+            },
+        }
+        self.assertEqual(source_correctness_target_proof(
+            source_record=record, snapshot={}, market_date="2026-08-03",
+        )["status"], "eligible_exact_target_proof")
+        record["target_mapping"]["source_period_end"] = "2026-08-04T06:00:00-07:00"
+        self.assertEqual(source_correctness_target_proof(
+            source_record=record, snapshot={}, market_date="2026-08-03",
+        )["status"], "unusable_source_period_target_mismatch")
+
+    def test_nws_overnight_low_remains_paper_proxy_not_strict_full_day_history(self) -> None:
+        record = _input(market_id="KXLOWSEA-26AUG03-T70")
+        record["market"]["question"] = "Will Seattle low temperature be below 70°?"
+        record["market"]["market_metadata"].update({"city": "Seattle", "market_kind": "low", "contract_shape": "tail"})
+        snapshot = record["source_inputs"]["source_context"]["data"]["weather_source_snapshot"]
+        snapshot["question"] = record["market"]["question"]
+        snapshot["sources"] = [{
+            "source_id": "nws", "source_name": "NWS", "source_location_city": "Seattle",
+            "forecast_measurement_kind": "low", "contract_shape": "tail", "question_side": "below",
+            "forecast_low": 58.0, "source_as_of": "2026-08-01T11:54:00+00:00",
+            "source_evidence_version": 1, "evidence_type": "forecast", "scoreable_forecast": True,
+            "forecast_start": "2026-08-02T18:00:00-07:00",
+            "forecast_end": "2026-08-03T06:00:00-07:00",
+            "target_mapping": {
+                "market_target_date": "2026-08-03", "source_target_date": "2026-08-03",
+                "source_period_start": "2026-08-02T18:00:00-07:00",
+                "source_period_end": "2026-08-03T06:00:00-07:00",
+                "source_timezone": "UTC-07:00", "mapping": "source_local_nws_night_low_proxy",
+            },
+        }]
+        _, artifacts = self._run([record], [_outcome(record, outcome="NO")])
+        [pending] = artifacts["pending_source_observations"]
+        self.assertEqual(pending["source_target_proof"]["status"], "eligible_exact_target_proof")
+        [settled] = artifacts["settled_source_correctness"]
+        self.assertFalse(settled["eligible_for_source_history"])
+        self.assertIn("partial_day_low_proxy_not_full_day", settled["strict_source_proof"]["reasons"])
+
+    def test_tag_free_prior_night_nws_low_cannot_enter_full_day_history(self) -> None:
+        record = _input(market_id="KXLOWSEA-26AUG03-T70")
+        record["market"]["question"] = "Will Seattle low temperature be below 70°?"
+        record["market"]["market_metadata"].update({"city": "Seattle", "market_kind": "low", "contract_shape": "tail"})
+        snapshot = record["source_inputs"]["source_context"]["data"]["weather_source_snapshot"]
+        snapshot["question"] = record["market"]["question"]
+        snapshot["sources"] = [{
+            "source_id": "nws", "source_name": "NWS", "source_location_city": "Seattle",
+            "forecast_measurement_kind": "low", "contract_shape": "tail", "question_side": "below",
+            "forecast_low": 58.0, "source_as_of": "2026-08-01T11:54:00+00:00",
+            "source_evidence_version": 1, "evidence_type": "forecast", "scoreable_forecast": True,
+            "forecast_start": "2026-08-02T18:00:00-07:00",
+            "forecast_end": "2026-08-03T06:00:00-07:00",
+            "target_mapping": {
+                "market_target_date": "2026-08-03", "source_target_date": "2026-08-03",
+                "source_period_start": "2026-08-02T18:00:00-07:00",
+                "source_period_end": "2026-08-03T06:00:00-07:00",
+                "source_timezone": "UTC-07:00",
+            },
+        }]
+        _, artifacts = self._run([record], [_outcome(record, outcome="NO")])
+        [settled] = artifacts["settled_source_correctness"]
+        self.assertEqual(settled["source_target_proof"]["status"], "eligible_exact_target_proof")
+        self.assertFalse(settled["eligible_for_source_history"])
+        self.assertIn("partial_day_low_proxy_not_full_day", settled["strict_source_proof"]["reasons"])
+
+    def test_nws_partial_day_aliases_do_not_become_full_day_history(self) -> None:
+        for kind, start, end, reason in (
+            ("low", "2026-08-02T18:00:00-07:00", "2026-08-03T06:00:00-07:00", "partial_day_low_proxy_not_full_day"),
+            ("low", "2026-08-03T00:00:00-07:00", "2026-08-03T06:00:00-07:00", "partial_day_low_proxy_not_full_day"),
+            ("high", "2026-08-03T06:00:00-07:00", "2026-08-03T18:00:00-07:00", "partial_day_high_proxy_not_full_day"),
+        ):
+            with self.subTest(kind=kind, start=start):
+                record = _input(market_id=f"KX{kind.upper()}SEA-26AUG03-T70")
+                record["market"]["question"] = f"Will Seattle {kind} temperature be {'below' if kind == 'low' else 'above'} 70°?"
+                record["market"]["market_metadata"].update({"city": "Seattle", "market_kind": kind, "contract_shape": "tail"})
+                snapshot = record["source_inputs"]["source_context"]["data"]["weather_source_snapshot"]
+                snapshot["question"] = record["market"]["question"]
+                snapshot["sources"] = [{
+                    "source_id": "nws", "source_location_city": "Seattle",
+                    "forecast_measurement_kind": kind, "contract_shape": "tail",
+                    "question_side": "below" if kind == "low" else "above",
+                    f"forecast_{kind}": 58.0 if kind == "low" else 84.0,
+                    "source_as_of": "2026-08-01T11:54:00+00:00",
+                    "source_evidence_version": 1, "evidence_type": "forecast", "scoreable_forecast": True,
+                    "forecast_start": start, "forecast_end": end,
+                    "target_mapping": {
+                        "market_target_date": "2026-08-03", "source_target_date": "2026-08-03",
+                        "source_timezone": "UTC-07:00",
+                    },
+                }]
+                _, artifacts = self._run([record], [_outcome(record, outcome="NO")], name=f"-{kind}-{start[11:13]}")
+                [settled] = artifacts["settled_source_correctness"]
+                self.assertEqual(settled["source_target_proof"]["status"], "eligible_exact_target_proof")
+                self.assertFalse(settled["eligible_for_source_history"])
+                self.assertIn(reason, settled["strict_source_proof"]["reasons"])
+                self.assertFalse(is_eligible_for_future_history(settled, "2026-08-06T00:00:00+00:00"))
+
+    def test_nws_one_sided_bounded_period_cannot_prove_full_day(self) -> None:
+        for kind, boundary in (("high", "start"), ("low", "end")):
+            with self.subTest(kind=kind, boundary=boundary):
+                source = {
+                    "source_id": "nws", "source_as_of": "2026-08-01T11:54:00+00:00",
+                    "source_location_city": "Seattle", "forecast_measurement_kind": kind,
+                    "contract_shape": "tail", "question_side": "above" if kind == "high" else "below",
+                    "target_mapping": {"source_timezone": "UTC-07:00", f"source_period_{boundary}":
+                        "2026-08-03T06:00:00-07:00"},
+                }
+                proof = strict_source_observation_proof(
+                    source_record=source, snapshot={"station_resolution": {"city": "Seattle"}},
+                    market_metadata={"city": "Seattle"}, market_date="2026-08-03", market_kind=kind,
+                    contract_shape="tail", question_side=source["question_side"],
+                    observed_at="2026-08-01T12:00:00+00:00",
+                )
+                self.assertIn(f"partial_day_{kind}_proxy_not_full_day", proof["reasons"])
+
+    def test_nws_explicit_full_calendar_day_is_not_blanket_rejected(self) -> None:
+        source = {
+            "source_id": "nws", "source_as_of": "2026-08-01T11:54:00+00:00",
+            "source_location_city": "Seattle", "forecast_measurement_kind": "high",
+            "contract_shape": "tail", "question_side": "above",
+            "target_mapping": {
+                "source_timezone": "UTC-07:00",
+                "source_period_start": "2026-08-03T00:00:00-07:00",
+                "source_period_end": "2026-08-04T00:00:00-07:00",
+            },
+        }
+        proof = strict_source_observation_proof(
+            source_record=source, snapshot={"station_resolution": {"city": "Seattle"}},
+            market_metadata={"city": "Seattle"}, market_date="2026-08-03", market_kind="high",
+            contract_shape="tail", question_side="above", observed_at="2026-08-01T12:00:00+00:00",
+        )
+        self.assertEqual(proof["status"], "eligible")
+
+    def test_nws_explicit_full_calendar_day_low_keeps_target_and_strict_proof(self) -> None:
+        source = {
+            "source_id": "nws", "source_as_of": "2026-08-01T11:54:00+00:00",
+            "source_location_city": "Seattle", "forecast_measurement_kind": "low",
+            "contract_shape": "tail", "question_side": "below",
+            "target_mapping": {
+                "market_target_date": "2026-08-03", "source_target_date": "2026-08-03",
+                "source_timezone": "UTC-07:00",
+                "source_period_start": "2026-08-03T00:00:00-07:00",
+                "source_period_end": "2026-08-04T00:00:00-07:00",
+            },
+        }
+        self.assertEqual(source_correctness_target_proof(
+            source_record=source, snapshot={}, market_date="2026-08-03",
+        )["status"], "eligible_exact_target_proof")
+        proof = strict_source_observation_proof(
+            source_record=source, snapshot={"station_resolution": {"city": "Seattle"}},
+            market_metadata={"city": "Seattle"}, market_date="2026-08-03", market_kind="low",
+            contract_shape="tail", question_side="below", observed_at="2026-08-01T12:00:00+00:00",
+        )
+        self.assertEqual(proof["status"], "eligible")
+
+    def test_nws_full_day_low_accepts_equivalent_utc_period_aliases(self) -> None:
+        source = {
+            "source_id": "nws", "source_as_of": "2026-08-01T11:54:00+00:00",
+            "source_location_city": "Seattle", "forecast_measurement_kind": "low",
+            "contract_shape": "tail", "question_side": "below",
+            "forecast_start": "2026-08-03T07:00:00Z",
+            "forecast_end": "2026-08-04T07:00:00Z",
+            "target_mapping": {
+                "market_target_date": "2026-08-03", "source_target_date": "2026-08-03",
+                "source_timezone": "UTC-07:00",
+                "source_period_start": "2026-08-03T00:00:00-07:00",
+                "source_period_end": "2026-08-04T00:00:00-07:00",
+            },
+        }
+        self.assertEqual(source_correctness_target_proof(
+            source_record=source, snapshot={}, market_date="2026-08-03",
+        )["status"], "eligible_exact_target_proof")
+        proof = strict_source_observation_proof(
+            source_record=source, snapshot={"station_resolution": {"city": "Seattle"}},
+            market_metadata={"city": "Seattle"}, market_date="2026-08-03", market_kind="low",
+            contract_shape="tail", question_side="below", observed_at="2026-08-01T12:00:00+00:00",
+        )
+        self.assertEqual(proof["status"], "eligible")
+
+        source["forecast_start"] = "2026-08-03T08:00:00Z"
+        self.assertEqual(source_correctness_target_proof(
+            source_record=source, snapshot={}, market_date="2026-08-03",
+        )["status"], "unusable_source_period_target_mismatch")
+        source["forecast_start"] = "2026-08-03T00:00:00"
+        self.assertEqual(source_correctness_target_proof(
+            source_record=source, snapshot={}, market_date="2026-08-03",
+        )["status"], "eligible_exact_target_proof")
+
+    def test_nws_full_day_utc_mapping_bounds_remain_strict_history(self) -> None:
+        for kind in ("low", "high"):
+            for zone in ("UTC-07:00", "America/Los_Angeles"):
+                with self.subTest(kind=kind, zone=zone):
+                    record = _input(market_id=f"KX{kind.upper()}SEA-26AUG03-T70")
+                    side = "below" if kind == "low" else "above"
+                    record["market"]["question"] = f"Will Seattle {kind} temperature be {side} 70°?"
+                    record["market"]["market_metadata"].update({"city": "Seattle", "market_kind": kind, "contract_shape": "tail"})
+                    snapshot = record["source_inputs"]["source_context"]["data"]["weather_source_snapshot"]
+                    snapshot["question"] = record["market"]["question"]
+                    snapshot["sources"] = [{
+                        "source_id": "nws", "source_location_city": "Seattle",
+                        "forecast_measurement_kind": kind, "contract_shape": "tail", "question_side": side,
+                        f"forecast_{kind}": 58.0 if kind == "low" else 84.0,
+                        "source_as_of": "2026-08-01T11:54:00+00:00",
+                        "source_evidence_version": 1, "evidence_type": "forecast", "scoreable_forecast": True,
+                        "forecast_start": "2026-08-03T00:00:00-07:00",
+                        "forecast_end": "2026-08-04T00:00:00-07:00",
+                        "target_mapping": {
+                            "market_target_date": "2026-08-03", "source_target_date": "2026-08-03",
+                            "source_timezone": zone,
+                            "source_period_start": "2026-08-03T07:00:00Z",
+                            "source_period_end": "2026-08-04T07:00:00Z",
+                        },
+                    }]
+                    _, artifacts = self._run([record], [_outcome(record, outcome="NO")], name=f"-{kind}-{zone.replace('/', '-')}")
+                    [settled] = artifacts["settled_source_correctness"]
+                    self.assertEqual(settled["source_target_proof"]["status"], "eligible_exact_target_proof")
+                    self.assertEqual(settled["strict_source_proof"]["status"], "eligible")
+                    self.assertTrue(settled["eligible_for_source_history"])
+
+    def test_period_alias_conflict_and_post_period_source_time_are_not_exact_proof(self) -> None:
+        record = {
+            "source_id": "nws", "source_as_of": "2026-08-01T11:54:00+00:00",
+            "source_location_city": "Seattle", "forecast_measurement_kind": "high",
+            "contract_shape": "tail", "question_side": "above",
+            "source_evidence_version": 1, "evidence_type": "forecast", "scoreable_forecast": True,
+            "forecast_end": "2026-08-03T06:00:00-07:00",
+            "target_mapping": {
+                "market_target_date": "2026-08-03", "source_target_date": "2026-08-03",
+                "source_period_start": "2026-08-03T06:00:00-07:00",
+                "source_period_end": "2026-08-03T18:00:00-07:00",
+                "source_timezone": "UTC-07:00",
+            },
+        }
+        self.assertEqual(source_correctness_target_proof(
+            source_record=record, snapshot={}, market_date="2026-08-03",
+        )["status"], "unusable_source_period_alias_conflict")
+        record.pop("forecast_end")
+        record["source_as_of"] = "2026-08-04T02:00:00+00:00"
+        proof = strict_source_observation_proof(
+            source_record=record, snapshot={"station_resolution": {"city": "Seattle"}},
+            market_metadata={"city": "Seattle"}, market_date="2026-08-03",
+            market_kind="high", contract_shape="tail", question_side="above",
+            observed_at="2026-08-04T03:00:00+00:00",
+        )
+        self.assertIn("source_as_of_after_source_period_end", proof["reasons"])
+
+    def test_open_meteo_local_hourly_end_precedes_later_source_time(self) -> None:
+        record = _input()
+        record["observed_at"] = "2026-08-04T07:00:00+00:00"
+        record["decision_key"]["observed_at_utc"] = record["observed_at"]
+        record["market"]["market_metadata"].update({"city": "Seattle", "market_kind": "high", "contract_shape": "tail"})
+        snapshot = record["source_inputs"]["source_context"]["data"]["weather_source_snapshot"]
+        snapshot["sources"] = [{
+            "source_id": "open_meteo", "source_name": "Open-Meteo", "source_location_city": "Seattle",
+            "forecast_measurement_kind": "high", "contract_shape": "tail", "question_side": "above",
+            "forecast_high": 75.0, "source_as_of": "2026-08-04T06:30:00+00:00",
+            "source_evidence_version": 1, "evidence_type": "forecast", "scoreable_forecast": True,
+            "forecast_start": "2026-08-03T00:00", "forecast_end": "2026-08-03T23:00",
+            "target_mapping": {
+                "market_target_date": "2026-08-03", "source_target_date": "2026-08-03",
+                "source_period_start": "2026-08-03T00:00", "source_period_end": "2026-08-03T23:00",
+                "source_timezone": "America/Los_Angeles", "mapping": "exact_source_local_hourly_date",
+            },
+        }]
+        [source] = snapshot["sources"]
+        self.assertEqual(source_correctness_target_proof(
+            source_record=source, snapshot=snapshot, market_date="2026-08-03",
+        )["status"], "eligible_exact_target_proof")
+        proof = strict_source_observation_proof(
+            source_record=source, snapshot=snapshot, market_metadata=record["market"]["market_metadata"],
+            market_date="2026-08-03", market_kind="high", contract_shape="tail", question_side="above",
+            observed_at=record["observed_at"],
+        )
+        self.assertIn("source_as_of_after_source_period_end", proof["reasons"])
+        _, artifacts = self._run([record], [_outcome(record, settlement_ts="2026-08-05T00:00:00+00:00")])
+        [settled] = artifacts["settled_source_correctness"]
+        self.assertFalse(settled["eligible_for_source_history"])
+        self.assertFalse(is_eligible_for_future_history(settled, "2026-08-06T00:00:00+00:00"))
+
+    def test_full_hourly_day_last_sample_is_not_period_end(self) -> None:
+        record = _input()
+        record["observed_at"] = "2026-08-04T06:45:00+00:00"
+        record["decision_key"]["observed_at_utc"] = record["observed_at"]
+        record["market"]["market_metadata"].update({"city": "Seattle", "market_kind": "high", "contract_shape": "tail"})
+        snapshot = record["source_inputs"]["source_context"]["data"]["weather_source_snapshot"]
+        snapshot["sources"] = [{
+            "source_id": "open_meteo", "source_location_city": "Seattle",
+            "forecast_measurement_kind": "high", "contract_shape": "tail", "question_side": "above",
+            "forecast_high": 75.0, "source_as_of": "2026-08-04T06:30:00+00:00",
+            "source_evidence_version": 1, "evidence_type": "forecast", "scoreable_forecast": True,
+            "forecast_start": "2026-08-03T00:00", "forecast_end": "2026-08-03T23:00",
+            "forecast_times": [f"2026-08-03T{hour:02d}:00" for hour in range(24)],
+            "target_mapping": {
+                "market_target_date": "2026-08-03", "source_target_date": "2026-08-03",
+                "source_period_start": "2026-08-03T00:00", "source_period_end": "2026-08-03T23:00",
+                "source_timezone": "America/Los_Angeles", "mapping": "exact_source_local_hourly_date",
+            },
+        }]
+        _, artifacts = self._run([record], [_outcome(record, settlement_ts="2026-08-05T00:00:00+00:00")])
+        [settled] = artifacts["settled_source_correctness"]
+        self.assertEqual(settled["strict_source_proof"]["status"], "eligible")
+        self.assertTrue(settled["eligible_for_source_history"])
+        self.assertTrue(is_eligible_for_future_history(settled, "2026-08-06T00:00:00+00:00"))
+        [source] = snapshot["sources"]
+        source["source_as_of"] = "2026-08-04T07:30:00+00:00"  # 00:30 on the following day.
+        proof = strict_source_observation_proof(
+            source_record=source, snapshot=snapshot, market_metadata=record["market"]["market_metadata"],
+            market_date="2026-08-03", market_kind="high", contract_shape="tail", question_side="above",
+            observed_at="2026-08-04T08:00:00+00:00",
+        )
+        self.assertIn("source_as_of_after_source_period_end", proof["reasons"])
+        source["source_as_of"] = "2026-08-04T06:30:00+00:00"
+        source["forecast_times"] = ["2026-08-03T00:00", "2026-08-03T23:00"]
+        proof = strict_source_observation_proof(
+            source_record=source, snapshot=snapshot, market_metadata=record["market"]["market_metadata"],
+            market_date="2026-08-03", market_kind="high", contract_shape="tail", question_side="above",
+            observed_at=record["observed_at"],
+        )
+        self.assertIn("source_as_of_after_source_period_end", proof["reasons"])
+
+    def test_mixed_offset_and_local_period_aliases_with_different_instants_conflict(self) -> None:
+        source = {
+            "source_id": "open_meteo", "source_as_of": "2026-08-01T11:54:00+00:00",
+            "source_location_city": "Seattle", "forecast_measurement_kind": "high",
+            "contract_shape": "tail", "question_side": "above",
+            "source_evidence_version": 1, "evidence_type": "forecast", "scoreable_forecast": True,
+            "forecast_start": "2026-08-03T07:00", "forecast_end": "2026-08-03T18:00",
+            "target_mapping": {
+                "market_target_date": "2026-08-03", "source_target_date": "2026-08-03",
+                "source_period_start": "2026-08-03T06:00:00-07:00",
+                "source_period_end": "2026-08-03T18:00:00-07:00",
+                "source_timezone": "America/Los_Angeles",
+            },
+        }
+        self.assertEqual(source_correctness_target_proof(
+            source_record=source, snapshot={}, market_date="2026-08-03",
+        )["status"], "unusable_source_period_alias_conflict")
+        proof = strict_source_observation_proof(
+            source_record=source, snapshot={"station_resolution": {"city": "Seattle"}},
+            market_metadata={"city": "Seattle"}, market_date="2026-08-03",
+            market_kind="high", contract_shape="tail", question_side="above",
+            observed_at="2026-08-01T12:00:00+00:00",
+        )
+        self.assertIn("source_period_alias_conflict", proof["reasons"])
+
+        # Offset-aware and provider-local aliases of the same instant remain usable.
+        source["forecast_start"] = "2026-08-03T06:00"
+        self.assertEqual(source_correctness_target_proof(
+            source_record=source, snapshot={}, market_date="2026-08-03",
+        )["status"], "eligible_exact_target_proof")
+        proof = strict_source_observation_proof(
+            source_record=source, snapshot={"station_resolution": {"city": "Seattle"}},
+            market_metadata={"city": "Seattle"}, market_date="2026-08-03",
+            market_kind="high", contract_shape="tail", question_side="above",
+            observed_at="2026-08-01T12:00:00+00:00",
+        )
+        self.assertEqual(proof["status"], "eligible")
+
+    def test_strict_history_requires_resolvable_timezone_for_local_period_end(self) -> None:
+        source = {
+            "source_id": "open_meteo", "source_as_of": "2026-08-04T06:30:00+00:00",
+            "source_location_city": "Seattle", "forecast_measurement_kind": "high",
+            "contract_shape": "tail", "question_side": "above",
+            "target_mapping": {
+                "source_period_start": "2026-08-03T00:00", "source_period_end": "2026-08-03T23:00",
+                "source_timezone": "Unknown/Location",
+            },
+        }
+        proof = strict_source_observation_proof(
+            source_record=source, snapshot={"station_resolution": {"city": "Seattle"}},
+            market_metadata={"city": "Seattle"}, market_date="2026-08-03",
+            market_kind="high", contract_shape="tail", question_side="above",
+            observed_at="2026-08-04T07:00:00+00:00",
+        )
+        self.assertIn("source_period_end_time_unproven", proof["reasons"])
+
+    def test_strict_history_rejects_invalid_zone_with_aware_full_day_bounds(self) -> None:
+        source = {
+            "source_id": "nws", "source_as_of": "2026-08-01T11:54:00+00:00",
+            "source_location_city": "Seattle", "forecast_measurement_kind": "low",
+            "contract_shape": "tail", "question_side": "below",
+            "target_mapping": {
+                "source_timezone": "Invalid/Zone",
+                "source_period_start": "2026-08-03T00:00:00-07:00",
+                "source_period_end": "2026-08-04T00:00:00-07:00",
+            },
+        }
+        proof = strict_source_observation_proof(
+            source_record=source, snapshot={"station_resolution": {"city": "Seattle"}},
+            market_metadata={"city": "Seattle"}, market_date="2026-08-03", market_kind="low",
+            contract_shape="tail", question_side="below", observed_at="2026-08-01T12:00:00+00:00",
+        )
+        self.assertIn("unresolvable_source_timezone", proof["reasons"])
 
     def test_v1_conflicting_retained_target_aliases_fail_closed(self) -> None:
         record = _input()

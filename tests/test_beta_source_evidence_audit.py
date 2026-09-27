@@ -186,13 +186,13 @@ class BetaSourceEvidenceAuditTests(unittest.TestCase):
         for name, mutation, eligible in (
             ("no_optional_period", {}, True),
             ("exact_day", {"forecast_start": "2026-08-06T06:00:00-07:00",
-                           "forecast_end": "2026-08-06T18:00:00-07:00"}, True),
+                           "forecast_end": "2026-08-06T18:00:00-07:00"}, False),
             ("source_local_naive", {"forecast_start": "2026-08-06T00:00:00",
-                                    "forecast_end": "2026-08-06T23:00:00"}, True),
+                                    "forecast_end": "2026-08-06T23:00:00"}, False),
             ("overnight", {"forecast_start": "2026-08-06T18:00:00-07:00",
-                           "forecast_end": "2026-08-07T06:00:00-07:00"}, True),
+                           "forecast_end": "2026-08-07T06:00:00-07:00"}, False),
             ("utc_on_target_locally", {"forecast_start": "2026-08-07T01:00:00Z",
-                                       "forecast_end": "2026-08-07T06:00:00Z"}, True),
+                                       "forecast_end": "2026-08-07T06:00:00Z"}, False),
             ("wrong_date", {"forecast_start": "2026-08-05T06:00:00-07:00",
                             "forecast_end": "2026-08-05T18:00:00-07:00"}, False),
             ("utc_previous_day_locally", {"forecast_start": "2026-08-06T01:00:00Z",
@@ -214,10 +214,19 @@ class BetaSourceEvidenceAuditTests(unittest.TestCase):
                 if eligible:
                     self.assertEqual(pending["strict_source_proof"]["status"], "eligible")
                 else:
-                    self.assertEqual(_read_rows(history.history_path), [])
-                    [unusable] = _read_rows(history.history_path.with_name("unsettled_or_unusable_source_observations.jsonl"))
-                    self.assertEqual(unusable["disposition_reason"], "unusable_source_period_target_mismatch")
-                    self.assertIn("source_period_target_mismatch", pending["strict_source_proof"]["reasons"])
+                    if name in {"exact_day", "source_local_naive", "overnight", "utc_on_target_locally"}:
+                        # Date association is valid, but a bounded 5–23h NWS
+                        # proxy cannot attest a daily extreme for strict history.
+                        self.assertEqual(pending["source_target_proof"]["status"], "eligible_exact_target_proof")
+                        self.assertIn("partial_day_high_proxy_not_full_day", pending["strict_source_proof"]["reasons"])
+                        [settled] = _read_rows(history.history_path)
+                        self.assertTrue(settled["eligible_for_reliability"])
+                        self.assertFalse(settled["eligible_for_source_history"])
+                    else:
+                        self.assertEqual(_read_rows(history.history_path), [])
+                        [unusable] = _read_rows(history.history_path.with_name("unsettled_or_unusable_source_observations.jsonl"))
+                        self.assertEqual(unusable["disposition_reason"], "unusable_source_period_target_mismatch")
+                        self.assertIn("source_period_target_mismatch", pending["strict_source_proof"]["reasons"])
 
     def test_runtime_qualifies_explicit_source_evidence_before_voting(self):
         rows = [_collector_row(date(2026, 1, 1) + timedelta(days=i)) for i in range(100)]
