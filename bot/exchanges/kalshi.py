@@ -586,6 +586,7 @@ class KalshiExchange(BaseExchange):
                     closes_at=_parse_dt(getattr(m, 'close_time', None)),
                     category=getattr(m, 'series_ticker', None) or getattr(m, 'market_type', 'binary'),
                     metadata={
+                        **_contract_metadata(m),
                         "status": getattr(m, 'status', ''),
                         "result": getattr(m, 'result', None),
                         "recorded_book_asks": recorded_asks,

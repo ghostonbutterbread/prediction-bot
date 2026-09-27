@@ -81,6 +81,39 @@ class KalshiQuoteTests(unittest.TestCase):
                          {"best_yes_ask": .44, "best_no_ask": None})
         self.assertEqual(market.no_price, 0.0)
 
+    def test_sdk_detail_preserves_both_rule_fields_with_raw_detail_parity(self):
+        rules = {
+            "rules_primary": "The minimum temperature at CLIPHX on September 24, 2026 is reported by The Weather Company.",
+            "rules_secondary": "Forecasts according to NWS are indicative only.",
+        }
+        payload = {
+            "ticker": "KXLOWTPHX-26SEP24-T73", "title": "Will the low in Phoenix be below 73°F?",
+            "series_ticker": "KXLOWTPHX", "yes_ask_dollars": ".44",
+            "no_ask_dollars": ".58", "status": "open", "result": None,
+            **rules,
+        }
+        exchange = exchange_for_quotes()
+        exchange.client.get_market = lambda **_kwargs: SimpleNamespace(market=SimpleNamespace(**payload))
+        with patch("bot.exchanges.kalshi.call_with_retry", side_effect=lambda fn, **_kwargs: fn()), \
+             patch.object(exchange, "_fetch_market_raw") as raw_fetch:
+            sdk_market = exchange.get_market(payload["ticker"])
+        raw_fetch.assert_not_called()
+        raw_market = _market_from_raw(payload)
+        self.assertEqual({key: sdk_market.metadata[key] for key in rules}, rules)
+        self.assertEqual({key: raw_market.metadata[key] for key in rules}, rules)
+
+    def test_sdk_detail_without_rules_does_not_invent_rule_fields(self):
+        payload = SimpleNamespace(ticker="KXLOWTPHX-26AUG01-T85", title="August low",
+                                  series_ticker="KXLOWTPHX", yes_ask_dollars=".44")
+        exchange = exchange_for_quotes()
+        exchange.client.get_market = lambda **_kwargs: SimpleNamespace(market=payload)
+        with patch("bot.exchanges.kalshi.call_with_retry", side_effect=lambda fn, **_kwargs: fn()), \
+             patch.object(exchange, "_fetch_market_raw") as raw_fetch:
+            market = exchange.get_market(payload.ticker)
+        raw_fetch.assert_not_called()
+        self.assertNotIn("rules_primary", market.metadata)
+        self.assertNotIn("rules_secondary", market.metadata)
+
     def test_sdk_events_malformed_no_ask_is_not_a_recorded_quote(self):
         exchange = exchange_for_quotes()
         close_time = datetime.now(timezone.utc) + timedelta(days=2)

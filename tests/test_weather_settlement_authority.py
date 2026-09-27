@@ -1,12 +1,14 @@
 """Synthetic decision-time rule text; not historical rule capture or resolved weather."""
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timezone
 
-from bot.exchanges.kalshi import _market_from_raw
+from bot.exchanges.kalshi import KalshiExchange, _market_from_raw
 from bot.feeds.live_data import LiveFeedAggregator
 from bot.feeds.weather_pro import MultiSourceForecast, ProWeatherEngine, WeatherSnapshot
 from bot.prediction_lab import PredictionLab
 from bot.replay_decision_input import build_replay_decision_input_v1, verify_replay_decision_input_v1
+from bot.shared_market_feed import build_shared_market_candidate_row, normalize_shared_candidate_input, shared_candidate_market_from_row
 from bot.strategies.enhanced import EnhancedStrategyEngine
 from test_replay_decision_input import _snapshot_row
 
@@ -26,6 +28,92 @@ def _market(ticker, rule):
 
 
 class WeatherSettlementAuthorityTests(unittest.TestCase):
+    def test_shared_only_candidate_preserves_decision_time_rules_for_weather_authority(self):
+        market = _market("KXLOWTPHX-26SEP24-T73", TWC_RULE)
+        market.no_price = 0.50
+        secondary = "Forecasts according to NWS are indicative only."
+        market.metadata.update(rules_secondary=secondary, status="settled", result="yes", outcome="YES")
+        shared = build_shared_market_candidate_row(
+            run_id="synthetic-sep", market=market, signal={"direction": "BUY_YES"},
+            source_runtime="prediction_lab", observed_at="2026-09-23T12:00:00Z",
+        )
+        self.assertEqual({key: shared["market"][key] for key in ("rules_primary", "rules_secondary")},
+                         {"rules_primary": TWC_RULE, "rules_secondary": secondary})
+        self.assertTrue({"status", "result", "outcome"}.isdisjoint(shared["market"]))
+        for row in (shared, {"shared_candidate": shared, "market_id": market.id}):
+            with self.subTest(embedded=row is not shared):
+                result = normalize_shared_candidate_input(row)
+                self.assertTrue(result.ok)
+                self.assertEqual(result.market.metadata["rules_primary"], TWC_RULE)
+                self.assertEqual(result.market.metadata["rules_secondary"], secondary)
+                self.assertTrue({"status", "result", "outcome"}.isdisjoint(result.market.metadata))
+                from bot.feeds.weather_pro import _settlement_authority
+                self.assertEqual(_settlement_authority(result.market.metadata)["source"], "the_weather_company")
+
+    def test_shared_only_august_secondary_rule_survives_artifact_containing_row(self):
+        market = _market("KXLOWTPHX-26AUG01-T85", "")
+        market.no_price = 0.50
+        market.metadata["rules_secondary"] = NWS_RULE
+        shared = build_shared_market_candidate_row(
+            run_id="synthetic-aug", market=market, signal={"direction": "BUY_YES"},
+            source_runtime="prediction_lab", observed_at="2026-07-31T12:00:00Z",
+        )
+        row = {
+            "market_id": market.id, "shared_candidate": shared,
+            "decision_artifact": {"source_context": {"data": {
+                "market_metadata": {"rules_primary": TWC_RULE, "status": "settled", "result": "YES"},
+            }}},
+        }
+        with patch.object(KalshiExchange, "get_market", side_effect=AssertionError("replay must not refetch rules")):
+            result = shared_candidate_market_from_row(row)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.market.metadata["rules_primary"], "")
+        self.assertEqual(result.market.metadata["rules_secondary"], NWS_RULE)
+        from bot.feeds.weather_pro import _settlement_authority
+        self.assertEqual(_settlement_authority(result.market.metadata)["evidence_field"], "rules_secondary")
+        self.assertEqual(_settlement_authority(result.market.metadata)["source"], "nws")
+        self.assertTrue({"status", "result", "outcome"}.isdisjoint(result.market.metadata))
+
+    def test_shared_only_missing_rules_remain_unknown_with_usable_forecast(self):
+        market = _market("KXLOWTPHX-26SEP24-T73", "")
+        market.no_price = 0.50
+        market.metadata.pop("rules_primary")
+        shared = build_shared_market_candidate_row(
+            run_id="synthetic-no-rules", market=market, signal={"direction": "BUY_YES"},
+            source_runtime="prediction_lab", observed_at="2026-09-23T12:00:00Z",
+        )
+        self.assertTrue({"rules_primary", "rules_secondary"}.isdisjoint(shared["market"]))
+        reconstructed = normalize_shared_candidate_input(shared)
+        self.assertTrue(reconstructed.ok)
+        self.assertTrue({"rules_primary", "rules_secondary"}.isdisjoint(reconstructed.market.metadata))
+        engine = ProWeatherEngine()
+        now = datetime.now(timezone.utc)
+        engine.nws.get_forecast = lambda *_args, **_kwargs: WeatherSnapshot(
+            city="phoenix", source="nws", high_temp_f=100, low_temp_f=72,
+            current_temp_f=85, fetched_at=now, forecast_hours_ahead=2, confidence=0.85,
+        )
+        engine.nws.get_station_observation = lambda *_args: None
+        engine.open_meteo.get_forecast = lambda *_args, **_kwargs: WeatherSnapshot(
+            city="phoenix", source="open-meteo", high_temp_f=98, low_temp_f=70,
+            current_temp_f=85, fetched_at=now, forecast_hours_ahead=2, confidence=0.85,
+        )
+        try:
+            signal = engine.score_temperature_market_with_context(
+                reconstructed.market.question, reconstructed.market.yes_price,
+                category=reconstructed.market.id, market_metadata=reconstructed.market.metadata,
+            )
+            self.assertIsNotNone(signal)
+            self.assertEqual(signal["data"]["settlement_source"], "unknown")
+            self.assertEqual(signal["data"]["settlement_authority"]["status"], "unknown_rules")
+            self.assertEqual(signal["data"]["predicted_temp"], 72)
+            self.assertEqual(signal["data"]["forecast_driver"], "nws")
+            self.assertEqual(
+                {detail["source_name"]: detail["weight"] for detail in signal["data"]["source_details"]
+                 if "weight" in detail}, {"nws": 1.0, "open-meteo": 0.0},
+            )
+        finally:
+            engine.close()
+
     def test_market_rules_do_not_change_forecast_value_confidence_or_driver(self):
         engine = ProWeatherEngine()
         now = datetime.now(timezone.utc)
