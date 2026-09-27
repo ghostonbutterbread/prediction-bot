@@ -2729,7 +2729,9 @@ def _future_pnl_inputs(
     source_row = source_row if isinstance(source_row, Mapping) else {}
     artifact = _candidate_artifact(signal, shared_candidate)
     artifact_order_book = _mapping(artifact.get("order_book"))
-    order_book_snapshot = _mapping(artifact.get("order_book_snapshot"))
+    order_book_snapshot = _mapping(artifact.get("order_book_snapshot")) or _mapping(
+        _mapping(shared_candidate.get("prices")).get("order_book_snapshot")
+    )
     order_book_data = _mapping(order_book_snapshot.get("data"))
     execution_snapshot = _mapping(artifact.get("execution_snapshot"))
     weather_snapshot = _candidate_weather_source_snapshot(signal, shared_candidate, artifact)
@@ -2804,7 +2806,12 @@ def _future_pnl_inputs(
         or signal_side
     )
     hypothetical_book = _optional_text(signal.get("execution_snapshot_marker"), execution_snapshot.get("marker")) == "paper_shadow_source_scoreboard_hypothetical_execution"
-    if hypothetical_book:
+    unquoted_snapshot = bool(order_book_snapshot) and order_book_snapshot.get("source") not in (None, "", "book")
+    if unquoted_snapshot and not hypothetical_book:
+        # Normalization flattens snapshot prices into best_*_ask. A fallback
+        # snapshot is a reference, not a recorded side-specific order-book ask.
+        best_yes_ask = best_no_ask = entry_price = None
+    elif hypothetical_book:
         # The execution snapshot can complement the opposite ask. Only the
         # pre-snapshot, side-labelled book quote proves a hypothetical entry.
         best_yes_ask = _price_number(
@@ -2828,7 +2835,7 @@ def _future_pnl_inputs(
         entry_price = _shadow_entry_price_for_side(initial_side, signal, source_row)
     # An estimate attached to the strategy's side cannot be relabelled as a
     # shadow lane's opposite-side fill. Retain it on the original side only.
-    estimated_fill_price = entry_price if hypothetical_book else (
+    estimated_fill_price = None if unquoted_snapshot and not hypothetical_book else entry_price if hypothetical_book else (
         _price_number(
             signal.get("estimated_fill_price"),
             execution_snapshot.get("estimated_fill_price"),

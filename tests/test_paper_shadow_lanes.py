@@ -1209,6 +1209,69 @@ parameters:
         self.assertNotIn("estimated_fill_price", future)
         self.assertEqual(future["best_yes_ask"], 0.44)
 
+    def test_shared_candidate_fallback_snapshot_does_not_become_no_ask(self):
+        from bot.paper_shadow_lanes import _future_pnl_inputs, _side_specific_price
+        from bot.shared_core.execution_snapshot import build_execution_snapshot
+        from bot.shared_market_feed import build_shared_market_candidate_row, normalize_shared_candidate_input
+
+        market = SimpleNamespace(
+            id="M1", exchange="kalshi", question="Will it rain?",
+            category="weather", yes_price=0.44, no_price=0.56, volume=100,
+            metadata={},
+        )
+        signal = {"direction": "BUY_YES", "market_price": 0.44,
+                  "model_probability": 0.70}
+        snapshot = build_execution_snapshot(signal, direction="BUY_YES", bid_ask={})
+        self.assertEqual(snapshot["source"], "fallback")
+        self.assertEqual(snapshot["best_no_ask"], 0.56)
+        artifact = {
+            "order_book_snapshot": {"source": snapshot["source"], "data": snapshot},
+            "execution_snapshot": snapshot,
+        }
+        candidate = build_shared_market_candidate_row(
+            run_id="r", market=market, signal=signal,
+            decision_artifact=artifact, source_runtime="prediction_lab",
+            observed_at="2026-05-06T12:00:00+00:00",
+        )
+        normalized = normalize_shared_candidate_input({"shared_candidate": candidate})
+        self.assertTrue(normalized.ok)
+        self.assertEqual(normalized.signal["best_no_ask"], 0.56)
+        future = _future_pnl_inputs(
+            signal=normalized.signal, shared_candidate=candidate,
+            source_row={"action": "BUY_NO"},
+            source_reliability={"recommended_action": "BUY_NO"},
+        )
+        self.assertIsNone(_side_specific_price(future, "NO"))
+        self.assertNotIn("entry_price", future)
+        self.assertNotIn("estimated_fill_price", future)
+
+    def test_shared_candidate_recorded_book_no_ask_remains_usable(self):
+        from bot.paper_shadow_lanes import _future_pnl_inputs, _side_specific_price
+        from bot.shared_market_feed import build_shared_market_candidate_row, normalize_shared_candidate_input
+
+        market = SimpleNamespace(
+            id="M1", exchange="kalshi", question="Will it rain?",
+            category="weather", yes_price=0.44, no_price=0.58, volume=100,
+            metadata={},
+        )
+        candidate = build_shared_market_candidate_row(
+            run_id="r", market=market,
+            signal={"direction": "BUY_YES", "market_price": 0.44},
+            decision_artifact={"order_book_snapshot": {
+                "source": "book", "data": {"best_yes_ask": 0.44, "best_no_ask": 0.58},
+            }},
+            source_runtime="prediction_lab", observed_at="2026-05-06T12:00:00+00:00",
+        )
+        normalized = normalize_shared_candidate_input({"shared_candidate": candidate})
+        self.assertTrue(normalized.ok)
+        future = _future_pnl_inputs(
+            signal=normalized.signal, shared_candidate=candidate,
+            source_row={"action": "BUY_NO"},
+            source_reliability={"recommended_action": "BUY_NO"},
+        )
+        self.assertEqual(_side_specific_price(future, "NO"), 0.58)
+        self.assertEqual(future["entry_price"], 0.58)
+
     def test_hypothetical_yes_only_book_does_not_create_no_ask(self):
         from bot.paper_shadow_lanes import _future_pnl_inputs
         from bot.shared_core.execution_snapshot import build_execution_snapshot
