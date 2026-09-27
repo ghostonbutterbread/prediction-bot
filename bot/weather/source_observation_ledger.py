@@ -574,8 +574,10 @@ def strict_source_observation_proof(
         ))
         if partial_day or (kind == "low" and _text(mapping.get("mapping")) == "source_local_nws_night_low_proxy"):
             reasons.append(f"partial_day_{kind}_proxy_not_full_day")
-    if not _text(mapping.get("source_timezone")):
+    if not source_timezone_name:
         reasons.append("missing_source_timezone")
+    elif _source_timezone(source_timezone_name) is None:
+        reasons.append("unresolvable_source_timezone")
     period_problem = _source_period_target_problem(source_record, mapping, _normalized_date(market_date))
     if period_problem:
         reasons.append(period_problem)
@@ -819,9 +821,9 @@ def _source_period_time(value: Any, source_timezone: str | None) -> datetime | N
         parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except (TypeError, ValueError):
         return None
-    if parsed.tzinfo is not None:
-        return parsed
     zone = _source_timezone(source_timezone)
+    if parsed.tzinfo is not None:
+        return parsed.astimezone(zone) if zone is not None else parsed
     return parsed.replace(tzinfo=zone) if zone is not None else None
 
 

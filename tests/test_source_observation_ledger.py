@@ -545,6 +545,37 @@ class SourceObservationLedgerTests(unittest.TestCase):
             source_record=source, snapshot={}, market_date="2026-08-03",
         )["status"], "eligible_exact_target_proof")
 
+    def test_nws_full_day_utc_mapping_bounds_remain_strict_history(self) -> None:
+        for kind in ("low", "high"):
+            for zone in ("UTC-07:00", "America/Los_Angeles"):
+                with self.subTest(kind=kind, zone=zone):
+                    record = _input(market_id=f"KX{kind.upper()}SEA-26AUG03-T70")
+                    side = "below" if kind == "low" else "above"
+                    record["market"]["question"] = f"Will Seattle {kind} temperature be {side} 70°?"
+                    record["market"]["market_metadata"].update({"city": "Seattle", "market_kind": kind, "contract_shape": "tail"})
+                    snapshot = record["source_inputs"]["source_context"]["data"]["weather_source_snapshot"]
+                    snapshot["question"] = record["market"]["question"]
+                    snapshot["sources"] = [{
+                        "source_id": "nws", "source_location_city": "Seattle",
+                        "forecast_measurement_kind": kind, "contract_shape": "tail", "question_side": side,
+                        f"forecast_{kind}": 58.0 if kind == "low" else 84.0,
+                        "source_as_of": "2026-08-01T11:54:00+00:00",
+                        "source_evidence_version": 1, "evidence_type": "forecast", "scoreable_forecast": True,
+                        "forecast_start": "2026-08-03T00:00:00-07:00",
+                        "forecast_end": "2026-08-04T00:00:00-07:00",
+                        "target_mapping": {
+                            "market_target_date": "2026-08-03", "source_target_date": "2026-08-03",
+                            "source_timezone": zone,
+                            "source_period_start": "2026-08-03T07:00:00Z",
+                            "source_period_end": "2026-08-04T07:00:00Z",
+                        },
+                    }]
+                    _, artifacts = self._run([record], [_outcome(record, outcome="NO")], name=f"-{kind}-{zone.replace('/', '-')}")
+                    [settled] = artifacts["settled_source_correctness"]
+                    self.assertEqual(settled["source_target_proof"]["status"], "eligible_exact_target_proof")
+                    self.assertEqual(settled["strict_source_proof"]["status"], "eligible")
+                    self.assertTrue(settled["eligible_for_source_history"])
+
     def test_period_alias_conflict_and_post_period_source_time_are_not_exact_proof(self) -> None:
         record = {
             "source_id": "nws", "source_as_of": "2026-08-01T11:54:00+00:00",
@@ -701,6 +732,24 @@ class SourceObservationLedgerTests(unittest.TestCase):
             observed_at="2026-08-04T07:00:00+00:00",
         )
         self.assertIn("source_period_end_time_unproven", proof["reasons"])
+
+    def test_strict_history_rejects_invalid_zone_with_aware_full_day_bounds(self) -> None:
+        source = {
+            "source_id": "nws", "source_as_of": "2026-08-01T11:54:00+00:00",
+            "source_location_city": "Seattle", "forecast_measurement_kind": "low",
+            "contract_shape": "tail", "question_side": "below",
+            "target_mapping": {
+                "source_timezone": "Invalid/Zone",
+                "source_period_start": "2026-08-03T00:00:00-07:00",
+                "source_period_end": "2026-08-04T00:00:00-07:00",
+            },
+        }
+        proof = strict_source_observation_proof(
+            source_record=source, snapshot={"station_resolution": {"city": "Seattle"}},
+            market_metadata={"city": "Seattle"}, market_date="2026-08-03", market_kind="low",
+            contract_shape="tail", question_side="below", observed_at="2026-08-01T12:00:00+00:00",
+        )
+        self.assertIn("unresolvable_source_timezone", proof["reasons"])
 
     def test_v1_conflicting_retained_target_aliases_fail_closed(self) -> None:
         record = _input()
