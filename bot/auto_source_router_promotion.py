@@ -443,6 +443,19 @@ def _validate_source_history_manifest(path: Path, generation_dir: Path, *, promo
         raise ValueError("source history manifest is invalid JSON") from error
     if not isinstance(value, dict) or value.get("schema_name") != "source_history_manifest":
         raise ValueError("source history manifest is invalid")
+    required_contract = {
+        "historical_counterfactual_only": True,
+        "non_mutating": True,
+        "join_key": "market_id",
+        "availability_field": "settlement_ts",
+    }
+    if type(value.get("schema_version")) is not int or value["schema_version"] != 1:
+        raise ValueError("source history manifest contract invalid: schema_version")
+    for field, expected_value in required_contract.items():
+        if value.get(field) != expected_value:
+            raise ValueError(f"source history manifest contract invalid: {field}")
+    if not isinstance(value.get("eligibility_filter"), str) or not value["eligibility_filter"].strip():
+        raise ValueError("source history manifest contract invalid: eligibility_filter")
     declared_hashes = value.get("sha256")
     expected = {"source_ledger", "strict_resolution", "raw_archive", "replay_index", "replay_manifest"}
     if not isinstance(declared_hashes, dict) or set(declared_hashes) != expected:
@@ -520,6 +533,8 @@ def _load_manifest(path: Path) -> dict[str, Any]:
         raise ValueError(f"promotion manifest is invalid JSON: {path}") from error
     if not isinstance(value, dict) or value.get("schema_name") != "auto_source_router_history_promotion":
         raise ValueError(f"promotion manifest is invalid: {path}")
+    if type(value.get("schema_version")) is not int or value["schema_version"] not in (1, PIPELINE_SCHEMA_VERSION):
+        raise ValueError("unsupported promotion manifest schema version")
     return value
 
 

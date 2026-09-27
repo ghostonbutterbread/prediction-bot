@@ -123,6 +123,48 @@ class AutoSourceRouterPromotionTests(unittest.TestCase):
         first.manifest_path.write_text(json.dumps(promotion, sort_keys=True) + "\n", encoding="utf-8")
         return first, promotion, nested
 
+    def test_relocated_v1_rejects_unsupported_promotion_schema_even_with_contained_artifacts(self) -> None:
+        first, promotion, nested = self.relocated_v1_generation()
+        # Contained paths isolate the schema contract from the locator guard.
+        old_dir = OBSOLETE_GENERATIONS / first.generation_dir.name
+        def contained(value):
+            return str(first.generation_dir / Path(value).relative_to(old_dir))
+        promotion["artifacts"] = {key: contained(value) for key, value in promotion["artifacts"].items()}
+        promotion["runtime_consumption"] = {
+            key: contained(value) if key in ("history_ledger_path", "history_manifest_path", "scoreboard_path") else value
+            for key, value in promotion["runtime_consumption"].items()
+        }
+        promotion["source_history_manifest"]["path"] = str(first.history_manifest_path)
+        for key in ("source_ledger", "strict_resolution", "raw_archive", "replay_index", "replay_manifest"):
+            nested[f"{key}_path"] = contained(nested[f"{key}_path"])
+        nested_bytes = (json.dumps(nested, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode()
+        first.history_manifest_path.write_bytes(nested_bytes)
+        promotion["artifact_sha256"]["source_history_manifest"] = hashlib.sha256(nested_bytes).hexdigest()
+        for version in (None, True, 3):
+            with self.subTest(version=version):
+                promotion["schema_version"] = version
+                first.manifest_path.write_text(json.dumps(promotion), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "unsupported promotion manifest schema"):
+                    _validate_current_generation(self.output_root)
+
+    def test_relocated_v1_rejects_unqualified_nested_manifest_with_updated_digest(self) -> None:
+        first, promotion, nested = self.relocated_v1_generation()
+        failures = (
+            ("schema_version", 2), ("schema_version", None), ("schema_version", True),
+            ("historical_counterfactual_only", False), ("non_mutating", False),
+            ("join_key", "candidate_id"), ("availability_field", "resolved_at"),
+            ("eligibility_filter", ""),
+        )
+        for field, invalid in failures:
+            with self.subTest(field=field, invalid=invalid):
+                changed = {**nested, field: invalid}
+                payload = (json.dumps(changed, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode()
+                first.history_manifest_path.write_bytes(payload)
+                promotion["artifact_sha256"]["source_history_manifest"] = hashlib.sha256(payload).hexdigest()
+                first.manifest_path.write_text(json.dumps(promotion), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "source history manifest contract"):
+                    _validate_current_generation(self.output_root)
+
     def test_relocated_v1_current_verified_scorecard_and_reuse_resolve_present_paths(self) -> None:
         first, promotion, _ = self.relocated_v1_generation()
         _validate_current_generation(self.output_root)
@@ -240,7 +282,7 @@ class AutoSourceRouterPromotionTests(unittest.TestCase):
         first, promotion, nested = self.relocated_v1_generation()
         promotion["schema_version"] = 3
         first.manifest_path.write_text(json.dumps(promotion), encoding="utf-8")
-        with self.assertRaisesRegex(ValueError, "outside generation"):
+        with self.assertRaisesRegex(ValueError, "unsupported promotion manifest schema"):
             _validate_current_generation(self.output_root)
         nested["schema_version"] = 2
         first.history_manifest_path.write_text(json.dumps(nested), encoding="utf-8")
@@ -251,7 +293,7 @@ class AutoSourceRouterPromotionTests(unittest.TestCase):
         first, promotion, nested = self.relocated_v1_generation()
         promotion["schema_version"] = True
         first.manifest_path.write_text(json.dumps(promotion), encoding="utf-8")
-        with self.assertRaisesRegex(ValueError, "outside generation"):
+        with self.assertRaisesRegex(ValueError, "unsupported promotion manifest schema"):
             _validate_current_generation(self.output_root)
         nested["schema_version"] = True
         first.history_manifest_path.write_text(json.dumps(nested), encoding="utf-8")
