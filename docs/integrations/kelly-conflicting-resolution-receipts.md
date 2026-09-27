@@ -6,8 +6,8 @@
 - **Base commit:** `02c5580b61fa4c30a54c4f80884cac329d21af0c`
 - **Intended integration target:** `beta`
 - **Last updated:** 2026-09-27
-- **Latest immutable implementation checkpoint:** `aa255df87316ac0786be97b1f5263211ce666a69` (current tip will include a later dossier-only commit)
-- **Feature implementation commits:** `05dd7ff93531c829d0f3ee61bc7d75ac6eb72ff7` (initial), `aa255df87316ac0786be97b1f5263211ce666a69` (review correction)
+- **Latest immutable implementation checkpoint:** `a12af53372cd3b16a5013572972acaf4dfe74938` (current tip will include a later dossier-only commit)
+- **Feature implementation commits:** `05dd7ff93531c829d0f3ee61bc7d75ac6eb72ff7` (initial), `aa255df87316ac0786be97b1f5263211ce666a69` (first review correction), `a12af53372cd3b16a5013572972acaf4dfe74938` (second review correction)
 - **Inspiration:** the same decision's equally timed YES and NO settlement receipts produced $110 or $90 in the sequential synthetic wallet depending on input order.
 
 ## Intent and implemented contract
@@ -42,7 +42,7 @@ Second-review correction: nested exact receipts require the decision's own candi
 ## Interruption / resume handoff
 
 - **Branch:** `fix/kelly-conflicting-resolution-receipts` from `02c5580b61fa4c30a54c4f80884cac329d21af0c` → `beta`.
-- **Checkpoint:** prior implementation `aa255df87316ac0786be97b1f5263211ce666a69`; record the current implementation commit in a later dossier-only handoff commit.
+- **Checkpoint:** latest implementation `a12af53372cd3b16a5013572972acaf4dfe74938`; this branch's tip includes a later dossier-only handoff commit.
 - **Exact resume:** obtain fresh independent read-only review of the corrected code and verified 1,234-test full-suite receipt on the clean branch tip; beta-first compatibility follows only after acceptance. Do not merge before review. No deployment from this code task.
 - **Working-tree state at handoff:** clean after the dossier-only handoff checkpoint; no raw or runtime modifications.
 
