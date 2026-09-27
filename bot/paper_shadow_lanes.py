@@ -2692,6 +2692,14 @@ def _label_source_classification(label_source: str, *, settlement_source: str | 
     settlement_normalized = _normalized_source_label(settlement_source or "")
     if normalized in ("", "unknown"):
         return "unknown"
+    # Diagnostic only: an explicitly observed NWS archive is independent of a
+    # Weather Company settlement, unlike an NWS forecast/proxy or NWS settlement.
+    if (settlement_normalized == "the_weather_company"
+            and (normalized.startswith("nws_") or normalized.endswith("_nws"))
+            and "settlement" not in normalized
+            and not any(token in normalized for token in ("forecast", "proxy"))
+            and any(token in normalized for token in ("observed", "archive", "station", "iem"))):
+        return "independent"
     if _is_independent_label_source(normalized):
         return "independent"
     if _is_settlement_derived_label_source(normalized) or (

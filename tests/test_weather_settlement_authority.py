@@ -98,6 +98,10 @@ class WeatherSettlementAuthorityTests(unittest.TestCase):
 
         self.assertEqual(_label_target({}, {}, {}, {"settlement_source": "the_weather_company"}), "unknown")
         self.assertEqual(_label_source_name({"settlement_source": "nws"}), "unknown")
+        self.assertEqual(_label_source_classification(
+            "nws_daily_observed_archive", settlement_source="the_weather_company"), "independent")
+        self.assertEqual(_label_source_classification(
+            "nws_daily_observed_archive", settlement_source="nws"), "settlement_derived")
         self.assertNotEqual(_label_source_classification(
             "nws_forecast_night_low_proxy", settlement_source="the_weather_company"), "independent")
 
@@ -131,6 +135,8 @@ class WeatherSettlementAuthorityTests(unittest.TestCase):
         for text in (
             "The minimum is not determined according to The Weather Company; an independent daily report determines resolution.",
             "The daily low is not reported by NWS; an independent report determines resolution.",
+            "The minimum will not be determined according to The Weather Company; an independent daily report determines resolution.",
+            "The daily low will not be reported by NWS; an independent report determines resolution.",
         ):
             with self.subTest(text=text):
                 self.assertEqual(_settlement_authority({"rules_primary": text})["source"], "unknown")

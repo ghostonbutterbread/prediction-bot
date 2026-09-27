@@ -142,7 +142,11 @@ def _settlement_authority(metadata: dict | None) -> dict:
             text, re.I,
         ):
             prefix = text[:attribution.start()]
-            if re.search(r"\b(?:not|never)\s+(?:(?:determined|resolved|settled|measured)\s+)?$", prefix, re.I):
+            if re.search(
+                r"\b(?:not|never)\s+(?:(?:be|been|being)\s+)?"
+                r"(?:(?:determined|resolved|settled|measured)\s+)?$",
+                prefix, re.I,
+            ):
                 continue
             provider = attribution.group("provider").lower()
             providers.add("the_weather_company" if provider == "weather company" else "nws")
