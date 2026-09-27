@@ -5,7 +5,7 @@
 - **Branch / worktree:** `fix/paper-shadow-side-price-provenance`; `/home/ryushe/worktrees/prediction-bot-paper-shadow-side-price-provenance`
 - **Base / intended target:** `f4fa746e0484c083ee0ea5c019caae33058bb925` → `beta`
 - **Last updated:** 2026-09-27
-- **Latest immutable recovery checkpoint:** none yet; commit this dossier with the tested implementation before handoff
+- **Latest immutable recovery checkpoint / implementation commit:** `9329ab27f117ea78376fc2617bfcba772cb8d6bb` (reachable on this branch); the branch tip may also contain a later dossier-only handoff commit
 - **Inspiration:** independent read-only provenance review `deleg_e1734166`; it reproduced YES-side `.44` entering a `BUY_NO` row/PnL without a NO ask and snapshot-complemented opposite asks.
 
 ## Intent and implemented contract
@@ -27,7 +27,7 @@ A shadow lane's chosen side must not inherit a generic reference or estimated fi
 - **Review blocker:** independent reviewer must verify provenance end-to-end and check whether signal or raw-artifact `best_*_ask` can itself be synthetic in any active producer. Review the marked legacy behavior and the precise fallback distinction; do not call this integrated before a fresh verdict.
 - **Integration blocker:** from clean fetched beta, stage a non-committing merge, run focused/full beta-first tests and `git diff --cached --check`, abort; then make an intentional reviewed merge that removes this temporary dossier from beta. Do not push or activate services by inference.
 - **Separate flow-audit findings:** market-only untimed legacy PnL outcome, Kelly conflicting-receipt order dependence, stale published Source Router manifest locator, and market-specific settlement-source authority are not repaired by this price branch.
-- **Exact resume point:** inspect the committed implementation and dossier; request an independent read-only review, fix any reproduced blocker with a RED regression, then perform beta-first compatibility. Worktree should be clean after checkpoint.
+- **Exact resume point:** review implementation commit `9329ab27f117ea78376fc2617bfcba772cb8d6bb` and the current branch tip/dossier; request an independent read-only review, fix any reproduced blocker with a RED regression, then perform beta-first compatibility. Worktree clean at implementation checkpoint.
 
 ## Decision gates
 
