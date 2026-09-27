@@ -740,7 +740,9 @@ class ProWeatherEngine:
         if len(snapshots) > 1:
             high_spread = max(highs) - min(highs) if highs else 0.0
             low_spread = max(lows) - min(lows) if lows else 0.0
-            agreement = max(0, 1 - (high_spread + low_spread) / 20)
+            spread = (low_spread if measurement_kind == "low" else high_spread
+                      if measurement_kind == "high" else high_spread + low_spread)
+            agreement = max(0, 1 - spread / 20)
         else:
             agreement = 1.0
 
@@ -755,10 +757,12 @@ class ProWeatherEngine:
         om_snapshot = next((s for s in snapshots if s.source == "open-meteo"), None)
         nws_open_meteo_gap = None
         if nws_snapshot and om_snapshot:
-            gaps = [abs(nws_value - om_value) for nws_value, om_value in (
-                (nws_snapshot.high_temp_f, om_snapshot.high_temp_f),
-                (nws_snapshot.low_temp_f, om_snapshot.low_temp_f),
-            ) if nws_value is not None and om_value is not None]
+            metrics = ("low_temp_f",) if measurement_kind == "low" else (
+                ("high_temp_f",) if measurement_kind == "high" else ("high_temp_f", "low_temp_f")
+            )
+            gaps = [abs(getattr(nws_snapshot, metric) - getattr(om_snapshot, metric))
+                    for metric in metrics if getattr(nws_snapshot, metric) is not None
+                    and getattr(om_snapshot, metric) is not None]
             nws_open_meteo_gap = max(gaps) if gaps else None
             if nws_open_meteo_gap is not None and nws_open_meteo_gap > 10:
                 confidence = max(0.10, confidence - 0.15)

@@ -1,7 +1,7 @@
 import unittest
 from datetime import datetime, timezone
 
-from bot.feeds.weather_pro import NWSFeed, OpenMeteoFeed, ProWeatherEngine
+from bot.feeds.weather_pro import NWSFeed, OpenMeteoFeed, ProWeatherEngine, WeatherSnapshot
 from bot.prediction_lab import PredictionLab
 from bot.weather.source_scoreboard import extract_source_forecast_observations
 
@@ -203,6 +203,38 @@ class ForecastTargetingTests(unittest.TestCase):
             )
             assert signal is not None
             self.assertEqual(signal["data"]["predicted_temp"], 84)
+        finally:
+            engine.close()
+
+    def test_requested_kind_confidence_ignores_other_temperature_kind(self):
+        engine = ProWeatherEngine()
+        try:
+            now = datetime.now(timezone.utc)
+            def snapshot(source, high, low):
+                return WeatherSnapshot(
+                    city="austin", source=source, high_temp_f=high, low_temp_f=low,
+                    current_temp_f=75, fetched_at=now, forecast_hours_ahead=2,
+                    confidence=0.85,
+                )
+            engine.nws.get_forecast = lambda *_args, **_kwargs: snapshot("nws", 84, 58)
+            engine.nws.get_station_observation = lambda *_args: None
+            for kind, comparison in (
+                ("high", ((84, 58), (84, 70))),
+                ("low", ((84, 58), (104, 58))),
+            ):
+                results = []
+                for high, low in comparison:
+                    engine._cache.clear()
+                    engine.open_meteo.get_forecast = lambda *_args, high=high, low=low, **_kwargs: snapshot("open-meteo", high, low)
+                    results.append(engine.get_forecast("austin", target_date="2026-09-27", require_target=True, measurement_kind=kind))
+                self.assertEqual(results[0].confidence, results[1].confidence, kind)
+                self.assertEqual(results[0].source_agreement, results[1].source_agreement, kind)
+                self.assertEqual(results[0].details["nws_open_meteo_gap"], results[1].details["nws_open_meteo_gap"], kind)
+            engine._cache.clear()
+            engine.open_meteo.get_forecast = lambda *_args, **_kwargs: snapshot("open-meteo", 94, 58)
+            disagreed = engine.get_forecast("austin", target_date="2026-09-27", require_target=True, measurement_kind="high")
+            self.assertEqual(disagreed.confidence, 0.43)  # Existing single-metric spread scale.
+            self.assertEqual(disagreed.details["nws_open_meteo_gap"], 10)
         finally:
             engine.close()
 

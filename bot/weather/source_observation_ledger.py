@@ -12,7 +12,7 @@ import json
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -459,6 +459,32 @@ def _source_period_target_problem(
     return "source_period_alias_conflict" if alias_conflict else None
 
 
+def _complete_open_meteo_hourly_day_end(
+    source: Mapping[str, Any], mapping: Mapping[str, Any], market_date: str | None,
+) -> datetime | None:
+    """A final hourly temperature timestamp is a sample, not a period end."""
+    if (source.get("source_id") != "open_meteo"
+            or mapping.get("mapping") != "exact_source_local_hourly_date"
+            or not market_date or not isinstance(source.get("forecast_times"), list)):
+        return None
+    try:
+        zone = ZoneInfo(str(mapping.get("source_timezone")))
+        start = datetime.combine(date.fromisoformat(market_date), datetime.min.time(), tzinfo=zone)
+        end = datetime.combine(start.date() + timedelta(days=1), datetime.min.time(), tzinfo=zone)
+    except (ZoneInfoNotFoundError, ValueError, TypeError):
+        return None
+    start_utc, end_utc = start.astimezone(timezone.utc), end.astimezone(timezone.utc)
+    expected = [start_utc + timedelta(hours=hour) for hour in range(int((end_utc - start_utc).total_seconds() // 3600))]
+    times = [_source_period_time(value, str(zone)) for value in source["forecast_times"]]
+    if (times != expected or not expected
+            or any(_source_period_time(value, str(zone)) != expected[0] for value in (
+                mapping.get("source_period_start"), source.get("forecast_start")) if value is not None)
+            or any(_source_period_time(value, str(zone)) != expected[-1] for value in (
+                mapping.get("source_period_end"), source.get("forecast_end")) if value is not None)):
+        return None
+    return end_utc
+
+
 def strict_source_observation_proof(
     *,
     source_record: Mapping[str, Any],
@@ -488,36 +514,46 @@ def strict_source_observation_proof(
         reasons.append("missing_or_unoffset_source_as_of")
     elif observed_at_time is None or source_as_of_time > observed_at_time:
         reasons.append("source_as_of_after_immutable_observed_at")
+    source_timezone_name = _text(mapping.get("source_timezone"))
+    hourly_day_end = _complete_open_meteo_hourly_day_end(source_record, mapping, _normalized_date(market_date))
     if source_as_of_time is not None:
         period_ends = (
             mapping.get("source_period_end"),
             *(source_record.get(f"{prefix}_end") for prefix in ("forecast", "forecast_period", "period")),
         )
         end_times = [
-            _source_period_time(end, _text(mapping.get("source_timezone")))
+            _source_period_time(end, source_timezone_name)
             for end in period_ends if end is not None
         ]
         if any(end_time is None for end_time in end_times):
             reasons.append("source_period_end_time_unproven")
-        if any(source_as_of_time >= end_time for end_time in end_times if end_time is not None):
+        if any(source_as_of_time >= (hourly_day_end if hourly_day_end and end_time == hourly_day_end - timedelta(hours=1) else end_time)
+               for end_time in end_times if end_time is not None):
             reasons.append("source_as_of_after_source_period_end")
-    source_timezone_name = _text(mapping.get("source_timezone"))
-    night_start = _source_period_time(mapping.get("source_period_start"), source_timezone_name)
-    night_end = _source_period_time(mapping.get("source_period_end"), source_timezone_name)
+    period_start = _source_period_time(_first_text(
+        mapping.get("source_period_start"), source_record.get("forecast_start"),
+        source_record.get("forecast_period_start"), source_record.get("period_start"),
+    ), source_timezone_name)
+    period_end = _source_period_time(_first_text(
+        mapping.get("source_period_end"), source_record.get("forecast_end"),
+        source_record.get("forecast_period_end"), source_record.get("period_end"),
+    ), source_timezone_name)
     target_day = _normalized_date(market_date)
-    prior_night_partial_low = bool(
-        night_start and night_end and target_day
-        and night_start.date().isoformat() < target_day == night_end.date().isoformat()
-    )
-    if (_text(source_record.get("forecast_measurement_kind")) or "").lower() == "low" and (
-        _text(mapping.get("mapping")) == "source_local_nws_night_low_proxy"
-        or (source_id == "nws" and night_start and night_end
-            and (_text(mapping.get("mapping")) == "exact_source_local_nws_period"
-                 or prior_night_partial_low))
-    ):
-        # The NWS overnight period targets the morning but cannot attest the
-        # rest of a full-day low market. Retain it for paper/proxy diagnostics.
-        reasons.append("partial_day_low_proxy_not_full_day")
+    kind = (_text(source_record.get("forecast_measurement_kind")) or "").lower()
+    if source_id == "nws" and target_day and kind in {"high", "low"}:
+        # NWS /forecast returns daytime/nighttime periods, not daily extrema.
+        # A retained bounded period proves a daily target only when it covers
+        # the entire source-local calendar day; older unbounded rows retain
+        # their legacy treatment rather than inventing a missing bound.
+        partial_day = bool((period_start or period_end) and (
+            not period_start or not period_end
+            or period_start.date().isoformat() != target_day
+            or period_start.time().isoformat() != "00:00:00"
+            or period_end.date() != period_start.date() + timedelta(days=1)
+            or period_end.time().isoformat() != "00:00:00"
+        ))
+        if partial_day or (kind == "low" and _text(mapping.get("mapping")) == "source_local_nws_night_low_proxy"):
+            reasons.append(f"partial_day_{kind}_proxy_not_full_day")
     if not _text(mapping.get("source_timezone")):
         reasons.append("missing_source_timezone")
     period_problem = _source_period_target_problem(source_record, mapping, _normalized_date(market_date))
