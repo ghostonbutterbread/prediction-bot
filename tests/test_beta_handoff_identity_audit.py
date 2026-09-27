@@ -246,6 +246,8 @@ class BetaHandoffIdentityAuditTests(unittest.TestCase):
                     with self.subTest(action=action, outcome=outcome, location=location, timestamp_key=timestamp_key):
                         decision = self._frozen_decision()
                         decision.update(action=action, model_probability=0.7 if action == "BUY_YES" else 0.3)
+                        if action == "BUY_NO":
+                            decision["provenance"]["future_pnl_inputs"] = {"side": "NO", "best_no_ask": 0.4}
                         resolution = self._independent_resolution()
                         resolution["outcome"] = outcome
                         timestamp = resolution.pop("settlement_ts")

@@ -1652,6 +1652,129 @@ parameters:
                 self.assertEqual(receipt["blocker"], "missing_position_size")
                 self.assertIsNone(receipt["pnl"])
 
+    def test_invalid_source_ask_with_alternate_entry_cannot_open_or_settle_kelly(self):
+        from bot.collector_lane_replay_kelly import replay_recorded_collector_lane_with_kelly
+
+        for marked in (False, True):
+            with self.subTest(marked=marked):
+                future: dict[str, object] = {"side": "NO"}
+                quote_key = "best_no_ask"
+                if marked:
+                    future["execution_snapshot_marker"] = "paper_shadow_source_scoreboard_hypothetical_execution"
+                    quote_key = "paper_shadow_recorded_best_no_ask"
+                future[quote_key] = float("nan")
+                decision = {
+                    "decision_id": "invalid-quote", "lane_id": "shadow_source_router",
+                    "shared_candidate_id": "candidate-1", "run_id": "run-1", "market_id": "M1",
+                    "observed_at": "2026-05-06T12:00:00+00:00", "action": "BUY_NO",
+                    "model_probability": .2, "entry_price": .58,
+                    "approved_position_size_usd": 10.0,
+                    "provenance": {"future_pnl_inputs": future},
+                }
+                [receipt] = build_paper_shadow_lane_resolution_rows(
+                    lane_rows=[decision], resolution_rows=[{
+                        "resolution_id": "resolution-1", "shared_candidate_id": "candidate-1",
+                        "run_id": "run-1", "market_id": "M1", "outcome": "NO",
+                        "settlement_ts": "2026-05-07T12:00:00+00:00",
+                    }],
+                )
+                wallet = replay_recorded_collector_lane_with_kelly(
+                    decisions=[decision], resolutions=[receipt], starting_balance_usd=100.0,
+                )
+                self.assertEqual(receipt["blocker"], "missing_fill_price")
+                self.assertIsNone(receipt["pnl"])
+                self.assertEqual(wallet["summary"]["opened_positions"], 0)
+                self.assertEqual(wallet["summary"]["settled_positions"], 0)
+                self.assertEqual(wallet["summary"]["final_balance_usd"], 100.0)
+
+    def test_blocked_stake_receipt_cannot_settle_kelly(self):
+        from bot.collector_lane_replay_kelly import replay_recorded_collector_lane_with_kelly
+
+        decision = {
+            "decision_id": "invalid-stake", "lane_id": "shadow_source_router",
+            "shared_candidate_id": "candidate-1", "run_id": "run-1", "market_id": "M1",
+            "observed_at": "2026-05-06T12:00:00+00:00", "action": "BUY_NO",
+            "model_probability": .2, "entry_price": .58,
+            "approved_position_size_usd": float("nan"),
+            "provenance": {"future_pnl_inputs": {"side": "NO", "best_no_ask": .58}},
+        }
+        [receipt] = build_paper_shadow_lane_resolution_rows(
+            lane_rows=[decision], resolution_rows=[{
+                "resolution_id": "resolution-1", "shared_candidate_id": "candidate-1",
+                "run_id": "run-1", "market_id": "M1", "outcome": "NO",
+                "settlement_ts": "2026-05-07T12:00:00+00:00",
+            }],
+        )
+        wallet = replay_recorded_collector_lane_with_kelly(
+            decisions=[decision], resolutions=[receipt], starting_balance_usd=100.0,
+        )
+        self.assertEqual(receipt["blocker"], "missing_position_size")
+        self.assertIsNone(receipt["pnl"])
+        self.assertEqual(wallet["summary"]["settled_positions"], 0)
+
+    def test_nested_scoreboard_quote_still_settles_kelly_when_direct_inputs_empty(self):
+        from bot.collector_lane_replay_kelly import replay_recorded_collector_lane_with_kelly
+
+        decision = {
+            "decision_id": "nested-quote", "lane_id": "shadow_source_scoreboard",
+            "shared_candidate_id": "candidate-1", "run_id": "run-1", "market_id": "M1",
+            "observed_at": "2026-05-06T12:00:00+00:00", "action": "BUY_NO",
+            "model_probability": .2, "entry_price": .58,
+            "approved_position_size_usd": 10.0,
+            "provenance": {"future_pnl_inputs": {}, "source_scoreboard": {
+                "future_pnl_inputs": {"side": "NO", "best_no_ask": .58},
+            }},
+        }
+        [receipt] = build_paper_shadow_lane_resolution_rows(
+            lane_rows=[decision], resolution_rows=[{
+                "resolution_id": "resolution-1", "shared_candidate_id": "candidate-1",
+                "run_id": "run-1", "market_id": "M1", "outcome": "NO",
+                "settlement_ts": "2026-05-07T12:00:00+00:00",
+            }],
+        )
+        wallet = replay_recorded_collector_lane_with_kelly(
+            decisions=[decision], resolutions=[receipt], starting_balance_usd=100.0,
+        )
+        self.assertIsNone(receipt["blocker"])
+        self.assertEqual(wallet["summary"]["settled_positions"], 1)
+        self.assertAlmostEqual(wallet["summary"]["final_balance_usd"], 107.241379)
+
+    def test_subnormal_quote_cannot_emit_infinite_resolution_pnl(self):
+        [receipt] = build_paper_shadow_lane_resolution_rows(
+            lane_rows=[{
+                "policy": "shadow_source_router", "action": "BUY_NO",
+                "shared_candidate_id": "candidate-tiny", "run_id": "run-1",
+                "market_id": "M1", "observed_at": "2026-05-06T12:00:00+00:00",
+                "approved_position_size_usd": 10.0,
+                "provenance": {"future_pnl_inputs": {"side": "NO", "best_no_ask": 5e-324}},
+            }],
+            resolution_rows=[{
+                "shared_candidate_id": "candidate-tiny", "run_id": "run-1",
+                "market_id": "M1", "outcome": "NO",
+                "settlement_ts": "2026-05-07T12:00:00+00:00",
+            }],
+        )
+        self.assertEqual(receipt["blocker"], "unrepresentable_economics")
+        self.assertIsNone(receipt["pnl"])
+
+    def test_huge_integer_stake_blocks_instead_of_crashing_resolution(self):
+        [receipt] = build_paper_shadow_lane_resolution_rows(
+            lane_rows=[{
+                "policy": "shadow_source_router", "action": "BUY_NO",
+                "shared_candidate_id": "candidate-huge", "run_id": "run-1",
+                "market_id": "M1", "observed_at": "2026-05-06T12:00:00+00:00",
+                "approved_position_size_usd": 10**1000,
+                "provenance": {"future_pnl_inputs": {"side": "NO", "best_no_ask": .58}},
+            }],
+            resolution_rows=[{
+                "shared_candidate_id": "candidate-huge", "run_id": "run-1",
+                "market_id": "M1", "outcome": "NO",
+                "settlement_ts": "2026-05-07T12:00:00+00:00",
+            }],
+        )
+        self.assertEqual(receipt["blocker"], "missing_position_size")
+        self.assertIsNone(receipt["pnl"])
+
     def test_router_does_not_promote_side_labelled_reference_as_executable_quote(self):
         from bot.paper_shadow_lanes import _side_specific_price
 

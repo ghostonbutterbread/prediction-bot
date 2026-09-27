@@ -90,6 +90,38 @@ class CollectorLaneReplayKellyTests(unittest.TestCase):
         self.assertEqual(result["decision_rows"][0]["status"], "opened")
         self.assertAlmostEqual(result["decision_rows"][0]["approved_stake_usd"], 10.0)
 
+    def test_subnormal_price_cannot_settle_infinite_synthetic_payout(self):
+        result = replay_recorded_collector_lane_with_kelly(
+            decisions=[{
+                "decision_id": "tiny-quote", "market_id": "M1", "observed_at": "2026-07-01T12:00:00+00:00",
+                "action": "BUY_NO", "model_probability": .2, "no_price": 5e-324,
+            }],
+            resolutions=[{
+                "decision_id": "tiny-quote", "market_id": "M1", "outcome": "NO",
+                "settlement_ts": "2026-07-02T12:00:00+00:00",
+            }],
+            starting_balance_usd=100.0,
+        )
+        self.assertEqual(result["decision_rows"][0]["reason_code"], "unrepresentable_economics")
+        self.assertEqual(result["summary"]["opened_positions"], 0)
+        self.assertEqual(result["summary"]["settled_positions"], 0)
+        self.assertEqual(result["summary"]["final_balance_usd"], 100.0)
+
+    def test_void_blocker_cannot_authorize_nonvoid_settlement(self):
+        result = replay_recorded_collector_lane_with_kelly(
+            decisions=[{
+                "decision_id": "d1", "market_id": "M1", "observed_at": "2026-07-01T12:00:00+00:00",
+                "action": "BUY_YES", "model_probability": .7, "yes_price": .5,
+            }],
+            resolutions=[{
+                "lane_decision_id": "d1", "shared_candidate_id": "candidate-1", "run_id": "run-1",
+                "market_id": "M1", "blocker": "void_resolution",
+                "resolution": {"matched": True, "matched_by": "shared_candidate_id", "outcome": "YES",
+                    "resolution_row_id": "resolution-1", "settlement_ts": "2026-07-02T12:00:00+00:00"},
+            }],
+        )
+        self.assertEqual(result["summary"]["settled_positions"], 0)
+
     def test_consumes_existing_lane_decision_and_exact_resolution_receipt(self):
         result = replay_recorded_collector_lane_with_kelly(
             decisions=[{

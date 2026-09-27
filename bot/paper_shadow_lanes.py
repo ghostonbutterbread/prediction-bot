@@ -2148,9 +2148,15 @@ def _resolution_row_blocker(*, action: str, outcome: str | None, side: str | Non
         return "unsupported_action"
     if side not in {"YES", "NO"}:
         return "missing_side"
-    if _price_number(fill_price) is None:
+    price = _price_number(fill_price)
+    if price is None:
         return "missing_fill_price"
-    if stake is None or not math.isfinite(stake) or stake <= 0:
+    try:
+        if stake is None or not math.isfinite(stake) or stake <= 0:
+            return "missing_position_size"
+        if not math.isfinite(stake / price):
+            return "unrepresentable_economics"
+    except (OverflowError, TypeError, ValueError, ZeroDivisionError):
         return "missing_position_size"
     return None
 
