@@ -7,8 +7,8 @@
 - **Base commit:** `28fbc7f41f89a8680a7490e7f3e6934f66913761`
 - **Intended integration target:** local `beta` (currently `28fbc7f41f89a8680a7490e7f3e6934f66913761`; fetched `origin/beta` at `295f69cf3199782d192a95950ed101779adea3db`, behind local integration)
 - **Last updated:** 2026-09-27
-- **Latest immutable recovery checkpoint:** `584c9d603fcc499fa7b404dc6d5c31db4e4bfd4c`
-- **Feature implementation commit(s):** `1f0ac294de7844d73c686c664c4405346e785546`, `267749d25d5ddd7b09663d460c5ab0969a209a21`, `584c9d603fcc499fa7b404dc6d5c31db4e4bfd4c`
+- **Latest immutable recovery checkpoint:** `3834a11029174bd88583adf404d5b0c45f3103e3`
+- **Feature implementation commit(s):** `1f0ac294de7844d73c686c664c4405346e785546`, `267749d25d5ddd7b09663d460c5ab0969a209a21`, `584c9d603fcc499fa7b404dc6d5c31db4e4bfd4c`, `3834a11029174bd88583adf404d5b0c45f3103e3`
 
 ## Intent and contract
 
@@ -24,7 +24,9 @@ Correct the false hardcoded NWS settlement authority for Kalshi daily weather ma
 - Corrected feature focused: `PYTHONPATH=$PWD:$PWD/tests python -m unittest test_weather_settlement_authority test_weather_forecast_targeting test_replay_decision_input test_prediction_lab_collect test_paper_shadow_lanes test_beta_data_flow_e2e test_source_observation_ledger -q`: **248 OK, 1 skipped**. Full isolated discover: **1,336 OK, 7 skipped**, receipt `/home/ryushe/.hermes/cache/scratch/weather-authority-review-correction-full-20260927.log`. New exact-tip independent verdict remains pending.
 - `deleg_ed36c285` **BLOCKED** corrected tip `154756dfbea7c8e4fa63db558409ab07a1f97ba7`: passive negation (`will not be determined according to TWC`, `will not be reported by NWS`) still produced false authority through the sealed input. It also identified a misleading paper diagnostic: an explicitly observed NWS daily archive under a TWC-settled market was classified settlement-derived. The reviewer independently ran **248 focused OK, 1 skipped** and **1,336 full OK, 7 skipped**. Both new cases were reproduced RED, then corrected GREEN: passive negation stays unknown; the TWC/NWS archive classification is independent only for explicit observation/archive-like labels, not forecast/proxy or NWS-settled labels.
 - After this correction the isolated focused suite passed **248 OK, 1 skipped** and full discover passed **1,336 OK, 7 skipped**; full receipt `/home/ryushe/.hermes/cache/scratch/weather-authority-passive-negation-full-20260927.log`. A new exact-tip independent verdict is required before beta preflight.
-- Independent read-only review: pending again on the latest correction; no non-committing beta preflight or integration yet.
+- `deleg_e01e2746` **BLOCKED** tip `2c59015d210a52c3078beb48739c5566de148ad9`: a legacy NWS source with explicit `role: cross_validation` and recorded weight `1.0` remained mislabeled through a verified sealed input; accepted `source`/`name` aliases also lost the recovered primary role and inferred 0.0 validator weight. Its affirmative, negation, archive/proxy, no-weight, and strict-history controls passed; independent focus **248 OK, 1 skipped**, inspected full **1,336 OK, 7 skipped**. Both source-role variants failed RED and passed GREEN after deriving the recorded primary through the already-normalized source-detail map and reconciling a stale cross-validation label.
+- Corrected isolated feature: focused **250 OK, 1 skipped**; full discover **1,338 OK, 7 skipped**, receipt `/home/ryushe/.hermes/cache/scratch/weather-authority-recorded-role-full-20260927.log`.
+- Independent read-only review: pending on a new clean tip; no non-committing beta preflight or integration yet.
 
 ## Blockers, deferred work and decision gates
 
@@ -35,8 +37,8 @@ Correct the false hardcoded NWS settlement authority for Kalshi daily weather ma
 ## Handoff
 
 - **Owning feature branch/ref:** `fix/market-weather-settlement-authority`
-- **Latest immutable recovery checkpoint:** `584c9d603fcc499fa7b404dc6d5c31db4e4bfd4c`
-- **Feature implementation commit(s):** `1f0ac294de7844d73c686c664c4405346e785546`, `267749d25d5ddd7b09663d460c5ab0969a209a21`, `584c9d603fcc499fa7b404dc6d5c31db4e4bfd4c`
+- **Latest immutable recovery checkpoint:** `3834a11029174bd88583adf404d5b0c45f3103e3`
+- **Feature implementation commit(s):** `1f0ac294de7844d73c686c664c4405346e785546`, `267749d25d5ddd7b09663d460c5ab0969a209a21`, `584c9d603fcc499fa7b404dc6d5c31db4e4bfd4c`, `3834a11029174bd88583adf404d5b0c45f3103e3`
 - **Exact resume point:** inspect code commit and this later dossier commit, obtain independent review, then beta preflight only on explicit integration assignment.
 - **Working-tree state at handoff:** expected clean after separate commits.
 
