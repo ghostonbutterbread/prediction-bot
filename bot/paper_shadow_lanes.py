@@ -2896,7 +2896,7 @@ def _future_pnl_inputs(
         ),
         "best_yes_bid": _price_number(
             signal.get("best_yes_bid"),
-            execution_snapshot.get("best_yes_bid"),
+            execution_snapshot.get("best_yes_bid") if not hypothetical_book else None,
             order_book_data.get("best_yes_bid"),
             artifact_order_book.get("best_yes_bid"),
         ),
@@ -2906,7 +2906,7 @@ def _future_pnl_inputs(
         ),
         "best_no_bid": _price_number(
             signal.get("best_no_bid"),
-            execution_snapshot.get("best_no_bid"),
+            execution_snapshot.get("best_no_bid") if not hypothetical_book else None,
             order_book_data.get("best_no_bid"),
             artifact_order_book.get("best_no_bid"),
         ),

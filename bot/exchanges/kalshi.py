@@ -364,6 +364,7 @@ class KalshiExchange(BaseExchange):
                                         "source": "daily_series",
                                         **_contract_metadata(m),
                                         "series": series_ticker,
+                                        "recorded_book_asks": _recorded_book_asks(m),
                                     },
                                     yes_bid=_quote_from_raw(m, 'yes_bid'),
                                     no_bid=_quote_from_raw(m, 'no_bid'),
@@ -420,6 +421,7 @@ class KalshiExchange(BaseExchange):
                                 "status": m.get('status', ''),
                                 "source": "direct",
                                 **_contract_metadata(m),
+                                "recorded_book_asks": _recorded_book_asks(m),
                             },
                             yes_bid=_quote_from_raw(m, 'yes_bid'),
                             no_bid=_quote_from_raw(m, 'no_bid'),
@@ -503,6 +505,10 @@ class KalshiExchange(BaseExchange):
                                     "status": getattr(m, 'status', ''),
                                     "source": "events",
                                     **_contract_metadata(m),
+                                    "recorded_book_asks": {
+                                        "best_yes_ask": yes_price if getattr(m, 'yes_ask_dollars', None) is not None else None,
+                                        "best_no_ask": no_price if getattr(m, 'no_ask_dollars', None) is not None else None,
+                                    },
                                 }
                             )
 
@@ -583,6 +589,10 @@ class KalshiExchange(BaseExchange):
                     metadata={
                         "status": getattr(m, 'status', ''),
                         "result": getattr(m, 'result', None),
+                        "recorded_book_asks": {
+                            "best_yes_ask": _dollars(m, 'yes_ask_dollars') if getattr(m, 'yes_ask_dollars', None) is not None else None,
+                            "best_no_ask": _dollars(m, 'no_ask_dollars') if getattr(m, 'no_ask_dollars', None) is not None else None,
+                        },
                     },
                     close_price=(_dollars(m, 'close_price_dollars') if getattr(m, 'close_price_dollars', None) is not None else None),
                     yes_bid=_dollars(m, 'yes_bid_dollars'),
@@ -948,6 +958,18 @@ def _quote_from_raw(data: dict, key: str) -> float:
         return 0.0
 
 
+def _recorded_book_asks(data: dict) -> dict[str, float | None]:
+    """Retain only explicitly supplied raw ask fields, never market references."""
+    return {
+        f"best_{side}_ask": (
+            _quote_from_raw(data, f"{side}_ask")
+            if data.get(f"{side}_ask_dollars") is not None or data.get(f"{side}_ask") is not None
+            else None
+        )
+        for side in ("yes", "no")
+    }
+
+
 def _dollars_from_raw(data: dict, key: str) -> float:
     """Extract dollar value from raw API JSON (already in dollars)."""
     # Try with _dollars suffix first (raw API format), then without
@@ -1005,6 +1027,7 @@ def _market_from_raw(
     }
     if metadata:
         market_metadata.update(metadata)
+    market_metadata["recorded_book_asks"] = _recorded_book_asks(data)
 
     close_price = data.get("close_price_dollars")
     if close_price is None:

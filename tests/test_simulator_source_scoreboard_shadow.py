@@ -1,11 +1,14 @@
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from bot.file_ops import append_jsonl, load_jsonl
-from bot.paper_shadow_lanes import summarize_paper_shadow_lane_report
+from bot.collector_lane_replay_kelly import replay_recorded_collector_lane_with_kelly
+from bot.exchanges.kalshi import _market_from_raw
+from bot.paper_shadow_lanes import build_paper_shadow_lane_resolution_rows, summarize_paper_shadow_lane_report
 from bot.simulator import Simulator
 from bot.strategies.enhanced import StrategyTrace
 
@@ -28,6 +31,8 @@ def fake_weather_market():
         category="weather",
         yes_price=0.44,
         no_price=0.58,
+        yes_bid=0.43,
+        no_bid=0.57,
         volume=1200,
         closes_at=None,
         metadata={
@@ -37,6 +42,7 @@ def fake_weather_market():
             "series_ticker": "KXHIGHSEA",
             "event_ticker": "KXHIGHSEA-260515",
             "market_route": {"group": "weather", "family": "daily_temperature", "allowed": True},
+            "recorded_book_asks": {"best_yes_ask": 0.44, "best_no_ask": 0.58},
         },
     )
 
@@ -44,7 +50,9 @@ def fake_weather_market():
 def fake_zero_yes_weather_market():
     market = fake_weather_market()
     market.yes_price = 0.0
+    market.yes_bid = None
     market.no_price = 0.58
+    market.metadata["recorded_book_asks"]["best_yes_ask"] = None
     return market
 
 
@@ -225,7 +233,7 @@ class SimulatorSourceScoreboardShadowTests(unittest.TestCase):
             "paper_shadow_source_scoreboard_hypothetical_execution",
         )
         self.assertTrue(future_pnl_inputs["hypothetical_execution_snapshot"])
-        self.assertEqual(future_pnl_inputs["order_book_source"], "paper_scan_market_quote")
+        self.assertEqual(future_pnl_inputs["order_book_source"], "paper_scan_recorded_book_ask")
         self.assertIn("execution_snapshot_as_of", future_pnl_inputs)
 
     def test_simulator_preserves_raw_ask_absence_before_hypothetical_fallback(self):
@@ -235,8 +243,10 @@ class SimulatorSourceScoreboardShadowTests(unittest.TestCase):
             sim = Simulator(shadow_config(tmpdir, scoreboard_path, decision_path))
             inputs = {}
             signal = {**weather_signal(), "market_id": "KXHIGHSEA-260515-T70"}
+            market = fake_weather_market()
+            market.metadata["recorded_book_asks"]["best_no_ask"] = None
             sim._prepare_shadow_source_scoreboard_signal(
-                signal, market=fake_weather_market(),
+                signal, market=market,
                 order_book={"best_yes_ask": 0.44, "best_no_ask": None},
                 inputs_by_shared_candidate_id=inputs,
             )
@@ -346,6 +356,76 @@ class SimulatorSourceScoreboardShadowTests(unittest.TestCase):
         self.assertNotIn("estimated_fill_price", future_inputs)
         self.assertNotIn("best_yes_ask", future_inputs)
         self.assertEqual(future_inputs["best_no_ask"], 0.58)
+
+    def test_market_reference_without_recorded_ask_cannot_settle_shadow_wallet(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            scoreboard_path = Path(tmpdir) / "source_scoreboard_by_slice.jsonl"
+            decision_path = Path(tmpdir) / "paper_shadow_lane_decisions.jsonl"
+            append_jsonl(scoreboard_path, {
+                "source_id": "nws", "source_name": "nws", "city_id": "seattle_wa",
+                "market_kind": "high", "contract_shape": "tail", "sample_count": 100,
+                "threshold_direction_accuracy": 0.95,
+            })
+            market = fake_weather_market()  # Reference yes/no prices; no recorded ask metadata.
+            market.metadata.pop("recorded_book_asks")
+            market.yes_bid = market.no_bid = None
+            sim = Simulator(router_shadow_config(tmpdir, scoreboard_path, decision_path))
+            sim.strategy = StableSkipWeatherTraceStrategy()
+            sim.scan(FakeExchange([market]))
+            [row] = [r for r in load_jsonl(decision_path) if r.get("policy") == "shadow_source_router"]
+            self.assertIsNone(row["provenance"]["source_router"]["future_pnl_inputs"].get("best_yes_bid"))
+            [receipt] = build_paper_shadow_lane_resolution_rows(
+                lane_rows=[row], resolution_rows=[{
+                    "shared_candidate_id": row["shared_candidate_id"],
+                    "run_id": row["run_id"], "market_id": market.id,
+                    "resolution_id": "independent-NO", "outcome": "NO",
+                    "settlement_ts": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+                }],
+            )
+            wallet = replay_recorded_collector_lane_with_kelly(
+                decisions=[row], resolutions=[receipt], starting_balance_usd=100.0,
+            )
+        self.assertEqual(row["action"], "BUY_NO")
+        self.assertIsNone(row.get("entry_price"))
+        self.assertEqual(receipt["blocker"], "missing_fill_price")
+        self.assertIsNone(receipt["pnl"])
+        self.assertEqual(wallet["summary"]["settled_positions"], 0)
+        self.assertEqual(wallet["summary"]["final_balance_usd"], 100.0)
+
+    def test_raw_kalshi_ask_remains_available_to_shadow_resolution(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            scoreboard_path = Path(tmpdir) / "source_scoreboard_by_slice.jsonl"
+            decision_path = Path(tmpdir) / "paper_shadow_lane_decisions.jsonl"
+            append_jsonl(scoreboard_path, {
+                "source_id": "nws", "source_name": "nws", "city_id": "seattle_wa",
+                "market_kind": "high", "contract_shape": "tail", "sample_count": 100,
+                "threshold_direction_accuracy": 0.95,
+            })
+            market = _market_from_raw({
+                "ticker": "KXHIGHSEA-260515-T70",
+                "title": "Will Seattle high temperature be above 70 degrees on May 15, 2026?",
+                "yes_ask_dollars": ".44", "no_ask_dollars": ".58",
+                "volume_fp": 1200,
+            }, category="weather", metadata={
+                k: v for k, v in fake_weather_market().metadata.items() if k != "recorded_book_asks"
+            })
+            self.assertIsNotNone(market)
+            sim = Simulator(router_shadow_config(tmpdir, scoreboard_path, decision_path))
+            sim.strategy = StableSkipWeatherTraceStrategy()
+            sim.scan(FakeExchange([market]))
+            [row] = [r for r in load_jsonl(decision_path) if r.get("policy") == "shadow_source_router"]
+            [receipt] = build_paper_shadow_lane_resolution_rows(
+                lane_rows=[row], resolution_rows=[{
+                    "shared_candidate_id": row["shared_candidate_id"],
+                    "run_id": row["run_id"], "market_id": market.id,
+                    "resolution_id": "independent-NO", "outcome": "NO",
+                    "settlement_ts": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+                }],
+            )
+        self.assertEqual(row["action"], "BUY_NO")
+        self.assertEqual(row["entry_price"], 0.58)
+        self.assertIsNone(receipt["blocker"])
+        self.assertEqual(receipt["pnl"]["pnl_usd"], 7.2414)
 
 
 if __name__ == "__main__":

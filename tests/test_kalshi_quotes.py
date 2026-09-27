@@ -49,6 +49,22 @@ class KalshiQuoteTests(unittest.TestCase):
                 market = _market_from_raw({"ticker": "SYNTHETIC", **fields})
                 self.assertEqual((market.yes_price, market.no_price, market.yes_bid, market.no_bid),
                                  (.43, .59, .41, .57))
+                self.assertEqual(market.metadata["recorded_book_asks"],
+                                 {"best_yes_ask": .43, "best_no_ask": .59})
+
+    def test_reference_fields_do_not_assert_recorded_asks(self):
+        market = _market_from_raw({"ticker": "SYNTHETIC", "yes_price": .44,
+                                   "no_price": .58, "no_ask_dollars": ".58"})
+        self.assertEqual(market.metadata["recorded_book_asks"],
+                         {"best_yes_ask": None, "best_no_ask": .58})
+
+    def test_raw_ask_proof_cannot_be_overwritten_by_market_metadata(self):
+        market = _market_from_raw(
+            {"ticker": "SYNTHETIC", "yes_price": .44},
+            metadata={"recorded_book_asks": {"best_yes_ask": .44}},
+        )
+        self.assertEqual(market.metadata["recorded_book_asks"],
+                         {"best_yes_ask": None, "best_no_ask": None})
 
     def test_collector_persists_normalized_quotes_even_for_skips(self):
         import tempfile

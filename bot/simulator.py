@@ -1751,14 +1751,17 @@ class Simulator:
 
             observed_at = datetime.now(timezone.utc).isoformat()
             direction = str(signal.get("direction") or "BUY_YES").upper()
+            market_metadata = getattr(market, "metadata", None)
+            recorded_asks = market_metadata.get("recorded_book_asks", {}) if isinstance(market_metadata, dict) else {}
+            recorded_asks = recorded_asks if isinstance(recorded_asks, dict) else {}
             shadow_order_book = {
-                "best_yes_ask": _shadow_price(order_book.get("best_yes_ask")),
-                "best_yes_bid": _shadow_price(order_book.get("best_yes_bid")),
-                "best_no_ask": _shadow_price(order_book.get("best_no_ask")),
-                "best_no_bid": _shadow_price(order_book.get("best_no_bid")),
+                "best_yes_ask": _shadow_price(recorded_asks.get("best_yes_ask")),
+                "best_yes_bid": _shadow_price(getattr(market, "yes_bid", None)),
+                "best_no_ask": _shadow_price(recorded_asks.get("best_no_ask")),
+                "best_no_bid": _shadow_price(getattr(market, "no_bid", None)),
             }
-            recorded_yes_ask = shadow_order_book["best_yes_ask"] or _shadow_price(signal.get("best_yes_ask"))
-            recorded_no_ask = shadow_order_book["best_no_ask"] or _shadow_price(signal.get("best_no_ask"))
+            recorded_yes_ask = shadow_order_book["best_yes_ask"]
+            recorded_no_ask = shadow_order_book["best_no_ask"]
             shadow_signal = dict(signal)
             for signal_key, book_key in (
                 ("best_yes_ask", "best_yes_ask"),
@@ -1806,11 +1809,14 @@ class Simulator:
                     "paper_shadow_recorded_best_yes_ask": recorded_yes_ask,
                     "paper_shadow_recorded_best_no_ask": recorded_no_ask,
                     "estimated_fill_price": execution_snapshot.get("estimated_fill_price"),
-                    "best_yes_ask": execution_snapshot.get("best_yes_ask"),
-                    "best_yes_bid": execution_snapshot.get("best_yes_bid"),
-                    "best_no_ask": execution_snapshot.get("best_no_ask"),
-                    "best_no_bid": execution_snapshot.get("best_no_bid"),
-                    "order_book_source": "paper_scan_market_quote",
+                    "best_yes_ask": recorded_yes_ask,
+                    "best_yes_bid": shadow_order_book["best_yes_bid"],
+                    "best_no_ask": recorded_no_ask,
+                    "best_no_bid": shadow_order_book["best_no_bid"],
+                    "order_book_source": (
+                        "paper_scan_recorded_book_ask" if recorded_yes_ask or recorded_no_ask
+                        else "paper_scan_market_reference"
+                    ),
                 }
             )
             decision_artifact = build_pre_execution_decision_artifact(
@@ -1832,7 +1838,7 @@ class Simulator:
                     reasoning={"paper_shadow_source_scoreboard": {"recommendation_only": True}},
                 ),
                 signal=writer_signal,
-                order_book=order_book,
+                order_book=shadow_order_book,
                 execution_snapshot=execution_snapshot,
                 config_snapshot=self.config,
                 observed_at=datetime.fromisoformat(observed_at.replace("Z", "+00:00")),
