@@ -82,6 +82,17 @@ class WeatherSettlementAuthorityTests(unittest.TestCase):
         self.assertEqual(rows[0]["settlement_source"], "unknown")
         self.assertEqual(rows[0]["weight"], 1.0)
 
+    def test_recorded_primary_weight_without_role_remains_forecast_primary(self):
+        rows = PredictionLab._weather_snapshot_sources(
+            {"source_details": [
+                {"source_name": "nws", "weight": 1.0},
+                {"source_name": "open-meteo"},
+            ]}, settlement_source="unknown", market_date="2026-09-24",
+            as_of="2026-09-23T12:00:00Z", station_resolution={}, source_agreement=None,
+        )
+        self.assertEqual([(row["source_name"], row["role"], row.get("weight")) for row in rows],
+                         [("nws", "forecast_primary", 1.0), ("open-meteo", "cross_validation", 0.0)])
+
     def test_paper_label_diagnostics_do_not_substitute_settlement_provider_or_night_proxy_for_daily_actual(self):
         from bot.paper_shadow_lanes import _label_target, _label_source_name, _label_source_classification
 
@@ -113,6 +124,16 @@ class WeatherSettlementAuthorityTests(unittest.TestCase):
         self.assertEqual(_settlement_authority({
             "rules_primary": "NWS forecasts are only indicative. " + TWC_RULE,
         })["source"], "the_weather_company")
+
+    def test_negated_provider_attribution_does_not_claim_settlement_authority(self):
+        from bot.feeds.weather_pro import _settlement_authority
+
+        for text in (
+            "The minimum is not determined according to The Weather Company; an independent daily report determines resolution.",
+            "The daily low is not reported by NWS; an independent report determines resolution.",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(_settlement_authority({"rules_primary": text})["source"], "unknown")
 
     def test_twc_market_rules_cross_exchange_signal_snapshot_and_sealed_input_without_rerouting_forecast(self):
         market = _market("KXLOWTPHX-26SEP24-T73", TWC_RULE)

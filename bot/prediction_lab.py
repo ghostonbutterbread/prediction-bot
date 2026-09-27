@@ -1306,7 +1306,8 @@ class PredictionLab:
         for source_name in source_names:
             key = source_name.lower()
             detail = detail_by_name.get(key, {})
-            role = detail.get("role") or ("forecast_primary" if key == forecast_name else "cross_validation")
+            role = detail.get("role") or ("forecast_primary" if key == (forecast_name if forecast_driver_present else recorded_primary)
+                                           else "cross_validation")
             if role == "settlement_primary":
                 role = "forecast_primary"  # Legacy forecast weight, not rule authority.
             weight = detail.get("weight") if "weight" in detail else None

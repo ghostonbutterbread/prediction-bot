@@ -136,10 +136,16 @@ def _settlement_authority(metadata: dict | None) -> dict:
         if not isinstance(text, str) or not text.strip():
             continue
         providers = set()
-        if re.search(r"\bThe Weather Company\b", text, re.I):
-            providers.add("the_weather_company")
-        if re.search(r"\b(?:according to|reported by)\s+(?:the\s+)?(?:NWS\b|National Weather Service\b)", text, re.I):
-            providers.add("nws")
+        for attribution in re.finditer(
+            r"\b(?:according to|reported by)\s+(?:the\s+)?"
+            r"(?P<provider>Weather Company|NWS|National Weather Service)\b",
+            text, re.I,
+        ):
+            prefix = text[:attribution.start()]
+            if re.search(r"\b(?:not|never)\s+(?:(?:determined|resolved|settled|measured)\s+)?$", prefix, re.I):
+                continue
+            provider = attribution.group("provider").lower()
+            providers.add("the_weather_company" if provider == "weather company" else "nws")
         if re.search(r"\baccording to\b", text, re.I) and not re.search(
             r"\baccording to\s+(?:the\s+)?(?:Weather Company|NWS\b|National Weather Service\b)", text, re.I
         ):
