@@ -512,6 +512,39 @@ class SourceObservationLedgerTests(unittest.TestCase):
         )
         self.assertEqual(proof["status"], "eligible")
 
+    def test_nws_full_day_low_accepts_equivalent_utc_period_aliases(self) -> None:
+        source = {
+            "source_id": "nws", "source_as_of": "2026-08-01T11:54:00+00:00",
+            "source_location_city": "Seattle", "forecast_measurement_kind": "low",
+            "contract_shape": "tail", "question_side": "below",
+            "forecast_start": "2026-08-03T07:00:00Z",
+            "forecast_end": "2026-08-04T07:00:00Z",
+            "target_mapping": {
+                "market_target_date": "2026-08-03", "source_target_date": "2026-08-03",
+                "source_timezone": "UTC-07:00",
+                "source_period_start": "2026-08-03T00:00:00-07:00",
+                "source_period_end": "2026-08-04T00:00:00-07:00",
+            },
+        }
+        self.assertEqual(source_correctness_target_proof(
+            source_record=source, snapshot={}, market_date="2026-08-03",
+        )["status"], "eligible_exact_target_proof")
+        proof = strict_source_observation_proof(
+            source_record=source, snapshot={"station_resolution": {"city": "Seattle"}},
+            market_metadata={"city": "Seattle"}, market_date="2026-08-03", market_kind="low",
+            contract_shape="tail", question_side="below", observed_at="2026-08-01T12:00:00+00:00",
+        )
+        self.assertEqual(proof["status"], "eligible")
+
+        source["forecast_start"] = "2026-08-03T08:00:00Z"
+        self.assertEqual(source_correctness_target_proof(
+            source_record=source, snapshot={}, market_date="2026-08-03",
+        )["status"], "unusable_source_period_target_mismatch")
+        source["forecast_start"] = "2026-08-03T00:00:00"
+        self.assertEqual(source_correctness_target_proof(
+            source_record=source, snapshot={}, market_date="2026-08-03",
+        )["status"], "eligible_exact_target_proof")
+
     def test_period_alias_conflict_and_post_period_source_time_are_not_exact_proof(self) -> None:
         record = {
             "source_id": "nws", "source_as_of": "2026-08-01T11:54:00+00:00",

@@ -395,6 +395,23 @@ def source_correctness_target_proof(
 
 
 
+def _source_timezone(value: str | None) -> ZoneInfo | timezone | None:
+    if not value:
+        return None
+    try:
+        return ZoneInfo(value)
+    except (ZoneInfoNotFoundError, ValueError):
+        # NWS retains fixed UTC offsets rather than an IANA zone.
+        match = re.fullmatch(r"UTC([+-])(\d{2}):(\d{2})", value)
+        if not match:
+            return None
+        hours, minutes = int(match[2]), int(match[3])
+        if hours > 23 or minutes > 59:
+            return None
+        offset = timedelta(hours=hours, minutes=minutes)
+        return timezone(offset if match[1] == "+" else -offset)
+
+
 def _source_period_target_problem(
     source: Mapping[str, Any], mapping: Mapping[str, Any], market_date: str | None,
 ) -> str | None:
@@ -407,12 +424,7 @@ def _source_period_target_problem(
         return None
     target = date.fromisoformat(market_date)
     timezone_name = _text(mapping.get("source_timezone"))
-    try:
-        source_timezone = ZoneInfo(timezone_name) if timezone_name else None
-    except (ZoneInfoNotFoundError, ValueError):
-        # NWS records an explicit offset (UTC-07:00), already retained on each
-        # period timestamp; it is not an IANA zone name.
-        source_timezone = None
+    source_timezone = _source_timezone(timezone_name)
     period_dates: dict[str, list[date]] = {"start": [], "end": []}
     period_times: dict[str, list[datetime]] = {"start": [], "end": []}
     alias_conflict = False
@@ -809,10 +821,8 @@ def _source_period_time(value: Any, source_timezone: str | None) -> datetime | N
         return None
     if parsed.tzinfo is not None:
         return parsed
-    try:
-        return parsed.replace(tzinfo=ZoneInfo(source_timezone)) if source_timezone else None
-    except (ZoneInfoNotFoundError, ValueError):
-        return None
+    zone = _source_timezone(source_timezone)
+    return parsed.replace(tzinfo=zone) if zone is not None else None
 
 
 def _number(value: Any) -> float | None:
