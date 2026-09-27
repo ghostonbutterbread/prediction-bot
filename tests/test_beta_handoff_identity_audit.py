@@ -235,7 +235,7 @@ class BetaHandoffIdentityAuditTests(unittest.TestCase):
                     self.assertEqual(wallet["summary"]["settled_positions"], 0)
                     self.assertEqual(wallet["summary"]["open_positions"], 1)
 
-    def test_real_shadow_receipt_preserves_authoritative_time_for_kelly(self):
+    def test_real_shadow_receipt_keeps_settlement_distinct_from_outcome_availability(self):
         for action in ("BUY_YES", "BUY_NO"):
             for outcome in ("YES", "NO", "VOID"):
                 for location, timestamp_key in (("root", "settlement_ts"), ("root", "outcome_known_at"),
@@ -255,10 +255,23 @@ class BetaHandoffIdentityAuditTests(unittest.TestCase):
                         receipt_path = self.root / "receipts.jsonl"
                         _write_rows(receipt_path, receipts)
                         [receipt] = _read_rows(receipt_path)
-                        self.assertEqual(receipt["resolution"].get("settlement_ts"), timestamp)
+                        self.assertEqual(receipt["resolution"].get("settlement_ts"),
+                                         timestamp if timestamp_key == "settlement_ts" else None)
                         self.assertEqual(receipt["resolution"].get(timestamp_key), timestamp)
                         self.assertEqual(receipt["resolution"].get("run_id"), decision["run_id"])
                         wallet = replay_recorded_collector_lane_with_kelly(decisions=[decision], resolutions=[receipt])
+                        if timestamp_key == "outcome_known_at":
+                            self.assertEqual(wallet["settlement_rows"], [])
+                            self.assertEqual(wallet["summary"]["open_positions"], 1)
+                            self.assertEqual(wallet["summary"]["reserved_capital_usd"], 10)
+                            self.assertEqual(wallet["summary"]["available_cash_usd"], 90)
+                            if outcome == "VOID":
+                                self.assertEqual(receipt["blocker"], "void_resolution")
+                                self.assertIsNone(receipt["pnl"])
+                            else:
+                                self.assertIsNone(receipt["blocker"])
+                                self.assertIsNotNone(receipt["pnl"])
+                            continue
                         self.assertEqual(wallet["summary"]["settled_positions"], 1)
                         self.assertEqual(wallet["summary"]["open_positions"], 0)
                         self.assertEqual(wallet["summary"]["reserved_capital_usd"], 0)
@@ -272,6 +285,32 @@ class BetaHandoffIdentityAuditTests(unittest.TestCase):
                         else:
                             expected_cash = 115 if action == "BUY_" + outcome else 90
                             self.assertEqual(wallet["summary"]["available_cash_usd"], expected_cash)
+
+    def test_outcome_known_only_shadow_receipt_does_not_invent_kelly_settlement(self):
+        decision = self._frozen_decision()
+        resolution = self._independent_resolution()
+        known_at = resolution.pop("settlement_ts")
+        resolution["outcome_known_at"] = known_at
+        [receipt] = build_paper_shadow_lane_resolution_rows(
+            lane_rows=[decision], resolution_rows=[resolution],
+        )
+        # Preserve the legacy fixed-notional diagnostic, but do not promote an
+        # outcome-availability clock into a recorded settlement instant.
+        self.assertIsNone(receipt["blocker"])
+        self.assertEqual(receipt["pnl"]["pnl_usd"], 15)
+        self.assertIsNone(receipt["resolution"]["settlement_ts"])
+        self.assertEqual(receipt["resolution"]["outcome_known_at"], known_at)
+        later = {
+            "decision_id": "decision-B", "market_id": "market-B",
+            "observed_at": "2026-09-08T12:30:00+00:00", "action": "SKIP",
+        }
+        wallet = replay_recorded_collector_lane_with_kelly(
+            decisions=[decision, later], resolutions=[receipt], starting_balance_usd=100.0,
+        )
+        self.assertEqual(wallet["settlement_rows"], [])
+        self.assertEqual(wallet["decision_rows"][1]["available_cash_before_usd"], 90.0)
+        self.assertEqual(wallet["summary"]["reserved_capital_usd"], 10.0)
+        self.assertEqual(wallet["summary"]["final_balance_usd"], 100.0)
 
     def test_explicit_non_later_settlement_is_blocked_before_pnl_and_kelly(self):
         decision = self._frozen_decision()

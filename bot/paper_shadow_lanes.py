@@ -2158,10 +2158,10 @@ def _build_lane_resolution_row(
             "match_key": _optional_text(resolution_match.get("match_key")),
             "outcome": outcome,
             "resolved_at": _optional_text(_mapping(resolution).get("resolved_at"), _mapping(_mapping(resolution).get("resolution")).get("resolved_at")),
-            # Settlement availability is authoritative evidence, not retrieval time.
+            # Preserve distinct settlement and outcome-availability clocks. An
+            # outcome-known timestamp cannot establish when settlement occurred.
             "settlement_ts": _optional_text(
                 _mapping(resolution).get("settlement_ts"), _mapping(_mapping(resolution).get("resolution")).get("settlement_ts"),
-                _mapping(resolution).get("outcome_known_at"), _mapping(_mapping(resolution).get("resolution")).get("outcome_known_at"),
             ),
             "outcome_known_at": _optional_text(_mapping(resolution).get("outcome_known_at"), _mapping(_mapping(resolution).get("resolution")).get("outcome_known_at")),
             "run_id": _optional_text(_mapping(resolution).get("run_id"), _mapping(_mapping(resolution).get("resolution")).get("run_id")),
