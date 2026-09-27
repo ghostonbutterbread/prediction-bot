@@ -389,7 +389,9 @@ class NWSFeed:
             logger.debug(f"NWS observation error for {station}: {e}")
             return None
 
-    def get_forecast(self, city: str, *, target_date: str | None = None) -> Optional[WeatherSnapshot]:
+    def get_forecast(
+        self, city: str, *, target_date: str | None = None, measurement_kind: str | None = None,
+    ) -> Optional[WeatherSnapshot]:
         grid = self._resolve_forecast_grid(city)
         if not grid:
             return None
@@ -424,7 +426,23 @@ class NWSFeed:
                 high_period = next((p for p in dated_periods if p.get("isDaytime") is True), None)
                 if high_period is None:
                     return _unavailable_snapshot(city=city, source="nws", target_date=target, reason="target_date_missing_daytime_forecast_period", fetched_at=fetched_at)
-                low_period = next((p for p in dated_periods if p.get("isDaytime") is False), high_period)
+                # The night beginning on the target date forecasts the *next*
+                # morning. Prefer the night ending on the target morning for a
+                # daily low; never use the following morning for a low market.
+                morning_low = None
+                for period in periods:
+                    if period.get("isDaytime") is not False:
+                        continue
+                    try:
+                        end = datetime.fromisoformat(str(period.get("endTime")).replace("Z", "+00:00"))
+                    except ValueError:
+                        continue
+                    if end.tzinfo is not None and end.date().isoformat() == target:
+                        morning_low = period
+                        break
+                if measurement_kind == "low" and morning_low is None:
+                    return _unavailable_snapshot(city=city, source="nws", target_date=target, reason="target_date_missing_low_forecast_period", fetched_at=fetched_at)
+                low_period = morning_low or next((p for p in dated_periods if p.get("isDaytime") is False), high_period)
             else:
                 high_period = next((p for p in periods if p.get("isDaytime") is True), periods[0])
                 low_period = next((p for p in periods if p.get("isDaytime") is False), high_period)
@@ -432,7 +450,8 @@ class NWSFeed:
             low = low_period.get("temperature")
             if high is None or low is None:
                 return _unavailable_snapshot(city=city, source="nws", target_date=target, reason="source_forecast_missing_temperature", fetched_at=fetched_at)
-            today = high_period
+            selected_period = low_period if target and measurement_kind == "low" else high_period
+            today = selected_period
             temp = high
             is_daytime = bool(today.get("isDaytime", True))
             period_name = today.get("name")
@@ -603,13 +622,14 @@ class ProWeatherEngine:
 
     def get_forecast(
         self, city: str, *, target_date: str | None = None, require_target: bool = False,
+        measurement_kind: str | None = None,
     ) -> Optional[MultiSourceForecast]:
         """Get cross-validated forecast from all sources."""
         city_lower = city.lower().strip()
         target = _target_date_text(target_date)
 
         # Check cache
-        cache_key = (city_lower, target, require_target)
+        cache_key = (city_lower, target, require_target, measurement_kind)
         if cache_key in self._cache:
             cached, ts = self._cache[cache_key]
             if (datetime.now(timezone.utc) - ts).total_seconds() < self._cache_ttl:
@@ -640,7 +660,7 @@ class ProWeatherEngine:
             else:
                 logger.warning(f"Open-Meteo forecast unavailable for {city_lower}: {om.availability_reason or 'implausible_forecast'}")
 
-        nws = self.nws.get_forecast(city_lower, target_date=target)
+        nws = self.nws.get_forecast(city_lower, target_date=target, measurement_kind=measurement_kind)
         if nws:
             source_snapshots.append(nws)
             if self._snapshot_is_plausible(nws):
@@ -793,11 +813,14 @@ class ProWeatherEngine:
         if not city:
             return None
 
-        forecast = self.get_forecast(city, target_date=market_date, require_target=True)
+        q = question.lower()
+        is_high = "high" in q or "maximum" in q or "max" in q
+        forecast = self.get_forecast(
+            city, target_date=market_date, require_target=True,
+            measurement_kind="high" if is_high else "low",
+        )
         if not forecast or not forecast.sources_used:
             return None
-
-        q = question.lower()
 
         # Extract threshold
         temp_match = re.search(r'(\d+)°', question)
@@ -805,7 +828,6 @@ class ProWeatherEngine:
             return None
         threshold = float(temp_match.group(1))
 
-        is_high = "high" in q or "maximum" in q or "max" in q
         actual_temp = forecast.high_temp_f if is_high else forecast.low_temp_f
 
         if actual_temp is not None and not (TEMP_MIN_F <= actual_temp <= TEMP_MAX_F):

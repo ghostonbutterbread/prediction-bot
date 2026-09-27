@@ -7,6 +7,7 @@ from pathlib import Path
 from bot.weather.source_observation_ledger import (
     is_eligible_for_future_history,
     materialize_source_observation_ledger,
+    source_correctness_target_proof,
 )
 from bot.weather.source_performance_materializer import materialize_source_performance_once
 
@@ -345,6 +346,27 @@ class SourceObservationLedgerTests(unittest.TestCase):
         self.assertEqual(settled["source_provenance"]["source_record_sha256"], hashlib.sha256(
             json.dumps(snapshot["sources"][0], sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         ).hexdigest())
+
+    def test_low_period_ending_on_target_morning_preserves_exact_source_proof(self) -> None:
+        record = {
+            "source_evidence_version": 1, "evidence_type": "forecast", "scoreable_forecast": True,
+            "forecast_measurement_kind": "low", "forecast_date": "2026-08-03",
+            "forecast_start": "2026-08-02T18:00:00-07:00",
+            "forecast_end": "2026-08-03T06:00:00-07:00",
+            "target_mapping": {
+                "market_target_date": "2026-08-03", "source_target_date": "2026-08-03",
+                "source_period_start": "2026-08-02T18:00:00-07:00",
+                "source_period_end": "2026-08-03T06:00:00-07:00",
+                "source_timezone": "UTC-07:00",
+            },
+        }
+        self.assertEqual(source_correctness_target_proof(
+            source_record=record, snapshot={}, market_date="2026-08-03",
+        )["status"], "eligible_exact_target_proof")
+        record["target_mapping"]["source_period_end"] = "2026-08-04T06:00:00-07:00"
+        self.assertEqual(source_correctness_target_proof(
+            source_record=record, snapshot={}, market_date="2026-08-03",
+        )["status"], "unusable_source_period_target_mismatch")
 
     def test_v1_conflicting_retained_target_aliases_fail_closed(self) -> None:
         record = _input()

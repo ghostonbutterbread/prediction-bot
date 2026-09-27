@@ -24,6 +24,9 @@ class _Http:
     def get(self, *args, **kwargs):
         return _Response(self.payload)
 
+    def close(self):
+        return None
+
 
 class ForecastTargetingTests(unittest.TestCase):
     def test_open_meteo_selects_exact_next_day_source_local_forecast(self):
@@ -93,6 +96,68 @@ class ForecastTargetingTests(unittest.TestCase):
 
         self.assertTrue(snapshot.scoreable_forecast)
         self.assertEqual(snapshot.source_details["target_mapping"]["source_timezone"], "UTC-05:00")
+
+    def test_nws_low_uses_night_ending_on_target_morning(self):
+        feed = NWSFeed()
+        feed.http = _Http({"properties": {"periods": [
+            {"number": 1, "name": "Saturday Night", "temperature": 58, "isDaytime": False,
+             "startTime": "2026-09-26T18:00:00-07:00", "endTime": "2026-09-27T06:00:00-07:00"},
+            {"number": 2, "name": "Sunday", "temperature": 84, "isDaytime": True,
+             "startTime": "2026-09-27T06:00:00-07:00", "endTime": "2026-09-27T18:00:00-07:00"},
+            {"number": 3, "name": "Sunday Night", "temperature": 68, "isDaytime": False,
+             "startTime": "2026-09-27T18:00:00-07:00", "endTime": "2026-09-28T06:00:00-07:00"},
+        ]}})
+        feed._points_cache["austin"] = (datetime.now(timezone.utc), ("EWX", 152, 91))
+
+        low = feed.get_forecast("austin", target_date="2026-09-27", measurement_kind="low")
+        self.assertTrue(low.scoreable_forecast)
+        self.assertEqual(low.low_temp_f, 58)
+        self.assertEqual(low.source_details["low_period"]["name"], "Saturday Night")
+        self.assertEqual(low.source_details["target_mapping"]["source_period_start"], "2026-09-26T18:00:00-07:00")
+        self.assertEqual(low.source_details["target_mapping"]["source_period_end"], "2026-09-27T06:00:00-07:00")
+
+    def test_nws_low_missing_prior_night_does_not_borrow_next_morning(self):
+        feed = NWSFeed()
+        feed.http = _Http({"properties": {"periods": [
+            {"number": 1, "name": "Sunday", "temperature": 84, "isDaytime": True,
+             "startTime": "2026-09-27T06:00:00-07:00", "endTime": "2026-09-27T18:00:00-07:00"},
+            {"number": 2, "name": "Sunday Night", "temperature": 68, "isDaytime": False,
+             "startTime": "2026-09-27T18:00:00-07:00", "endTime": "2026-09-28T06:00:00-07:00"},
+        ]}})
+        feed._points_cache["austin"] = (datetime.now(timezone.utc), ("EWX", 152, 91))
+
+        low = feed.get_forecast("austin", target_date="2026-09-27", measurement_kind="low")
+        self.assertFalse(low.scoreable_forecast)
+        self.assertEqual(low.availability_reason, "target_date_missing_low_forecast_period")
+        high = feed.get_forecast("austin", target_date="2026-09-27", measurement_kind="high")
+        self.assertTrue(high.scoreable_forecast)
+        self.assertEqual(high.high_temp_f, 84)
+
+    def test_scored_low_uses_morning_period_and_retains_source_period_proof(self):
+        engine = ProWeatherEngine()
+        try:
+            setattr(engine.nws, "http", _Http({"properties": {"periods": [
+                {"name": "Saturday Night", "temperature": 58, "isDaytime": False,
+                 "startTime": "2026-09-26T18:00:00-07:00", "endTime": "2026-09-27T06:00:00-07:00"},
+                {"name": "Sunday", "temperature": 84, "isDaytime": True,
+                 "startTime": "2026-09-27T06:00:00-07:00", "endTime": "2026-09-27T18:00:00-07:00"},
+                {"name": "Sunday Night", "temperature": 68, "isDaytime": False,
+                 "startTime": "2026-09-27T18:00:00-07:00", "endTime": "2026-09-28T06:00:00-07:00"},
+            ]}}))
+            engine.nws._points_cache["austin"] = (datetime.now(timezone.utc), ("EWX", 152, 91))
+            setattr(engine.nws, "get_station_observation", lambda city: None)
+            engine.open_meteo.get_forecast = lambda *_args, **_kwargs: None
+            signal = engine._score_temperature_market(
+                "Will Austin low temperature be below 70° on Sep 27, 2026?",
+                0.5, market_date="2026-09-27",
+            )
+            assert signal is not None
+            self.assertEqual(signal["data"]["predicted_temp"], 58)
+            [source] = [s for s in signal["data"]["source_details"] if s.get("source_id") == "nws"]
+            self.assertEqual(source["forecast_measurement_kind"], "low")
+            self.assertEqual(source["target_mapping"]["source_period_end"], "2026-09-27T06:00:00-07:00")
+        finally:
+            engine.close()
 
     def test_nws_fails_closed_when_target_period_timezone_is_ambiguous(self):
         feed = NWSFeed()

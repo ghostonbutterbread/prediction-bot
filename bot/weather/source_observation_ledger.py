@@ -413,6 +413,7 @@ def _source_period_target_problem(
         # NWS records an explicit offset (UTC-07:00), already retained on each
         # period timestamp; it is not an IANA zone name.
         source_timezone = None
+    period_dates: dict[str, list[date]] = {"start": [], "end": []}
     for boundary in ("start", "end"):
         values = [mapping.get(f"source_period_{boundary}"), *(
             source.get(f"{prefix}_{boundary}") for prefix in ("forecast", "forecast_period", "period")
@@ -426,9 +427,24 @@ def _source_period_target_problem(
                 return "source_period_invalid"
             if period.tzinfo is not None and source_timezone is not None:
                 period = period.astimezone(source_timezone)
-            day_offset = (period.date() - target).days
-            if day_offset != 0 and not (boundary == "end" and day_offset == 1):
-                return "source_period_target_mismatch"
+            period_dates[boundary].append(period.date())
+    is_low = (_text(source.get("forecast_measurement_kind")) or "").lower() == "low"
+    # A daytime high belongs to its starting date; a night low belongs to
+    # the morning on which its retained nighttime period ends. Do not require
+    # optional bounds on older source records.
+    low_ends_on_target = bool(period_dates["end"]) and all(
+        period_day == target for period_day in period_dates["end"]
+    )
+    for boundary, dates in period_dates.items():
+        for period_day in dates:
+            day_offset = (period_day - target).days
+            if day_offset == 0:
+                continue
+            if boundary == "start" and day_offset == -1 and is_low and low_ends_on_target:
+                continue
+            if boundary == "end" and day_offset == 1 and not is_low:
+                continue
+            return "source_period_target_mismatch"
     return None
 
 
