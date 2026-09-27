@@ -146,6 +146,24 @@ class AutoSourceRouterPromotionTests(unittest.TestCase):
         self.assertEqual(loaded.source_ledger_path, first.history_path)
         self.assertTrue(loaded.raw_archive_path.is_file())
 
+    def test_relocated_v1_does_not_use_preexisting_obsolete_location(self) -> None:
+        first, _, nested = self.relocated_v1_generation()
+        # Patch the known-prefix constant only inside this synthetic fixture:
+        # never create or read anything at the real obsolete checkout prefix.
+        old_generations = self.root / "obsolete-checkout" / "generations"
+        old_ledger = old_generations / first.generation_dir.name / first.history_path.relative_to(first.generation_dir)
+        old_ledger.parent.mkdir(parents=True)
+        old_ledger.write_bytes(first.history_path.read_bytes())
+        nested["source_ledger_path"] = str(old_ledger)
+        for key in ("strict_resolution", "raw_archive", "replay_index", "replay_manifest"):
+            nested[f"{key}_path"] = str(first.generation_dir / Path(nested[f"{key}_path"]).relative_to(
+                OBSOLETE_GENERATIONS / first.generation_dir.name
+            ))
+        first.history_manifest_path.write_text(json.dumps(nested), encoding="utf-8")
+        with patch("bot.weather.source_history_manifest._V1_OBSOLETE_GENERATIONS", old_generations):
+            loaded = load_source_history_manifest(first.history_manifest_path)
+        self.assertEqual(loaded.source_ledger_path, first.history_path)
+
     def test_relocated_v1_stays_incompatible_with_forward_paper_v2_lane(self) -> None:
         first, _, _ = self.relocated_v1_generation()
         with self.assertRaisesRegex(ValueError, "incompatible Source Router history schema version 1"):

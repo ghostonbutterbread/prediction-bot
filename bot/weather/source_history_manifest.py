@@ -109,17 +109,16 @@ def load_source_history_manifest(path: str | Path) -> SourceHistoryManifest:
             raise SourceHistoryManifestError(f"history manifest missing {path_key}")
         if not isinstance(expected, str) or len(expected) != 64:
             raise SourceHistoryManifestError(f"history manifest missing sha256 for {digest_key}")
-        source_path = Path(raw_path).expanduser()
-        if not source_path.is_absolute():
-            source_path = manifest_path.parent / source_path
-        source_path = source_path.resolve()
-        if not source_path.is_file() and manifest_path.name == "source_history_manifest.json":
+        relocated = None
+        if manifest_path.name == "source_history_manifest.json":
             try:
                 relocated = relocated_v1_generation_path(raw_path, manifest_path.parent, schema_version=payload["schema_version"])
             except ValueError as exc:
                 raise SourceHistoryManifestError(str(exc)) from exc
-            if relocated is not None:
-                source_path = relocated
+        source_path = relocated or Path(raw_path).expanduser()
+        if not source_path.is_absolute():
+            source_path = manifest_path.parent / source_path
+        source_path = source_path.resolve()
         if not source_path.is_file():
             raise SourceHistoryManifestError(f"history evidence file does not exist: {digest_key}")
         actual = _sha256(source_path)
