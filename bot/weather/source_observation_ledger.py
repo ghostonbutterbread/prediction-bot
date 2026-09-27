@@ -427,15 +427,17 @@ def _source_period_target_problem(
                 period = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
             except (TypeError, ValueError):
                 return "source_period_invalid"
-            if period.tzinfo is not None and source_timezone is not None:
-                period = period.astimezone(source_timezone)
+            if source_timezone is not None:
+                period = (period.astimezone(source_timezone) if period.tzinfo is not None
+                          else period.replace(tzinfo=source_timezone))
             period_dates[boundary].append(period.date())
             period_times[boundary].append(period)
         # Distinct bounds on the same local date are not interchangeable
-        # evidence. Compare aware aliases by instant, naive aliases locally.
+        # evidence. Resolve naive source-local aliases against the recorded IANA
+        # zone; without a resolvable zone, mixed forms cannot prove equality.
         aware = {period.astimezone(timezone.utc) for period in period_times[boundary] if period.tzinfo is not None}
         naive = {period for period in period_times[boundary] if period.tzinfo is None}
-        if len(aware) > 1 or len(naive) > 1:
+        if len(aware) > 1 or len(naive) > 1 or (aware and naive):
             alias_conflict = True
     is_low = (_text(source.get("forecast_measurement_kind")) or "").lower() == "low"
     # A daytime high belongs to its starting date; a night low belongs to
@@ -491,13 +493,27 @@ def strict_source_observation_proof(
             mapping.get("source_period_end"),
             *(source_record.get(f"{prefix}_end") for prefix in ("forecast", "forecast_period", "period")),
         )
-        if any((end_time := _parse_time(end)) is not None and source_as_of_time >= end_time
-               for end in period_ends if end is not None):
+        end_times = [
+            _source_period_time(end, _text(mapping.get("source_timezone")))
+            for end in period_ends if end is not None
+        ]
+        if any(end_time is None for end_time in end_times):
+            reasons.append("source_period_end_time_unproven")
+        if any(source_as_of_time >= end_time for end_time in end_times if end_time is not None):
             reasons.append("source_as_of_after_source_period_end")
+    source_timezone_name = _text(mapping.get("source_timezone"))
+    night_start = _source_period_time(mapping.get("source_period_start"), source_timezone_name)
+    night_end = _source_period_time(mapping.get("source_period_end"), source_timezone_name)
+    target_day = _normalized_date(market_date)
+    prior_night_partial_low = bool(
+        night_start and night_end and target_day
+        and night_start.date().isoformat() < target_day == night_end.date().isoformat()
+    )
     if (_text(source_record.get("forecast_measurement_kind")) or "").lower() == "low" and (
         _text(mapping.get("mapping")) == "source_local_nws_night_low_proxy"
-        or (source_id == "nws" and _text(mapping.get("mapping")) == "exact_source_local_nws_period"
-            and mapping.get("source_period_start") and mapping.get("source_period_end"))
+        or (source_id == "nws" and night_start and night_end
+            and (_text(mapping.get("mapping")) == "exact_source_local_nws_period"
+                 or prior_night_partial_low))
     ):
         # The NWS overnight period targets the morning but cannot attest the
         # rest of a full-day low market. Retain it for paper/proxy diagnostics.
@@ -739,6 +755,20 @@ def _parse_time(value: Any) -> datetime | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed.tzinfo is not None else None
+
+
+def _source_period_time(value: Any, source_timezone: str | None) -> datetime | None:
+    """Resolve provider-local period bounds before comparing them to UTC instants."""
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is not None:
+        return parsed
+    try:
+        return parsed.replace(tzinfo=ZoneInfo(source_timezone)) if source_timezone else None
+    except (ZoneInfoNotFoundError, ValueError):
+        return None
 
 
 def _number(value: Any) -> float | None:
