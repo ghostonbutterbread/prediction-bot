@@ -237,6 +237,36 @@ class ResolutionFeedTests(unittest.TestCase):
 
         self.assertEqual(fetched, market_ids + market_ids[:1])
 
+    def test_unresolved_rotation_respects_smaller_fetch_budget(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            refs = root / "collector_markets.jsonl"
+            market_ids = [f"KXRESOLVE-26JUN11-T{strike}" for strike in (70, 71, 72, 73)]
+            self._write_jsonl(refs, [{"market_id": market_id} for market_id in market_ids])
+            fetched: list[str] = []
+
+            def fetch(market_id: str):
+                fetched.append(market_id)
+                return {"ticker": market_id, "status": "active"}
+
+            config = {"resolution_feed": {
+                "enabled": True,
+                "market_ref_paths": [str(refs)],
+                "output_dir": str(root / "feed"),
+                "central_output_dir": str(root / "central"),
+                "mode": "incremental_unresolved",
+                "max_incremental_markets": 2,
+                "max_markets": 1,
+                "interval_seconds": 1800,
+            }}
+            for hour in range(8):
+                run_resolution_feed_once(
+                    config, now=datetime(2026, 6, 11, 12, tzinfo=timezone.utc) + timedelta(hours=hour),
+                    fetch_market=fetch,
+                )
+
+        self.assertEqual(fetched, market_ids * 2)
+
     def test_central_resolution_cache_is_shared_across_lane_outputs(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)

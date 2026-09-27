@@ -107,12 +107,18 @@ def run_resolution_feed_once(
     lane_latest_resolution = output_dir / "latest_resolutions.jsonl"
     central_latest_resolution = central_output_dir / "latest_resolutions.jsonl"
     _seed_central_resolutions_from_lane_latest(central_latest_resolution, lane_latest_resolution)
+    # The cursor must advance by markets actually offered to the fetcher.
+    # A smaller downstream max_markets cap must not silently skip queue IDs.
+    fetch_limits = [
+        limit for limit in (feed_cfg["max_incremental_markets"], feed_cfg["max_markets"])
+        if limit is not None
+    ]
     market_ref_path = _market_ref_path_for_refresh(
         existing_market_ref_paths,
         output_dir=output_dir,
         existing_latest_path=central_latest_resolution,
         mode=str(feed_cfg["mode"]),
-        max_incremental_markets=feed_cfg["max_incremental_markets"],
+        max_incremental_markets=min(fetch_limits) if fetch_limits else None,
     )
     stamp = now_dt.strftime("%Y%m%dT%H%M%SZ")
     output_path = output_dir / f"resolutions_{stamp}.jsonl"
