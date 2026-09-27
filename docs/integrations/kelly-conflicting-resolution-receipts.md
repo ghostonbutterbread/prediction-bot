@@ -6,8 +6,8 @@
 - **Base commit:** `02c5580b61fa4c30a54c4f80884cac329d21af0c`
 - **Intended integration target:** `beta`
 - **Last updated:** 2026-09-27
-- **Latest immutable implementation checkpoint:** `a12af53372cd3b16a5013572972acaf4dfe74938` (current tip will include a later dossier-only commit)
-- **Feature implementation commits:** `05dd7ff93531c829d0f3ee61bc7d75ac6eb72ff7` (initial), `aa255df87316ac0786be97b1f5263211ce666a69` (first review correction), `a12af53372cd3b16a5013572972acaf4dfe74938` (second review correction)
+- **Latest immutable implementation checkpoint:** `3ece90b8d3aaa3ddb5f58a718ec7575b2ca2b5e9` (current tip will include a later dossier-only commit)
+- **Feature implementation commits:** `05dd7ff93531c829d0f3ee61bc7d75ac6eb72ff7` (initial), `aa255df87316ac0786be97b1f5263211ce666a69` (first review correction), `a12af53372cd3b16a5013572972acaf4dfe74938` (second), `3ece90b8d3aaa3ddb5f58a718ec7575b2ca2b5e9` (third)
 - **Inspiration:** the same decision's equally timed YES and NO settlement receipts produced $110 or $90 in the sequential synthetic wallet depending on input order.
 
 ## Intent and implemented contract
@@ -46,7 +46,7 @@ Third-review correction: compare the receipt's market ID against the correspondi
 ## Interruption / resume handoff
 
 - **Branch:** `fix/kelly-conflicting-resolution-receipts` from `02c5580b61fa4c30a54c4f80884cac329d21af0c` → `beta`.
-- **Checkpoint:** prior implementation `a12af53372cd3b16a5013572972acaf4dfe74938`; record the current correction's implementation checkpoint in a later dossier-only handoff commit.
+- **Checkpoint:** latest implementation `3ece90b8d3aaa3ddb5f58a718ec7575b2ca2b5e9`; this branch's tip includes a later dossier-only handoff commit.
 - **Exact resume:** verify final full-suite result for the third correction, then obtain fresh independent read-only review of corrected code on the clean branch tip; beta-first compatibility follows only after acceptance. Do not merge before review. No deployment from this code task.
 - **Working-tree state at handoff:** clean after the dossier-only handoff checkpoint; no raw or runtime modifications.
 
