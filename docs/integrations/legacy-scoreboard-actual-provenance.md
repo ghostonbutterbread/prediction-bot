@@ -1,6 +1,6 @@
 # Legacy scoreboard actual-temperature provenance — integration dossier
 
-- **Status:** feature; awaiting parent independent review/integration
+- **Status:** feature and exact combined beta tree independently accepted for an intentional local merge only; no push or activation
 - **Owner:** task `t_5743e6af` (focused subagent)
 - **Canonical path:** `docs/integrations/legacy-scoreboard-actual-provenance.md` (branch-local; remove at integration)
 - **Branch / owning ref:** `fix/legacy-scoreboard-actual-provenance`
@@ -23,7 +23,8 @@ No forecast producer, raw ledger, wallet, service, runtime, or configuration cha
 - **GREEN focused:** `PYTHONPATH=<worktree> python3 -m unittest tests.test_weather_source_scoreboard tests.test_source_reliability_replay_evidence -q` — 32 tests, OK after final source-only assertion.
 - **Full isolated suite:** `PYTHONPATH=<worktree> python3 -m unittest discover -s tests -q` — 1343 tests, OK (7 skipped), after final source-only assertion.
 - **Coverage:** forecast-only root/weather/forecast/live aliases; forecast-snapshot direct `actual_temp` and `resolved_temp`; lookup precedence; resolution/observed actuals; date failure; YES/NO no-imputation; source-only edge binding; CLI ledger coverage.
-- **Review:** parent owns independent read-only review and integration; no review/merge claimed here.
+- **Independent feature review:** ACCEPTED clean tip `ff7f741177a372dd25a5a10d04f24676d2437f5f` for a new noncommitting preflight only; 32 focused, 1,343 full (7 skipped). Reviewer reproduced forecast-only unscored and explicit independently supplied actual still scored.
+- **Independent combined-tree review:** ACCEPTED exact staged local-beta tree `746ecf1fb3d8f88d9a7de3c673edeb75d09e33eb` for an intentional local merge only; both feature parents staged, both dossiers excluded, combined 207 focused (1 skipped) and 1,348 full (7 skipped). No beta merge, push, or runtime activation at this dossier checkpoint.
 - **Ancestry:** task branch based on local `beta` at base above. Remote `origin/beta` was fetched read-only and is a different commit (`295f69cf3199782d192a95950ed101779adea3db`); do not silently change the assigned local target.
 
 ## Blockers and deferred data limits
@@ -36,9 +37,9 @@ No forecast producer, raw ledger, wallet, service, runtime, or configuration cha
 
 - **Owning feature branch/ref:** `fix/legacy-scoreboard-actual-provenance`
 - **Latest immutable recovery checkpoint / implementation commits:** `eea0754c8b5e6da6eacf7f456406323d0c967224` (reachable from this branch; current tip includes this later dossier-only handoff commit).
-- **Exact resume point:** parent independently reviews `beta..fix/legacy-scoreboard-actual-provenance`, performs beta compatibility checks, and decides integration; do not beta merge from this subagent.
+- **Exact resume point:** from clean local beta HEAD `9e7f83e4f4d507a56413ddf91d546fd1f78c8250`, stage both accepted feature branches, remove both dossiers, verify index tree `746ecf1fb3d8f88d9a7de3c673edeb75d09e33eb`, rerun focused/full, then local beta merge. If identity or tests differ, stop for re-review.
 - **Working-tree state at handoff:** clean after dossier-only handoff commit.
-- **Integration gate:** exact feature diff + independent review and parent beta compatibility checks.
+- **Integration gate:** independent exact-tree review authorizes the matching local beta merge only; exclude this branch-local dossier from beta. A changed staged code tree requires new review.
 - **Activation / cohort gate:** no activation in this task; independent actuals required before promoting rankings.
 - **Promotion gate:** fresh independently resolved forward overlap; synthetic success is not performance evidence.
 
@@ -46,3 +47,4 @@ No forecast producer, raw ledger, wallet, service, runtime, or configuration cha
 
 - 2026-09-27 — Chose exclusion at actual-extraction seam rather than rewriting producer values, which remain useful for decision diagnostics; no own beta merge/push/runtime activation.
 - 2026-09-27 — Implementation checkpoint `eea0754c8b5e6da6eacf7f456406323d0c967224` passed focused 32-test and full 1343-test isolated suites (7 skipped); handoff-only commit follows.
+- 2026-09-27 — independent feature and exact combined-tree reviews accepted their distinct gates; root-only date-validation masking is tracked separately as `t_50cd1699` before real-cohort ranking use.
