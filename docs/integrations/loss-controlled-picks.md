@@ -22,7 +22,7 @@ A new disabled `shadow_fee_aware_loss_guard` extends existing stable-BUY selecti
 ## Evidence and review
 
 - Focused: `PYTHONPATH=. PYTHONDONTWRITEBYTECODE=1 python -B -m unittest tests.test_paper_shadow_lanes tests.test_paired_loss_guard_probe -q` → 80 tests OK, 1 skipped after provenance/accounting fixes. Full isolated: `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 /mnt/data-collection/prediction-bot/.venv/bin/python -B -m unittest discover -s tests -q` → 1,216 tests OK, 7 skipped in 65.055s. `git diff --check` clean. A prior full rerun timed out due concurrent suites and its owned process was terminated; this later isolated run supersedes it.
-- Independent review: first read-only review held integration for the forward lane trusting flattened reference prices and generic resolver treating a quote as a fill. Added failing regressions, fixed both on this feature branch and reran the real cohort; independent re-review of the corrected commit is required before integration.
+- Independent review: first read-only review held integration for flattened reference asks and quote-as-fill resolution accounting; added failing regressions and fixed both. Fresh read-only re-review of committed `f4fa746..8bdad61` approved **disabled-code beta integration consideration**, found no remaining blocker, reran 80 focused and 1,216 full tests. Activation/promotion remain held pending fresh event-disjoint forward-paper evidence.
 - Replay/cohort/fixture evidence: `/mnt/data-collection/prediction-bot/data/derived_reports/loss_guard_probe_20260927_v3/` read back with 393 paired rows and verified derived hashes. Control: 8 winning/41 losing resolved BUYs, 49 priced. Candidate: 8 winning/2 losing resolved BUYs, 10 priced. 40 of 393 markets were not finalized; 7 recorded BUYs unresolved. Accepted BUYs span 8 events versus 26 events for resolved control BUYs; correlated strikes and one cohort invalidate independent-sample inference. Fixed $10 per BUY, fee-free *ask-quote proxy* P&L: control -$304.9636, candidate +$85.0364. These are not realizable fills, wallet results, or forward evidence. The $0.20 cutoff was selected after inspecting this cohort: the observed winner retention is explicitly in-sample/selection-biased, not generalizable or optimal.
 - Merge/ancestry evidence: branch created from local beta `f4fa746` after fetching `origin/beta`; local beta was clean and 21 commits ahead of remote at creation.
 
@@ -40,7 +40,7 @@ A new disabled `shadow_fee_aware_loss_guard` extends existing stable-BUY selecti
 - **Owning feature branch/ref:** `feat/loss-controlled-picks`
 - **Latest immutable recovery checkpoint:** `2c6e18de2d19b15323e7de02b5a752d01b236fcd` (implementation and dossier; a later dossier-only handoff commit may be the feature tip)
 - **Feature implementation commit(s):** `2c6e18de2d19b15323e7de02b5a752d01b236fcd`
-- **Exact resume point:** independently re-review the corrected committed feature, inspect beta target state and a non-committing compatibility merge, then decide whether disabled-code beta integration is warranted. Do not activate without a separately authorized fresh, event-disjoint forward-paper cohort.
+- **Exact resume point:** perform a non-committing beta compatibility merge, run beta-worktree focused/full tests, abort the preflight, then merge the reviewed disabled code only if the target stays clean. Do not activate without a separately authorized fresh, event-disjoint forward-paper cohort.
 - **Working-tree state at handoff:** clean committed feature required before review; no raw/runtime/config mutation.
 
 ## Decision gates
@@ -51,4 +51,4 @@ A new disabled `shadow_fee_aware_loss_guard` extends existing stable-BUY selecti
 
 ## Decision record
 
-- 2026-09-27 — Created source-independent loss-guard experiment from beta; no raw/runtime/config changes or claims of improved outcome yet.
+- 2026-09-27 — First review held on two price/P&L provenance defects; fixed test-first, independently re-reviewed and approved for disabled-code beta consideration only. Local beta `f4fa746` clean, `origin/beta` ancestor (beta ahead 21). No activation/promotion; next noncommitting beta compatibility test.
