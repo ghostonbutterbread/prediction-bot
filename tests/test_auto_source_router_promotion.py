@@ -267,6 +267,31 @@ class AutoSourceRouterPromotionTests(unittest.TestCase):
             with self.assertRaisesRegex(SourceHistoryManifestError, "relocated v1 generation id mismatch"):
                 load_source_history_manifest(first.history_manifest_path)
 
+    def test_relocated_v1_rejects_unrelated_prefix_symlinked_to_current(self) -> None:
+        first, promotion, nested = self.relocated_v1_generation()
+        unrelated = self.root / "unrelated-checkout" / "generations" / first.generation_dir.name
+        unrelated.parent.mkdir(parents=True)
+        unrelated.symlink_to(first.generation_dir, target_is_directory=True)
+        old_dir = OBSOLETE_GENERATIONS / first.generation_dir.name
+
+        def aliased(value):
+            return str(unrelated / Path(value).relative_to(old_dir))
+
+        promotion["artifacts"] = {key: aliased(value) for key, value in promotion["artifacts"].items()}
+        for key in ("history_ledger_path", "history_manifest_path", "scoreboard_path"):
+            promotion["runtime_consumption"][key] = aliased(promotion["runtime_consumption"][key])
+        promotion["source_history_manifest"]["path"] = aliased(promotion["source_history_manifest"]["path"])
+        for key in ("source_ledger", "strict_resolution", "raw_archive", "replay_index", "replay_manifest"):
+            nested[f"{key}_path"] = aliased(nested[f"{key}_path"])
+        nested_bytes = (json.dumps(nested, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode()
+        first.history_manifest_path.write_bytes(nested_bytes)
+        promotion["artifact_sha256"]["source_history_manifest"] = hashlib.sha256(nested_bytes).hexdigest()
+        first.manifest_path.write_text(json.dumps(promotion), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "unrecognized v1 generation locator"):
+            _validate_current_generation(self.output_root)
+        with self.assertRaisesRegex(SourceHistoryManifestError, "unrecognized v1 generation locator"):
+            load_source_history_manifest(first.history_manifest_path)
+
     def test_relocated_v1_rejects_symlink_escape_even_when_external_bytes_match(self) -> None:
         first, _, _ = self.relocated_v1_generation()
         external = self.root / "matching-ledger.jsonl"

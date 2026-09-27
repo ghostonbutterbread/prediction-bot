@@ -64,6 +64,10 @@ def relocated_v1_generation_path(value: str | Path, generation_dir: Path, *, sch
     try:
         relative = declared.relative_to(_V1_OBSOLETE_GENERATIONS)
     except ValueError:
+        # A different lexical prefix must not gain v1 authority merely by
+        # symlinking into this generation; direct contained paths stay valid.
+        if not declared.is_relative_to(generation_dir) and declared.resolve().is_relative_to(generation_dir):
+            raise ValueError("unrecognized v1 generation locator")
         return None
     if not relative.parts or relative.parts[0] != generation_dir.name:
         raise ValueError("relocated v1 generation id mismatch")
