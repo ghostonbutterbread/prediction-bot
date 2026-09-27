@@ -10,6 +10,7 @@ Cross-validates multiple sources for higher confidence.
 """
 
 import logging
+import re
 import httpx
 from typing import Optional
 from datetime import date, datetime, timezone, timedelta
@@ -94,8 +95,8 @@ CITY_COORDS = {
     "death valley": (36.5054, -117.0794),
 }
 
-# NWS grid coordinates + exact station IDs used for Kalshi settlement
-# CRITICAL: Kalshi settles using specific NWS stations, not city averages
+# NWS grid/station mapping is forecast and observation context, not proof of
+# the market-specific settlement authority.
 CITY_NWS = {
     "austin": ("EWX", 152, 91, "KAUS"),        # Austin-Bergstrom Airport
     "new york": ("OKX", 34, 37, "KNYC"),        # Central Park
@@ -123,6 +124,50 @@ CITY_NWS = {
     "tampa": ("TBW", 97, 47, "KTPA"),           # Tampa International
     "death valley": ("VEF", 158, 38, "KDWA"),   # Death Valley
 }
+
+
+def _settlement_authority(metadata: dict | None) -> dict:
+    """Identify a provider from explicit contract rules, not forecast sources."""
+    rules = metadata if isinstance(metadata, dict) else {}
+    matches = []
+    unresolved_provider = False
+    for field_name in ("rules_primary", "rules_secondary"):
+        text = rules.get(field_name)
+        if not isinstance(text, str) or not text.strip():
+            continue
+        providers = set()
+        for attribution in re.finditer(
+            r"\b(?:according to|reported by)\s+(?:the\s+)?"
+            r"(?P<provider>Weather Company|NWS|National Weather Service)\b",
+            text, re.I,
+        ):
+            prefix = text[:attribution.start()]
+            # Attributing a forecast to a provider does not establish who
+            # reports the final measured temperature for settlement.
+            if re.search(r"\b(?:forecasts?|predictions?)\s*,?\s*$", prefix, re.I):
+                continue
+            if re.search(
+                r"\b(?:not|never)\s+(?:(?:be|been|being)\s+)?"
+                r"(?:(?:determined|resolved|settled|measured)\s+)?$",
+                prefix, re.I,
+            ):
+                continue
+            provider = attribution.group("provider").lower()
+            providers.add("the_weather_company" if provider == "weather company" else "nws")
+        if re.search(r"\baccording to\b", text, re.I) and not re.search(
+            r"\baccording to\s+(?:the\s+)?(?:Weather Company|NWS\b|National Weather Service\b)", text, re.I
+        ):
+            unresolved_provider = True
+        matches.append((field_name, providers))
+    providers = set().union(*(found for _, found in matches)) if matches else set()
+    status = ("conflicting_rules" if len(providers) > 1 or (providers and unresolved_provider)
+              else "identified" if providers else "unknown_rules")
+    source = next(iter(providers)) if status == "identified" else "unknown"
+    return {
+        "source": source, "status": status,
+        "evidence_field": next((field for field, found in matches if source in found), None),
+        "evidence_origin": "kalshi_market_metadata",
+    }
 
 
 def _c_to_f(c: float) -> float:
@@ -348,11 +393,9 @@ class NWSFeed:
 
     def get_station_observation(self, city: str) -> Optional[dict]:
         """
-        Get real-time NWS station observation for the exact station
-        used by Kalshi to settle temperature markets.
+        Get real-time NWS station observation for the mapped city station.
         
-        This is the REAL edge — you can see current temperature at
-        the settlement station throughout the day.
+        This is a current observation, not the contract's daily report.
         
         Note: Daily high will almost always be higher than any individual
         hourly reading, because the true max occurs between readings.
@@ -652,7 +695,7 @@ class ProWeatherEngine:
             result = MultiSourceForecast(
                 city=city_lower, high_temp_f=None, low_temp_f=None, current_temp_f=None,
                 sources_used=[], confidence=0, fetched_at=datetime.now(timezone.utc),
-                details={"source_snapshots": source_snapshots, "settlement_source": "nws"},
+                details={"source_snapshots": source_snapshots},
             )
             self._cache[cache_key] = (result, datetime.now(timezone.utc))
             return result
@@ -696,7 +739,7 @@ class ProWeatherEngine:
             result = MultiSourceForecast(
                 city=city_lower, high_temp_f=None, low_temp_f=None, current_temp_f=None,
                 sources_used=[], confidence=0, fetched_at=datetime.now(timezone.utc),
-                details={"source_snapshots": source_snapshots, "local_station_observation": local_station_observation, "settlement_source": "nws"},
+                details={"source_snapshots": source_snapshots, "local_station_observation": local_station_observation},
             )
             self._cache[cache_key] = (result, datetime.now(timezone.utc))
             return result
@@ -709,8 +752,8 @@ class ProWeatherEngine:
         highs = [s.high_temp_f for s in snapshots if s.high_temp_f is not None]
         lows = [s.low_temp_f for s in snapshots if s.low_temp_f is not None]
 
-        # NWS is the settlement source for Kalshi temperature markets.
-        # Weight NWS more heavily when available, but use others for validation.
+        # Forecast policy: prefer NWS when available, regardless of the
+        # market-specific settlement provider; others validate confidence.
         nws_snapshot = next((s for s in snapshots if s.source == "nws"), None)
         
         if nws_snapshot:
@@ -747,11 +790,11 @@ class ProWeatherEngine:
             agreement = 1.0
 
         # Confidence: more sources + NWS agreement = higher confidence
-        # NWS is the settlement source, so NWS presence boosts confidence
+        # Existing NWS forecast presence boosts confidence.
         has_nws = nws_snapshot is not None
         base_confidence = {1: 0.70, 2: 0.82, 3: 0.90}.get(len(snapshots), 0.70)
         if has_nws:
-            base_confidence += 0.05  # NWS is the settlement source
+            base_confidence += 0.05
         
         confidence = base_confidence * agreement
         om_snapshot = next((s for s in snapshots if s.source == "open-meteo"), None)
@@ -793,7 +836,6 @@ class ProWeatherEngine:
                 "source_forecast_period_ends": {s.source: s.forecast_period_end for s in snapshots if s.forecast_period_end},
                 "source_metadata": {s.source: dict(s.source_details) for s in snapshots if s.source_details},
                 "local_station_observation": local_station_observation,
-                "settlement_source": "nws",  # Kalshi uses NWS to settle
                 "forecast_driver": "nws" if has_nws else "equal_source_average",
                 "nws_high": nws_snapshot.high_temp_f if nws_snapshot else None,
                 "nws_low": nws_snapshot.low_temp_f if nws_snapshot else None,
@@ -810,12 +852,15 @@ class ProWeatherEngine:
 
     def score_temperature_market_with_context(
         self, question: str, yes_price: float, *, category: str = "",
+        market_metadata: dict | None = None,
     ) -> Optional[dict]:
         market_date = _market_target_date(question, category=category)
-        return self._score_temperature_market(question, yes_price, market_date=market_date)
+        return self._score_temperature_market(question, yes_price, market_date=market_date,
+                                              market_metadata=market_metadata)
 
     def _score_temperature_market(
         self, question: str, yes_price: float, *, market_date: str | None,
+        market_metadata: dict | None = None,
     ) -> Optional[dict]:
         """Score a temperature market using multi-source data."""
         import re
@@ -902,6 +947,7 @@ class ProWeatherEngine:
 
         edge = abs(predicted_prob - yes_price)
 
+        authority = _settlement_authority(market_metadata)
         return {
             "signal_type": "weather",
             "predicted_prob": round(max(0.01, min(0.99, predicted_prob)), 4),
@@ -928,7 +974,11 @@ class ProWeatherEngine:
                     contract_shape="range" if is_range else "tail",
                     question_side="range" if is_range else "above" if is_above else "below" if is_below else None,
                 ),
-                "settlement_source": forecast.details.get("settlement_source"),
+                "settlement_source": authority["source"],
+                "settlement_authority": authority,
+                "forecast_driver": forecast.details.get("forecast_driver") or (
+                    "nws" if "nws" in forecast.sources_used else "equal_source_average"
+                ),
                 "nws_high": forecast.details.get("nws_high"),
                 "nws_low": forecast.details.get("nws_low"),
                 "nws_open_meteo_gap": forecast.details.get("nws_open_meteo_gap"),
@@ -944,9 +994,11 @@ class ProWeatherEngine:
         contract_shape: str | None = None,
         question_side: str | None = None,
     ) -> list[dict]:
-        settlement_source = forecast.details.get("settlement_source")
+        forecast_driver = forecast.details.get("forecast_driver") or (
+            "nws" if "nws" in forecast.sources_used else "equal_source_average"
+        )
         sources = list(forecast.sources_used or [])
-        has_settlement_source = settlement_source in sources
+        has_forecast_driver = forecast_driver in sources
         equal_weight = round(1.0 / len(sources), 6) if sources else None
         details = []
         source_snapshots = forecast.details.get("source_snapshots", [])
@@ -954,13 +1006,13 @@ class ProWeatherEngine:
             snapshot.source: snapshot for snapshot in source_snapshots if isinstance(snapshot, WeatherSnapshot)
         }
         for source in sources:
-            if has_settlement_source:
-                drives_forecast = source == settlement_source
+            if has_forecast_driver:
+                drives_forecast = source == forecast_driver
                 weight = 1.0 if drives_forecast else 0.0
-                note = "settlement_source_drives_forecast" if drives_forecast else "validator_only_settlement_source_drives_forecast"
+                note = "forecast_driver_policy" if drives_forecast else "validator_only_forecast_driver_policy"
             else:
                 weight = equal_weight
-                note = "equal_weight_average_no_settlement_source"
+                note = "equal_weight_average_no_forecast_driver"
             snapshot = snapshot_by_source.get(source)
             target_mapping = snapshot.source_details.get("target_mapping") if snapshot else None
             details.append(_drop_none({
@@ -978,7 +1030,7 @@ class ProWeatherEngine:
                     "market_target_date": target_mapping.get("market_target_date") if isinstance(target_mapping, dict) else None,
                     "source_target_date": target_mapping.get("source_target_date") if isinstance(target_mapping, dict) else None,
                     "target_mapping": target_mapping,
-                    "role": "settlement_primary" if source == settlement_source else "forecast_contributor" if not has_settlement_source else "cross_validation",
+                    "role": "forecast_primary" if source == forecast_driver else "forecast_contributor" if not has_forecast_driver else "cross_validation",
                     "weight": weight,
                     "contribution": weight,
                     "weight_note": note,

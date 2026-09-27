@@ -24,7 +24,7 @@ _FORBIDDEN_INPUT_TOKENS = frozenset(
         "pnl", "payout", "profit", "winner", "won", "void", "future", "result",
     }
 )
-_SAFE_PROVENANCE_FIELD_NAMES = frozenset({"settlement_source", "station_resolution"})
+_SAFE_PROVENANCE_FIELD_NAMES = frozenset({"settlement_source", "settlement_authority", "station_resolution"})
 _FORBIDDEN_RECORDED_DECISION_FIELDS = frozenset(
     {
         "main_decision", "normal_decision", "shadow_decision", "shared_core_decision",
@@ -74,6 +74,10 @@ _FORECAST_TARGET_MAPPING_V1 = {
     "market_target_date": _SCALAR, "source_target_date": _SCALAR, "mapping": _SCALAR,
     "source_timezone": _SCALAR, "source_period_start": _SCALAR, "source_period_end": _SCALAR,
 }
+_SETTLEMENT_AUTHORITY_V1 = {
+    "source": _SCALAR, "status": _SCALAR, "evidence_field": _SCALAR,
+    "evidence_origin": _SCALAR,
+}
 _SOURCE_METADATA_V1 = {
     "timezone": _SCALAR, "utc_offset_seconds": _SCALAR, "current_time": _SCALAR,
     "forecast_times_used": [_SCALAR], "office": _SCALAR, "grid_x": _SCALAR,
@@ -105,6 +109,7 @@ _WEATHER_SOURCE_V1 = {
     "periods_used": [_PERIOD_REF_V1], "high_period": _PERIOD_REF_V1,
     "low_period": _PERIOD_REF_V1, "station_id": _SCALAR, "station_cli": _SCALAR,
     "station_mapping": _SCALAR, "settlement_source": _SCALAR,
+    "settlement_authority": _SETTLEMENT_AUTHORITY_V1, "forecast_driver": _SCALAR,
     "source_agreement_score": _SCALAR, "date_validation": _DATE_VALIDATION_V1,
     "source_metadata": _SOURCE_METADATA_V1,
 }
@@ -112,7 +117,8 @@ _WEATHER_SIGNAL_DATA_V1 = {
     "forecast_high": _SCALAR, "forecast_low": _SCALAR, "current_temp": _SCALAR,
     "actual_temp_used": _SCALAR, "predicted_temp": _SCALAR, "threshold": _SCALAR,
     "city": _SCALAR, "sources": [_SCALAR], "agreement": _SCALAR,
-    "settlement_source": _SCALAR, "nws_high": _SCALAR, "nws_low": _SCALAR,
+    "settlement_source": _SCALAR, "settlement_authority": _SETTLEMENT_AUTHORITY_V1,
+    "forecast_driver": _SCALAR, "nws_high": _SCALAR, "nws_low": _SCALAR,
     "nws_open_meteo_gap": _SCALAR, "weather_date": _SCALAR, "forecast_date": _SCALAR,
     "target_forecast_date": _SCALAR, "fetched_at": _SCALAR, "as_of": _SCALAR,
     "market_target_date": _SCALAR,
@@ -139,7 +145,8 @@ _WEATHER_SNAPSHOT_V1 = {
     "source_timestamp": _SCALAR, "ttl_seconds": _SCALAR, "source_fetched_at": _SCALAR,
     "source_as_of": _SCALAR, "predicted_prob": _SCALAR, "confidence": _SCALAR,
     "weather_confidence_score": _SCALAR, "source_agreement_score": _SCALAR,
-    "settlement_source": _SCALAR, "station_id": _SCALAR, "station_cli": _SCALAR,
+    "settlement_source": _SCALAR, "settlement_authority": _SETTLEMENT_AUTHORITY_V1,
+    "forecast_driver": _SCALAR, "station_id": _SCALAR, "station_cli": _SCALAR,
     "station_mapping": _SCALAR, "station_resolution": _STATION_RESOLUTION_V1,
     "forecast": _FORECAST_V1, "sources": [_WEATHER_SOURCE_V1],
     "gaps": {"nws_open_meteo_gap": _SCALAR}, "source_signal": _WEATHER_SOURCE_SIGNAL_V1,

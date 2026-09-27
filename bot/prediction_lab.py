@@ -1101,7 +1101,10 @@ class PredictionLab:
             or artifact.get("as_of")
             or artifact.get("observed_at")
         )
-        settlement_source = weather_data.get("settlement_source") or "nws"
+        settlement_authority = weather_data.get("settlement_authority")
+        settlement_source = (settlement_authority.get("source") if isinstance(settlement_authority, dict)
+                             else None) or "unknown"
+        forecast_driver = weather_data.get("forecast_driver")
         source_agreement = weather_data.get("agreement", weather_signal.get("source_agreement_score"))
         weather_confidence = weather_signal.get("confidence")
         trace = artifact.get("strategy_trace") if isinstance(artifact.get("strategy_trace"), dict) else {}
@@ -1142,6 +1145,8 @@ class PredictionLab:
             "weather_confidence_score": evidence.get("weather_confidence_score"),
             "source_agreement_score": source_agreement,
             "settlement_source": settlement_source,
+            "settlement_authority": settlement_authority,
+            "forecast_driver": forecast_driver,
             "station_id": station_resolution.get("station_id") or weather_data.get("station_id") or weather_signal.get("station_id"),
             "station_cli": station_resolution.get("station_cli") or weather_data.get("station_cli") or weather_signal.get("station_cli"),
             "station_mapping": evidence.get("weather_station_mapping"),
@@ -1290,32 +1295,42 @@ class PredictionLab:
         individual_highs = weather_data.get("individual_highs") if isinstance(weather_data.get("individual_highs"), dict) else {}
         individual_lows = weather_data.get("individual_lows") if isinstance(weather_data.get("individual_lows"), dict) else {}
         individual_currents = weather_data.get("individual_currents") if isinstance(weather_data.get("individual_currents"), dict) else {}
-        settlement_name = str(settlement_source or "").lower()
+        forecast_name = str(weather_data.get("forecast_driver") or "").lower()
         source_keys = [source_name.lower() for source_name in source_names]
-        settlement_source_drives_forecast = bool(settlement_name and settlement_name in source_keys)
-        equal_source_weight = round(1.0 / len(source_names), 6) if source_names else None
+        forecast_driver_present = bool(forecast_name and forecast_name in source_keys)
+        recorded_primary = next((name for name, detail in detail_by_name.items()
+                                 if name and detail.get("weight") == 1.0), None)
+        equal_source_weight = (round(1.0 / len(source_names), 6)
+                               if source_names and forecast_name == "equal_source_average" else None)
         sources: list[dict[str, Any]] = []
         for source_name in source_names:
             key = source_name.lower()
             detail = detail_by_name.get(key, {})
-            role = detail.get("role") or ("settlement_primary" if key == settlement_name else "cross_validation")
+            role = detail.get("role") or ("forecast_primary" if key == (forecast_name if forecast_driver_present else recorded_primary)
+                                           else "cross_validation")
+            if role == "settlement_primary" or (
+                role == "cross_validation"
+                and key == (forecast_name if forecast_driver_present else recorded_primary)
+            ):
+                role = "forecast_primary"  # A recorded forecast primary is not settlement authority.
             weight = detail.get("weight") if "weight" in detail else None
             contribution = detail.get("contribution") if "contribution" in detail else None
             weight_note = detail.get("weight_note")
             if weight is None and contribution is None:
-                if settlement_source_drives_forecast:
-                    if key == settlement_name:
+                if forecast_driver_present or recorded_primary:
+                    if key == (forecast_name if forecast_driver_present else recorded_primary):
                         weight = 1.0
                         contribution = 1.0
-                        weight_note = weight_note or "settlement_source_drives_forecast"
+                        weight_note = weight_note or "forecast_driver_policy"
                     else:
                         weight = 0.0
                         contribution = 0.0
-                        weight_note = weight_note or "validator_only_settlement_source_drives_forecast"
+                        weight_note = weight_note or ("validator_only_forecast_driver_policy" if forecast_driver_present
+                                                      else "validator_only_recorded_forecast_primary")
                 elif equal_source_weight is not None:
                     weight = equal_source_weight
                     contribution = equal_source_weight
-                    weight_note = weight_note or "equal_weight_average_no_settlement_source"
+                    weight_note = weight_note or "equal_weight_average_no_forecast_driver"
                 else:
                     weight_note = weight_note or "not_recorded_by_weather_engine"
             elif not weight_note:
@@ -1351,6 +1366,8 @@ class PredictionLab:
                 "station_cli": detail.get("station_cli") or station_resolution.get("station_cli"),
                 "station_mapping": detail.get("station_mapping") or station_resolution.get("mapping"),
                 "settlement_source": settlement_source,
+                "settlement_authority": weather_data.get("settlement_authority"),
+                "forecast_driver": weather_data.get("forecast_driver"),
                 "source_agreement_score": source_agreement,
                 "confidence": detail.get("confidence"),
                 "validation_reason": detail.get("validation_reason"),

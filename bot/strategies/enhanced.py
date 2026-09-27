@@ -941,6 +941,7 @@ class EnhancedStrategyEngine:
                 market.yes_price,
                 getattr(market, 'category', ''),
                 market_id=getattr(market, 'id', ''),
+                market_metadata=getattr(market, 'metadata', None),
             )
             if result:
                 return result

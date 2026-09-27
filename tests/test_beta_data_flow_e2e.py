@@ -82,7 +82,7 @@ class _WeatherBoundary:
         self.future_source_ids = set(future_source_ids)
         self.calls = []
 
-    def score_temperature_market_with_context(self, question, yes_price, *, category):
+    def score_temperature_market_with_context(self, question, yes_price, *, category, market_metadata=None):
         market = self.markets[category]
         self.calls.append(category)
         target = market.metadata["market_date"]
