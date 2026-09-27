@@ -1,0 +1,16 @@
+id: shadow_fee_aware_loss_guard
+type: fee_aware_loss_guard
+source_wallet: stable_paper
+source_role: baseline
+input_source: shared_candidate_dataset
+input_market_source: shared_market
+enabled: false
+description: >-
+  Paper-only source-independent loss guard: keep existing stable BUY_YES/BUY_NO
+  only when the selected-side executable ask and fee-aware net edge meet their
+  configured floors. Quotes and recorded fill estimates are not actual fills;
+  this lane never creates a buy, changes sizing, or mutates accounting.
+parameters:
+  min_executable_ask: 0.20
+  fee_rate: 0.07
+  min_fee_aware_net_edge: 0.03

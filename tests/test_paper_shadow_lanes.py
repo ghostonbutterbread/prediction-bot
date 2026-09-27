@@ -246,6 +246,238 @@ parameters:
         self.assertAlmostEqual(no_side["payout_aware"]["side_probability"], 0.67)
         self.assertAlmostEqual(no_side["payout_aware"]["fee_aware_net_edge"], 0.05124)
 
+    def _loss_guard_row(self, tmpdir, *, action="BUY_YES", signal=None, parameters=None, stable_fields=None):
+        candidate_id = "loss-guard-candidate"
+        dataset_path = Path(tmpdir) / "shared_candidates.jsonl"
+        stable = {
+            "shared_candidate_id": candidate_id,
+            "wallet_id": "stable_paper",
+            "run_id": "stable-run",
+            "candidate_dataset_path": str(dataset_path),
+            "decision_role": "paper_shadow",
+            "decision_id": "stable-loss-guard",
+            "market_id": "KX-LOSS-GUARD",
+            "observed_at": "2026-05-13T12:00:01+00:00",
+            "action": action,
+            "reason_code": "approved" if action != "SKIP" else "stable_skip",
+            "requested_position_size_usd": 10.0,
+            "approved_position_size_usd": 10.0 if action != "SKIP" else 0.0,
+        }
+        stable.update(stable_fields or {})
+        config = {"paper_shadow_lanes": {
+            "enabled": True,
+            "definitions_dir": str(self._production_lanes_dir()),
+            "enabled_lanes": ["shadow_fee_aware_loss_guard"],
+            "shadow_fee_aware_loss_guard": {"parameters": parameters or {}},
+        }}
+        given_signal = signal or {}
+        book = given_signal.get("order_book_snapshot")
+        if book is None:
+            book = {
+                "source": "book", "market_id": stable["market_id"],
+                "observed_at": "2026-05-13T12:00:00+00:00",
+                "data": {key: given_signal[key] for key in ("best_yes_ask", "best_no_ask") if key in given_signal},
+            }
+        result = write_paper_shadow_lane_decisions(
+            config=config,
+            candidate_dataset_path=dataset_path,
+            inputs_by_shared_candidate_id={candidate_id: {"stable_paper": SimpleNamespace(
+                signal={"market_id": "KX-LOSS-GUARD", "confidence": 0.8, **given_signal},
+                shared_candidate={"candidate_id": candidate_id, "market_id": "KX-LOSS-GUARD",
+                                  "observed_at": stable["observed_at"],
+                                  "prices": {"order_book_snapshot": book}},
+            )}},
+            wallet_decision_rows={"stable_paper": [stable], "beta_paper": []},
+            wallet_runs={"stable_paper": SimpleNamespace(session_id="stable-run")},
+            ledger_root=tmpdir,
+        )
+        self.assertEqual(result.lane_ids, ("shadow_fee_aware_loss_guard",))
+        return load_jsonl(Path(result.decision_path))[0]
+
+    def test_loss_guard_rejects_reference_envelope_even_with_flattened_ask(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            row = self._loss_guard_row(tmpdir, signal={
+                "model_probability": 0.90, "best_yes_ask": 0.40,
+                "order_book_snapshot": {
+                    "source": "reference", "market_id": "KX-LOSS-GUARD",
+                    "observed_at": "2026-05-13T12:00:00+00:00",
+                    "data": {"best_yes_ask": 0.40},
+                },
+            })
+        self.assertEqual(row["action"], "SKIP")
+        self.assertEqual(row["reason_code"], "executable_side_ask_unavailable")
+        self.assertIsNone(row.get("entry_price"))
+
+    def test_loss_guard_rejects_book_without_matching_market_identity(self):
+        for book_market in (None, "OTHER-MARKET"):
+            with self.subTest(book_market=book_market), tempfile.TemporaryDirectory() as tmpdir:
+                row = self._loss_guard_row(tmpdir, signal={
+                    "model_probability": 0.90, "best_yes_ask": 0.40,
+                    "order_book_snapshot": {
+                        "source": "book", "market_id": book_market,
+                        "observed_at": "2026-05-13T12:00:00+00:00",
+                        "data": {"best_yes_ask": 0.40},
+                    },
+                })
+                self.assertEqual(row["action"], "SKIP")
+                self.assertEqual(row["reason_code"], "executable_side_ask_unavailable")
+
+    def test_loss_guard_rejects_book_observed_after_candidate(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            row = self._loss_guard_row(tmpdir, signal={
+                "model_probability": 0.90, "best_yes_ask": 0.40,
+                "order_book_snapshot": {
+                    "source": "book", "market_id": "KX-LOSS-GUARD",
+                    "observed_at": "2026-05-13T12:00:02+00:00",
+                    "data": {"best_yes_ask": 0.40},
+                },
+            })
+        self.assertEqual(row["action"], "SKIP")
+        self.assertEqual(row["reason_code"], "executable_side_ask_unavailable")
+
+    def test_loss_guard_uses_conservative_recorded_estimate_for_edge_and_emitted_price(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            row = self._loss_guard_row(tmpdir, signal={
+                "model_probability": 0.55,
+                "best_yes_ask": 0.20,
+                "estimated_fill_price": 0.52,
+                "market_price": 0.10,
+            })
+        self.assertEqual(row["action"], "SKIP")
+        self.assertEqual(row["reason_code"], "fee_aware_edge_below_floor")
+        payout = row["provenance"]["payout_aware"]
+        self.assertEqual(payout["entry_price"], 0.52)
+        self.assertEqual(payout["selected_side_ask"], 0.20)
+        self.assertEqual(payout["price_basis"], "recorded_fill_estimate")
+
+    def test_loss_guard_keeps_buy_with_higher_recorded_estimate_at_same_economic_price(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            row = self._loss_guard_row(tmpdir, signal={
+                "model_probability": 0.70,
+                "best_yes_ask": 0.20,
+                "execution_snapshot": {"estimated_fill_price": 0.60},
+            })
+        self.assertEqual(row["action"], "BUY_YES")
+        self.assertEqual(row["entry_price"], 0.60)
+        self.assertEqual(row["price"], 0.60)
+        self.assertEqual(row["provenance"]["payout_aware"]["entry_price"], 0.60)
+        self.assertEqual(row["provenance"]["payout_aware"]["selected_side_ask"], 0.20)
+        self.assertEqual(row["provenance"]["payout_aware"]["price_basis"], "recorded_fill_estimate")
+
+    def test_loss_guard_uses_estimate_recorded_in_stable_decision(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            row = self._loss_guard_row(tmpdir, signal={
+                "model_probability": 0.55, "best_yes_ask": 0.20,
+            }, stable_fields={"estimated_fill_price": 0.52})
+        self.assertEqual(row["reason_code"], "fee_aware_edge_below_floor")
+        self.assertEqual(row["provenance"]["payout_aware"]["entry_price"], 0.52)
+
+    def test_loss_guard_uses_most_conservative_recorded_estimate(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            row = self._loss_guard_row(tmpdir, signal={
+                "model_probability": 0.55, "best_yes_ask": 0.20,
+                "estimated_fill_price": 0.21,
+            }, stable_fields={"estimated_fill_price": 0.52})
+        self.assertEqual(row["reason_code"], "fee_aware_edge_below_floor")
+        self.assertEqual(row["provenance"]["payout_aware"]["entry_price"], 0.52)
+
+    def test_loss_guard_retains_yes_and_no_with_quote_basis_without_router(self):
+        for action, probability, quote_key in (
+            ("BUY_YES", 0.67, "best_yes_ask"),
+            ("BUY_NO", 0.33, "best_no_ask"),
+        ):
+            with self.subTest(action=action), tempfile.TemporaryDirectory() as tmpdir:
+                row = self._loss_guard_row(tmpdir, action=action, signal={
+                    "model_probability": probability,
+                    quote_key: 0.60,
+                    "estimated_fill_price": 0.55,
+                    "source_router": {"recommended_action": "SKIP"},
+                })
+            self.assertEqual(row["action"], action)
+            self.assertEqual(row["reason_code"], "approved_fee_aware_edge_floor")
+            self.assertEqual(row["entry_price"], 0.60)
+            self.assertEqual(row["price"], 0.60)
+            self.assertEqual(row["approved_position_size_usd"], 10.0)
+            self.assertAlmostEqual(row["provenance"]["payout_aware"]["fee_aware_net_edge"], 0.05124)
+            self.assertEqual(row["provenance"]["payout_aware"]["price_basis"], "selected_side_ask_quote")
+            self.assertTrue(row["provenance"]["payout_aware"]["quote_not_fill"])
+            self.assertNotIn("source_router", row["provenance"])
+            self.assertFalse(row["accounting_ref"]["mutates_accounting"])
+            self.assertFalse(row["accounting_ref"]["places_live_orders"])
+
+    def test_loss_guard_resolution_keeps_quote_proxy_out_of_fill_pnl(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            row = self._loss_guard_row(tmpdir, signal={"model_probability": 0.90, "best_yes_ask": 0.40})
+        self.assertEqual(row["action"], "BUY_YES")
+        resolved = build_paper_shadow_lane_resolution_rows(
+            lane_rows=[row],
+            resolution_rows=[{"market_id": "KX-LOSS-GUARD", "resolution": {
+                "outcome": "YES", "settlement_ts": "2026-05-14T12:00:00+00:00"}}],
+        )[0]
+        self.assertEqual(resolved["resolution"]["outcome"], "YES")
+        self.assertEqual(resolved["entry_price"], 0.40)
+        self.assertIsNone(resolved["fill_price"])
+        self.assertIsNone(resolved["pnl"])
+        self.assertEqual(resolved["blocker"], "quote_not_fill")
+
+    def test_loss_guard_keeps_stable_skip_even_with_positive_signal(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            row = self._loss_guard_row(tmpdir, action="SKIP", signal={
+                "model_probability": 0.9, "best_yes_ask": 0.3,
+            })
+        self.assertEqual(row["action"], "SKIP")
+        self.assertEqual(row["reason_code"], "baseline_skip")
+        self.assertEqual(row["approved_position_size_usd"], 0.0)
+        self.assertIsNone(row.get("entry_price"))
+
+    def test_loss_guard_requires_selected_side_ask_not_reference_price(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            row = self._loss_guard_row(tmpdir, action="BUY_NO", signal={
+                "model_probability": 0.10, "best_yes_ask": 0.25,
+                "no_market_price": 0.50, "market_price": 0.50,
+                "estimated_fill_price": 0.60,
+            })
+        self.assertEqual(row["action"], "SKIP")
+        self.assertEqual(row["reason_code"], "executable_side_ask_unavailable")
+        self.assertIsNone(row.get("entry_price"))
+
+    def test_loss_guard_ask_boundary_and_configurable_floor(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rejected = self._loss_guard_row(tmpdir, signal={
+                "model_probability": 0.8, "best_yes_ask": 0.20,
+            }, parameters={"min_executable_ask": 0.21})
+        self.assertEqual(rejected["reason_code"], "executable_side_ask_below_floor")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            accepted = self._loss_guard_row(tmpdir, signal={
+                "model_probability": 0.8, "best_yes_ask": 0.20,
+            })
+        self.assertEqual(accepted["action"], "BUY_YES")
+        self.assertEqual(accepted["entry_price"], 0.20)
+        self.assertEqual(accepted["provenance"]["payout_aware"]["min_executable_ask"], 0.20)
+
+    def test_loss_guard_net_edge_floor_is_configurable(self):
+        signal = {"model_probability": 0.67, "best_yes_ask": 0.60}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            accepted = self._loss_guard_row(tmpdir, signal=signal)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rejected = self._loss_guard_row(tmpdir, signal=signal, parameters={
+                "min_fee_aware_net_edge": 0.06,
+            })
+        self.assertEqual(accepted["action"], "BUY_YES")
+        self.assertEqual(rejected["action"], "SKIP")
+        self.assertEqual(rejected["reason_code"], "fee_aware_edge_below_floor")
+        self.assertEqual(rejected["approved_position_size_usd"], 0.0)
+
+    def test_loss_guard_is_disabled_by_default_in_production_definition(self):
+        from bot.paper_shadow_lanes import _lane_definitions
+
+        definitions = _lane_definitions({"definitions_dir": str(self._production_lanes_dir())})
+        self.assertNotIn("shadow_fee_aware_loss_guard", [lane.lane_id for lane in definitions])
+        definition = yaml.safe_load((self._production_lanes_dir() / "shadow_fee_aware_loss_guard.yaml").read_text())
+        self.assertFalse(definition["enabled"])
+        self.assertEqual(definition["parameters"]["min_executable_ask"], 0.20)
+        self.assertEqual(definition["parameters"]["min_fee_aware_net_edge"], 0.03)
+
     def _production_lanes_dir(self) -> Path:
         return Path(__file__).resolve().parents[1] / "lanes"
 
