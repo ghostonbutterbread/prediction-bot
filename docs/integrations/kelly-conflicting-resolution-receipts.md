@@ -1,6 +1,6 @@
 # Synthetic Kelly conflicting-resolution receipts — integration dossier
 
-- **Status:** seventh independent review blocked beta integration: candidate-first lookup omitted a contradictory viable same-run/market legacy receipt. Test-first union of strong authority buckets passes focused/full suites; fresh review and beta-first compatibility pending; no merge/push/runtime activation
+- **Status:** seventh-review correction independently accepted for beta-first compatibility preflight at implementation `1aa825fe70eebdf63adae80a6ec80eaa02b35c54`; focused/full isolated suites pass. Beta compatibility, merge/push and runtime activation are separate gates and remain pending
 - **Owner:** Hermes, Kanban `t_5fc5d6e8` (parent audit `t_500d82fb`)
 - **Branch / owning ref:** `fix/kelly-conflicting-resolution-receipts`
 - **Base commit:** `02c5580b61fa4c30a54c4f80884cac329d21af0c`
@@ -51,7 +51,8 @@ Seventh-review correction: group the union of candidate and run–market receipt
 - Sixth-review RED/GREEN: a producer→Kelly regression for nested-only candidate M1, alone and with M2 in either order, failed on the two M1+M2 cases before correction. Indexing both root and nested candidate IDs made all cases pass while preserving existing identity checks. Worktree-first focused `tests.test_beta_handoff_identity_audit tests.test_collector_lane_replay_kelly tests.test_paper_shadow_lanes tests.test_beta_paper_lifecycle_audit -q` **125 OK (1 skipped)**; `git diff --check` passed. Full discovery `proc_6278131148ab` exited **0**, **1,243 tests OK (7 skipped), 61.586s**, receipt `/home/ryushe/.hermes/cache/scratch/prediction-kelly-nested-candidate-full-20260927.log`.
 - Seventh independent read-only review `deleg_06fbb082` **blocked beta-first preflight** at clean tip `6b6f2e9ae75d6ec3dadefdb88147e393c86559a2`. A nested exact M1/YES receipt with candidate ID and a flat M1/NO receipt with the same run/settlement but no candidate each independently settled (+$15/−$10). Together, candidate-first lookup omitted the flat run–market authority and booked unsupported +$15 in either order. Previous nested M1 vs wrong-market M2 fix, candidate alias conflict, and legacy single-receipt cases held. Reviewer reran focused **125 OK (1 skipped)**, inspected full **1,243/7**, made no edits/runtime changes.
 - Seventh-review RED/GREEN: exact and legacy receipts each remained valid alone, but opposite outcomes together falsely emitted +$15 before correction. Candidate ∪ run–market grouping makes both orders ambiguous and leaves $10 reserved; agreeing legacy/exact receipts settle once and an explicit wrong-candidate receipt cannot displace valid authority. Worktree-first focused `tests.test_beta_handoff_identity_audit tests.test_collector_lane_replay_kelly tests.test_paper_shadow_lanes tests.test_beta_paper_lifecycle_audit -q` **126 OK (1 skipped)**; `git diff --check` passed. Full discovery `proc_0f676336b244` exited **0**, **1,244 tests OK (7 skipped), 316.817s**, receipt `/home/ryushe/.hermes/cache/scratch/prediction-kelly-union-authorities-full-20260927.log`.
-- Fresh independent read-only review and beta-first compatibility against then-current beta are required before integration.
+- Eighth independent read-only review `deleg_76311072` **ACCEPTED** exact clean tip `182537337dc09abb6f2d4bf849f5ab52e1ba701f` for beta-first preflight. Opposing viable exact/flat authorities remain pending with $10 reserved in both orders; equivalent receipts settle once; wrong-market and wrong-candidate neighbors cannot veto M1; selected match-key provenance, valid clock ambiguity, BUY_NO, VOID, legacy no-status cases held. Reviewer reran focused **126 OK (1 skipped)**, inspected full **1,244/7** receipt and diff; no edits, raw or runtime action. This is not integration or settlement-source authority.
+- Beta-first compatibility against current local beta is required before integration.
 - No raw evidence, service, live balance/order, config, or runtime changes.
 
 ## Blockers and deferred work
@@ -63,7 +64,7 @@ Seventh-review correction: group the union of candidate and run–market receipt
 
 - **Branch:** `fix/kelly-conflicting-resolution-receipts` from `02c5580b61fa4c30a54c4f80884cac329d21af0c` → `beta`.
 - **Checkpoint:** latest committed implementation `1aa825fe70eebdf63adae80a6ec80eaa02b35c54`; seventh-review code/tests passed full discovery.
-- **Exact resume:** obtain a fresh independent read-only review on the clean exact tip. Beta-first compatibility against current local beta `80b715e46f88aa11c978a5edd5dcb1b0c31f06a0` follows only after acceptance. Do not merge before review. No deployment from this code task.
+- **Exact resume:** run a noncommitting beta-first merge preflight from clean local beta `80b715e46f88aa11c978a5edd5dcb1b0c31f06a0`, excluding this branch-only dossier, then focused/full compatibility and staged diff checks. Abort cleanly after preflight. Integrate locally only after it passes; do not deploy from this code task.
 - **Working-tree state at handoff:** clean after the dossier-only handoff checkpoint; no raw or runtime modifications.
 
 ## Decision gates
@@ -82,3 +83,4 @@ Seventh-review correction: group the union of candidate and run–market receipt
 - 2026-09-27 — fifth independent review blocked producer-erased assertions and wrong-market suppression. Test-first producer reconciliation focused 124 OK (1 skipped) and full 1,242 OK (7 skipped); fresh review pending. No integration decision.
 - 2026-09-27 — sixth independent review blocked nested candidate indexing and false wrong-market rejection. Test-first correction focused 125 OK (1 skipped) and full 1,243 OK (7 skipped); fresh review pending. No integration decision.
 - 2026-09-27 — seventh independent review blocked candidate-first suppression of opposing flat run–market authority. Test-first union correction focused 126 OK (1 skipped) and full 1,244 OK (7 skipped); fresh review pending. No integration decision.
+- 2026-09-27 — eighth independent review accepted `182537337dc09abb6f2d4bf849f5ab52e1ba701f` for beta-first preflight; focused 126 OK (1 skipped), prior full 1,244 OK (7 skipped). No integration/activation decision.
