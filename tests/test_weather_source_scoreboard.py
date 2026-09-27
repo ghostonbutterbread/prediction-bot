@@ -68,7 +68,9 @@ def weather_row(
         },
     }
     if actual_temp is not None:
-        row["actual_temp_used"] = actual_temp
+        # Fixture actuals are separately recorded labels, not the forecast's
+        # decision-time `actual_temp_used` alias.
+        row["actual_temp"] = actual_temp
     return row
 
 
@@ -166,6 +168,92 @@ class WeatherSourceScoreboardTests(unittest.TestCase):
         )
         self.assertEqual(report["summary"]["observations_scored"], 2)
 
+    def test_forecast_derived_actual_fields_remain_coverage_only(self):
+        row = weather_row(actual_temp=None, sources=[{"source_name": "nws", "forecast_high": 72.0}])
+        live = row["decision_artifact"]["strategy_trace"]["raw_signals"]["live"]["data"]
+        live["actual_temp_used"] = 72.0
+        row["actual_temp_used"] = 72.0
+        row["weather"] = {"actual_temp_used": 72.0}
+        row["weather_source_snapshot"] = {
+            "forecast": {"actual_temp_used": 72.0, "actual_temp": 72.0, "resolved_temp": 72.0},
+        }
+        row["observed_at"] = "2026-05-14T12:00:00+00:00"
+        row["resolved_at"] = "2026-05-16T13:00:00+00:00"
+        row["best_yes_ask"] = 0.4
+
+        observation = extract_source_forecast_observations(row)[0]
+        self.assertEqual(observation.forecast_temp_f, 72.0)
+        self.assertIsNone(observation.actual_temp_f)
+        scoreboard = build_source_scoreboard([row])
+        self.assertEqual(scoreboard["summary"]["observations_extracted"], 1)
+        self.assertEqual(scoreboard["summary"]["observations_missing_actual"], 1)
+        self.assertEqual(scoreboard["summary"]["observations_scored"], 0)
+        self.assertEqual(scoreboard["slices"][0]["sample_count"], 0)
+        self.assertIsNone(scoreboard["slices"][0]["mae"])
+
+        ledger = build_source_outcome_ledger_rows([row])[0]
+        self.assertEqual(ledger["forecast_temp_f"], 72.0)
+        self.assertEqual(ledger["predicted_outcome"], "YES")
+        self.assertIsNone(ledger["actual_temp_f"])
+        self.assertIsNone(ledger["actual_outcome"])
+        self.assertIsNone(ledger["direction_correct"])
+        self.assertIsNone(ledger["absolute_error_f"])
+        self.assertFalse(ledger["eligible_for_reliability"])
+        self.assertIn("missing_actual_temp", ledger["exclusion_reason"])
+        self.assertIn("missing_actual_outcome", ledger["exclusion_reason"])
+
+        unbound = build_source_edge_evaluation_rows([ledger])[0]
+        self.assertFalse(unbound["eligible_for_edge_validation"])
+        self.assertIsNone(unbound["official_outcome"])
+        finalized = build_source_edge_evaluation_rows(
+            [ledger], outcome_lookup={row["market_id"]: {"official_outcome": "YES", "outcome_source": "kalshi_result"}}
+        )[0]
+        self.assertTrue(finalized["eligible_for_edge_validation"])
+        self.assertEqual(finalized["source_implied_side"], "YES")
+        self.assertEqual(finalized["binary_edge_realized"], 0.6)
+
+    def test_independent_lookup_overrides_forecast_alias_without_changing_direction_controls(self):
+        row = weather_row(actual_temp=None, sources=[{"source_name": "nws", "forecast_high": 72.0}])
+        row["actual_temp_used"] = 72.0
+        row["weather_source_snapshot"] = {"forecast": {"actual_temp": 72.0}}
+        row["observed_at"] = "2026-05-14T12:00:00+00:00"
+        row["resolved_at"] = "2026-05-16T13:00:00+00:00"
+        lookup = {row["market_id"]: {"actual_temp": 68.0}}
+
+        scoreboard = build_source_scoreboard([row], actual_lookup=lookup)
+        self.assertEqual(scoreboard["summary"]["observations_scored"], 1)
+        self.assertEqual(scoreboard["slices"][0]["mae"], 4.0)
+        self.assertEqual(scoreboard["slices"][0]["threshold_direction_accuracy"], 0.0)
+        ledger = build_source_outcome_ledger_rows([row], actual_lookup=lookup)[0]
+        self.assertEqual(ledger["actual_temp_f"], 68.0)
+        self.assertEqual(ledger["actual_outcome"], "NO")
+        self.assertFalse(ledger["direction_correct"])
+        self.assertTrue(ledger["eligible_for_reliability"])
+
+        row["decision_artifact"]["strategy_trace"]["raw_signals"]["live"]["data"]["date_validation"] = {
+            "ok": False, "reason": "mismatch"
+        }
+        blocked = build_source_outcome_ledger_rows([row], actual_lookup=lookup)[0]
+        self.assertIsNone(blocked["actual_temp_f"])
+        self.assertIn("date_validation_failed:mismatch", blocked["exclusion_reason"])
+
+    def test_resolution_and_observed_fields_remain_actuals_without_forecast_alias(self):
+        row = weather_row(actual_temp=None, sources=[{"source_name": "nws", "forecast_high": 72.0}])
+        row["actual_temp_used"] = 72.0
+        row["resolution"] = {"resolved_temp": 69.0}
+        self.assertEqual(extract_source_forecast_observations(row)[0].actual_temp_f, 69.0)
+        row.pop("resolution")
+        row["observed_temp"] = 67.0
+        self.assertEqual(extract_source_forecast_observations(row)[0].actual_temp_f, 67.0)
+
+    def test_market_outcome_alone_does_not_impute_temperature(self):
+        row = weather_row(actual_temp=None, sources=[{"source_name": "nws", "forecast_high": 72.0}])
+        row["resolution"] = {"outcome": "YES", "resolved_at": "2026-05-16T13:00:00+00:00"}
+        ledger = build_source_outcome_ledger_rows([row])[0]
+        self.assertIsNone(ledger["actual_temp_f"])
+        self.assertIsNone(ledger["actual_outcome"])
+        self.assertFalse(ledger["eligible_for_reliability"])
+
     def test_string_only_sources_are_counted_as_missing_forecast_observations(self):
         row = weather_row(actual_temp=73.0, sources=[])
         row["decision_artifact"]["strategy_trace"]["raw_signals"]["live"]["data"].pop("source_details")
@@ -226,7 +314,9 @@ class WeatherSourceScoreboardTests(unittest.TestCase):
 
         report = build_source_scoreboard([row])
 
-        self.assertEqual(report["summary"]["observations_scored"], 1)
+        self.assertEqual(report["summary"]["observations_scored"], 0)
+        self.assertEqual(report["summary"]["observations_missing_actual"], 1)
+        self.assertEqual(report["slices"][0]["sample_count"], 0)
         self.assertEqual(report["slices"][0]["city_id"], "new_york_ny")
 
     def test_report_generation_builds_ranked_slices_leaderboards_and_notes(self):

@@ -199,7 +199,11 @@ class SourceReliabilityReplayEvidenceTests(unittest.TestCase):
             ledger_rows = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines()]
             self.assertEqual(len(ledger_rows), 1)
             self.assertEqual(ledger_rows[0]["source_id"], "nws")
-            self.assertTrue(ledger_rows[0]["eligible_for_reliability"])
+            self.assertEqual(ledger_rows[0]["forecast_temp_f"], 72.0)
+            self.assertIsNone(ledger_rows[0]["actual_temp_f"])
+            self.assertIsNone(ledger_rows[0]["actual_outcome"])
+            self.assertFalse(ledger_rows[0]["eligible_for_reliability"])
+            self.assertIn("missing_actual_temp", ledger_rows[0]["exclusion_reason"])
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
             self.assertEqual(summary["ledger_rows"], 1)
             self.assertEqual(summary["ledger_output"], str(ledger_path))

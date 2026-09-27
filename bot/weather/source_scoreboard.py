@@ -807,29 +807,25 @@ def _date_validation_problem(row: dict[str, Any], market: MarketContext) -> str 
 
 
 def _actual_temp_for(row: dict[str, Any], market: MarketContext, actual_lookup: dict[Any, Any]) -> float | None:
+    """Ignore known forecast-derived aliases when extracting an actual."""
     lookup_value = _actual_temp_from_lookup(market, actual_lookup)
     if lookup_value is not None:
         return lookup_value
 
-    weather_snapshot = _extract_weather_snapshot(row)
     live_data = _live_signal_data(row)
-    forecast = _dict_at(weather_snapshot, "forecast")
     weather = _dict_at(row, "weather")
     resolution = _dict_at(row, "resolution")
+    # `actual_temp_used` is the forecast selected for the decision, including
+    # when copied into row/weather/live-data. A forecast snapshot's actual-like
+    # fields likewise do not independently establish a resolved observation.
     candidates = [
-        row.get("actual_temp_used"),
         row.get("actual_temp"),
         row.get("resolved_temp"),
         row.get("observed_temp"),
         row.get("settlement_temp"),
         row.get("result_temp"),
-        weather.get("actual_temp_used"),
         weather.get("actual_temp"),
         weather.get("resolved_temp"),
-        forecast.get("actual_temp_used"),
-        forecast.get("actual_temp"),
-        forecast.get("resolved_temp"),
-        live_data.get("actual_temp_used"),
         live_data.get("actual_temp"),
         live_data.get("resolved_temp"),
         resolution.get("actual_temp"),

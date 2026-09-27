@@ -428,6 +428,7 @@ def shared_candidate_market_from_row(row: Any) -> SharedCandidateMarketResult:
         "series_ticker": shared_market.get("series_ticker"),
         "event_ticker": shared_market.get("event_ticker") or source_row.get("event_ticker"),
         "market_route": route or None,
+        **{key: shared_market[key] for key in ("rules_primary", "rules_secondary") if key in shared_market},
         "shared_market": provenance,
     }
     metadata = {key: value for key, value in metadata.items() if value is not None}
@@ -795,6 +796,7 @@ def _build_market_summary(market: Any, metadata: dict[str, Any]) -> dict[str, An
         "category": getattr(market, "category", None),
         "event_ticker": metadata.get("event_ticker"),
         "series_ticker": metadata.get("series_ticker"),
+        **{key: metadata[key] for key in ("rules_primary", "rules_secondary") if key in metadata},
         "volume": getattr(market, "volume", None),
         "closes_at": getattr(market, "closes_at", None),
     }
