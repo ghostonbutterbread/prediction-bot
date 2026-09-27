@@ -153,6 +153,18 @@ class WeatherSettlementAuthorityTests(unittest.TestCase):
             "rules_primary": "NWS forecasts are only indicative. " + TWC_RULE,
         })["source"], "the_weather_company")
 
+    def test_nonbinding_forecast_attribution_is_not_settlement_authority(self):
+        from bot.feeds.weather_pro import _settlement_authority
+
+        indicative = "Forecasts according to NWS are indicative only"
+        for text, expected_source in (
+            (indicative + ".", "unknown"),
+            (indicative + "; the final minimum temperature is reported by The Weather Company.",
+             "the_weather_company"),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(_settlement_authority({"rules_primary": text})["source"], expected_source)
+
     def test_negated_provider_attribution_does_not_claim_settlement_authority(self):
         from bot.feeds.weather_pro import _settlement_authority
 

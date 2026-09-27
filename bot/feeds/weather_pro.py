@@ -142,6 +142,10 @@ def _settlement_authority(metadata: dict | None) -> dict:
             text, re.I,
         ):
             prefix = text[:attribution.start()]
+            # Attributing a forecast to a provider does not establish who
+            # reports the final measured temperature for settlement.
+            if re.search(r"\b(?:forecasts?|predictions?)\s*,?\s*$", prefix, re.I):
+                continue
             if re.search(
                 r"\b(?:not|never)\s+(?:(?:be|been|being)\s+)?"
                 r"(?:(?:determined|resolved|settled|measured)\s+)?$",
