@@ -7,8 +7,8 @@
 - **Base commit:** `9e7f83e4f4d507a56413ddf91d546fd1f78c8250` (clean local `beta`)
 - **Intended integration target:** local `beta`, not `main` or `origin/beta`
 - **Last updated:** 2026-09-27
-- **Latest immutable recovery checkpoint:** pending implementation commit
-- **Feature implementation commit(s):** pending
+- **Latest immutable recovery checkpoint:** `eea0754c8b5e6da6eacf7f456406323d0c967224`
+- **Feature implementation commit(s):** `eea0754c8b5e6da6eacf7f456406323d0c967224`
 - **Inspiration:** `bot/feeds/weather_pro.py` assigns `actual_temp_used` from selected forecast high/low; `bot/feeds/live_data.py` uses the same label for a forecast; `docs/architecture/weather_source_scoreboard_evidence_20260516.md` documents misleading perfect-match slices.
 
 ## Intent and implemented contract
@@ -35,9 +35,9 @@ No forecast producer, raw ledger, wallet, service, runtime, or configuration cha
 ## Interruption / resume handoff and decision gates
 
 - **Owning feature branch/ref:** `fix/legacy-scoreboard-actual-provenance`
-- **Latest immutable recovery checkpoint / implementation commits:** pending commit; replace with verified reachable SHA after code commit.
-- **Exact resume point:** inspect diff, commit scoped implementation and this dossier, record code SHA, verify clean tip; hand to parent for independent review, not beta merge.
-- **Working-tree state at handoff:** in progress; final state to be clean.
+- **Latest immutable recovery checkpoint / implementation commits:** `eea0754c8b5e6da6eacf7f456406323d0c967224` (reachable from this branch; current tip includes this later dossier-only handoff commit).
+- **Exact resume point:** parent independently reviews `beta..fix/legacy-scoreboard-actual-provenance`, performs beta compatibility checks, and decides integration; do not beta merge from this subagent.
+- **Working-tree state at handoff:** clean after dossier-only handoff commit.
 - **Integration gate:** exact feature diff + independent review and parent beta compatibility checks.
 - **Activation / cohort gate:** no activation in this task; independent actuals required before promoting rankings.
 - **Promotion gate:** fresh independently resolved forward overlap; synthetic success is not performance evidence.
@@ -45,3 +45,4 @@ No forecast producer, raw ledger, wallet, service, runtime, or configuration cha
 ## Decision record
 
 - 2026-09-27 — Chose exclusion at actual-extraction seam rather than rewriting producer values, which remain useful for decision diagnostics; no own beta merge/push/runtime activation.
+- 2026-09-27 — Implementation checkpoint `eea0754c8b5e6da6eacf7f456406323d0c967224` passed focused 32-test and full 1343-test isolated suites (7 skipped); handoff-only commit follows.
