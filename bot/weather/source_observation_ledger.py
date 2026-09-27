@@ -446,6 +446,14 @@ def _source_period_target_problem(
     low_ends_on_target = bool(period_dates["end"]) and all(
         period_day == target for period_day in period_dates["end"]
     )
+    full_day_low = (is_low and bool(period_times["start"] and period_times["end"])
+                    and all(period.date() == target and period.hour == 0 and period.minute == 0
+                            and period.second == 0 and period.microsecond == 0
+                            for period in period_times["start"])
+                    and all(period.date() == target + timedelta(days=1)
+                            and period.hour == 0 and period.minute == 0
+                            and period.second == 0 and period.microsecond == 0
+                            for period in period_times["end"]))
     for boundary, dates in period_dates.items():
         for period_day in dates:
             day_offset = (period_day - target).days
@@ -453,7 +461,7 @@ def _source_period_target_problem(
                 continue
             if boundary == "start" and day_offset == -1 and is_low and low_ends_on_target:
                 continue
-            if boundary == "end" and day_offset == 1 and not is_low:
+            if boundary == "end" and day_offset == 1 and (not is_low or full_day_low):
                 continue
             return "source_period_target_mismatch"
     return "source_period_alias_conflict" if alias_conflict else None
