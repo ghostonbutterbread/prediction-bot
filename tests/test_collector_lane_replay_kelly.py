@@ -233,16 +233,21 @@ class CollectorLaneReplayKellyTests(unittest.TestCase):
         }
         receipts = [{
             "lane_decision_id": "lane-1", "shared_candidate_id": "candidate-1", "run_id": "run-1",
-            "market_id": "KXONE", "market_status": "finalized", "resolution": {
+            "market_id": "KXONE", "market_status": "finalized",
+            "outcome_known_at": known_at, "resolution": {
                 "matched": True, "matched_by": "shared_candidate_id", "outcome": "YES",
                 "settlement_ts": "2026-07-01T13:00:00+00:00", "resolution_row_id": receipt_id,
             },
-        } for receipt_id in ("receipt-b", "receipt-a")]
+        } for receipt_id, known_at in (
+            ("receipt-b", "2026-07-01T14:00:00+00:00"),
+            ("receipt-a", "2026-07-01T13:30:00+00:00"),
+        )]
         forward = replay_recorded_collector_lane_with_kelly(decisions=[decision], resolutions=receipts)
         reversed_result = replay_recorded_collector_lane_with_kelly(decisions=[decision], resolutions=reversed(receipts))
         self.assertEqual(forward["settlement_rows"], reversed_result["settlement_rows"])
         self.assertEqual(forward["summary"]["settled_positions"], 1)
         self.assertEqual(forward["summary"]["ambiguous_resolution_decisions"], 0)
+        self.assertEqual(forward["settlement_rows"][0]["available_at"], "2026-07-01T14:00:00+00:00")
         self.assertAlmostEqual(forward["summary"]["final_balance_usd"], 110.0)
 
     def test_disagreeing_nested_settlement_time_cannot_move_wallet_chronology(self):
@@ -283,6 +288,27 @@ class CollectorLaneReplayKellyTests(unittest.TestCase):
             self.assertEqual(result["summary"]["ambiguous_resolution_decisions"], 1)
             self.assertAlmostEqual(result["summary"]["final_balance_usd"], 100.0)
 
+    def test_predecision_receipt_does_not_conflict_with_later_valid_authority(self):
+        decision = {
+            "decision_id": "d1", "market_id": "KXONE", "observed_at": "2026-07-01T12:00:00+00:00",
+            "action": "BUY_YES", "model_probability": 0.70, "yes_price": 0.50,
+        }
+        early = {
+            "decision_id": "d1", "market_id": "KXONE", "outcome": "NO",
+            "settlement_ts": "2026-07-01T11:00:00+00:00",
+        }
+        later = {
+            "decision_id": "d1", "market_id": "KXONE", "outcome": "YES",
+            "settlement_ts": "2026-07-01T13:00:00+00:00",
+        }
+        for receipts in ([early, later], [later, early]):
+            result = replay_recorded_collector_lane_with_kelly(
+                decisions=[decision], resolutions=receipts, starting_balance_usd=100.0,
+            )
+            self.assertEqual(result["summary"]["ambiguous_resolution_decisions"], 0)
+            self.assertEqual(result["summary"]["settled_positions"], 1)
+            self.assertEqual(result["summary"]["final_balance_usd"], 110.0)
+
     def test_legacy_flat_duplicate_does_not_block_matching_exact_receipt(self):
         decision = {
             "decision_id": "lane-1", "shared_candidate_id": "candidate-1", "run_id": "run-1",
@@ -305,6 +331,28 @@ class CollectorLaneReplayKellyTests(unittest.TestCase):
             self.assertEqual(result["summary"]["settled_positions"], 1)
             self.assertEqual(result["summary"]["ambiguous_resolution_decisions"], 0)
             self.assertEqual(result["settlement_rows"][0]["resolution_receipt"]["resolution_row_id"], "receipt-exact")
+
+    def test_conflicting_decision_id_aliases_cannot_settle_synthetic_pnl(self):
+        decision = {
+            "decision_id": "d1", "market_id": "KXONE", "observed_at": "2026-07-01T12:00:00+00:00",
+            "action": "BUY_YES", "model_probability": 0.70, "yes_price": 0.50,
+        }
+        contradictory = {
+            "decision_id": "d1", "lane_decision_id": "other", "market_id": "KXONE",
+            "outcome": "YES", "settlement_ts": "2026-07-01T13:00:00+00:00",
+        }
+        result = replay_recorded_collector_lane_with_kelly(
+            decisions=[decision], resolutions=[contradictory], starting_balance_usd=100.0,
+        )
+        self.assertEqual(result["settlement_rows"], [])
+        self.assertEqual(result["summary"]["ambiguous_resolution_decisions"], 0)
+        self.assertEqual(result["summary"]["reserved_capital_usd"], 10.0)
+        self.assertEqual(result["summary"]["final_balance_usd"], 100.0)
+        valid = {key: value for key, value in contradictory.items() if key != "lane_decision_id"}
+        for receipts in ([contradictory, valid], [valid, contradictory]):
+            result = replay_recorded_collector_lane_with_kelly(decisions=[decision], resolutions=receipts)
+            self.assertEqual(result["summary"]["settled_positions"], 1)
+            self.assertEqual(result["summary"]["ambiguous_resolution_decisions"], 0)
 
     def test_void_releases_reserved_capital_without_booking_pnl(self):
         result = replay_recorded_collector_lane_with_kelly(
@@ -338,6 +386,45 @@ class CollectorLaneReplayKellyTests(unittest.TestCase):
         self.assertEqual(result["settlement_rows"], [])
         self.assertEqual(result["summary"]["open_positions"], 1)
         self.assertAlmostEqual(result["summary"]["final_balance_usd"], 100.0)
+
+    def test_secondary_outcome_clock_before_decision_cannot_settle(self):
+        decision = {
+            "decision_id": "d1", "market_id": "KXONE", "observed_at": "2026-07-01T12:00:00+00:00",
+            "action": "BUY_YES", "model_probability": 0.70, "yes_price": 0.50,
+        }
+        receipt = {
+            "decision_id": "d1", "market_id": "KXONE", "outcome": "YES",
+            "settlement_ts": "2026-07-01T13:00:00+00:00",
+            "outcome_known_at": "2026-07-01T11:00:00+00:00",
+        }
+        result = replay_recorded_collector_lane_with_kelly(
+            decisions=[decision], resolutions=[receipt], starting_balance_usd=100.0,
+        )
+        self.assertEqual(result["settlement_rows"], [])
+        self.assertEqual(result["summary"]["ambiguous_resolution_decisions"], 0)
+        self.assertEqual(result["summary"]["reserved_capital_usd"], 10.0)
+        self.assertEqual(result["summary"]["final_balance_usd"], 100.0)
+
+    def test_later_outcome_known_time_delays_synthetic_capital_release(self):
+        first = {
+            "decision_id": "d1", "market_id": "KXONE", "observed_at": "2026-07-01T12:00:00+00:00",
+            "action": "BUY_YES", "model_probability": 0.70, "yes_price": 0.50,
+        }
+        second = {
+            "decision_id": "d2", "market_id": "KXTWO", "observed_at": "2026-07-01T13:30:00+00:00",
+            "action": "BUY_YES", "model_probability": 0.70, "yes_price": 0.50,
+        }
+        receipt = {
+            "decision_id": "d1", "market_id": "KXONE", "outcome": "YES",
+            "settlement_ts": "2026-07-01T13:00:00+00:00",
+            "outcome_known_at": "2026-07-01T14:00:00+00:00",
+        }
+        result = replay_recorded_collector_lane_with_kelly(
+            decisions=[first, second], resolutions=[receipt], starting_balance_usd=100.0,
+        )
+        self.assertEqual(result["decision_rows"][1]["available_cash_before_usd"], 90.0)
+        self.assertEqual(result["settlement_rows"][0]["settlement_ts"], "2026-07-01T13:00:00+00:00")
+        self.assertEqual(result["settlement_rows"][0]["available_at"], "2026-07-01T14:00:00+00:00")
 
     def test_rejects_resolved_at_as_a_settlement_timestamp(self):
         result = replay_recorded_collector_lane_with_kelly(

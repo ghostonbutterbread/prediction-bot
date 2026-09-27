@@ -40,7 +40,11 @@ def replay_recorded_collector_lane_with_kelly(
         raise ValueError("max_bet_pct must be in (0, 1]")
 
     ordered_decisions = sorted((dict(row) for row in decisions), key=lambda row: _timestamp(row, "observed_at"))
-    resolutions_by_decision, conflicting_resolution_ids = _resolution_map(resolutions)
+    decision_times: dict[str, datetime | None] = {}
+    for ordinal, decision in enumerate(ordered_decisions, start=1):
+        decision_id = str(decision.get("decision_id") or f"collector-kelly:{ordinal}")
+        decision_times[decision_id] = None if decision_id in decision_times else _timestamp(decision, "observed_at")
+    resolutions_by_decision, conflicting_resolution_ids = _resolution_map(resolutions, decision_times=decision_times)
     cash = float(starting_balance_usd)
     positions: list[dict[str, Any]] = []
     decision_rows: list[dict[str, Any]] = []
@@ -235,17 +239,23 @@ def write_collector_lane_replay_kelly(
     }
 
 
-def _resolution_map(rows: Iterable[Mapping[str, Any]]) -> tuple[dict[str, dict[str, Any]], set[str]]:
+def _resolution_map(
+    rows: Iterable[Mapping[str, Any]], *, decision_times: Mapping[str, datetime | None],
+) -> tuple[dict[str, dict[str, Any]], set[str]]:
     result: dict[str, dict[str, Any]] = {}
     conflicting: set[str] = set()
     for raw_row in rows:
         row = dict(raw_row)
         nested = dict(row.get("resolution") or {}) if isinstance(row.get("resolution"), Mapping) else {}
+        if (row.get("decision_id") not in (None, "") and row.get("lane_decision_id") not in (None, "")
+                and str(row["decision_id"]) != str(row["lane_decision_id"])):
+            continue
         decision_id = str(row.get("decision_id") or row.get("lane_decision_id") or "")
+        decision_time = decision_times.get(decision_id)
         market_id = str(row.get("market_id") or nested.get("market_id") or "")
         outcome = str(nested.get("outcome") or row.get("outcome") or "").upper()
         settlement_value = nested.get("settlement_ts") or row.get("settlement_ts")
-        if not decision_id or not market_id or outcome not in {"YES", "NO", "VOID"} or settlement_value in (None, ""):
+        if decision_time is None or not market_id or outcome not in {"YES", "NO", "VOID"} or settlement_value in (None, ""):
             continue
         allowed_statuses = {"void_resolution"} if outcome == "VOID" else {"finalized", "settled", "resolved"}
         statuses = (row.get("market_status"), nested.get("market_status"))
@@ -281,9 +291,17 @@ def _resolution_map(rows: Iterable[Mapping[str, Any]]) -> tuple[dict[str, dict[s
         ):
             continue
         try:
-            settlement_ts = _parse_timestamp(settlement_value)
+            clocks = [
+                _parse_timestamp(source[field])
+                for source in (row, nested)
+                for field in ("settlement_ts", "outcome_known_at")
+                if source.get(field) not in (None, "")
+            ]
         except ValueError:
             continue
+        if any(clock <= decision_time for clock in clocks):
+            continue
+        settlement_ts = _parse_timestamp(settlement_value)
         if decision_id in conflicting:
             continue
         existing = result.get(decision_id)
@@ -294,6 +312,7 @@ def _resolution_map(rows: Iterable[Mapping[str, Any]]) -> tuple[dict[str, dict[s
             "run_id": run_id,
             "outcome": outcome,
             "settlement_ts": settlement_ts,
+            "available_at": max(clocks),
             "resolution_receipt": {
                 "resolution_row_id": nested.get("resolution_row_id") or row.get("resolution_id") or row.get("decision_id"),
                 "matched_by": nested.get("matched_by") or "exact_decision_id_market_id",
@@ -315,13 +334,17 @@ def _resolution_map(rows: Iterable[Mapping[str, Any]]) -> tuple[dict[str, dict[s
             # A legacy receipt with omitted identity does not contradict an
             # otherwise identical exact receipt. Prefer the more fully bound
             # authority, then pick equivalent retrieval receipts deterministically.
+            available_at = max(existing["available_at"], candidate["available_at"])
             candidate_rank = (bool(candidate["shared_candidate_id"]), bool(candidate["run_id"]))
             existing_rank = (bool(existing["shared_candidate_id"]), bool(existing["run_id"]))
             if candidate_rank > existing_rank or (
                 candidate_rank == existing_rank
                 and _canonical_row_sha256(candidate["resolution_receipt"]) < _canonical_row_sha256(existing["resolution_receipt"])
             ):
+                candidate["available_at"] = available_at
                 result[decision_id] = candidate
+            else:
+                existing["available_at"] = available_at
     return result, conflicting
 
 
@@ -339,7 +362,7 @@ def _settle_due_positions(*, positions: list[dict[str, Any]], resolutions_by_dec
         ):
             remaining.append(position)
             continue
-        if before_or_at is not None and resolution["settlement_ts"] > before_or_at:
+        if before_or_at is not None and resolution["available_at"] > before_or_at:
             remaining.append(position)
             continue
         is_void = resolution["outcome"] == "VOID"
@@ -351,6 +374,7 @@ def _settle_due_positions(*, positions: list[dict[str, Any]], resolutions_by_dec
             "market_id": position["market_id"],
             "action": position["action"],
             "settlement_ts": resolution["settlement_ts"].isoformat(),
+            "available_at": resolution["available_at"].isoformat(),
             "outcome": resolution["outcome"],
             "void_resolution": is_void,
             "stake_usd": _round(position["stake_usd"]),
