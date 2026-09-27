@@ -40,7 +40,7 @@ def replay_recorded_collector_lane_with_kelly(
         raise ValueError("max_bet_pct must be in (0, 1]")
 
     ordered_decisions = sorted((dict(row) for row in decisions), key=lambda row: _timestamp(row, "observed_at"))
-    resolutions_by_decision = _resolution_map(resolutions)
+    resolutions_by_decision, conflicting_resolution_ids = _resolution_map(resolutions)
     cash = float(starting_balance_usd)
     positions: list[dict[str, Any]] = []
     decision_rows: list[dict[str, Any]] = []
@@ -134,6 +134,9 @@ def replay_recorded_collector_lane_with_kelly(
         before_or_at=None,
     )
     settlement_rows.extend(settled)
+    for position in positions:
+        if position["decision_id"] in conflicting_resolution_ids:
+            position["resolution_blocker"] = "conflicting_resolution_receipts"
     reserved = _reserved_capital(positions)
     summary = {
         "starting_balance_usd": _round(starting_balance_usd),
@@ -144,6 +147,10 @@ def replay_recorded_collector_lane_with_kelly(
         "settled_positions": len(settlement_rows),
         "void_positions": sum(row["void_resolution"] for row in settlement_rows),
         "open_positions": len(positions),
+        "ambiguous_resolution_decisions": len({
+            position["decision_id"] for position in positions
+            if position["decision_id"] in conflicting_resolution_ids
+        }),
         "skipped_decisions": sum(row["status"] == "skipped" for row in decision_rows),
         "kelly_policy": {
             "policy_name": "bounded_fractional_kelly_capacity_diagnostic",
@@ -228,19 +235,43 @@ def write_collector_lane_replay_kelly(
     }
 
 
-def _resolution_map(rows: Iterable[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+def _resolution_map(rows: Iterable[Mapping[str, Any]]) -> tuple[dict[str, dict[str, Any]], set[str]]:
     result: dict[str, dict[str, Any]] = {}
+    conflicting: set[str] = set()
     for raw_row in rows:
         row = dict(raw_row)
         nested = dict(row.get("resolution") or {}) if isinstance(row.get("resolution"), Mapping) else {}
         decision_id = str(row.get("decision_id") or row.get("lane_decision_id") or "")
         market_id = str(row.get("market_id") or nested.get("market_id") or "")
         outcome = str(nested.get("outcome") or row.get("outcome") or "").upper()
-        settlement_value = nested.get("settlement_ts") or nested.get("outcome_known_at") or row.get("settlement_ts") or row.get("outcome_known_at")
-        if not decision_id or not market_id or not outcome or settlement_value in (None, ""):
+        settlement_value = nested.get("settlement_ts") or row.get("settlement_ts")
+        if not decision_id or not market_id or outcome not in {"YES", "NO", "VOID"} or settlement_value in (None, ""):
+            continue
+        allowed_statuses = {"void_resolution"} if outcome == "VOID" else {"finalized", "settled", "resolved"}
+        statuses = (row.get("market_status"), nested.get("market_status"))
+        if any(str(status).strip().lower() not in allowed_statuses for status in statuses if status not in (None, "")):
             continue
         shared_candidate_id = str(row.get("shared_candidate_id") or nested.get("shared_candidate_id") or "")
         run_id = str(row.get("run_id") or nested.get("run_id") or "")
+        if nested and any(
+            row.get(field) not in (None, "") and nested.get(field) not in (None, "")
+            and str(row[field]) != str(nested[field])
+            for field in ("market_id", "shared_candidate_id", "run_id")
+        ):
+            continue
+        if nested.get("outcome") not in (None, "") and row.get("outcome") not in (None, "") and (
+            str(nested["outcome"]).upper() != str(row["outcome"]).upper()
+        ):
+            continue
+        try:
+            if any(
+                _parse_timestamp(nested[field]) != _parse_timestamp(row[field])
+                for field in ("settlement_ts", "outcome_known_at")
+                if nested.get(field) not in (None, "") and row.get(field) not in (None, "")
+            ):
+                continue
+        except ValueError:
+            continue
         if nested and (
             nested.get("matched") is not True
             or nested.get("matched_by") in (None, "", "market_id")
@@ -252,6 +283,8 @@ def _resolution_map(rows: Iterable[Mapping[str, Any]]) -> dict[str, dict[str, An
         try:
             settlement_ts = _parse_timestamp(settlement_value)
         except ValueError:
+            continue
+        if decision_id in conflicting:
             continue
         existing = result.get(decision_id)
         candidate = {
@@ -268,9 +301,28 @@ def _resolution_map(rows: Iterable[Mapping[str, Any]]) -> dict[str, dict[str, An
                 "source_row_sha256": row.get("source_row_sha256"),
             },
         }
-        if existing is None or settlement_ts < existing["settlement_ts"]:
+        if existing is None:
             result[decision_id] = candidate
-    return result
+        elif any(existing[field] != candidate[field] for field in (
+            "market_id", "outcome", "settlement_ts",
+        )) or any(
+            existing[field] and candidate[field] and existing[field] != candidate[field]
+            for field in ("shared_candidate_id", "run_id")
+        ):
+            result.pop(decision_id)
+            conflicting.add(decision_id)
+        else:
+            # A legacy receipt with omitted identity does not contradict an
+            # otherwise identical exact receipt. Prefer the more fully bound
+            # authority, then pick equivalent retrieval receipts deterministically.
+            candidate_rank = (bool(candidate["shared_candidate_id"]), bool(candidate["run_id"]))
+            existing_rank = (bool(existing["shared_candidate_id"]), bool(existing["run_id"]))
+            if candidate_rank > existing_rank or (
+                candidate_rank == existing_rank
+                and _canonical_row_sha256(candidate["resolution_receipt"]) < _canonical_row_sha256(existing["resolution_receipt"])
+            ):
+                result[decision_id] = candidate
+    return result, conflicting
 
 
 def _settle_due_positions(*, positions: list[dict[str, Any]], resolutions_by_decision: Mapping[str, Mapping[str, Any]], cash: float, before_or_at: datetime | None) -> tuple[float, list[dict[str, Any]]]:
