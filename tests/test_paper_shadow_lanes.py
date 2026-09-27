@@ -1417,6 +1417,849 @@ parameters:
             0.445,
         )
 
+    def test_source_router_preserves_strategy_estimate_separately_from_book_ask(self):
+        from bot.paper_shadow_lanes import _LaneDefinition, _source_router_provenance
+
+        provenance = _source_router_provenance(
+            _LaneDefinition(lane_id="shadow_source_router"),
+            signal={
+                "direction": "BUY_YES", "market_id": "M1",
+                "candidate_observed_at": "2026-05-06T12:00:00+00:00",
+                "estimated_fill_price": .445,
+                "decision_artifact": {"order_book_snapshot": {
+                    "source": "book", "market_id": "M1", "data": {"best_yes_ask": .44},
+                }},
+            },
+            shared_candidate={"market_id": "M1", "observed_at": "2026-05-06T12:00:00+00:00"},
+            source_row={"action": "BUY_YES"},
+            source_router={"available": True, "recommended_action": "BUY_YES"},
+            requested_position_size_usd=10.0,
+            approved_position_size_usd=10.0,
+        )
+        future = provenance["future_pnl_inputs"]
+        self.assertEqual(future["best_yes_ask"], .44)
+        self.assertEqual(future["entry_price"], .44)
+        self.assertEqual(future["estimated_fill_price"], .445)
+
+    def test_cross_side_generic_reference_does_not_become_no_entry(self):
+        from bot.paper_shadow_lanes import _shadow_entry_price_for_side
+
+        yes_reference = {"direction": "BUY_YES", "market_price": 0.44, "best_yes_ask": 0.44}
+        self.assertIsNone(_shadow_entry_price_for_side(
+            "NO", yes_reference, {"action": "BUY_NO", "entry_price": 0.44},
+        ))
+        self.assertEqual(_shadow_entry_price_for_side(
+            "NO", {"direction": "BUY_NO", "market_price": 0.58}, {"action": "BUY_NO"},
+        ), 0.58)
+
+    def test_future_pnl_does_not_relabel_cross_side_estimate_without_no_ask(self):
+        from bot.paper_shadow_lanes import _future_pnl_inputs
+
+        future = _future_pnl_inputs(
+            signal={"direction": "BUY_YES", "market_price": 0.44,
+                    "best_yes_ask": 0.44, "estimated_fill_price": 0.44},
+            shared_candidate={}, source_row={"action": "BUY_NO", "entry_price": 0.44},
+            source_reliability={"recommended_action": "BUY_NO"},
+        )
+        self.assertNotIn("entry_price", future)
+        self.assertNotIn("estimated_fill_price", future)
+        self.assertEqual(future["best_yes_ask"], 0.44)
+
+    def test_shared_candidate_fallback_snapshot_does_not_become_no_ask(self):
+        from bot.paper_shadow_lanes import _future_pnl_inputs, _side_specific_price
+        from bot.shared_core.execution_snapshot import build_execution_snapshot
+        from bot.shared_market_feed import build_shared_market_candidate_row, normalize_shared_candidate_input
+
+        market = SimpleNamespace(
+            id="M1", exchange="kalshi", question="Will it rain?",
+            category="weather", yes_price=0.44, no_price=0.56, volume=100,
+            metadata={},
+        )
+        signal = {"direction": "BUY_YES", "market_price": 0.44,
+                  "model_probability": 0.70}
+        snapshot = build_execution_snapshot(signal, direction="BUY_YES", bid_ask={})
+        self.assertEqual(snapshot["source"], "fallback")
+        self.assertEqual(snapshot["best_no_ask"], 0.56)
+        artifact = {
+            "order_book_snapshot": {"source": snapshot["source"], "data": snapshot},
+            "execution_snapshot": snapshot,
+        }
+        candidate = build_shared_market_candidate_row(
+            run_id="r", market=market, signal=signal,
+            decision_artifact=artifact, source_runtime="prediction_lab",
+            observed_at="2026-05-06T12:00:00+00:00",
+        )
+        normalized = normalize_shared_candidate_input({"shared_candidate": candidate})
+        self.assertTrue(normalized.ok)
+        self.assertEqual(normalized.signal["best_no_ask"], 0.56)
+        future = _future_pnl_inputs(
+            signal=normalized.signal, shared_candidate=candidate,
+            source_row={"action": "BUY_NO"},
+            source_reliability={"recommended_action": "BUY_NO"},
+        )
+        self.assertIsNone(_side_specific_price(future, "NO"))
+        self.assertNotIn("entry_price", future)
+        self.assertNotIn("estimated_fill_price", future)
+
+    def test_shared_candidate_recorded_book_no_ask_remains_usable(self):
+        from bot.paper_shadow_lanes import _future_pnl_inputs, _side_specific_price
+        from bot.shared_market_feed import build_shared_market_candidate_row, normalize_shared_candidate_input
+
+        market = SimpleNamespace(
+            id="M1", exchange="kalshi", question="Will it rain?",
+            category="weather", yes_price=0.44, no_price=0.58, volume=100,
+            metadata={},
+        )
+        candidate = build_shared_market_candidate_row(
+            run_id="r", market=market,
+            signal={"direction": "BUY_YES", "market_price": 0.44},
+            decision_artifact={"order_book_snapshot": {
+                "source": "book", "data": {"best_yes_ask": 0.44, "best_no_ask": 0.58},
+            }},
+            source_runtime="prediction_lab", observed_at="2026-05-06T12:00:00+00:00",
+        )
+        normalized = normalize_shared_candidate_input({"shared_candidate": candidate})
+        self.assertTrue(normalized.ok)
+        future = _future_pnl_inputs(
+            signal=normalized.signal, shared_candidate=candidate,
+            source_row={"action": "BUY_NO"},
+            source_reliability={"recommended_action": "BUY_NO"},
+        )
+        self.assertEqual(_side_specific_price(future, "NO"), 0.58)
+        self.assertEqual(future["entry_price"], 0.58)
+
+    def test_unproven_book_source_cannot_settle_shadow_price_or_wallet(self):
+        from bot.collector_lane_replay_kelly import replay_recorded_collector_lane_with_kelly
+        from bot.paper_shadow_lanes import _future_pnl_inputs, _side_specific_price
+        from bot.shared_market_feed import build_shared_market_candidate_row, normalize_shared_candidate_input
+
+        for source in (None, ""):
+            with self.subTest(source=source):
+                book = {"market_id": "M1", "as_of": "2026-05-06T12:00:00+00:00",
+                        "data": {"best_no_ask": .58}}
+                if source is not None:
+                    book["source"] = source
+                candidate = build_shared_market_candidate_row(
+                    run_id="r", market=self._market("M1"),
+                    signal={"direction": "BUY_YES", "market_price": .44},
+                    decision_artifact={"order_book_snapshot": book},
+                    source_runtime="prediction_lab", observed_at="2026-05-06T12:00:00+00:00",
+                )
+                normalized = normalize_shared_candidate_input({"shared_candidate": candidate})
+                self.assertTrue(normalized.ok)
+                future = _future_pnl_inputs(
+                    signal=normalized.signal, shared_candidate=candidate,
+                    source_row={"action": "BUY_NO"},
+                    source_reliability={"recommended_action": "BUY_NO"},
+                )
+                decision = {
+                    "decision_id": "unproven-book", "policy": "shadow_source_router",
+                    "shared_candidate_id": normalized.shared_candidate_id, "run_id": "r",
+                    "market_id": "M1", "observed_at": "2026-05-06T12:00:00+00:00",
+                    "action": "BUY_NO", "model_probability": .2, "entry_price": .58,
+                    "approved_position_size_usd": 10.0,
+                    "provenance": {"future_pnl_inputs": future},
+                }
+                [receipt] = build_paper_shadow_lane_resolution_rows(
+                    lane_rows=[decision], resolution_rows=[{
+                        "shared_candidate_id": normalized.shared_candidate_id, "run_id": "r",
+                        "market_id": "M1", "resolution_id": "resolved-M1", "outcome": "NO",
+                        "settlement_ts": "2026-05-07T12:00:00+00:00",
+                    }],
+                )
+                wallet = replay_recorded_collector_lane_with_kelly(
+                    decisions=[decision], resolutions=[receipt], starting_balance_usd=100.0,
+                )
+                self.assertIsNone(_side_specific_price(future, "NO"))
+                self.assertEqual(receipt["blocker"], "missing_fill_price")
+                self.assertIsNone(receipt["pnl"])
+                self.assertEqual(wallet["summary"]["opened_positions"], 0)
+                self.assertEqual(wallet["summary"]["settled_positions"], 0)
+
+    def test_artifact_only_book_must_prove_selected_side_quote(self):
+        from bot.collector_lane_replay_kelly import replay_recorded_collector_lane_with_kelly
+        from bot.paper_shadow_lanes import _future_pnl_inputs, _side_specific_price
+        from bot.shared_market_feed import build_shared_market_candidate_row, normalize_shared_candidate_input
+
+        cases = (
+            ("fallback", "M1", "2026-05-06T12:00:00+00:00", False),
+            (None, "M1", "2026-05-06T12:00:00+00:00", False),
+            ("book", "M2", "2026-05-06T12:00:00+00:00", False),
+            ("book", "M1", "2026-05-07T12:00:00+00:00", False),
+            ("fallback", "M2", "2026-05-06T12:00:00+00:00", True),
+            ("book", "M1", "2026-05-07T12:00:00+00:00", True),
+        )
+        for source, market_id, as_of, marked in cases:
+            with self.subTest(source=source, market_id=market_id, as_of=as_of, marked=marked):
+                book = {"market_id": market_id, "as_of": as_of, "best_no_ask": .58}
+                if source is not None:
+                    book["source"] = source
+                candidate = build_shared_market_candidate_row(
+                    run_id="r", market=self._market("M1"),
+                    signal={"direction": "BUY_YES", "market_price": .44},
+                    decision_artifact={"order_book": book},
+                    source_runtime="prediction_lab", observed_at="2026-05-06T12:00:00+00:00",
+                )
+                normalized = normalize_shared_candidate_input({"shared_candidate": candidate})
+                self.assertTrue(normalized.ok)
+                signal = {**normalized.signal, "decision_artifact": {"order_book": book}}
+                if marked:
+                    signal.update(
+                        execution_snapshot_marker="paper_shadow_source_scoreboard_hypothetical_execution",
+                        paper_shadow_recorded_best_no_ask=.58,
+                    )
+                future = _future_pnl_inputs(
+                    signal=signal, shared_candidate=candidate,
+                    source_row={"action": "BUY_NO"},
+                    source_reliability={"recommended_action": "BUY_NO"},
+                )
+                decision = {
+                    "decision_id": "artifact-book", "policy": "shadow_source_router",
+                    "shared_candidate_id": normalized.shared_candidate_id, "run_id": "r",
+                    "market_id": "M1", "observed_at": "2026-05-06T12:00:00+00:00",
+                    "action": "BUY_NO", "model_probability": .2, "entry_price": .58,
+                    "approved_position_size_usd": 10.0,
+                    "provenance": {"future_pnl_inputs": future},
+                }
+                [receipt] = build_paper_shadow_lane_resolution_rows(
+                    lane_rows=[decision], resolution_rows=[{
+                        "shared_candidate_id": normalized.shared_candidate_id, "run_id": "r",
+                        "market_id": "M1", "resolution_id": "resolved-M1", "outcome": "NO",
+                        "settlement_ts": "2026-05-08T12:00:00+00:00",
+                    }],
+                )
+                wallet = replay_recorded_collector_lane_with_kelly(
+                    decisions=[decision], resolutions=[receipt], starting_balance_usd=100.0,
+                )
+                self.assertIsNone(_side_specific_price(future, "NO"))
+                self.assertEqual(receipt["blocker"], "missing_fill_price")
+                self.assertIsNone(receipt["pnl"])
+                self.assertEqual(wallet["summary"]["opened_positions"], 0)
+                self.assertEqual(wallet["summary"]["settled_positions"], 0)
+                self.assertEqual(wallet["summary"]["final_balance_usd"], 100.0)
+
+    def test_nonbook_artifact_cannot_hide_behind_yes_only_recorded_snapshot(self):
+        from bot.paper_shadow_lanes import _future_pnl_inputs, _side_specific_price
+        from bot.shared_market_feed import build_shared_market_candidate_row, normalize_shared_candidate_input
+
+        artifact = {
+            "order_book_snapshot": {"source": "book", "market_id": "M1", "data": {"best_yes_ask": .44}},
+            "order_book": {"source": "fallback", "market_id": "M1", "best_no_ask": .58},
+        }
+        candidate = build_shared_market_candidate_row(
+            run_id="r", market=self._market("M1"),
+            signal={"direction": "BUY_YES", "market_price": .44},
+            decision_artifact=artifact, source_runtime="prediction_lab",
+            observed_at="2026-05-06T12:00:00+00:00",
+        )
+        normalized = normalize_shared_candidate_input({"shared_candidate": candidate})
+        self.assertTrue(normalized.ok)
+        future = _future_pnl_inputs(
+            signal={**normalized.signal, "best_no_ask": .58, "decision_artifact": artifact},
+            shared_candidate=candidate, source_row={"action": "BUY_NO"},
+            source_reliability={"recommended_action": "BUY_NO"},
+        )
+        self.assertIsNone(_side_specific_price(future, "NO"))
+        self.assertNotIn("entry_price", future)
+
+    def test_artifact_only_genuine_book_and_independent_marked_ask_remain_usable(self):
+        from bot.paper_shadow_lanes import _future_pnl_inputs, _side_specific_price
+        from bot.shared_market_feed import build_shared_market_candidate_row, normalize_shared_candidate_input
+
+        cases = (
+            ("book", "M1", "2026-05-06T05:00:00-07:00", False),
+            ("book", None, None, False),
+            ("synthetic", "M1", "2026-05-06T12:00:00+00:00", True),
+            (None, None, None, True),
+        )
+        for source, market_id, as_of, marked in cases:
+            with self.subTest(source=source, market_id=market_id, as_of=as_of, marked=marked):
+                book: dict[str, object] = {"best_no_ask": .58}
+                if source is not None:
+                    book["source"] = source
+                if market_id is not None:
+                    book["market_id"] = market_id
+                if as_of is not None:
+                    book["as_of"] = as_of
+                candidate = build_shared_market_candidate_row(
+                    run_id="r", market=self._market("M1"),
+                    signal={"direction": "BUY_YES", "market_price": .44},
+                    decision_artifact={"order_book": book},
+                    source_runtime="prediction_lab", observed_at="2026-05-06T12:00:00+00:00",
+                )
+                normalized = normalize_shared_candidate_input({"shared_candidate": candidate})
+                self.assertTrue(normalized.ok)
+                signal = {**normalized.signal, "decision_artifact": {"order_book": book}}
+                if marked:
+                    signal.update(
+                        execution_snapshot_marker="paper_shadow_source_scoreboard_hypothetical_execution",
+                        paper_shadow_recorded_best_no_ask=.58,
+                    )
+                future = _future_pnl_inputs(
+                    signal=signal, shared_candidate=candidate,
+                    source_row={"action": "BUY_NO"},
+                    source_reliability={"recommended_action": "BUY_NO"},
+                )
+                self.assertEqual(_side_specific_price(future, "NO"), .58)
+                self.assertEqual(future["entry_price"], .58)
+
+    def test_marked_retained_ask_cannot_override_wrong_market_book(self):
+        from bot.collector_lane_replay_kelly import replay_recorded_collector_lane_with_kelly
+        from bot.paper_shadow_lanes import _future_pnl_inputs, _side_specific_price
+        from bot.shared_market_feed import build_shared_market_candidate_row, normalize_shared_candidate_input
+
+        candidate = build_shared_market_candidate_row(
+            run_id="r", market=self._market("M1"),
+            signal={"direction": "BUY_YES", "market_price": .44},
+            decision_artifact={"order_book_snapshot": {
+                "source": "book", "market_id": "M2", "as_of": "2026-05-06T12:00:00+00:00",
+                "data": {"best_no_ask": .58},
+            }}, source_runtime="prediction_lab", observed_at="2026-05-06T12:00:00+00:00",
+        )
+        normalized = normalize_shared_candidate_input({"shared_candidate": candidate})
+        self.assertTrue(normalized.ok)
+        future = _future_pnl_inputs(
+            signal={**normalized.signal,
+                    "execution_snapshot_marker": "paper_shadow_source_scoreboard_hypothetical_execution",
+                    "paper_shadow_recorded_best_no_ask": .58},
+            shared_candidate=candidate, source_row={"action": "BUY_NO"},
+            source_reliability={"recommended_action": "BUY_NO"},
+        )
+        self.assertIsNone(_side_specific_price(future, "NO"))
+        self.assertNotIn("entry_price", future)
+        decision = {
+            "decision_id": "wrong-market", "policy": "shadow_source_router",
+            "shared_candidate_id": normalized.shared_candidate_id, "run_id": "r",
+            "market_id": "M1", "observed_at": "2026-05-06T12:00:00+00:00",
+            "action": "BUY_NO", "model_probability": .2, "entry_price": .58,
+            "approved_position_size_usd": 10.0,
+            "provenance": {"future_pnl_inputs": future},
+        }
+        [receipt] = build_paper_shadow_lane_resolution_rows(
+            lane_rows=[decision], resolution_rows=[{
+                "shared_candidate_id": normalized.shared_candidate_id, "run_id": "r",
+                "market_id": "M1", "resolution_id": "resolved-M1", "outcome": "NO",
+                "settlement_ts": "2026-05-07T12:00:00+00:00",
+            }],
+        )
+        wallet = replay_recorded_collector_lane_with_kelly(
+            decisions=[decision], resolutions=[receipt], starting_balance_usd=100.0,
+        )
+        self.assertEqual(receipt["blocker"], "missing_fill_price")
+        self.assertIsNone(receipt["pnl"])
+        self.assertEqual(wallet["summary"]["opened_positions"], 0)
+        self.assertEqual(wallet["summary"]["settled_positions"], 0)
+
+    def test_other_market_book_ask_cannot_price_shared_candidate(self):
+        from bot.paper_shadow_lanes import _future_pnl_inputs, _side_specific_price
+        from bot.shared_market_feed import build_shared_market_candidate_row, normalize_shared_candidate_input
+
+        candidate = build_shared_market_candidate_row(
+            run_id="r", market=self._market("M1"),
+            signal={"direction": "BUY_YES", "market_price": 0.44},
+            decision_artifact={"order_book_snapshot": {
+                "source": "book", "market_id": "M2",
+                "as_of": "2026-05-06T12:00:00+00:00",
+                "data": {"best_yes_ask": 0.44, "best_no_ask": 0.58},
+            }},
+            source_runtime="prediction_lab", observed_at="2026-05-06T12:00:00+00:00",
+        )
+        normalized = normalize_shared_candidate_input({"shared_candidate": candidate})
+        self.assertTrue(normalized.ok)
+        future = _future_pnl_inputs(
+            signal=normalized.signal, shared_candidate=candidate,
+            source_row={"action": "BUY_NO"},
+            source_reliability={"recommended_action": "BUY_NO"},
+        )
+        self.assertIsNone(_side_specific_price(future, "NO"))
+        self.assertNotIn("entry_price", future)
+
+        marked = _future_pnl_inputs(
+            signal={**normalized.signal,
+                    "execution_snapshot_marker": "paper_shadow_source_scoreboard_hypothetical_execution"},
+            shared_candidate=candidate, source_row={"action": "BUY_NO"},
+            source_reliability={"recommended_action": "BUY_NO"},
+        )
+        self.assertIsNone(_side_specific_price(marked, "NO"))
+        self.assertNotIn("entry_price", marked)
+
+    def test_book_ask_cannot_arrive_after_shared_candidate(self):
+        from bot.paper_shadow_lanes import _future_pnl_inputs, _side_specific_price
+        from bot.shared_market_feed import build_shared_market_candidate_row, normalize_shared_candidate_input
+
+        for as_of, expected in (
+            ("2026-05-08T12:00:00+00:00", None),
+            ("2026-05-06T05:00:00-07:00", 0.58),
+        ):
+            with self.subTest(as_of=as_of):
+                candidate = build_shared_market_candidate_row(
+                    run_id="r", market=self._market("M1"),
+                    signal={"direction": "BUY_YES", "market_price": 0.44},
+                    decision_artifact={"order_book_snapshot": {
+                        "source": "book", "market_id": "M1", "as_of": as_of,
+                        "data": {"best_yes_ask": 0.44, "best_no_ask": 0.58},
+                    }},
+                    source_runtime="prediction_lab", observed_at="2026-05-06T12:00:00+00:00",
+                )
+                normalized = normalize_shared_candidate_input({"shared_candidate": candidate})
+                self.assertTrue(normalized.ok)
+                future = _future_pnl_inputs(
+                    signal=normalized.signal, shared_candidate=candidate,
+                    source_row={"action": "BUY_NO"},
+                    source_reliability={"recommended_action": "BUY_NO"},
+                )
+                self.assertEqual(_side_specific_price(future, "NO"), expected)
+                if expected is None:
+                    self.assertNotIn("entry_price", future)
+                else:
+                    self.assertEqual(future["entry_price"], expected)
+                marked = _future_pnl_inputs(
+                    signal={**normalized.signal,
+                            "execution_snapshot_marker": "paper_shadow_source_scoreboard_hypothetical_execution"},
+                    shared_candidate=candidate, source_row={"action": "BUY_NO"},
+                    source_reliability={"recommended_action": "BUY_NO"},
+                )
+                self.assertEqual(_side_specific_price(marked, "NO"), expected)
+
+    def test_recovered_execution_snapshot_complement_is_not_book_no_ask(self):
+        from bot.paper_shadow_lanes import (
+            _future_pnl_inputs, _side_specific_price,
+            build_paper_shadow_lane_resolution_rows,
+        )
+        from bot.prediction_lab_backfill import backfill_prediction_lab_row
+        from bot.shared_core.execution_snapshot import build_execution_snapshot
+        from bot.shared_market_feed import build_shared_market_candidate_row, normalize_shared_candidate_input
+
+        market = SimpleNamespace(
+            id="M1", exchange="kalshi", question="Will it rain?",
+            category="weather", yes_price=0.44, no_price=0.56, volume=100,
+            metadata={},
+        )
+        signal = {"direction": "BUY_YES", "market_price": 0.44}
+        snapshot = build_execution_snapshot(
+            signal, direction="BUY_YES", bid_ask={"best_yes_ask": 0.44},
+            fallback_to_signal_prices=False,
+        )
+        self.assertEqual(snapshot["source"], "book")
+        self.assertEqual(snapshot["best_no_ask"], 0.56)  # computed, not quoted
+        recovered = backfill_prediction_lab_row(
+            {"market_id": "M1", "observed_at": "2026-05-06T12:00:00+00:00",
+             "direction": "BUY_YES", "yes_market_price": 0.44,
+             "no_market_price": 0.56,
+             "decision_artifact": {"execution_snapshot": snapshot}},
+            artifact_recovery=True,
+        ).row
+        artifact = recovered["decision_artifact"]
+        candidate = build_shared_market_candidate_row(
+            run_id="r", market=market, signal=signal,
+            decision_artifact=artifact, source_runtime="prediction_lab",
+            observed_at="2026-05-06T12:00:00+00:00",
+        )
+        normalized = normalize_shared_candidate_input({"shared_candidate": candidate})
+        self.assertTrue(normalized.ok)
+        future = _future_pnl_inputs(
+            signal=normalized.signal, shared_candidate=candidate,
+            source_row={"action": "BUY_NO"},
+            source_reliability={"recommended_action": "BUY_NO"},
+        )
+        self.assertIsNone(_side_specific_price(future, "NO"))
+        self.assertNotIn("entry_price", future)
+        self.assertNotIn("estimated_fill_price", future)
+
+        [resolution] = build_paper_shadow_lane_resolution_rows(
+            lane_rows=[{
+                "policy": "shadow_source_router", "action": "BUY_NO",
+                "shared_candidate_id": candidate["candidate_id"], "market_id": "M1",
+                "observed_at": candidate["observed_at"],
+                "approved_position_size_usd": 10.0,
+                "provenance": {"future_pnl_inputs": future},
+            }],
+            resolution_rows=[{
+                "shared_candidate_id": candidate["candidate_id"], "market_id": "M1",
+                "resolution": {"outcome": "NO", "resolved_at": "2026-05-07T12:00:00+00:00"},
+            }],
+        )
+        self.assertEqual(resolution["blocker"], "missing_fill_price")
+        self.assertIsNone(resolution["fill_price"])
+        self.assertIsNone(resolution["pnl"])
+
+    def test_execution_snapshot_alone_does_not_flatten_complement_as_book(self):
+        from bot.paper_shadow_lanes import _future_pnl_inputs, _side_specific_price
+        from bot.shared_core.execution_snapshot import build_execution_snapshot
+        from bot.shared_market_feed import build_shared_market_candidate_row, normalize_shared_candidate_input
+
+        market = SimpleNamespace(
+            id="M1", exchange="kalshi", question="Will it rain?",
+            category="weather", yes_price=0.44, no_price=0.56, volume=100,
+            metadata={},
+        )
+        signal = {"direction": "BUY_YES", "market_price": 0.44}
+        snapshot = build_execution_snapshot(
+            signal, direction="BUY_YES", bid_ask={"best_yes_ask": 0.44},
+            fallback_to_signal_prices=False,
+        )
+        candidate = build_shared_market_candidate_row(
+            run_id="r", market=market, signal=signal,
+            decision_artifact={"execution_snapshot": snapshot},
+            source_runtime="prediction_lab", observed_at="2026-05-06T12:00:00+00:00",
+        )
+        normalized = normalize_shared_candidate_input({"shared_candidate": candidate})
+        self.assertTrue(normalized.ok)
+        future = _future_pnl_inputs(
+            signal=normalized.signal, shared_candidate=candidate,
+            source_row={"action": "BUY_NO"},
+            source_reliability={"recommended_action": "BUY_NO"},
+        )
+        self.assertIsNone(_side_specific_price(future, "NO"))
+        self.assertNotIn("entry_price", future)
+
+    def test_old_recovered_book_label_does_not_launder_complement(self):
+        from bot.paper_shadow_lanes import (
+            _future_pnl_inputs, _side_specific_price,
+            build_paper_shadow_lane_resolution_rows,
+        )
+        from bot.prediction_lab_backfill import backfill_prediction_lab_row
+        from bot.shared_market_feed import build_shared_market_candidate_row, normalize_shared_candidate_input
+
+        market = SimpleNamespace(
+            id="M1", exchange="kalshi", question="Will it rain?",
+            category="weather", yes_price=0.44, no_price=0.56, volume=100,
+            metadata={},
+        )
+        artifact = {
+            "order_book_snapshot": {
+                "source": "book", "data": {"best_yes_ask": 0.44, "best_no_ask": 0.56},
+            },
+            "provenance": {"sources": [{
+                "field": "order_book_snapshot", "method": "nested_artifact_recovery",
+                "path": "decision_artifact.execution_snapshot",
+            }]},
+        }
+        row = {"market_id": "M1", "observed_at": "2026-05-06T12:00:00+00:00",
+               "decision_artifact": artifact}
+        twice = backfill_prediction_lab_row(
+            backfill_prediction_lab_row(row, artifact_recovery=True).row,
+            artifact_recovery=True,
+        ).row
+        artifact = twice["decision_artifact"]
+        self.assertEqual(artifact["order_book_snapshot"]["source"], "synthetic")
+        candidate = build_shared_market_candidate_row(
+            run_id="r", market=market,
+            signal={"direction": "BUY_YES", "market_price": 0.44},
+            decision_artifact=artifact, source_runtime="prediction_lab",
+            observed_at="2026-05-06T12:00:00+00:00",
+        )
+        normalized = normalize_shared_candidate_input({"shared_candidate": candidate})
+        self.assertTrue(normalized.ok)
+        future = _future_pnl_inputs(
+            signal=normalized.signal, shared_candidate=candidate,
+            source_row={"action": "BUY_NO"},
+            source_reliability={"recommended_action": "BUY_NO"},
+        )
+        self.assertIsNone(_side_specific_price(future, "NO"))
+        self.assertNotIn("entry_price", future)
+
+        marked_signal = {**normalized.signal,
+                         "execution_snapshot_marker": "paper_shadow_source_scoreboard_hypothetical_execution"}
+        marked = _future_pnl_inputs(
+            signal=marked_signal, shared_candidate=candidate,
+            source_row={"action": "BUY_NO"},
+            source_reliability={"recommended_action": "BUY_NO"},
+        )
+        self.assertIsNone(_side_specific_price(marked, "NO"))
+        self.assertNotIn("entry_price", marked)
+        [resolution] = build_paper_shadow_lane_resolution_rows(
+            lane_rows=[{
+                "policy": "shadow_source_router", "action": "BUY_NO",
+                "shared_candidate_id": candidate["candidate_id"], "market_id": "M1",
+                "observed_at": candidate["observed_at"],
+                "approved_position_size_usd": 10.0,
+                "provenance": {"future_pnl_inputs": marked},
+            }],
+            resolution_rows=[{
+                "shared_candidate_id": candidate["candidate_id"], "market_id": "M1",
+                "resolution": {"outcome": "NO", "resolved_at": "2026-05-07T12:00:00+00:00"},
+            }],
+        )
+        self.assertEqual(resolution["blocker"], "missing_fill_price")
+        self.assertIsNone(resolution["pnl"])
+
+    def test_marked_synthetic_no_book_does_not_create_yes_ask(self):
+        from bot.paper_shadow_lanes import _future_pnl_inputs, _side_specific_price
+        from bot.shared_market_feed import build_shared_market_candidate_row, normalize_shared_candidate_input
+
+        candidate = build_shared_market_candidate_row(
+            run_id="r", market=self._market("M1"),
+            signal={"direction": "BUY_NO", "market_price": 0.56},
+            decision_artifact={"order_book_snapshot": {
+                "source": "synthetic", "data": {"best_no_ask": 0.56, "best_yes_ask": 0.44},
+            }},
+            source_runtime="prediction_lab", observed_at="2026-05-06T12:00:00+00:00",
+        )
+        normalized = normalize_shared_candidate_input({"shared_candidate": candidate})
+        self.assertTrue(normalized.ok)
+        future = _future_pnl_inputs(
+            signal={**normalized.signal,
+                    "execution_snapshot_marker": "paper_shadow_source_scoreboard_hypothetical_execution"},
+            shared_candidate=candidate, source_row={"action": "BUY_YES"},
+            source_reliability={"recommended_action": "BUY_YES"},
+        )
+        self.assertIsNone(_side_specific_price(future, "YES"))
+        self.assertNotIn("entry_price", future)
+
+    def test_hypothetical_yes_only_book_does_not_create_no_ask(self):
+        from bot.paper_shadow_lanes import _future_pnl_inputs
+        from bot.shared_core.execution_snapshot import build_execution_snapshot
+
+        snapshot = build_execution_snapshot(
+            {"market_price": 0.44}, direction="BUY_YES",
+            bid_ask={"best_yes_ask": 0.44},
+        )
+        self.assertEqual(snapshot["best_no_ask"], 0.56)  # computed, not quoted
+        signal = {
+            "direction": "BUY_YES", "market_price": 0.44,
+            "best_yes_ask": snapshot["best_yes_ask"],
+            "best_no_ask": snapshot["best_no_ask"],
+            "estimated_fill_price": snapshot["estimated_fill_price"],
+            "execution_snapshot_marker": "paper_shadow_source_scoreboard_hypothetical_execution",
+            "paper_shadow_recorded_best_yes_ask": 0.44,
+            "paper_shadow_recorded_best_no_ask": None,
+            "decision_artifact": {"execution_snapshot": snapshot},
+        }
+        future = _future_pnl_inputs(
+            signal=signal, shared_candidate={}, source_row={"action": "BUY_YES"},
+            source_reliability={"recommended_action": "BUY_NO"},
+        )
+        self.assertNotIn("best_no_ask", future)
+        self.assertNotIn("entry_price", future)
+        self.assertNotIn("estimated_fill_price", future)
+
+    def test_execution_snapshot_complement_is_not_a_recorded_no_ask(self):
+        from bot.paper_shadow_lanes import _future_pnl_inputs
+        from bot.shared_core.execution_snapshot import build_execution_snapshot
+
+        snapshot = build_execution_snapshot(
+            {"market_price": 0.44}, direction="BUY_YES",
+            bid_ask={"best_yes_ask": 0.44},
+        )
+        future = _future_pnl_inputs(
+            signal={"direction": "BUY_YES", "market_price": 0.44,
+                    "best_yes_ask": 0.44, "decision_artifact": {"execution_snapshot": snapshot}},
+            shared_candidate={}, source_row={"action": "BUY_YES"},
+            source_reliability={"recommended_action": "BUY_NO"},
+        )
+        self.assertNotIn("best_no_ask", future)
+        self.assertNotIn("estimated_fill_price", future)
+        self.assertNotIn("entry_price", future)
+
+    def test_hypothetical_recorded_no_ask_is_preserved_for_resolution(self):
+        from bot.paper_shadow_lanes import _future_pnl_inputs
+
+        signal = {
+            "direction": "BUY_YES", "market_price": 0.44,
+            "best_yes_ask": 0.44, "best_no_ask": 0.58,
+            "estimated_fill_price": 0.44,
+            "execution_snapshot_marker": "paper_shadow_source_scoreboard_hypothetical_execution",
+            "paper_shadow_recorded_best_yes_ask": 0.44,
+            "paper_shadow_recorded_best_no_ask": 0.58,
+        }
+        future = _future_pnl_inputs(
+            signal=signal, shared_candidate={}, source_row={"action": "BUY_YES"},
+            source_reliability={"recommended_action": "BUY_NO"},
+        )
+        self.assertEqual(future["paper_shadow_recorded_best_no_ask"], 0.58)
+        lane = {
+            "policy": "shadow_source_router", "shared_candidate_id": "candidate-recorded",
+            "market_id": "KXHIGHSEA-3", "action": "BUY_NO",
+            "approved_position_size_usd": 10.0,
+            "provenance": {"future_pnl_inputs": future},
+        }
+        [row] = build_paper_shadow_lane_resolution_rows(
+            lane_rows=[lane], resolution_rows=[{
+                "shared_candidate_id": "candidate-recorded", "market_id": "KXHIGHSEA-3",
+                "resolution": {"outcome": "NO", "resolved_at": "2026-05-16T13:00:00+00:00"},
+            }],
+        )
+        self.assertIsNone(row["blocker"])
+        self.assertEqual(row["fill_price"], 0.58)
+
+    def test_persisted_invalid_selected_ask_cannot_create_resolution_pnl(self):
+        for marked in (False, True):
+            for price in (float("nan"), float("inf"), -float("inf"), 1.2):
+                with self.subTest(marked=marked, price=price):
+                    future: dict[str, object] = {"side": "NO"}
+                    key = "best_no_ask"
+                    if marked:
+                        future["execution_snapshot_marker"] = "paper_shadow_source_scoreboard_hypothetical_execution"
+                        key = "paper_shadow_recorded_best_no_ask"
+                    future[key] = price
+                    [receipt] = build_paper_shadow_lane_resolution_rows(
+                        lane_rows=[{
+                            "policy": "shadow_source_router", "action": "BUY_NO",
+                            "shared_candidate_id": "candidate-nonfinite", "run_id": "run-1",
+                            "market_id": "M1", "observed_at": "2026-05-06T12:00:00+00:00",
+                            "approved_position_size_usd": 10.0,
+                            "provenance": {"future_pnl_inputs": future},
+                        }],
+                        resolution_rows=[{
+                            "shared_candidate_id": "candidate-nonfinite", "run_id": "run-1",
+                            "market_id": "M1", "outcome": "NO",
+                            "settlement_ts": "2026-05-07T12:00:00+00:00",
+                        }],
+                    )
+                    self.assertEqual(receipt["blocker"], "missing_fill_price")
+                    self.assertIsNone(receipt["pnl"])
+
+    def test_persisted_nonfinite_stake_cannot_create_resolution_pnl(self):
+        for stake in (float("nan"), float("inf"), -float("inf")):
+            with self.subTest(stake=stake):
+                [receipt] = build_paper_shadow_lane_resolution_rows(
+                    lane_rows=[{
+                        "policy": "shadow_source_router", "action": "BUY_NO",
+                        "shared_candidate_id": "candidate-bad-stake", "run_id": "run-1",
+                        "market_id": "M1", "observed_at": "2026-05-06T12:00:00+00:00",
+                        "approved_position_size_usd": stake,
+                        "provenance": {"future_pnl_inputs": {"side": "NO", "best_no_ask": .58}},
+                    }],
+                    resolution_rows=[{
+                        "shared_candidate_id": "candidate-bad-stake", "run_id": "run-1",
+                        "market_id": "M1", "outcome": "NO",
+                        "settlement_ts": "2026-05-07T12:00:00+00:00",
+                    }],
+                )
+                self.assertEqual(receipt["blocker"], "missing_position_size")
+                self.assertIsNone(receipt["pnl"])
+
+    def test_invalid_source_ask_with_alternate_entry_cannot_open_or_settle_kelly(self):
+        from bot.collector_lane_replay_kelly import replay_recorded_collector_lane_with_kelly
+
+        for marked in (False, True):
+            with self.subTest(marked=marked):
+                future: dict[str, object] = {"side": "NO"}
+                quote_key = "best_no_ask"
+                if marked:
+                    future["execution_snapshot_marker"] = "paper_shadow_source_scoreboard_hypothetical_execution"
+                    quote_key = "paper_shadow_recorded_best_no_ask"
+                future[quote_key] = float("nan")
+                decision = {
+                    "decision_id": "invalid-quote", "lane_id": "shadow_source_router",
+                    "shared_candidate_id": "candidate-1", "run_id": "run-1", "market_id": "M1",
+                    "observed_at": "2026-05-06T12:00:00+00:00", "action": "BUY_NO",
+                    "model_probability": .2, "entry_price": .58,
+                    "approved_position_size_usd": 10.0,
+                    "provenance": {"future_pnl_inputs": future},
+                }
+                [receipt] = build_paper_shadow_lane_resolution_rows(
+                    lane_rows=[decision], resolution_rows=[{
+                        "resolution_id": "resolution-1", "shared_candidate_id": "candidate-1",
+                        "run_id": "run-1", "market_id": "M1", "outcome": "NO",
+                        "settlement_ts": "2026-05-07T12:00:00+00:00",
+                    }],
+                )
+                wallet = replay_recorded_collector_lane_with_kelly(
+                    decisions=[decision], resolutions=[receipt], starting_balance_usd=100.0,
+                )
+                self.assertEqual(receipt["blocker"], "missing_fill_price")
+                self.assertIsNone(receipt["pnl"])
+                self.assertEqual(wallet["summary"]["opened_positions"], 0)
+                self.assertEqual(wallet["summary"]["settled_positions"], 0)
+                self.assertEqual(wallet["summary"]["final_balance_usd"], 100.0)
+
+    def test_blocked_stake_receipt_cannot_settle_kelly(self):
+        from bot.collector_lane_replay_kelly import replay_recorded_collector_lane_with_kelly
+
+        decision = {
+            "decision_id": "invalid-stake", "lane_id": "shadow_source_router",
+            "shared_candidate_id": "candidate-1", "run_id": "run-1", "market_id": "M1",
+            "observed_at": "2026-05-06T12:00:00+00:00", "action": "BUY_NO",
+            "model_probability": .2, "entry_price": .58,
+            "approved_position_size_usd": float("nan"),
+            "provenance": {"future_pnl_inputs": {"side": "NO", "best_no_ask": .58}},
+        }
+        [receipt] = build_paper_shadow_lane_resolution_rows(
+            lane_rows=[decision], resolution_rows=[{
+                "resolution_id": "resolution-1", "shared_candidate_id": "candidate-1",
+                "run_id": "run-1", "market_id": "M1", "outcome": "NO",
+                "settlement_ts": "2026-05-07T12:00:00+00:00",
+            }],
+        )
+        wallet = replay_recorded_collector_lane_with_kelly(
+            decisions=[decision], resolutions=[receipt], starting_balance_usd=100.0,
+        )
+        self.assertEqual(receipt["blocker"], "missing_position_size")
+        self.assertIsNone(receipt["pnl"])
+        self.assertEqual(wallet["summary"]["settled_positions"], 0)
+
+    def test_nested_scoreboard_quote_still_settles_kelly_when_direct_inputs_empty(self):
+        from bot.collector_lane_replay_kelly import replay_recorded_collector_lane_with_kelly
+
+        decision = {
+            "decision_id": "nested-quote", "lane_id": "shadow_source_scoreboard",
+            "shared_candidate_id": "candidate-1", "run_id": "run-1", "market_id": "M1",
+            "observed_at": "2026-05-06T12:00:00+00:00", "action": "BUY_NO",
+            "model_probability": .2, "entry_price": .58,
+            "approved_position_size_usd": 10.0,
+            "provenance": {"future_pnl_inputs": {}, "source_scoreboard": {
+                "future_pnl_inputs": {"side": "NO", "best_no_ask": .58},
+            }},
+        }
+        [receipt] = build_paper_shadow_lane_resolution_rows(
+            lane_rows=[decision], resolution_rows=[{
+                "resolution_id": "resolution-1", "shared_candidate_id": "candidate-1",
+                "run_id": "run-1", "market_id": "M1", "outcome": "NO",
+                "settlement_ts": "2026-05-07T12:00:00+00:00",
+            }],
+        )
+        wallet = replay_recorded_collector_lane_with_kelly(
+            decisions=[decision], resolutions=[receipt], starting_balance_usd=100.0,
+        )
+        self.assertIsNone(receipt["blocker"])
+        self.assertEqual(wallet["summary"]["settled_positions"], 1)
+        self.assertAlmostEqual(wallet["summary"]["final_balance_usd"], 107.241379)
+
+    def test_subnormal_quote_cannot_emit_infinite_resolution_pnl(self):
+        [receipt] = build_paper_shadow_lane_resolution_rows(
+            lane_rows=[{
+                "policy": "shadow_source_router", "action": "BUY_NO",
+                "shared_candidate_id": "candidate-tiny", "run_id": "run-1",
+                "market_id": "M1", "observed_at": "2026-05-06T12:00:00+00:00",
+                "approved_position_size_usd": 10.0,
+                "provenance": {"future_pnl_inputs": {"side": "NO", "best_no_ask": 5e-324}},
+            }],
+            resolution_rows=[{
+                "shared_candidate_id": "candidate-tiny", "run_id": "run-1",
+                "market_id": "M1", "outcome": "NO",
+                "settlement_ts": "2026-05-07T12:00:00+00:00",
+            }],
+        )
+        self.assertEqual(receipt["blocker"], "unrepresentable_economics")
+        self.assertIsNone(receipt["pnl"])
+
+    def test_huge_integer_stake_blocks_instead_of_crashing_resolution(self):
+        [receipt] = build_paper_shadow_lane_resolution_rows(
+            lane_rows=[{
+                "policy": "shadow_source_router", "action": "BUY_NO",
+                "shared_candidate_id": "candidate-huge", "run_id": "run-1",
+                "market_id": "M1", "observed_at": "2026-05-06T12:00:00+00:00",
+                "approved_position_size_usd": 10**1000,
+                "provenance": {"future_pnl_inputs": {"side": "NO", "best_no_ask": .58}},
+            }],
+            resolution_rows=[{
+                "shared_candidate_id": "candidate-huge", "run_id": "run-1",
+                "market_id": "M1", "outcome": "NO",
+                "settlement_ts": "2026-05-07T12:00:00+00:00",
+            }],
+        )
+        self.assertEqual(receipt["blocker"], "missing_position_size")
+        self.assertIsNone(receipt["pnl"])
+
+    def test_router_does_not_promote_side_labelled_reference_as_executable_quote(self):
+        from bot.paper_shadow_lanes import _side_specific_price
+
+        diagnostic = {"side": "NO", "entry_price": 0.58, "estimated_fill_price": 0.58}
+        self.assertIsNone(_side_specific_price(diagnostic, "NO"))
+        self.assertEqual(_side_specific_price({**diagnostic, "best_no_ask": 0.58}, "NO"), 0.58)
+
     def test_shadow_source_scoreboard_uses_side_ask_when_signal_market_price_is_zero(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             dataset_path = Path(tmpdir) / "shared" / "prediction_lab" / "market_snapshots.jsonl"
@@ -2908,6 +3751,47 @@ parameters:
         self.assertEqual(confidence_row["reason_code"], "approved_confidence_floor")
 
 
+    def test_source_shadow_resolution_uses_recorded_no_ask_not_yes_side_estimate(self):
+        lane = {
+            "policy": "shadow_source_router", "shared_candidate_id": "candidate-no-ask",
+            "market_id": "KXHIGHSEA-1", "observed_at": "2026-05-14T12:00:00+00:00",
+            "action": "BUY_NO", "approved_position_size_usd": 10.0,
+            "provenance": {"future_pnl_inputs": {
+                "recommended_action": "BUY_NO", "side": "NO", "entry_price": 0.58,
+                "estimated_fill_price": 0.44, "best_no_ask": 0.58,
+            }},
+        }
+        [row] = build_paper_shadow_lane_resolution_rows(
+            lane_rows=[lane], resolution_rows=[{
+                "shared_candidate_id": "candidate-no-ask", "market_id": "KXHIGHSEA-1",
+                "resolution": {"outcome": "NO", "resolved_at": "2026-05-16T13:00:00+00:00"},
+            }],
+        )
+        self.assertIsNone(row["blocker"])
+        self.assertEqual(row["fill_price"], 0.58)
+        self.assertEqual(row["pnl"]["pnl_usd"], round(10 / 0.58 - 10, 4))
+
+    def test_legacy_complemented_shadow_ask_is_not_an_executable_fill(self):
+        lane = {
+            "policy": "shadow_source_router", "shared_candidate_id": "candidate-complement",
+            "market_id": "KXHIGHSEA-2", "observed_at": "2026-05-14T12:00:00+00:00",
+            "action": "BUY_NO", "approved_position_size_usd": 10.0,
+            "provenance": {"future_pnl_inputs": {
+                "recommended_action": "BUY_NO", "side": "NO", "entry_price": 0.56,
+                "estimated_fill_price": 0.56, "best_no_ask": 0.56,
+                "execution_snapshot_marker": "paper_shadow_source_scoreboard_hypothetical_execution",
+            }},
+        }
+        [row] = build_paper_shadow_lane_resolution_rows(
+            lane_rows=[lane], resolution_rows=[{
+                "shared_candidate_id": "candidate-complement", "market_id": "KXHIGHSEA-2",
+                "resolution": {"outcome": "NO", "resolved_at": "2026-05-16T13:00:00+00:00"},
+            }],
+        )
+        self.assertEqual(row["blocker"], "missing_fill_price")
+        self.assertIsNone(row["fill_price"])
+        self.assertIsNone(row["pnl"])
+
     def test_source_scoreboard_resolution_rows_preserve_replayable_pnl_inputs(self):
         lane_rows = [
             {
@@ -2930,6 +3814,7 @@ parameters:
                             "side": "YES",
                             "entry_price": 0.24,
                             "estimated_fill_price": 0.25,
+                            "best_yes_ask": 0.25,
                             "stable_approved_position_size_usd": 10.0,
                         },
                     }
@@ -2978,6 +3863,7 @@ parameters:
                             "recommended_action": "BUY_YES",
                             "side": "YES",
                             "estimated_fill_price": 0.25,
+                            "best_yes_ask": 0.25,
                             "stable_approved_position_size_usd": 10.0,
                         },
                     }
@@ -2997,6 +3883,7 @@ parameters:
                             "recommended_action": "BUY_NO",
                             "side": "NO",
                             "entry_price": 0.20,
+                            "best_no_ask": 0.20,
                             "stable_approved_position_size_usd": 5.0,
                         },
                     }
@@ -3094,6 +3981,7 @@ parameters:
                             "recommended_action": "BUY_YES",
                             "side": "YES",
                             "estimated_fill_price": 0.5,
+                            "best_yes_ask": 0.5,
                             "starting_balance_usd": 100.0,
                             "approved_position_size_usd": 10.0,
                         }
@@ -3116,6 +4004,7 @@ parameters:
                             "recommended_action": "BUY_YES",
                             "side": "YES",
                             "estimated_fill_price": 0.5,
+                            "best_yes_ask": 0.5,
                             "starting_balance_usd": 100.0,
                             "approved_position_size_usd": 10.0,
                         }
@@ -3188,6 +4077,7 @@ parameters:
                             "recommended_action": "BUY_NO",
                             "side": "NO",
                             "estimated_fill_price": 0.25,
+                            "best_no_ask": 0.25,
                             "approved_position_size_usd": 10.0,
                         },
                     },
@@ -3197,6 +4087,7 @@ parameters:
                         "recommended_action": "BUY_NO",
                         "side": "NO",
                         "estimated_fill_price": 0.25,
+                        "best_no_ask": 0.25,
                         "approved_position_size_usd": 10.0,
                     },
                 },
@@ -3213,6 +4104,7 @@ parameters:
                         "recommended_action": "BUY_YES",
                         "side": "YES",
                         "estimated_fill_price": 0.50,
+                        "best_yes_ask": 0.50,
                         "approved_position_size_usd": 10.0,
                     }
                 },
@@ -3241,6 +4133,7 @@ parameters:
                         "recommended_action": "BUY_YES",
                         "side": "YES",
                         "estimated_fill_price": 0.25,
+                        "best_yes_ask": 0.25,
                     }
                 },
             },
@@ -3328,6 +4221,7 @@ parameters:
                         "recommended_action": "BUY_YES",
                         "side": "YES",
                         "estimated_fill_price": 0.25,
+                        "best_yes_ask": 0.25,
                     }
                 },
             }
@@ -3386,6 +4280,7 @@ parameters:
                             "recommended_action": "BUY_NO",
                             "side": "NO",
                             "estimated_fill_price": 0.20,
+                            "best_no_ask": 0.20,
                         }
                     },
                 },

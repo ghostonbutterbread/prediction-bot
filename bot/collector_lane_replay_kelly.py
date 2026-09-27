@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -92,11 +93,14 @@ def replay_recorded_collector_lane_with_kelly(
             row["reason_code"] = "missing_model_probability"
             decision_rows.append(row)
             continue
-        price = _price(
-            decision.get("yes_price") if action == "BUY_YES" else decision.get("no_price"),
-            decision.get("entry_price"),
-            decision.get("price"),
-        )
+        if str(decision.get("lane_id") or decision.get("policy") or "") in {"shadow_source_router", "shadow_source_scoreboard"}:
+            price = _source_shadow_ask(decision, action)
+        else:
+            price = _price(
+                decision.get("yes_price") if action == "BUY_YES" else decision.get("no_price"),
+                decision.get("entry_price"),
+                decision.get("price"),
+            )
         if price is None:
             row["reason_code"] = "missing_decision_time_price"
             decision_rows.append(row)
@@ -116,6 +120,10 @@ def replay_recorded_collector_lane_with_kelly(
         })
         if stake <= 0:
             row["reason_code"] = "kelly_nonpositive_or_no_available_cash"
+            decision_rows.append(row)
+            continue
+        if not math.isfinite(stake / price):
+            row["reason_code"] = "unrepresentable_economics"
             decision_rows.append(row)
             continue
         market_id = row["market_id"]
@@ -264,6 +272,9 @@ def _resolution_map(
         decision_time = decision_times.get(decision_id)
         market_id = str(row.get("market_id") or nested.get("market_id") or "")
         outcome = str(nested.get("outcome") or row.get("outcome") or "").upper()
+        blocker = row.get("blocker")
+        if blocker not in (None, "") and not (blocker == "void_resolution" and outcome == "VOID"):
+            continue
         settlement_value = nested.get("settlement_ts") or row.get("settlement_ts")
         if (decision_time is None or not market_id or market_id != decision_markets.get(decision_id)
                 or outcome not in {"YES", "NO", "VOID"} or settlement_value in (None, "")):
@@ -437,6 +448,21 @@ def _price(*values: Any) -> float | None:
         if 0 < numeric < 1:
             return numeric
     return None
+
+
+def _source_shadow_ask(decision: Mapping[str, Any], action: str) -> float | None:
+    provenance = decision.get("provenance")
+    provenance = provenance if isinstance(provenance, Mapping) else {}
+    inputs = provenance.get("future_pnl_inputs")
+    if not isinstance(inputs, Mapping) or not inputs:
+        scoreboard = provenance.get("source_scoreboard")
+        inputs = scoreboard.get("future_pnl_inputs") if isinstance(scoreboard, Mapping) else None
+    if not isinstance(inputs, Mapping):
+        return None
+    key = f"best_{action.removeprefix('BUY_').lower()}_ask"
+    if inputs.get("execution_snapshot_marker") == "paper_shadow_source_scoreboard_hypothetical_execution":
+        key = f"paper_shadow_recorded_{key}"
+    return _price(inputs.get(key))
 
 
 def _reserved_capital(positions: Iterable[Mapping[str, Any]]) -> float:

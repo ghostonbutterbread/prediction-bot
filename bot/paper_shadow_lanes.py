@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 import json
+import math
 import re
 from typing import Any, Iterable, Mapping
 
@@ -2116,8 +2117,20 @@ def _build_lane_resolution_row(
     outcome = _normalized_resolution_outcome(resolution)
     action = _action_label(_optional_text(future_inputs.get("recommended_action"), row.get("action"), row.get("side")))
     side = _side_from_action(action) or _optional_text(future_inputs.get("side"))
-    quote_only_buy = _lane_id_for_row(row) == FEE_AWARE_LOSS_GUARD_LANE_ID and _is_buy_action(action)
-    fill_price = None if quote_only_buy else _number(future_inputs.get("estimated_fill_price"), future_inputs.get("entry_price"), row.get("entry_price"), row.get("price"))
+    lane_id = _lane_id_for_row(row)
+    quote_only_buy = lane_id == FEE_AWARE_LOSS_GUARD_LANE_ID and _is_buy_action(action)
+    if lane_id in {"shadow_source_router", "shadow_source_scoreboard"} and _is_buy_action(action):
+        # A source shadow is not an executed fill. Generic estimates and
+        # snapshot-complemented asks are diagnostic, not executable quotes.
+        if side in {"YES", "NO"}:
+            quote_key = f"best_{side.lower()}_ask"
+            if future_inputs.get("execution_snapshot_marker") == "paper_shadow_source_scoreboard_hypothetical_execution":
+                quote_key = f"paper_shadow_recorded_best_{side.lower()}_ask"
+            fill_price = _price_number(future_inputs.get(quote_key))
+        else:
+            fill_price = None
+    else:
+        fill_price = None if quote_only_buy else _number(future_inputs.get("estimated_fill_price"), future_inputs.get("entry_price"), row.get("entry_price"), row.get("price"))
     entry_price = _number(future_inputs.get("entry_price"), row.get("entry_price"), row.get("price"))
     stake = _number(
         row.get("approved_position_size_usd"),
@@ -2248,9 +2261,15 @@ def _resolution_row_blocker(*, action: str, outcome: str | None, side: str | Non
         return "unsupported_action"
     if side not in {"YES", "NO"}:
         return "missing_side"
-    if fill_price is None or float(fill_price) <= 0:
+    price = _price_number(fill_price)
+    if price is None:
         return "missing_fill_price"
-    if stake is None or float(stake) <= 0:
+    try:
+        if stake is None or not math.isfinite(stake) or stake <= 0:
+            return "missing_position_size"
+        if not math.isfinite(stake / price):
+            return "unrepresentable_economics"
+    except (OverflowError, TypeError, ValueError, ZeroDivisionError):
         return "missing_position_size"
     return None
 
@@ -2844,7 +2863,6 @@ def _source_router_provenance(
     side_price = _side_specific_price(future_pnl_inputs, side)
     if side_price is not None:
         future_pnl_inputs["entry_price"] = side_price
-        future_pnl_inputs["estimated_fill_price"] = side_price
     future_pnl_inputs["recommended_action"] = action
     future_pnl_inputs["recommended_side"] = side
     future_pnl_inputs["side"] = side
@@ -2887,7 +2905,9 @@ def _future_pnl_inputs(
     source_row = source_row if isinstance(source_row, Mapping) else {}
     artifact = _candidate_artifact(signal, shared_candidate)
     artifact_order_book = _mapping(artifact.get("order_book"))
-    order_book_snapshot = _mapping(artifact.get("order_book_snapshot"))
+    order_book_snapshot = _mapping(artifact.get("order_book_snapshot")) or _mapping(
+        _mapping(shared_candidate.get("prices")).get("order_book_snapshot")
+    )
     order_book_data = _mapping(order_book_snapshot.get("data"))
     execution_snapshot = _mapping(artifact.get("execution_snapshot"))
     weather_snapshot = _candidate_weather_source_snapshot(signal, shared_candidate, artifact)
@@ -2955,31 +2975,76 @@ def _future_pnl_inputs(
         question=question,
         question_side=question_side,
     )
-    initial_side = _side_from_action(str(source_row.get("action") or signal.get("direction") or ""))
-    entry_price = _shadow_entry_price_for_side(initial_side, signal, source_row)
-    estimated_fill_price = _price_number(
-        signal.get("estimated_fill_price"),
-        execution_snapshot.get("estimated_fill_price"),
-        order_book_data.get("estimated_fill_price"),
-        artifact_order_book.get("estimated_fill_price"),
+    signal_side = _side_from_action(str(signal.get("direction") or ""))
+    initial_side = (
+        _side_from_action(str(source_reliability.get("recommended_action") or ""))
+        or _side_from_action(str(source_row.get("action") or ""))
+        or signal_side
+    )
+    hypothetical_book = _optional_text(signal.get("execution_snapshot_marker"), execution_snapshot.get("marker")) == "paper_shadow_source_scoreboard_hypothetical_execution"
+    candidate_market_id = _optional_text(signal.get("market_id"), shared_candidate.get("market_id"), market.get("id"))
+    candidate_observed_at = _parse_timestamp(_optional_text(
+        signal.get("candidate_observed_at"), shared_candidate.get("observed_at"), source_row.get("observed_at"),
+    ))
+    book_envelopes = tuple(book for book in (order_book_snapshot, artifact_order_book) if book)
+    invalid_book_context = False
+    for book in book_envelopes:
+        book_market_id = _optional_text(book.get("market_id"))
+        book_as_of = _parse_timestamp(_optional_text(book.get("as_of"), book.get("observed_at")))
+        if (book_market_id and candidate_market_id and book_market_id != candidate_market_id) or (
+            book_as_of and candidate_observed_at and book_as_of > candidate_observed_at
+        ):
+            invalid_book_context = True
+            break
+    eligible_book_data = order_book_data if order_book_snapshot.get("source") == "book" and not invalid_book_context else {}
+    eligible_artifact_book = artifact_order_book if artifact_order_book.get("source") == "book" and not invalid_book_context else {}
+    unquoted_snapshot = bool(book_envelopes) and not (eligible_book_data or eligible_artifact_book)
+    if unquoted_snapshot and not hypothetical_book:
+        # Normalization flattens snapshot prices into best_*_ask. A fallback
+        # snapshot is a reference, not a recorded side-specific order-book ask.
+        best_yes_ask = best_no_ask = entry_price = None
+    elif hypothetical_book:
+        # The execution snapshot can complement the opposite ask. Only the
+        # pre-snapshot, side-labelled book quote proves a hypothetical entry.
+        # A synthetic, wrong-market, or future artifact cannot supplement it.
+        best_yes_ask = _price_number(
+            signal.get("paper_shadow_recorded_best_yes_ask") if not invalid_book_context else None,
+            eligible_book_data.get("best_yes_ask"), eligible_artifact_book.get("best_yes_ask"),
+        )
+        best_no_ask = _price_number(
+            signal.get("paper_shadow_recorded_best_no_ask") if not invalid_book_context else None,
+            eligible_book_data.get("best_no_ask"), eligible_artifact_book.get("best_no_ask"),
+        )
+        entry_price = _side_price_from_book(initial_side, {"best_yes_ask": best_yes_ask, "best_no_ask": best_no_ask})
+    else:
+        best_yes_ask = _price_number(
+            signal.get("best_yes_ask") if not book_envelopes else None,
+            eligible_book_data.get("best_yes_ask"),
+            eligible_artifact_book.get("best_yes_ask"),
+        )
+        best_no_ask = _price_number(
+            signal.get("best_no_ask") if not book_envelopes else None,
+            eligible_book_data.get("best_no_ask"),
+            eligible_artifact_book.get("best_no_ask"),
+        )
+        entry_price = (
+            _side_price_from_book(initial_side, {"best_yes_ask": best_yes_ask, "best_no_ask": best_no_ask})
+            if book_envelopes else _shadow_entry_price_for_side(initial_side, signal, source_row)
+        )
+    # An estimate attached to the strategy's side cannot be relabelled as a
+    # shadow lane's opposite-side fill. Retain it on the original side only.
+    estimated_fill_price = None if unquoted_snapshot and not hypothetical_book else entry_price if hypothetical_book else (
+        _price_number(
+            signal.get("estimated_fill_price"),
+            execution_snapshot.get("estimated_fill_price"),
+            eligible_book_data.get("estimated_fill_price"),
+            eligible_artifact_book.get("estimated_fill_price"),
+        ) if signal_side is None or signal_side == initial_side else None
     )
     if estimated_fill_price is None:
         estimated_fill_price = _side_price_from_book(
             initial_side,
-            {
-                "best_yes_ask": _price_number(
-                    signal.get("best_yes_ask"),
-                    execution_snapshot.get("best_yes_ask"),
-                    order_book_data.get("best_yes_ask"),
-                    artifact_order_book.get("best_yes_ask"),
-                ),
-                "best_no_ask": _price_number(
-                    signal.get("best_no_ask"),
-                    execution_snapshot.get("best_no_ask"),
-                    order_book_data.get("best_no_ask"),
-                    artifact_order_book.get("best_no_ask"),
-                ),
-            },
+            {"best_yes_ask": best_yes_ask, "best_no_ask": best_no_ask},
         )
     if entry_price is None:
         entry_price = estimated_fill_price
@@ -3010,27 +3075,23 @@ def _future_pnl_inputs(
         "side": initial_side,
         "entry_price": entry_price,
         "estimated_fill_price": estimated_fill_price,
-        "best_yes_ask": _price_number(
-            signal.get("best_yes_ask"),
-            execution_snapshot.get("best_yes_ask"),
-            order_book_data.get("best_yes_ask"),
-            artifact_order_book.get("best_yes_ask"),
+        "best_yes_ask": best_yes_ask,
+        "paper_shadow_recorded_best_yes_ask": (
+            best_yes_ask if hypothetical_book else None
         ),
         "best_yes_bid": _price_number(
             signal.get("best_yes_bid"),
-            execution_snapshot.get("best_yes_bid"),
+            execution_snapshot.get("best_yes_bid") if not hypothetical_book else None,
             order_book_data.get("best_yes_bid"),
             artifact_order_book.get("best_yes_bid"),
         ),
-        "best_no_ask": _price_number(
-            signal.get("best_no_ask"),
-            execution_snapshot.get("best_no_ask"),
-            order_book_data.get("best_no_ask"),
-            artifact_order_book.get("best_no_ask"),
+        "best_no_ask": best_no_ask,
+        "paper_shadow_recorded_best_no_ask": (
+            best_no_ask if hypothetical_book else None
         ),
         "best_no_bid": _price_number(
             signal.get("best_no_bid"),
-            execution_snapshot.get("best_no_bid"),
+            execution_snapshot.get("best_no_bid") if not hypothetical_book else None,
             order_book_data.get("best_no_bid"),
             artifact_order_book.get("best_no_bid"),
         ),
@@ -3125,19 +3186,12 @@ def _compute_source_router_edge(
 
 
 def _side_specific_price(future_pnl_inputs: Mapping[str, Any], side: str | None) -> float | None:
-    if side == "YES":
-        return _price_number(
-            future_pnl_inputs.get("best_yes_ask"),
-            future_pnl_inputs.get("entry_price") if future_pnl_inputs.get("side") == "YES" else None,
-            future_pnl_inputs.get("estimated_fill_price") if future_pnl_inputs.get("side") == "YES" else None,
-        )
-    if side == "NO":
-        return _price_number(
-            future_pnl_inputs.get("best_no_ask"),
-            future_pnl_inputs.get("entry_price") if future_pnl_inputs.get("side") == "NO" else None,
-            future_pnl_inputs.get("estimated_fill_price") if future_pnl_inputs.get("side") == "NO" else None,
-        )
-    return None
+    if side not in {"YES", "NO"}:
+        return None
+    quote_key = f"best_{side.lower()}_ask"
+    if future_pnl_inputs.get("execution_snapshot_marker") == "paper_shadow_source_scoreboard_hypothetical_execution":
+        quote_key = f"paper_shadow_recorded_best_{side.lower()}_ask"
+    return _price_number(future_pnl_inputs.get(quote_key))
 
 
 def _shadow_entry_price_for_side(
@@ -3145,10 +3199,26 @@ def _shadow_entry_price_for_side(
     signal: Mapping[str, Any],
     source_row: Mapping[str, Any],
 ) -> float | int | None:
-    side_price = _side_price_from_book(side, signal)
+    if signal.get("execution_snapshot_marker") == "paper_shadow_source_scoreboard_hypothetical_execution":
+        # The normalized snapshot may carry an inferred opposite ask. Its
+        # pre-snapshot side quote is the only price eligible for a lane entry.
+        if side in {"YES", "NO"}:
+            return _price_number(signal.get(f"paper_shadow_recorded_best_{side.lower()}_ask"))
+        return None
+    # Reference yes/no market prices are side-labelled, but they are not
+    # order-book asks and cannot justify an opposite-side shadow entry.
+    side_price = _price_number(signal.get(f"best_{side.lower()}_ask")) if side in {"YES", "NO"} else None
     if side_price is not None:
         return side_price
+    # Generic signal/source prices are directional. Do not relabel a YES
+    # reference as a NO entry when a shadow recommendation flips sides.
+    signal_side = _side_from_action(str(signal.get("direction") or ""))
+    source_side = _side_from_action(str(source_row.get("action") or ""))
+    if any(proven_side and proven_side != side for proven_side in (signal_side, source_side)):
+        return None
     return _price_number(
+        signal.get(f"{side.lower()}_market_price") if side in {"YES", "NO"} else None,
+        signal.get(f"{side.lower()}_price") if side in {"YES", "NO"} else None,
         signal.get("entry_price"),
         signal.get("market_price"),
         source_row.get("entry_price"),
@@ -3750,7 +3820,11 @@ def _price_number(*values: Any) -> float | int | None:
         number = _number(value)
         if number is None:
             continue
-        if number <= 0:
+        try:
+            valid = math.isfinite(number) and 0 < number <= 1
+        except (OverflowError, TypeError, ValueError):
+            valid = False
+        if not valid:
             continue
         return number
     return None

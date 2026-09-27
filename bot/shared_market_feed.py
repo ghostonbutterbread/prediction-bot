@@ -807,9 +807,17 @@ def _build_prices(market: Any, signal: dict[str, Any], decision_artifact: dict[s
             "pre_logic_order_book_snapshot",
             "post_logic_order_book_snapshot",
             "order_book_snapshot",
-            "execution_snapshot",
         ],
     )
+    recovered_sources = _mapping(_mapping(decision_artifact).get("provenance")).get("sources") or []
+    if any(
+        isinstance(source, dict)
+        and source.get("field") == "order_book_snapshot"
+        and source.get("path") == "decision_artifact.execution_snapshot"
+        for source in recovered_sources
+    ):
+        # Older backfills labelled a complemented execution snapshot as a book.
+        order_book = {**order_book, "source": "synthetic"}
     data = order_book.get("data") if isinstance(order_book.get("data"), dict) else order_book
     return {
         "yes_price": getattr(market, "yes_price", signal.get("yes_market_price")),

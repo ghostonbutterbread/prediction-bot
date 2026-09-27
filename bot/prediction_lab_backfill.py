@@ -489,6 +489,18 @@ def _recover_source_snapshots(artifact: dict[str, Any]) -> list[FieldProvenance]
 
 
 def _recover_order_book(artifact: dict[str, Any]) -> list[FieldProvenance]:
+    prior_snapshot = artifact.get("order_book_snapshot")
+    provenance = artifact.get("provenance")
+    prior_sources = provenance.get("sources") if isinstance(provenance, dict) else []
+    if isinstance(prior_snapshot, dict) and any(
+        isinstance(source, dict)
+        and source.get("field") == "order_book_snapshot"
+        and source.get("path") == "decision_artifact.execution_snapshot"
+        for source in (prior_sources or [])
+    ):
+        # A previous backfill may have labelled a complemented execution
+        # snapshot as a book. Retain its evidence but not that quote claim.
+        prior_snapshot["source"] = "synthetic"
     if _has_executable_asks((artifact.get("order_book_snapshot") or {}).get("data") if isinstance(artifact.get("order_book_snapshot"), dict) else None):
         return []
     for key in ("order_book", "book", "recorded_order_book"):
@@ -499,7 +511,9 @@ def _recover_order_book(artifact: dict[str, Any]) -> list[FieldProvenance]:
     execution_snapshot = artifact.get("execution_snapshot")
     if _has_executable_asks(execution_snapshot):
         artifact["order_book_snapshot"] = {
-            "source": str(execution_snapshot.get("source") or artifact.get("execution_snapshot_source") or "book"),
+            # An execution snapshot can complement a one-sided book. Its
+            # source=book describes the input, not every normalized ask.
+            "source": "synthetic",
             "data": {
                 key: execution_snapshot.get(key)
                 for key in ("best_yes_ask", "best_no_ask", "best_yes_bid", "best_no_bid")
@@ -953,9 +967,21 @@ def _attach_provenance(
     line_number: int | None,
     input_path: str | None = None,
 ) -> None:
+    artifact_provenance = artifact.get("provenance")
+    if not isinstance(artifact_provenance, dict):
+        artifact_provenance = {}
+    row_provenance = row.get("provenance")
+    if not isinstance(row_provenance, dict):
+        row_provenance = {}
+    previous_sources = artifact_provenance.get("sources") or row_provenance.get("sources") or []
+    sources = [copy.deepcopy(item) for item in previous_sources if isinstance(item, dict)]
+    for item in recovered:
+        source = item.to_dict()
+        if source not in sources:
+            sources.append(source)
     payload = {
         "tier": tier,
-        "sources": [item.to_dict() for item in recovered],
+        "sources": sources,
         "backfill_version": BACKFILL_VERSION,
         "reasons": list(reasons),
     }
