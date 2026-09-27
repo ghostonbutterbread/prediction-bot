@@ -1,6 +1,6 @@
 # Bounded unresolved resolution queue — integration dossier
 
-- **Status:** corrected full suite and independent code review passed; beta compatibility gate pending
+- **Status:** corrected code and beta-first compatibility suites passed; final independent handoff gate pending
 - **Owner:** Hermes, Kanban `t_eeedba96` (audit `t_500d82fb`)
 - **Branch / owning ref:** `fix/resolution-feed-fair-unresolved`
 - **Base commit:** `f4fa746e0484c083ee0ea5c019caae33058bb925`
@@ -23,12 +23,13 @@ Keep the collector-owned, deduplicated market-reference queue and central outcom
 - Independent corrected-code re-review of `29d672e`: dual-cap and additional combinations covered all pending markets; 14 focused tests OK (6 skipped), 27 related integration tests OK, clean diff; **no behavioral blocker**. Reviewer could not approve integration because the then-read dossier still pointed to `858abad` and its recorded full suite was incomplete; those handoff gates are corrected here and in the preceding dossier-only `21c3e1d`.
 - Broad isolated discovery: `PYTHONPATH=<worktree> /mnt/data-collection/prediction-bot/.venv/bin/python -m unittest discover -s tests -q` completed on corrected checkpoint `29d672e` — **1,191 tests OK (7 skipped), 69.958 seconds**. Log `/home/ryushe/.hermes/cache/scratch/prediction-resolver-full-suite-corrected-20260927.log`. An earlier verbose invocation hit an agent-selected 300-second guard without a verdict; isolated range-review module passed four tests (516 generated cases) in 65.504 seconds. The completed quiet full suite is the actual gate receipt, not an inference from the earlier run.
 - Beta non-committing merge preflight against clean fetched `beta` at `f4fa746`: staged cleanly, `git diff --cached --check` passed, beta-first focused integration suite 41 tests OK (6 skipped). The beta-first full suite exceeded an agent-chosen 240-second guard while multiple unrelated full suites were concurrently running; `/home/ryushe/.hermes/cache/scratch/prediction-resolver-beta-preflight-20260927.log` has no final summary. The shell trap aborted the preflight; `beta` is clean and unchanged. **Incomplete gate, not a failing assertion or product latency requirement.** Re-run when concurrent suites finish rather than counting feature-branch full-suite results as beta compatibility.
+- Beta-first full-suite retry after concurrent suites finished: non-committing merge of this branch into freshly fetched clean `beta` staged cleanly; `git diff --cached --check` passed; `PYTHONPATH=<beta-worktree> /mnt/data-collection/prediction-bot/.venv/bin/python -m unittest discover -s tests -q` completed **1,191 tests OK (7 skipped), 76.786 seconds**. Receipt `/home/ryushe/.hermes/cache/scratch/prediction-resolver-beta-preflight-retry-20260927.log`. Preflight was aborted by the shell trap; readback showed clean beta at `f4fa746` with no merge state or staged diff.
 - Runtime/data action: none. Active resolver config and source archive unchanged.
 
 ## Blockers and deferred work
 
-- **Remaining gate:** test a non-committing merge of this older-base feature into the clean fetched beta worktree, with beta-first import path, focused/full isolated checks, and `git diff --cached --check`; abort the preflight before the actual merge. Obtain a fresh independent gate on this corrected handoff and compatibility receipt before beta integration.
-- **Trigger:** before integration into beta. The corrected feature full suite and independent code review already passed; do not misclassify the earlier verbose 300-second guard as a failure.
+- **Remaining gate:** independent final read-only check of the corrected immutable checkpoint, review finding, full feature and beta-first receipts, clean target, and dossier truth before beta integration. No unresolved behavioral blocker remains in the focused reviewer result.
+- **Trigger:** before integration into beta. Do not misclassify either earlier agent-chosen timeout as a product failure; the completed quiet suites are the gate receipts.
 - **Activation boundary:** code merge is not service restart/activation; separately inspect the active collector runtime and resolver output after an explicitly approved rollout.
 - **Other audit defects:** NWS low date selection, missing-side NO fill, paper PnL resolution authority, and contradictory Kelly receipts are separate owned fixes, not folded into this queue patch.
 
@@ -37,7 +38,7 @@ Keep the collector-owned, deduplicated market-reference queue and central outcom
 - **Branch/ref:** `fix/resolution-feed-fair-unresolved`.
 - **Latest immutable implementation checkpoint:** `29d672e7e4e673bbd842be1a165763a037aca7e8`; current tip includes later dossier-only handoff commits.
 - **Feature implementation commit(s):** `858abadda0927ae951d41b6b090346f12884b562`, `29d672e7e4e673bbd842be1a165763a037aca7e8`.
-- **Exact resume point:** run beta-first non-committing merge compatibility gate, resolve any blocker, then request independent verification of the corrected handoff and compatibility evidence before beta integration.
+- **Exact resume point:** obtain independent final handoff/compatibility verdict on the corrected dossier and completed beta-first suite; if accepted, merge into beta without the branch-local dossier, verify beta focused checks, then record beta commit and retire the clean contained feature worktree. Do not deploy services as part of the merge.
 - **Working-tree state at handoff:** clean after the dossier-only checkpoint.
 
 ## Decision gates
