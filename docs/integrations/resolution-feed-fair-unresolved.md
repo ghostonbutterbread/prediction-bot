@@ -6,8 +6,8 @@
 - **Base commit:** `f4fa746e0484c083ee0ea5c019caae33058bb925`
 - **Intended integration target:** `beta`
 - **Last updated:** 2026-09-27
-- **Latest immutable recovery checkpoint:** none yet
-- **Feature implementation commits:** none yet
+- **Latest immutable recovery checkpoint:** `858abadda0927ae951d41b6b090346f12884b562`
+- **Feature implementation commits:** `858abadda0927ae951d41b6b090346f12884b562`
 - **Inspiration:** bounded independent resolver repeatedly selects the first unresolved alphabetic market when that market remains active; later markets never reach resolution.
 
 ## Intent and implemented contract
@@ -34,9 +34,10 @@ Keep the collector-owned, deduplicated market-reference queue and central outcom
 ## Interruption / resume handoff
 
 - **Branch/ref:** `fix/resolution-feed-fair-unresolved`.
-- **Latest immutable recovery checkpoint:** none yet; commit after local gate.
-- **Exact resume point:** run full suite, obtain independent review, resolve findings, commit dossier and implementation; review beta integration separately.
-- **Working-tree state at handoff:** implementation and regression test intentionally uncommitted until verification.
+- **Latest immutable recovery checkpoint:** `858abadda0927ae951d41b6b090346f12884b562` (implementation commit; current tip will include a later dossier-only handoff commit).
+- **Feature implementation commit(s):** `858abadda0927ae951d41b6b090346f12884b562`.
+- **Exact resume point:** reconcile independent review; diagnose or bound the stalled broad suite, rerun required gates, then review beta integration. This branch is not merge-ready.
+- **Working-tree state at handoff:** clean after the dossier-only checkpoint.
 
 ## Decision gates
 
