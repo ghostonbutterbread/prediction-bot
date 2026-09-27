@@ -8,6 +8,7 @@ from bot.weather.source_observation_ledger import (
     is_eligible_for_future_history,
     materialize_source_observation_ledger,
     source_correctness_target_proof,
+    strict_source_observation_proof,
 )
 from bot.weather.source_performance_materializer import materialize_source_performance_once
 
@@ -367,6 +368,60 @@ class SourceObservationLedgerTests(unittest.TestCase):
         self.assertEqual(source_correctness_target_proof(
             source_record=record, snapshot={}, market_date="2026-08-03",
         )["status"], "unusable_source_period_target_mismatch")
+
+    def test_nws_overnight_low_remains_paper_proxy_not_strict_full_day_history(self) -> None:
+        record = _input(market_id="KXLOWSEA-26AUG03-T70")
+        record["market"]["question"] = "Will Seattle low temperature be below 70°?"
+        record["market"]["market_metadata"].update({"city": "Seattle", "market_kind": "low", "contract_shape": "tail"})
+        snapshot = record["source_inputs"]["source_context"]["data"]["weather_source_snapshot"]
+        snapshot["question"] = record["market"]["question"]
+        snapshot["sources"] = [{
+            "source_id": "nws", "source_name": "NWS", "source_location_city": "Seattle",
+            "forecast_measurement_kind": "low", "contract_shape": "tail", "question_side": "below",
+            "forecast_low": 58.0, "source_as_of": "2026-08-01T11:54:00+00:00",
+            "source_evidence_version": 1, "evidence_type": "forecast", "scoreable_forecast": True,
+            "forecast_start": "2026-08-02T18:00:00-07:00",
+            "forecast_end": "2026-08-03T06:00:00-07:00",
+            "target_mapping": {
+                "market_target_date": "2026-08-03", "source_target_date": "2026-08-03",
+                "source_period_start": "2026-08-02T18:00:00-07:00",
+                "source_period_end": "2026-08-03T06:00:00-07:00",
+                "source_timezone": "UTC-07:00", "mapping": "source_local_nws_night_low_proxy",
+            },
+        }]
+        _, artifacts = self._run([record], [_outcome(record, outcome="NO")])
+        [pending] = artifacts["pending_source_observations"]
+        self.assertEqual(pending["source_target_proof"]["status"], "eligible_exact_target_proof")
+        [settled] = artifacts["settled_source_correctness"]
+        self.assertFalse(settled["eligible_for_source_history"])
+        self.assertIn("partial_day_low_proxy_not_full_day", settled["strict_source_proof"]["reasons"])
+
+    def test_period_alias_conflict_and_post_period_source_time_are_not_exact_proof(self) -> None:
+        record = {
+            "source_id": "nws", "source_as_of": "2026-08-01T11:54:00+00:00",
+            "source_location_city": "Seattle", "forecast_measurement_kind": "high",
+            "contract_shape": "tail", "question_side": "above",
+            "source_evidence_version": 1, "evidence_type": "forecast", "scoreable_forecast": True,
+            "forecast_end": "2026-08-03T06:00:00-07:00",
+            "target_mapping": {
+                "market_target_date": "2026-08-03", "source_target_date": "2026-08-03",
+                "source_period_start": "2026-08-03T06:00:00-07:00",
+                "source_period_end": "2026-08-03T18:00:00-07:00",
+                "source_timezone": "UTC-07:00",
+            },
+        }
+        self.assertEqual(source_correctness_target_proof(
+            source_record=record, snapshot={}, market_date="2026-08-03",
+        )["status"], "unusable_source_period_alias_conflict")
+        record.pop("forecast_end")
+        record["source_as_of"] = "2026-08-04T02:00:00+00:00"
+        proof = strict_source_observation_proof(
+            source_record=record, snapshot={"station_resolution": {"city": "Seattle"}},
+            market_metadata={"city": "Seattle"}, market_date="2026-08-03",
+            market_kind="high", contract_shape="tail", question_side="above",
+            observed_at="2026-08-04T03:00:00+00:00",
+        )
+        self.assertIn("source_as_of_after_source_period_end", proof["reasons"])
 
     def test_v1_conflicting_retained_target_aliases_fail_closed(self) -> None:
         record = _input()

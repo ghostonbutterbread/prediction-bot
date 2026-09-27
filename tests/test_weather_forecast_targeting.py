@@ -133,13 +133,38 @@ class ForecastTargetingTests(unittest.TestCase):
         self.assertTrue(high.scoreable_forecast)
         self.assertEqual(high.high_temp_f, 84)
 
+    def test_nws_requested_kind_survives_unrelated_missing_temperature(self):
+        feed = NWSFeed()
+        feed._points_cache["austin"] = (datetime.now(timezone.utc), ("EWX", 152, 91))
+        feed.http = _Http({"properties": {"periods": [
+            {"name": "Sunday", "temperature": 84, "isDaytime": True,
+             "startTime": "2026-09-27T06:00:00-07:00", "endTime": "2026-09-27T18:00:00-07:00"},
+            {"name": "Sunday Night", "temperature": None, "isDaytime": False,
+             "startTime": "2026-09-27T18:00:00-07:00", "endTime": "2026-09-28T06:00:00-07:00"},
+        ]}})
+        high = feed.get_forecast("austin", target_date="2026-09-27", measurement_kind="high")
+        self.assertTrue(high.scoreable_forecast)
+        self.assertEqual(high.high_temp_f, 84)
+        self.assertIsNone(high.low_temp_f)
+
+        feed.http = _Http({"properties": {"periods": [
+            {"name": "Saturday Night", "temperature": 58, "isDaytime": False,
+             "startTime": "2026-09-26T18:00:00-07:00", "endTime": "2026-09-27T06:00:00-07:00"},
+            {"name": "Sunday", "temperature": None, "isDaytime": True,
+             "startTime": "2026-09-27T06:00:00-07:00", "endTime": "2026-09-27T18:00:00-07:00"},
+        ]}})
+        low = feed.get_forecast("austin", target_date="2026-09-27", measurement_kind="low")
+        self.assertTrue(low.scoreable_forecast)
+        self.assertEqual(low.low_temp_f, 58)
+        self.assertIsNone(low.high_temp_f)
+
     def test_scored_low_uses_morning_period_and_retains_source_period_proof(self):
         engine = ProWeatherEngine()
         try:
             setattr(engine.nws, "http", _Http({"properties": {"periods": [
                 {"name": "Saturday Night", "temperature": 58, "isDaytime": False,
                  "startTime": "2026-09-26T18:00:00-07:00", "endTime": "2026-09-27T06:00:00-07:00"},
-                {"name": "Sunday", "temperature": 84, "isDaytime": True,
+                {"name": "Sunday", "temperature": None, "isDaytime": True,
                  "startTime": "2026-09-27T06:00:00-07:00", "endTime": "2026-09-27T18:00:00-07:00"},
                 {"name": "Sunday Night", "temperature": 68, "isDaytime": False,
                  "startTime": "2026-09-27T18:00:00-07:00", "endTime": "2026-09-28T06:00:00-07:00"},
@@ -156,6 +181,28 @@ class ForecastTargetingTests(unittest.TestCase):
             [source] = [s for s in signal["data"]["source_details"] if s.get("source_id") == "nws"]
             self.assertEqual(source["forecast_measurement_kind"], "low")
             self.assertEqual(source["target_mapping"]["source_period_end"], "2026-09-27T06:00:00-07:00")
+            self.assertEqual(source["target_mapping"]["mapping"], "source_local_nws_night_low_proxy")
+        finally:
+            engine.close()
+
+    def test_high_scoring_survives_missing_unrelated_night_temperature(self):
+        engine = ProWeatherEngine()
+        try:
+            setattr(engine.nws, "http", _Http({"properties": {"periods": [
+                {"name": "Sunday", "temperature": 84, "isDaytime": True,
+                 "startTime": "2026-09-27T06:00:00-07:00", "endTime": "2026-09-27T18:00:00-07:00"},
+                {"name": "Sunday Night", "temperature": None, "isDaytime": False,
+                 "startTime": "2026-09-27T18:00:00-07:00", "endTime": "2026-09-28T06:00:00-07:00"},
+            ]}}))
+            engine.nws._points_cache["austin"] = (datetime.now(timezone.utc), ("EWX", 152, 91))
+            setattr(engine.nws, "get_station_observation", lambda city: None)
+            engine.open_meteo.get_forecast = lambda *_args, **_kwargs: None
+            signal = engine._score_temperature_market(
+                "Will Austin high temperature be above 80° on Sep 27, 2026?",
+                0.5, market_date="2026-09-27",
+            )
+            assert signal is not None
+            self.assertEqual(signal["data"]["predicted_temp"], 84)
         finally:
             engine.close()
 

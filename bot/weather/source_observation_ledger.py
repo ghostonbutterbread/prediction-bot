@@ -12,7 +12,7 @@ import json
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -414,6 +414,8 @@ def _source_period_target_problem(
         # period timestamp; it is not an IANA zone name.
         source_timezone = None
     period_dates: dict[str, list[date]] = {"start": [], "end": []}
+    period_times: dict[str, list[datetime]] = {"start": [], "end": []}
+    alias_conflict = False
     for boundary in ("start", "end"):
         values = [mapping.get(f"source_period_{boundary}"), *(
             source.get(f"{prefix}_{boundary}") for prefix in ("forecast", "forecast_period", "period")
@@ -428,6 +430,13 @@ def _source_period_target_problem(
             if period.tzinfo is not None and source_timezone is not None:
                 period = period.astimezone(source_timezone)
             period_dates[boundary].append(period.date())
+            period_times[boundary].append(period)
+        # Distinct bounds on the same local date are not interchangeable
+        # evidence. Compare aware aliases by instant, naive aliases locally.
+        aware = {period.astimezone(timezone.utc) for period in period_times[boundary] if period.tzinfo is not None}
+        naive = {period for period in period_times[boundary] if period.tzinfo is None}
+        if len(aware) > 1 or len(naive) > 1:
+            alias_conflict = True
     is_low = (_text(source.get("forecast_measurement_kind")) or "").lower() == "low"
     # A daytime high belongs to its starting date; a night low belongs to
     # the morning on which its retained nighttime period ends. Do not require
@@ -445,7 +454,7 @@ def _source_period_target_problem(
             if boundary == "end" and day_offset == 1 and not is_low:
                 continue
             return "source_period_target_mismatch"
-    return None
+    return "source_period_alias_conflict" if alias_conflict else None
 
 
 def strict_source_observation_proof(
@@ -477,6 +486,22 @@ def strict_source_observation_proof(
         reasons.append("missing_or_unoffset_source_as_of")
     elif observed_at_time is None or source_as_of_time > observed_at_time:
         reasons.append("source_as_of_after_immutable_observed_at")
+    if source_as_of_time is not None:
+        period_ends = (
+            mapping.get("source_period_end"),
+            *(source_record.get(f"{prefix}_end") for prefix in ("forecast", "forecast_period", "period")),
+        )
+        if any((end_time := _parse_time(end)) is not None and source_as_of_time >= end_time
+               for end in period_ends if end is not None):
+            reasons.append("source_as_of_after_source_period_end")
+    if (_text(source_record.get("forecast_measurement_kind")) or "").lower() == "low" and (
+        _text(mapping.get("mapping")) == "source_local_nws_night_low_proxy"
+        or (source_id == "nws" and _text(mapping.get("mapping")) == "exact_source_local_nws_period"
+            and mapping.get("source_period_start") and mapping.get("source_period_end"))
+    ):
+        # The NWS overnight period targets the morning but cannot attest the
+        # rest of a full-day low market. Retain it for paper/proxy diagnostics.
+        reasons.append("partial_day_low_proxy_not_full_day")
     if not _text(mapping.get("source_timezone")):
         reasons.append("missing_source_timezone")
     period_problem = _source_period_target_problem(source_record, mapping, _normalized_date(market_date))
