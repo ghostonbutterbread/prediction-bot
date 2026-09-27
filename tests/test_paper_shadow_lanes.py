@@ -1605,6 +1605,53 @@ parameters:
         self.assertIsNone(row["blocker"])
         self.assertEqual(row["fill_price"], 0.58)
 
+    def test_persisted_invalid_selected_ask_cannot_create_resolution_pnl(self):
+        for marked in (False, True):
+            for price in (float("nan"), float("inf"), -float("inf"), 1.2):
+                with self.subTest(marked=marked, price=price):
+                    future: dict[str, object] = {"side": "NO"}
+                    key = "best_no_ask"
+                    if marked:
+                        future["execution_snapshot_marker"] = "paper_shadow_source_scoreboard_hypothetical_execution"
+                        key = "paper_shadow_recorded_best_no_ask"
+                    future[key] = price
+                    [receipt] = build_paper_shadow_lane_resolution_rows(
+                        lane_rows=[{
+                            "policy": "shadow_source_router", "action": "BUY_NO",
+                            "shared_candidate_id": "candidate-nonfinite", "run_id": "run-1",
+                            "market_id": "M1", "observed_at": "2026-05-06T12:00:00+00:00",
+                            "approved_position_size_usd": 10.0,
+                            "provenance": {"future_pnl_inputs": future},
+                        }],
+                        resolution_rows=[{
+                            "shared_candidate_id": "candidate-nonfinite", "run_id": "run-1",
+                            "market_id": "M1", "outcome": "NO",
+                            "settlement_ts": "2026-05-07T12:00:00+00:00",
+                        }],
+                    )
+                    self.assertEqual(receipt["blocker"], "missing_fill_price")
+                    self.assertIsNone(receipt["pnl"])
+
+    def test_persisted_nonfinite_stake_cannot_create_resolution_pnl(self):
+        for stake in (float("nan"), float("inf"), -float("inf")):
+            with self.subTest(stake=stake):
+                [receipt] = build_paper_shadow_lane_resolution_rows(
+                    lane_rows=[{
+                        "policy": "shadow_source_router", "action": "BUY_NO",
+                        "shared_candidate_id": "candidate-bad-stake", "run_id": "run-1",
+                        "market_id": "M1", "observed_at": "2026-05-06T12:00:00+00:00",
+                        "approved_position_size_usd": stake,
+                        "provenance": {"future_pnl_inputs": {"side": "NO", "best_no_ask": .58}},
+                    }],
+                    resolution_rows=[{
+                        "shared_candidate_id": "candidate-bad-stake", "run_id": "run-1",
+                        "market_id": "M1", "outcome": "NO",
+                        "settlement_ts": "2026-05-07T12:00:00+00:00",
+                    }],
+                )
+                self.assertEqual(receipt["blocker"], "missing_position_size")
+                self.assertIsNone(receipt["pnl"])
+
     def test_router_does_not_promote_side_labelled_reference_as_executable_quote(self):
         from bot.paper_shadow_lanes import _side_specific_price
 

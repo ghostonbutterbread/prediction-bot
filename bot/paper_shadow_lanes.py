@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 import json
+import math
 import re
 from typing import Any, Iterable, Mapping
 
@@ -2147,9 +2148,9 @@ def _resolution_row_blocker(*, action: str, outcome: str | None, side: str | Non
         return "unsupported_action"
     if side not in {"YES", "NO"}:
         return "missing_side"
-    if fill_price is None or float(fill_price) <= 0:
+    if _price_number(fill_price) is None:
         return "missing_fill_price"
-    if stake is None or float(stake) <= 0:
+    if stake is None or not math.isfinite(stake) or stake <= 0:
         return "missing_position_size"
     return None
 
@@ -3635,7 +3636,11 @@ def _price_number(*values: Any) -> float | int | None:
         number = _number(value)
         if number is None:
             continue
-        if number <= 0:
+        try:
+            valid = math.isfinite(number) and 0 < number <= 1
+        except (OverflowError, TypeError, ValueError):
+            valid = False
+        if not valid:
             continue
         return number
     return None
