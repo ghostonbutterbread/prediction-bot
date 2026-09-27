@@ -2693,7 +2693,6 @@ def _source_router_provenance(
     side_price = _side_specific_price(future_pnl_inputs, side)
     if side_price is not None:
         future_pnl_inputs["entry_price"] = side_price
-        future_pnl_inputs["estimated_fill_price"] = side_price
     future_pnl_inputs["recommended_action"] = action
     future_pnl_inputs["recommended_side"] = side
     future_pnl_inputs["side"] = side

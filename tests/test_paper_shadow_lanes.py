@@ -1185,6 +1185,30 @@ parameters:
             0.445,
         )
 
+    def test_source_router_preserves_strategy_estimate_separately_from_book_ask(self):
+        from bot.paper_shadow_lanes import _LaneDefinition, _source_router_provenance
+
+        provenance = _source_router_provenance(
+            _LaneDefinition(lane_id="shadow_source_router"),
+            signal={
+                "direction": "BUY_YES", "market_id": "M1",
+                "candidate_observed_at": "2026-05-06T12:00:00+00:00",
+                "estimated_fill_price": .445,
+                "decision_artifact": {"order_book_snapshot": {
+                    "source": "book", "market_id": "M1", "data": {"best_yes_ask": .44},
+                }},
+            },
+            shared_candidate={"market_id": "M1", "observed_at": "2026-05-06T12:00:00+00:00"},
+            source_row={"action": "BUY_YES"},
+            source_router={"available": True, "recommended_action": "BUY_YES"},
+            requested_position_size_usd=10.0,
+            approved_position_size_usd=10.0,
+        )
+        future = provenance["future_pnl_inputs"]
+        self.assertEqual(future["best_yes_ask"], .44)
+        self.assertEqual(future["entry_price"], .44)
+        self.assertEqual(future["estimated_fill_price"], .445)
+
     def test_cross_side_generic_reference_does_not_become_no_entry(self):
         from bot.paper_shadow_lanes import _shadow_entry_price_for_side
 
