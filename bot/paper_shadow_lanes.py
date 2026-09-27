@@ -2824,13 +2824,16 @@ def _future_pnl_inputs(
     elif hypothetical_book:
         # The execution snapshot can complement the opposite ask. Only the
         # pre-snapshot, side-labelled book quote proves a hypothetical entry.
+        # A synthetic, wrong-market, or future artifact cannot supplement it.
+        eligible_book_data = {} if unquoted_snapshot else order_book_data
+        eligible_artifact_book = {} if unquoted_snapshot else artifact_order_book
         best_yes_ask = _price_number(
             signal.get("paper_shadow_recorded_best_yes_ask"),
-            order_book_data.get("best_yes_ask"), artifact_order_book.get("best_yes_ask"),
+            eligible_book_data.get("best_yes_ask"), eligible_artifact_book.get("best_yes_ask"),
         )
         best_no_ask = _price_number(
             signal.get("paper_shadow_recorded_best_no_ask"),
-            order_book_data.get("best_no_ask"), artifact_order_book.get("best_no_ask"),
+            eligible_book_data.get("best_no_ask"), eligible_artifact_book.get("best_no_ask"),
         )
         entry_price = _side_price_from_book(initial_side, {"best_yes_ask": best_yes_ask, "best_no_ask": best_no_ask})
     else:

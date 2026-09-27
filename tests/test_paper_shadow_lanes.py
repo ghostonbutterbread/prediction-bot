@@ -1296,6 +1296,15 @@ parameters:
         self.assertIsNone(_side_specific_price(future, "NO"))
         self.assertNotIn("entry_price", future)
 
+        marked = _future_pnl_inputs(
+            signal={**normalized.signal,
+                    "execution_snapshot_marker": "paper_shadow_source_scoreboard_hypothetical_execution"},
+            shared_candidate=candidate, source_row={"action": "BUY_NO"},
+            source_reliability={"recommended_action": "BUY_NO"},
+        )
+        self.assertIsNone(_side_specific_price(marked, "NO"))
+        self.assertNotIn("entry_price", marked)
+
     def test_book_ask_cannot_arrive_after_shared_candidate(self):
         from bot.paper_shadow_lanes import _future_pnl_inputs, _side_specific_price
         from bot.shared_market_feed import build_shared_market_candidate_row, normalize_shared_candidate_input
@@ -1326,6 +1335,13 @@ parameters:
                     self.assertNotIn("entry_price", future)
                 else:
                     self.assertEqual(future["entry_price"], expected)
+                marked = _future_pnl_inputs(
+                    signal={**normalized.signal,
+                            "execution_snapshot_marker": "paper_shadow_source_scoreboard_hypothetical_execution"},
+                    shared_candidate=candidate, source_row={"action": "BUY_NO"},
+                    source_reliability={"recommended_action": "BUY_NO"},
+                )
+                self.assertEqual(_side_specific_price(marked, "NO"), expected)
 
     def test_recovered_execution_snapshot_complement_is_not_book_no_ask(self):
         from bot.paper_shadow_lanes import (
@@ -1420,7 +1436,10 @@ parameters:
         self.assertNotIn("entry_price", future)
 
     def test_old_recovered_book_label_does_not_launder_complement(self):
-        from bot.paper_shadow_lanes import _future_pnl_inputs, _side_specific_price
+        from bot.paper_shadow_lanes import (
+            _future_pnl_inputs, _side_specific_price,
+            build_paper_shadow_lane_resolution_rows,
+        )
         from bot.prediction_lab_backfill import backfill_prediction_lab_row
         from bot.shared_market_feed import build_shared_market_candidate_row, normalize_shared_candidate_input
 
@@ -1460,6 +1479,54 @@ parameters:
             source_reliability={"recommended_action": "BUY_NO"},
         )
         self.assertIsNone(_side_specific_price(future, "NO"))
+        self.assertNotIn("entry_price", future)
+
+        marked_signal = {**normalized.signal,
+                         "execution_snapshot_marker": "paper_shadow_source_scoreboard_hypothetical_execution"}
+        marked = _future_pnl_inputs(
+            signal=marked_signal, shared_candidate=candidate,
+            source_row={"action": "BUY_NO"},
+            source_reliability={"recommended_action": "BUY_NO"},
+        )
+        self.assertIsNone(_side_specific_price(marked, "NO"))
+        self.assertNotIn("entry_price", marked)
+        [resolution] = build_paper_shadow_lane_resolution_rows(
+            lane_rows=[{
+                "policy": "shadow_source_router", "action": "BUY_NO",
+                "shared_candidate_id": candidate["candidate_id"], "market_id": "M1",
+                "observed_at": candidate["observed_at"],
+                "approved_position_size_usd": 10.0,
+                "provenance": {"future_pnl_inputs": marked},
+            }],
+            resolution_rows=[{
+                "shared_candidate_id": candidate["candidate_id"], "market_id": "M1",
+                "resolution": {"outcome": "NO", "resolved_at": "2026-05-07T12:00:00+00:00"},
+            }],
+        )
+        self.assertEqual(resolution["blocker"], "missing_fill_price")
+        self.assertIsNone(resolution["pnl"])
+
+    def test_marked_synthetic_no_book_does_not_create_yes_ask(self):
+        from bot.paper_shadow_lanes import _future_pnl_inputs, _side_specific_price
+        from bot.shared_market_feed import build_shared_market_candidate_row, normalize_shared_candidate_input
+
+        candidate = build_shared_market_candidate_row(
+            run_id="r", market=self._market("M1"),
+            signal={"direction": "BUY_NO", "market_price": 0.56},
+            decision_artifact={"order_book_snapshot": {
+                "source": "synthetic", "data": {"best_no_ask": 0.56, "best_yes_ask": 0.44},
+            }},
+            source_runtime="prediction_lab", observed_at="2026-05-06T12:00:00+00:00",
+        )
+        normalized = normalize_shared_candidate_input({"shared_candidate": candidate})
+        self.assertTrue(normalized.ok)
+        future = _future_pnl_inputs(
+            signal={**normalized.signal,
+                    "execution_snapshot_marker": "paper_shadow_source_scoreboard_hypothetical_execution"},
+            shared_candidate=candidate, source_row={"action": "BUY_YES"},
+            source_reliability={"recommended_action": "BUY_YES"},
+        )
+        self.assertIsNone(_side_specific_price(future, "YES"))
         self.assertNotIn("entry_price", future)
 
     def test_hypothetical_yes_only_book_does_not_create_no_ask(self):
