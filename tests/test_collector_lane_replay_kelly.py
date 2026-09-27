@@ -385,6 +385,37 @@ class CollectorLaneReplayKellyTests(unittest.TestCase):
                 self.assertEqual(result["settlement_rows"][0]["resolution_receipt"]["resolution_row_id"], "receipt-exact")
                 self.assertEqual(result["summary"]["final_balance_usd"], 110.0)
 
+    def test_wrong_market_receipt_cannot_suppress_valid_exact_market_authority(self):
+        decisions = [{
+            "decision_id": "lane-1", "shared_candidate_id": "candidate-1", "run_id": "run-1",
+            "market_id": "M1", "observed_at": "2026-07-01T12:00:00+00:00",
+            "action": "BUY_YES", "model_probability": 0.70, "entry_price": 0.50,
+        }, {
+            "decision_id": "lane-2", "market_id": "M3",
+            "observed_at": "2026-07-01T13:30:00+00:00", "action": "SKIP",
+        }]
+        def receipt(market_id, outcome, receipt_id):
+            return {
+                "lane_decision_id": "lane-1", "shared_candidate_id": "candidate-1", "run_id": "run-1",
+                "market_id": market_id, "resolution": {
+                    "matched": True, "matched_by": "shared_candidate_id", "outcome": outcome,
+                    "settlement_ts": "2026-07-01T13:00:00+00:00", "resolution_row_id": receipt_id,
+                },
+            }
+        exact = receipt("M1", "YES", "receipt-exact")
+        wrong_market = receipt("M2", "NO", "receipt-other-market")
+        duplicate = {"decision_id": "lane-1", "market_id": "M1", "outcome": "YES",
+                     "settlement_ts": "2026-07-01T13:00:00+00:00"}
+        for ordered in permutations((exact, wrong_market, duplicate)):
+            with self.subTest(order=[r.get("market_id") for r in ordered]):
+                result = replay_recorded_collector_lane_with_kelly(
+                    decisions=decisions, resolutions=ordered, starting_balance_usd=100.0,
+                )
+                self.assertEqual(result["summary"]["settled_positions"], 1)
+                self.assertEqual(result["summary"]["ambiguous_resolution_decisions"], 0)
+                self.assertEqual(result["settlement_rows"][0]["resolution_receipt"]["resolution_row_id"], "receipt-exact")
+                self.assertEqual(result["decision_rows"][1]["available_cash_before_usd"], 110.0)
+
     def test_conflicting_decision_id_aliases_cannot_settle_synthetic_pnl(self):
         decision = {
             "decision_id": "d1", "market_id": "KXONE", "observed_at": "2026-07-01T12:00:00+00:00",

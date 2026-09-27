@@ -42,14 +42,17 @@ def replay_recorded_collector_lane_with_kelly(
     ordered_decisions = sorted((dict(row) for row in decisions), key=lambda row: _timestamp(row, "observed_at"))
     decision_times: dict[str, datetime | None] = {}
     decision_identities: dict[str, tuple[str, str]] = {}
+    decision_markets: dict[str, str] = {}
     for ordinal, decision in enumerate(ordered_decisions, start=1):
         decision_id = str(decision.get("decision_id") or f"collector-kelly:{ordinal}")
         decision_times[decision_id] = None if decision_id in decision_times else _timestamp(decision, "observed_at")
         decision_identities[decision_id] = (
             str(decision.get("shared_candidate_id") or ""), str(decision.get("run_id") or ""),
         )
+        decision_markets[decision_id] = str(decision.get("market_id") or "")
     resolutions_by_decision, conflicting_resolution_ids = _resolution_map(
         resolutions, decision_times=decision_times, decision_identities=decision_identities,
+        decision_markets=decision_markets,
     )
     cash = float(starting_balance_usd)
     positions: list[dict[str, Any]] = []
@@ -247,7 +250,7 @@ def write_collector_lane_replay_kelly(
 
 def _resolution_map(
     rows: Iterable[Mapping[str, Any]], *, decision_times: Mapping[str, datetime | None],
-    decision_identities: Mapping[str, tuple[str, str]],
+    decision_identities: Mapping[str, tuple[str, str]], decision_markets: Mapping[str, str],
 ) -> tuple[dict[str, dict[str, Any]], set[str]]:
     result: dict[str, dict[str, Any]] = {}
     conflicting: set[str] = set()
@@ -262,7 +265,8 @@ def _resolution_map(
         market_id = str(row.get("market_id") or nested.get("market_id") or "")
         outcome = str(nested.get("outcome") or row.get("outcome") or "").upper()
         settlement_value = nested.get("settlement_ts") or row.get("settlement_ts")
-        if decision_time is None or not market_id or outcome not in {"YES", "NO", "VOID"} or settlement_value in (None, ""):
+        if (decision_time is None or not market_id or market_id != decision_markets.get(decision_id)
+                or outcome not in {"YES", "NO", "VOID"} or settlement_value in (None, "")):
             continue
         allowed_statuses = {"void_resolution"} if outcome == "VOID" else {"finalized", "settled", "resolved"}
         statuses = (row.get("market_status"), nested.get("market_status"))

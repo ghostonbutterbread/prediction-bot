@@ -1,6 +1,6 @@
 # Synthetic Kelly conflicting-resolution receipts — integration dossier
 
-- **Status:** second independent review blocked beta integration on missing decision identity and order-dependent partial receipt reconciliation; isolated test-first correction passed focused/full suites, fresh independent review and beta-first compatibility pending; no merge/push/runtime activation
+- **Status:** third independent review blocked beta integration on a wrong-market receipt suppressing valid exact settlement; isolated test-first correction passes focused tests, final full-suite/re-review and beta-first compatibility pending; no merge/push/runtime activation
 - **Owner:** Hermes, Kanban `t_5fc5d6e8` (parent audit `t_500d82fb`)
 - **Branch / owning ref:** `fix/kelly-conflicting-resolution-receipts`
 - **Base commit:** `02c5580b61fa4c30a54c4f80884cac329d21af0c`
@@ -20,6 +20,8 @@ Review correction: conflicting outer `decision_id`/`lane_decision_id` aliases in
 
 Second-review correction: nested exact receipts require the decision's own candidate and run IDs, not merely those supplied by the receipt. Before duplicate/conflict grouping, reject a receipt whose supplied nonempty candidate or run ID contradicts (or cannot be verified against) the decision. An omitted identity in a flat legacy receipt remains admissible, and a matching partial legacy duplicate does not displace a richer exact receipt. This ensures an unrelated partial receipt cannot make a valid exact receipt settle in some input orders but not others.
 
+Third-review correction: compare the receipt's market ID against the corresponding decision before duplicate/conflict grouping, just as candidate/run and chronology are checked. A receipt for another market cannot settle this decision, nor make a valid exact-market authority ambiguous. Keep conflicting *valid* same-market outcomes/times pending; do not choose by order.
+
 ## Evidence and review
 
 - RED against base behavior: opposing YES/NO receipts at one decision/time settled a $10 stake as +$10 or -$10 depending on order; `PENDING` outcome booked -$10; explicit `market_status=active` booked +$10; contradictory nested market/outcome/settlement aliases could book P&L; outcome-known time alone was used as settlement.
@@ -31,6 +33,8 @@ Second-review correction: nested exact receipts require the decision's own candi
 - First follow-up full discovery run hit a 360s command timeout before a suite verdict; its log `/home/ryushe/.hermes/cache/scratch/prediction-kelly-review-clock-full-20260927.log` is **incomplete**, not a test failure. Tracked background retry `proc_aba5974ef5e6` exited **0**; final worktree-first full discovery passed **1,232 tests OK (7 skipped), 123.566s**, receipt `/home/ryushe/.hermes/cache/scratch/prediction-kelly-review-clock-full-retry-20260927.log`.
 - Second independent read-only review `deleg_c367c9b6` **blocked beta integration** at tip `294a2c37d949d064e5628443a9083eb327bfa87a`: a nested exact receipt booked +$10 against a decision lacking its candidate/run ID; three same-outcome receipts (partial candidate, conflicting partial run, exact candidate/run) yielded +$10 or reserved pending by permutation. Previous alias, clock, conflict, VOID and legacy behavior passed focused 35 OK.
 - Second-review RED/GREEN: the nested missing-decision-identity regression failed for missing candidate, run and both; four of six permutations failed on a mismatched partial run with an otherwise valid exact receipt. With decision-side identity checks before grouping, all six orders settle once on the exact match; the unsupported nested receipt stays pending. Focused worktree-first `tests.test_collector_lane_replay_kelly tests.test_beta_handoff_identity_audit -q` **37 tests OK**, `git diff --check` passed. Final isolated full discovery process exited **0**, **1,234 tests OK (7 skipped), 64.855s**, receipt `/home/ryushe/.hermes/cache/scratch/prediction-kelly-identity-match-full-20260927.log`.
+- Third independent read-only review `deleg_c686f1d2` **blocked integration** at tip `b5b0468b148bad5c26aea6aee93cc8b07dc402ab`: a receipt for market M2, linked to the same decision as a valid M1 receipt, suppressed M1 settlement with a false ambiguity and $10 reserved; the next decision saw $90 instead of $110 available cash. Earlier decision identity, legacy, VOID, status and chronology cases held; focused 37 OK.
+- Third-review RED/GREEN: all six orders of valid exact M1/YES, wrong-market M2/NO, and equivalent flat M1/YES failed before correction, then settled once on M1 with zero ambiguity and $110 available cash at the next decision. Focused worktree-first `tests.test_collector_lane_replay_kelly tests.test_beta_handoff_identity_audit -q` **38 tests OK**; `git diff --check` passed. Final isolated full discovery process `proc_4898ca9befd3` writes `/home/ryushe/.hermes/cache/scratch/prediction-kelly-market-identity-full-20260927.log`; verify its actual exit and summary before claiming a full-suite pass.
 - Fresh independent read-only review and beta-first compatibility against then-current beta are required before integration.
 - No raw evidence, service, live balance/order, config, or runtime changes.
 
@@ -42,8 +46,8 @@ Second-review correction: nested exact receipts require the decision's own candi
 ## Interruption / resume handoff
 
 - **Branch:** `fix/kelly-conflicting-resolution-receipts` from `02c5580b61fa4c30a54c4f80884cac329d21af0c` → `beta`.
-- **Checkpoint:** latest implementation `a12af53372cd3b16a5013572972acaf4dfe74938`; this branch's tip includes a later dossier-only handoff commit.
-- **Exact resume:** obtain fresh independent read-only review of the corrected code and verified 1,234-test full-suite receipt on the clean branch tip; beta-first compatibility follows only after acceptance. Do not merge before review. No deployment from this code task.
+- **Checkpoint:** prior implementation `a12af53372cd3b16a5013572972acaf4dfe74938`; record the current correction's implementation checkpoint in a later dossier-only handoff commit.
+- **Exact resume:** verify final full-suite result for the third correction, then obtain fresh independent read-only review of corrected code on the clean branch tip; beta-first compatibility follows only after acceptance. Do not merge before review. No deployment from this code task.
 - **Working-tree state at handoff:** clean after the dossier-only handoff checkpoint; no raw or runtime modifications.
 
 ## Decision gates
@@ -57,3 +61,4 @@ Second-review correction: nested exact receipts require the decision's own candi
 - 2026-09-27 — reproduced order-dependent synthetic settlement; test-first correction passed focused/full isolated suites; review and beta compatibility pending.
 - 2026-09-27 — independent review blocked unsupported P&L from decision alias/secondary-clock contradictions. Corrective focused 35 OK and full 1,232 OK (7 skipped); fresh review pending. No integration decision.
 - 2026-09-27 — second independent review blocked identity completeness and three-receipt order dependence. Test-first correction focused 37 OK and full 1,234 OK (7 skipped); fresh review pending. No integration decision.
+- 2026-09-27 — third independent review blocked wrong-market false conflict. Test-first correction focused 38 OK; full-suite/re-review pending. No integration decision.
