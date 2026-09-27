@@ -4223,6 +4223,49 @@ parameters:
                 self.assertEqual(router["buy_rows"], 0)
                 self.assertIsNone(receipt["pnl"])
 
+    def test_resolved_pnl_cli_stream_preserves_router_directional_and_economic_summary(self):
+        lane = {
+            "policy": "shadow_source_router", "shared_candidate_id": "router-stream",
+            "market_id": "KXROUTER-STREAM", "observed_at": "2026-09-07T12:00:00+00:00",
+            "action": "BUY_YES", "approved_position_size_usd": 10.0,
+            "provenance": {"future_pnl_inputs": {
+                "market_id": "KXROUTER-STREAM", "recommended_action": "BUY_YES",
+                "side": "YES", "best_yes_ask": 0.4,
+            }},
+        }
+        resolution = {"market_id": "KXROUTER-STREAM", "outcome": "YES"}
+        expected = summarize_paper_shadow_lane_resolved_pnl(
+            lane_rows=[lane], resolution_rows=[resolution],
+        )
+        self.assertEqual(expected["source_router"]["raw_router_win_rate_pct"], 100.0)
+        self.assertEqual(expected["source_router"]["buy_rows"], 0)
+        with tempfile.TemporaryDirectory() as tmp:
+            lane_path = Path(tmp) / "lanes.jsonl"
+            resolution_path = Path(tmp) / "resolutions.jsonl"
+            lane_path.write_text(json.dumps(lane) + "\n", encoding="utf-8")
+            resolution_path.write_text(json.dumps(resolution) + "\n", encoding="utf-8")
+            streamed = summarize_paper_shadow_lane_resolved_pnl(
+                lane_decision_path=lane_path, resolution_path=resolution_path,
+            )
+            self.assertEqual(streamed, expected)
+            output = StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(paper_shadow_lane_report_main([
+                    "--section", "resolved_pnl", "--format", "json",
+                    "--lane-decision-path", str(lane_path),
+                    "--resolution-path", str(resolution_path),
+                ]), 0)
+            self.assertEqual(json.loads(output.getvalue()), expected)
+            text_output = StringIO()
+            with redirect_stdout(text_output):
+                self.assertEqual(paper_shadow_lane_report_main([
+                    "--section", "resolved_pnl",
+                    "--lane-decision-path", str(lane_path),
+                    "--resolution-path", str(resolution_path),
+                ]), 0)
+            self.assertIn('"raw_win_rate_pct": 100.0', text_output.getvalue())
+            self.assertIn('"missing_settlement_timestamp": 1', text_output.getvalue())
+
     def test_source_scoreboard_resolved_pnl_reports_blockers_without_guessing(self):
         lane_rows = [
             {

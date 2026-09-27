@@ -1758,21 +1758,27 @@ def _summarize_paper_shadow_lane_resolution_stream(
     by_lane: dict[str, dict[str, Any]] = {}
     blocker_counts: dict[str, int] = {}
 
-    for row in lane_rows:
-        joined = _build_lane_resolution_row(row, resolution_index)
-        _accumulate_paper_shadow_lane_resolution_row(
-            joined,
-            totals=totals,
-            by_lane=by_lane,
-            blocker_counts=blocker_counts,
-        )
+    def joined_rows() -> Iterable[dict[str, Any]]:
+        for row in lane_rows:
+            joined = _build_lane_resolution_row(row, resolution_index)
+            _accumulate_paper_shadow_lane_resolution_row(
+                joined,
+                totals=totals,
+                by_lane=by_lane,
+                blocker_counts=blocker_counts,
+            )
+            yield joined
+
+    # Consume once, without retaining the ledger, through the same router
+    # directional/economic summary used by the in-memory report.
+    source_router = _summarize_source_router_resolution_rows(joined_rows())
 
     return _finalize_pnl_bucket(
         {
             **totals,
             "by_lane": by_lane,
             "blocker_counts": blocker_counts,
-            "source_router": _finalize_pnl_bucket(_empty_pnl_bucket()),
+            "source_router": source_router,
         }
     )
 
