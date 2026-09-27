@@ -3007,7 +3007,9 @@ def _shadow_entry_price_for_side(
         if side in {"YES", "NO"}:
             return _price_number(signal.get(f"paper_shadow_recorded_best_{side.lower()}_ask"))
         return None
-    side_price = _side_price_from_book(side, signal)
+    # Reference yes/no market prices are side-labelled, but they are not
+    # order-book asks and cannot justify an opposite-side shadow entry.
+    side_price = _price_number(signal.get(f"best_{side.lower()}_ask")) if side in {"YES", "NO"} else None
     if side_price is not None:
         return side_price
     # Generic signal/source prices are directional. Do not relabel a YES
@@ -3017,6 +3019,8 @@ def _shadow_entry_price_for_side(
     if any(proven_side and proven_side != side for proven_side in (signal_side, source_side)):
         return None
     return _price_number(
+        signal.get(f"{side.lower()}_market_price") if side in {"YES", "NO"} else None,
+        signal.get(f"{side.lower()}_price") if side in {"YES", "NO"} else None,
         signal.get("entry_price"),
         signal.get("market_price"),
         source_row.get("entry_price"),

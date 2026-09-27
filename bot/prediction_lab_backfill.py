@@ -499,7 +499,9 @@ def _recover_order_book(artifact: dict[str, Any]) -> list[FieldProvenance]:
     execution_snapshot = artifact.get("execution_snapshot")
     if _has_executable_asks(execution_snapshot):
         artifact["order_book_snapshot"] = {
-            "source": str(execution_snapshot.get("source") or artifact.get("execution_snapshot_source") or "book"),
+            # An execution snapshot can complement a one-sided book. Its
+            # source=book describes the input, not every normalized ask.
+            "source": "synthetic",
             "data": {
                 key: execution_snapshot.get(key)
                 for key in ("best_yes_ask", "best_no_ask", "best_yes_bid", "best_no_bid")

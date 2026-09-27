@@ -1272,6 +1272,132 @@ parameters:
         self.assertEqual(_side_specific_price(future, "NO"), 0.58)
         self.assertEqual(future["entry_price"], 0.58)
 
+    def test_recovered_execution_snapshot_complement_is_not_book_no_ask(self):
+        from bot.paper_shadow_lanes import (
+            _future_pnl_inputs, _side_specific_price,
+            build_paper_shadow_lane_resolution_rows,
+        )
+        from bot.prediction_lab_backfill import backfill_prediction_lab_row
+        from bot.shared_core.execution_snapshot import build_execution_snapshot
+        from bot.shared_market_feed import build_shared_market_candidate_row, normalize_shared_candidate_input
+
+        market = SimpleNamespace(
+            id="M1", exchange="kalshi", question="Will it rain?",
+            category="weather", yes_price=0.44, no_price=0.56, volume=100,
+            metadata={},
+        )
+        signal = {"direction": "BUY_YES", "market_price": 0.44}
+        snapshot = build_execution_snapshot(
+            signal, direction="BUY_YES", bid_ask={"best_yes_ask": 0.44},
+            fallback_to_signal_prices=False,
+        )
+        self.assertEqual(snapshot["source"], "book")
+        self.assertEqual(snapshot["best_no_ask"], 0.56)  # computed, not quoted
+        recovered = backfill_prediction_lab_row(
+            {"market_id": "M1", "observed_at": "2026-05-06T12:00:00+00:00",
+             "direction": "BUY_YES", "yes_market_price": 0.44,
+             "no_market_price": 0.56,
+             "decision_artifact": {"execution_snapshot": snapshot}},
+            artifact_recovery=True,
+        ).row
+        artifact = recovered["decision_artifact"]
+        candidate = build_shared_market_candidate_row(
+            run_id="r", market=market, signal=signal,
+            decision_artifact=artifact, source_runtime="prediction_lab",
+            observed_at="2026-05-06T12:00:00+00:00",
+        )
+        normalized = normalize_shared_candidate_input({"shared_candidate": candidate})
+        self.assertTrue(normalized.ok)
+        future = _future_pnl_inputs(
+            signal=normalized.signal, shared_candidate=candidate,
+            source_row={"action": "BUY_NO"},
+            source_reliability={"recommended_action": "BUY_NO"},
+        )
+        self.assertIsNone(_side_specific_price(future, "NO"))
+        self.assertNotIn("entry_price", future)
+        self.assertNotIn("estimated_fill_price", future)
+
+        [resolution] = build_paper_shadow_lane_resolution_rows(
+            lane_rows=[{
+                "policy": "shadow_source_router", "action": "BUY_NO",
+                "shared_candidate_id": candidate["candidate_id"], "market_id": "M1",
+                "observed_at": candidate["observed_at"],
+                "approved_position_size_usd": 10.0,
+                "provenance": {"future_pnl_inputs": future},
+            }],
+            resolution_rows=[{
+                "shared_candidate_id": candidate["candidate_id"], "market_id": "M1",
+                "resolution": {"outcome": "NO", "resolved_at": "2026-05-07T12:00:00+00:00"},
+            }],
+        )
+        self.assertEqual(resolution["blocker"], "missing_fill_price")
+        self.assertIsNone(resolution["fill_price"])
+        self.assertIsNone(resolution["pnl"])
+
+    def test_execution_snapshot_alone_does_not_flatten_complement_as_book(self):
+        from bot.paper_shadow_lanes import _future_pnl_inputs, _side_specific_price
+        from bot.shared_core.execution_snapshot import build_execution_snapshot
+        from bot.shared_market_feed import build_shared_market_candidate_row, normalize_shared_candidate_input
+
+        market = SimpleNamespace(
+            id="M1", exchange="kalshi", question="Will it rain?",
+            category="weather", yes_price=0.44, no_price=0.56, volume=100,
+            metadata={},
+        )
+        signal = {"direction": "BUY_YES", "market_price": 0.44}
+        snapshot = build_execution_snapshot(
+            signal, direction="BUY_YES", bid_ask={"best_yes_ask": 0.44},
+            fallback_to_signal_prices=False,
+        )
+        candidate = build_shared_market_candidate_row(
+            run_id="r", market=market, signal=signal,
+            decision_artifact={"execution_snapshot": snapshot},
+            source_runtime="prediction_lab", observed_at="2026-05-06T12:00:00+00:00",
+        )
+        normalized = normalize_shared_candidate_input({"shared_candidate": candidate})
+        self.assertTrue(normalized.ok)
+        future = _future_pnl_inputs(
+            signal=normalized.signal, shared_candidate=candidate,
+            source_row={"action": "BUY_NO"},
+            source_reliability={"recommended_action": "BUY_NO"},
+        )
+        self.assertIsNone(_side_specific_price(future, "NO"))
+        self.assertNotIn("entry_price", future)
+
+    def test_old_recovered_book_label_does_not_launder_complement(self):
+        from bot.paper_shadow_lanes import _future_pnl_inputs, _side_specific_price
+        from bot.shared_market_feed import build_shared_market_candidate_row, normalize_shared_candidate_input
+
+        market = SimpleNamespace(
+            id="M1", exchange="kalshi", question="Will it rain?",
+            category="weather", yes_price=0.44, no_price=0.56, volume=100,
+            metadata={},
+        )
+        artifact = {
+            "order_book_snapshot": {
+                "source": "book", "data": {"best_yes_ask": 0.44, "best_no_ask": 0.56},
+            },
+            "provenance": {"sources": [{
+                "field": "order_book_snapshot", "method": "nested_artifact_recovery",
+                "path": "decision_artifact.execution_snapshot",
+            }]},
+        }
+        candidate = build_shared_market_candidate_row(
+            run_id="r", market=market,
+            signal={"direction": "BUY_YES", "market_price": 0.44},
+            decision_artifact=artifact, source_runtime="prediction_lab",
+            observed_at="2026-05-06T12:00:00+00:00",
+        )
+        normalized = normalize_shared_candidate_input({"shared_candidate": candidate})
+        self.assertTrue(normalized.ok)
+        future = _future_pnl_inputs(
+            signal=normalized.signal, shared_candidate=candidate,
+            source_row={"action": "BUY_NO"},
+            source_reliability={"recommended_action": "BUY_NO"},
+        )
+        self.assertIsNone(_side_specific_price(future, "NO"))
+        self.assertNotIn("entry_price", future)
+
     def test_hypothetical_yes_only_book_does_not_create_no_ask(self):
         from bot.paper_shadow_lanes import _future_pnl_inputs
         from bot.shared_core.execution_snapshot import build_execution_snapshot
