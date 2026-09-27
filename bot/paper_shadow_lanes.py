@@ -2682,7 +2682,6 @@ def _label_source_name(future_pnl_inputs: Mapping[str, Any]) -> str:
         _optional_text(
             future_pnl_inputs.get("label_target"),
             future_pnl_inputs.get("actual_source"),
-            future_pnl_inputs.get("settlement_source"),
         )
         or "unknown"
     )
@@ -2704,7 +2703,7 @@ def _label_source_classification(label_source: str, *, settlement_source: str | 
 
 def _is_independent_label_source(value: str) -> bool:
     normalized = _normalized_source_label(value)
-    if _is_settlement_derived_label_source(normalized):
+    if _is_settlement_derived_label_source(normalized) or "forecast" in normalized or "proxy" in normalized:
         return False
     return any(token in normalized for token in ("observed", "daily", "archive", "asos", "station", "iem"))
 
@@ -3680,10 +3679,6 @@ def _label_target(
             weather_snapshot.get("actual_source"),
             _mapping(signal.get("resolution")).get("actual_source"),
             _mapping(shared_candidate.get("resolution")).get("actual_source"),
-            signal.get("settlement_source"),
-            weather_snapshot.get("settlement_source"),
-            _mapping(signal.get("resolution")).get("settlement_source"),
-            _mapping(shared_candidate.get("resolution")).get("settlement_source"),
         )
         or "unknown"
     )

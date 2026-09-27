@@ -905,7 +905,8 @@ class LiveFeedAggregator:
         self.forex = ForexFeed()
 
     def get_signal(self, question: str, yes_price: float,
-                   category: str = "", *, market_id: str = "") -> Optional[dict]:
+                   category: str = "", *, market_id: str = "",
+                   market_metadata: dict | None = None) -> Optional[dict]:
         """
         Get market-specific live data signal.
 
@@ -927,10 +928,12 @@ class LiveFeedAggregator:
                     # Inject city into question for the weather engine
                     modified_q = question + f" in {city}"
                     if callable(score_with_context):
-                        return score_with_context(modified_q, yes_price, category=market_id or category)
+                        return score_with_context(modified_q, yes_price, category=market_id or category,
+                                                  market_metadata=market_metadata)
                     return self.weather.score_temperature_market(modified_q, yes_price)
             if callable(score_with_context):
-                return score_with_context(question, yes_price, category=market_id or category)
+                return score_with_context(question, yes_price, category=market_id or category,
+                                          market_metadata=market_metadata)
             return self.weather.score_temperature_market(question, yes_price)
 
         # Crypto markets
