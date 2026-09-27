@@ -1,6 +1,6 @@
 # Paper-shadow side-price provenance — integration dossier
 
-- **Status:** corrected after four blocking independent reviews; fresh read-only review and beta-first compatibility pending; no merge, push, deployment, or runtime activation
+- **Status:** independent review ACCEPTED code at `546c47ef27c5fe35a04c5f1f0d1365ea68ae8c23` for beta-first preflight; compatibility pending; no merge, push, deployment, or runtime activation
 - **Owner / task:** Hermes, prediction-bot Kanban `t_d7273f28`; parent flow audit `t_500d82fb`
 - **Branch / worktree:** `fix/paper-shadow-side-price-provenance`; `/home/ryushe/worktrees/prediction-bot-paper-shadow-side-price-provenance`
 - **Base / intended target:** `f4fa746e0484c083ee0ea5c019caae33058bb925` → `beta`
@@ -40,14 +40,14 @@ The fourth independent review (`deleg_688d2d49`) **blocked** tip `cdb8393396eefb
 - Latest focused: `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=<worktree> /mnt/data-collection/prediction-bot/.venv/bin/python -m unittest tests.test_paper_shadow_lanes tests.test_shared_market_feed tests.test_prediction_lab_backfill tests.test_simulator_source_scoreboard_shadow tests.test_collector_lane_replay -q` — 108 OK, 1 skipped; `/home/ryushe/.hermes/cache/scratch/prediction-paper-marked-recovery-focused-20260927.log`.
 - Latest full isolated: `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=<worktree> /mnt/data-collection/prediction-bot/.venv/bin/python -m unittest discover -s tests -q` — 1,206 OK, 7 skipped; `/home/ryushe/.hermes/cache/scratch/prediction-paper-marked-recovery-full-20260927.log`.
 - `git diff --check` passed before final dossier edit; rerun after staging. Full-suite initial pass had one legacy entry-only identity fixture fail because it lacked a same-side ask; that fixture now supplies a quote to isolate its chronology assertions. Earlier focused fixtures expecting PnL from entry-only/estimate-only data likewise explicitly supply same-side asks.
-- Independent review of latest corrected tip: pending; four earlier read-only reviews blocked their old tips. Beta-first compatibility: pending. No live fills, orders, wallet changes, raw-data writes, services, or ignored config changes.
+- Fifth independent read-only review `deleg_bafe935c` **ACCEPTED** clean tip `546c47ef27c5fe35a04c5f1f0d1365ea68ae8c23` for beta-first compatibility. It reproduced marked/unmarked repeated-backfill cases through exact resolution in both side directions: synthetic opposite asks remained `missing_fill_price` with no PnL. Wrong-market/future quotes were blocked; matching/equivalent-offset books, retained selected-side asks, and same-side reference diagnostics remained usable. Reviewer ran focused 108 OK (1 skipped), inspected active marked producer without finding a concrete signal-ask laundering route, and changed no files or runtime state. This is not acceptance of observed fills or market-specific settlement authority. Beta-first compatibility: pending. No live fills, orders, wallet changes, raw-data writes, services, or ignored config changes.
 
 ## Boundaries, blockers, resume
 
-- **Review gate:** independent reviewer must verify both marked and unmarked paths after repeated artifact recovery, selected-side retained-quote precedence, wrong-market/future metadata, equivalent offset instants, and actual raw-book and same-side reference diagnostic retention in both side directions. Inspect producer-origin synthetic `best_*_ask` risk; no integration before a fresh verdict.
+- **Review gate:** satisfied by `deleg_bafe935c` for reviewed code at `546c47ef27c5fe35a04c5f1f0d1365ea68ae8c23`; any material code change or beta merge conflict requires renewed review.
 - **Integration blocker:** from clean fetched beta, stage a non-committing merge, run focused/full beta-first tests and `git diff --cached --check`, abort; then make an intentional reviewed merge that removes this temporary dossier from beta. Do not push or activate services by inference.
 - **Separate flow-audit findings:** market-only untimed legacy PnL outcome, stale published Source Router manifest locator, and market-specific settlement-source authority are not repaired by this price branch. The Kelly conflicting-receipt fix was reviewed and merged into local beta separately, but not pushed or activated.
-- **Exact resume point:** review implementation commit `f8779607c2e92558e8aed36f86832bceee7ddbde` plus the current branch tip/dossier; request a fresh independent read-only review, fix any reproduced blocker with a RED regression, then perform beta-first compatibility. Worktree clean at implementation checkpoint.
+- **Exact resume point:** perform non-committing merge into clean fetched local `beta` from accepted code tip `546c47ef27c5fe35a04c5f1f0d1365ea68ae8c23` plus later dossier-only handoff; exclude this temporary dossier from beta, run focused/full beta-first tests and staged diff check, then abort. If compatible, intentionally merge, exclude dossier, rerun tests, verify clean beta. No push or activation implied.
 
 ## Decision gates
 
