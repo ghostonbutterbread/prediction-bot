@@ -2143,7 +2143,14 @@ def _build_lane_resolution_row(
     observed_at = _optional_text(row.get("observed_at"), future_inputs.get("observed_at"))
     assertion_blocker = _resolution_assertion_blocker(resolution)
     chronology_blocker = _resolution_chronology_blocker(resolution, observed_at)
+    settlement_ts = _optional_text(
+        _mapping(resolution).get("settlement_ts"), _mapping(_mapping(resolution).get("resolution")).get("settlement_ts"),
+    )
     blocker = resolution_blocker or chronology_blocker or assertion_blocker or _resolution_row_blocker(action=action, outcome=outcome, side=side, fill_price=fill_price, stake=stake)
+    if blocker is None and _is_buy_action(action) and resolution_match.get("matched_by") == "market_id" and settlement_ts is None:
+        # A bare market outcome cannot prove that this decision preceded
+        # settlement. Keep its directional match but not an economic PnL claim.
+        blocker = "missing_settlement_timestamp"
     if quote_only_buy and blocker == "missing_fill_price":
         blocker = "quote_not_fill"
     pnl = _resolution_row_pnl(action=action, outcome=outcome, side=side, fill_price=fill_price, stake=stake) if blocker is None else None
@@ -2174,9 +2181,7 @@ def _build_lane_resolution_row(
             "resolved_at": _optional_text(_mapping(resolution).get("resolved_at"), _mapping(_mapping(resolution).get("resolution")).get("resolved_at")),
             # Preserve distinct settlement and outcome-availability clocks. An
             # outcome-known timestamp cannot establish when settlement occurred.
-            "settlement_ts": _optional_text(
-                _mapping(resolution).get("settlement_ts"), _mapping(_mapping(resolution).get("resolution")).get("settlement_ts"),
-            ),
+            "settlement_ts": settlement_ts,
             "outcome_known_at": _optional_text(resolution_match.get("latest_outcome_known_at"), _mapping(resolution).get("outcome_known_at"), _mapping(_mapping(resolution).get("resolution")).get("outcome_known_at")),
             "run_id": _optional_text(_mapping(resolution).get("run_id"), _mapping(_mapping(resolution).get("resolution")).get("run_id")),
             "market_id": _optional_text(_mapping(resolution).get("market_id"), market_id),

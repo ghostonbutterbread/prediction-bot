@@ -102,7 +102,8 @@ class CollectorLaneReplayTests(unittest.TestCase):
                     }
                 ],
             )
-            _write_jsonl(resolutions, [{"market_id": "KXTEST-1", "outcome": "NO"}])
+            _write_jsonl(resolutions, [{"market_id": "KXTEST-1", "outcome": "NO",
+                                        "settlement_ts": "2026-07-02T12:00:00+00:00"}])
 
             result = build_collector_lane_replay(
                 snapshot_path=snapshots,
@@ -140,7 +141,10 @@ class CollectorLaneReplayTests(unittest.TestCase):
                 },
             )
             self.assertEqual(refreshed["resolution_feed"]["resolved_market_count"], 1)
-            self.assertEqual(refreshed["pnl"]["pnl_calculable_rows"], 2)
+            # A finalized market-only API outcome without a settlement clock
+            # remains directional evidence, not a paper cash-flow receipt.
+            self.assertEqual(refreshed["pnl"]["pnl_calculable_rows"], 0)
+            self.assertEqual(refreshed["pnl"]["blocker_counts"], {"missing_settlement_timestamp": 2})
 
     def test_hydrates_nested_collector_artifact_without_outcome_fields(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -222,6 +222,43 @@ class BetaHandoffIdentityAuditTests(unittest.TestCase):
             "settlement_ts": "2026-09-08T12:00:00+00:00", "resolved_at": "2026-09-10T12:00:00+00:00",
         }
 
+    def test_market_only_untimed_outcome_is_directional_not_economic(self):
+        decision = self._frozen_decision()
+        for extra in ({}, {"resolved_at": "2026-09-10T12:00:00+00:00"},
+                      {"outcome_known_at": "2026-09-10T12:00:00+00:00"}):
+            with self.subTest(extra=extra):
+                [receipt] = build_paper_shadow_lane_resolution_rows(
+                    lane_rows=[decision],
+                    resolution_rows=[{"market_id": "market-A", "outcome": "YES", **extra}],
+                )
+                self.assertEqual(receipt["resolution"]["matched_by"], "market_id")
+                self.assertTrue(receipt["resolution"]["matched"])
+                self.assertEqual(receipt["resolution"]["outcome"], "YES")
+                self.assertIsNone(receipt["resolution"]["settlement_ts"])
+                self.assertEqual(receipt["blocker"], "missing_settlement_timestamp")
+                self.assertIsNone(receipt["pnl"])
+                wallet = replay_recorded_collector_lane_with_kelly(
+                    decisions=[decision], resolutions=[receipt], starting_balance_usd=100.0,
+                )
+                self.assertEqual(wallet["summary"]["settled_positions"], 0)
+
+    def test_market_only_later_settlement_and_exact_untimed_diagnostic_survive(self):
+        decision = self._frozen_decision()
+        resolutions = (
+            {"market_id": "market-A", "outcome": "YES",
+             "settlement_ts": "2026-09-08T12:00:00+00:00"},
+            {"market_id": "market-A", "shared_candidate_id": "candidate-A",
+             "outcome": "YES"},
+        )
+        for resolution, matched_by in zip(resolutions, ("market_id", "shared_candidate_id")):
+            with self.subTest(matched_by=matched_by):
+                [receipt] = build_paper_shadow_lane_resolution_rows(
+                    lane_rows=[decision], resolution_rows=[resolution],
+                )
+                self.assertEqual(receipt["resolution"]["matched_by"], matched_by)
+                self.assertIsNone(receipt["blocker"])
+                self.assertTrue(receipt["pnl"]["calculable"])
+
     def test_shadow_resolution_rejects_supplied_identity_conflicts(self):
         decision = self._frozen_decision()
         for field in ("market_id", "run_id", "shared_candidate_id", "shared_snapshot_id"):

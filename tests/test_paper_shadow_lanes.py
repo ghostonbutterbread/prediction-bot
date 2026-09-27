@@ -3821,7 +3821,10 @@ parameters:
                 },
             }
         ]
-        resolution_rows = [{"market_id": "KXHIGHSEA-1", "resolution": {"outcome": "YES", "resolved_at": "2026-05-16T13:00:00+00:00"}}]
+        resolution_rows = [{"market_id": "KXHIGHSEA-1", "resolution": {
+            "outcome": "YES", "settlement_ts": "2026-05-16T12:00:00+00:00",
+            "resolved_at": "2026-05-16T13:00:00+00:00",
+        }}]
 
         joined = build_paper_shadow_lane_resolution_rows(lane_rows=lane_rows, resolution_rows=resolution_rows)
 
@@ -3872,6 +3875,7 @@ parameters:
             {
                 "policy": "shadow_source_scoreboard",
                 "shared_candidate_id": "candidate-loss",
+                "observed_at": "2026-05-14T12:00:00+00:00",
                 "action": "BUY_NO",
                 "approved_position_size_usd": 5.0,
                 "provenance": {
@@ -3907,7 +3911,7 @@ parameters:
         ]
         resolution_rows = [
             {"shared_candidate_id": "candidate-win", "market_id": "KXHIGHSEA-1", "outcome": "YES"},
-            {"market_id": "KXHIGHSEA-2", "outcome": "YES"},
+            {"market_id": "KXHIGHSEA-2", "outcome": "YES", "settlement_ts": "2026-05-16T12:00:00+00:00"},
             {"shared_candidate_id": "candidate-skip", "market_id": "KXHIGHSEA-3", "outcome": "NO"},
         ]
 
