@@ -1,6 +1,6 @@
 # Per-market weather settlement authority — integration dossier
 
-- **Status:** feature corrected after independent review blocker; new exact-tip review and beta preflight pending.
+- **Status:** feature and exact staged beta tree independently accepted for an intentional local beta merge only; no push or activation.
 - **Owner:** weather-authority task agent
 - **Branch / owning ref:** `fix/market-weather-settlement-authority`
 - **Worktree:** `/home/ryushe/worktrees/prediction-bot-weather-authority`
@@ -28,11 +28,13 @@ Correct the false hardcoded NWS settlement authority for Kalshi daily weather ma
 - Corrected isolated feature: focused **250 OK, 1 skipped**; full discover **1,338 OK, 7 skipped**, receipt `/home/ryushe/.hermes/cache/scratch/weather-authority-recorded-role-full-20260927.log`.
 - `deleg_5ae2fe92` **BLOCKED** clean tip `60afbf46d90e77c86d5aded4c3e6741585016b32`: "Forecasts according to NWS are indicative only; the final minimum temperature is reported by The Weather Company" was falsely called conflicting/unknown, and forecast-only wording falsely identified NWS. Previous role/alias, negative/positive rules, no-weight, strict-history and paper controls passed; reviewer ran **250 focused OK, 1 skipped** and inspected **1,338 full OK, 7 skipped**. Both nonbinding forecast cases failed RED and passed GREEN after excluding a provider attribution to a forecast/prediction subject, while retaining affirmative final measured-value attribution.
 - New isolated feature checks: focused **251 OK, 1 skipped**; full discover **1,339 OK, 7 skipped**, receipt `/home/ryushe/.hermes/cache/scratch/weather-authority-nonbinding-forecast-full-20260927.log`.
-- Independent read-only review: pending on a new clean tip; no beta preflight or integration yet.
+- `deleg_dfddb488` **ACCEPTED** clean code/dossier tip `dd54fa1c83cf7cc9e4b6fdee0480acf78f202d9a` for a **new noncommitting beta preflight only**. It independently checked nonbinding NWS forecast attribution and TWC final rule through a sealed synthetic path, ran **251 focused OK, 1 skipped**, and inspected **1,339 full OK, 7 skipped**; not merge approval.
+- `deleg_8570e8b3` **ACCEPTED exact staged beta tree `d22dc518de7746924ed8fd9f48418c513465a38c`** with `HEAD=28fbc7f41f89a8680a7490e7f3e6934f66913761`, `MERGE_HEAD=dd54fa1c83cf7cc9e4b6fdee0480acf78f202d9a` and nine code/test files (dossier excluded) for an intentional **local beta merge only**. It independently reran **251 focused OK, 1 skipped** and **1,339 full OK, 7 skipped**, with bounded synthetic authority, forecast, role, sealed-input, partial-day and diagnostic controls. Parent preflight receipt: `/home/ryushe/.hermes/cache/scratch/weather-authority-beta-preflight-full-20260927.log`. The accepted noncommitting preflight was aborted cleanly so this feature-only verdict could be recorded before intentional integration.
+- **Next:** parent restages a noncommitting merge including this later dossier-only commit, excludes the dossier, proves the staged tree is still exactly `d22dc518de7746924ed8fd9f48418c513465a38c`, reruns focused and full suites, then commits the intentional **local** beta merge. This does not authorize a push, runtime activation, or historical rule/outcome attestation.
 
 ## Blockers, deferred work and decision gates
 
-- **Integration gate:** fresh independent review and clean beta non-committing preflight at current local target with focused/full tests on the combined tree; exclude this dossier and leave other-owned worktrees untouched. If beta advances, reconcile its unique commits first.
+- **Integration gate:** feature review and exact-tree beta preflight independently accepted; restage from clean `beta`, exclude the dossier, require staged tree `d22dc518de7746924ed8fd9f48418c513465a38c`, rerun tests, then intentional local merge only. If target beta changes, a new exact-tree review is required. Leave other-owned worktrees untouched.
 - **Activation gate:** separately validate fresh collector decision-time `rules_primary` coverage, new output provenance and exact market identity in an observer cohort before relying on authority claims. Do not infer availability from today's public API for an older decision.
 - **Promotion gate:** exact independently finalized settlements and forward holdout; synthetic source labels and paper forecasts are not outcomes, full-day weather reports, fills or P&L evidence.
 
@@ -41,7 +43,7 @@ Correct the false hardcoded NWS settlement authority for Kalshi daily weather ma
 - **Owning feature branch/ref:** `fix/market-weather-settlement-authority`
 - **Latest immutable recovery checkpoint:** `02707c00d8d6f0460045484448bcb79649fa9846`
 - **Feature implementation commit(s):** `1f0ac294de7844d73c686c664c4405346e785546`, `267749d25d5ddd7b09663d460c5ab0969a209a21`, `584c9d603fcc499fa7b404dc6d5c31db4e4bfd4c`, `3834a11029174bd88583adf404d5b0c45f3103e3`, `02707c00d8d6f0460045484448bcb79649fa9846`
-- **Exact resume point:** inspect code commit and this later dossier commit, obtain independent review, then beta preflight only on explicit integration assignment.
+- **Exact resume point:** verify clean local beta at `28fbc7f41f89a8680a7490e7f3e6934f66913761`, restage this feature (including the later dossier-only verdict), remove the dossier from beta, prove staged tree `d22dc518de7746924ed8fd9f48418c513465a38c`, rerun focused/full, commit local beta merge. If any identity or test differs, stop and re-review.
 - **Working-tree state at handoff:** expected clean after separate commits.
 
 2026-09-27 — scoped feature implementation and synthetic tests complete; no merge, push, service/config/wallet changes.
