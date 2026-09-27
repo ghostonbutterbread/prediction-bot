@@ -8,6 +8,7 @@ wallets, decision ledgers, or accounting state.
 from __future__ import annotations
 
 import json
+from bisect import bisect_right
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from glob import glob
@@ -106,12 +107,18 @@ def run_resolution_feed_once(
     lane_latest_resolution = output_dir / "latest_resolutions.jsonl"
     central_latest_resolution = central_output_dir / "latest_resolutions.jsonl"
     _seed_central_resolutions_from_lane_latest(central_latest_resolution, lane_latest_resolution)
+    # The cursor must advance by markets actually offered to the fetcher.
+    # A smaller downstream max_markets cap must not silently skip queue IDs.
+    fetch_limits = [
+        limit for limit in (feed_cfg["max_incremental_markets"], feed_cfg["max_markets"])
+        if limit is not None
+    ]
     market_ref_path = _market_ref_path_for_refresh(
         existing_market_ref_paths,
         output_dir=output_dir,
         existing_latest_path=central_latest_resolution,
         mode=str(feed_cfg["mode"]),
-        max_incremental_markets=feed_cfg["max_incremental_markets"],
+        max_incremental_markets=min(fetch_limits) if fetch_limits else None,
     )
     stamp = now_dt.strftime("%Y%m%dT%H%M%SZ")
     output_path = output_dir / f"resolutions_{stamp}.jsonl"
@@ -334,10 +341,24 @@ def _market_ref_path_for_refresh(
             if market_id and market_id not in resolved_market_ids:
                 pending_market_ids.append(market_id)
 
-    if max_incremental_markets is not None:
-        pending_market_ids = pending_market_ids[:max(0, int(max_incremental_markets))]
-
     pending_path = output_dir / "resolution_market_refs.pending.jsonl"
+    if max_incremental_markets is not None:
+        limit = max(0, int(max_incremental_markets))
+        last_attempted = None
+        if limit and pending_path.is_file():
+            with pending_path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    try:
+                        previous = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(previous, Mapping):
+                        last_attempted = row_market_id(previous) or last_attempted
+        if last_attempted and pending_market_ids:
+            start = bisect_right(pending_market_ids, last_attempted) % len(pending_market_ids)
+            pending_market_ids = pending_market_ids[start:] + pending_market_ids[:start]
+        pending_market_ids = pending_market_ids[:limit]
+
     pending_path.write_text(
         "".join(json.dumps({"market_id": market_id}, sort_keys=True) + "\n" for market_id in pending_market_ids),
         encoding="utf-8",
