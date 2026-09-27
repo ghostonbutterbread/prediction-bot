@@ -1185,6 +1185,113 @@ parameters:
             0.445,
         )
 
+    def test_cross_side_generic_reference_does_not_become_no_entry(self):
+        from bot.paper_shadow_lanes import _shadow_entry_price_for_side
+
+        yes_reference = {"direction": "BUY_YES", "market_price": 0.44, "best_yes_ask": 0.44}
+        self.assertIsNone(_shadow_entry_price_for_side(
+            "NO", yes_reference, {"action": "BUY_NO", "entry_price": 0.44},
+        ))
+        self.assertEqual(_shadow_entry_price_for_side(
+            "NO", {"direction": "BUY_NO", "market_price": 0.58}, {"action": "BUY_NO"},
+        ), 0.58)
+
+    def test_future_pnl_does_not_relabel_cross_side_estimate_without_no_ask(self):
+        from bot.paper_shadow_lanes import _future_pnl_inputs
+
+        future = _future_pnl_inputs(
+            signal={"direction": "BUY_YES", "market_price": 0.44,
+                    "best_yes_ask": 0.44, "estimated_fill_price": 0.44},
+            shared_candidate={}, source_row={"action": "BUY_NO", "entry_price": 0.44},
+            source_reliability={"recommended_action": "BUY_NO"},
+        )
+        self.assertNotIn("entry_price", future)
+        self.assertNotIn("estimated_fill_price", future)
+        self.assertEqual(future["best_yes_ask"], 0.44)
+
+    def test_hypothetical_yes_only_book_does_not_create_no_ask(self):
+        from bot.paper_shadow_lanes import _future_pnl_inputs
+        from bot.shared_core.execution_snapshot import build_execution_snapshot
+
+        snapshot = build_execution_snapshot(
+            {"market_price": 0.44}, direction="BUY_YES",
+            bid_ask={"best_yes_ask": 0.44},
+        )
+        self.assertEqual(snapshot["best_no_ask"], 0.56)  # computed, not quoted
+        signal = {
+            "direction": "BUY_YES", "market_price": 0.44,
+            "best_yes_ask": snapshot["best_yes_ask"],
+            "best_no_ask": snapshot["best_no_ask"],
+            "estimated_fill_price": snapshot["estimated_fill_price"],
+            "execution_snapshot_marker": "paper_shadow_source_scoreboard_hypothetical_execution",
+            "paper_shadow_recorded_best_yes_ask": 0.44,
+            "paper_shadow_recorded_best_no_ask": None,
+            "decision_artifact": {"execution_snapshot": snapshot},
+        }
+        future = _future_pnl_inputs(
+            signal=signal, shared_candidate={}, source_row={"action": "BUY_YES"},
+            source_reliability={"recommended_action": "BUY_NO"},
+        )
+        self.assertNotIn("best_no_ask", future)
+        self.assertNotIn("entry_price", future)
+        self.assertNotIn("estimated_fill_price", future)
+
+    def test_execution_snapshot_complement_is_not_a_recorded_no_ask(self):
+        from bot.paper_shadow_lanes import _future_pnl_inputs
+        from bot.shared_core.execution_snapshot import build_execution_snapshot
+
+        snapshot = build_execution_snapshot(
+            {"market_price": 0.44}, direction="BUY_YES",
+            bid_ask={"best_yes_ask": 0.44},
+        )
+        future = _future_pnl_inputs(
+            signal={"direction": "BUY_YES", "market_price": 0.44,
+                    "best_yes_ask": 0.44, "decision_artifact": {"execution_snapshot": snapshot}},
+            shared_candidate={}, source_row={"action": "BUY_YES"},
+            source_reliability={"recommended_action": "BUY_NO"},
+        )
+        self.assertNotIn("best_no_ask", future)
+        self.assertNotIn("estimated_fill_price", future)
+        self.assertNotIn("entry_price", future)
+
+    def test_hypothetical_recorded_no_ask_is_preserved_for_resolution(self):
+        from bot.paper_shadow_lanes import _future_pnl_inputs
+
+        signal = {
+            "direction": "BUY_YES", "market_price": 0.44,
+            "best_yes_ask": 0.44, "best_no_ask": 0.58,
+            "estimated_fill_price": 0.44,
+            "execution_snapshot_marker": "paper_shadow_source_scoreboard_hypothetical_execution",
+            "paper_shadow_recorded_best_yes_ask": 0.44,
+            "paper_shadow_recorded_best_no_ask": 0.58,
+        }
+        future = _future_pnl_inputs(
+            signal=signal, shared_candidate={}, source_row={"action": "BUY_YES"},
+            source_reliability={"recommended_action": "BUY_NO"},
+        )
+        self.assertEqual(future["paper_shadow_recorded_best_no_ask"], 0.58)
+        lane = {
+            "policy": "shadow_source_router", "shared_candidate_id": "candidate-recorded",
+            "market_id": "KXHIGHSEA-3", "action": "BUY_NO",
+            "approved_position_size_usd": 10.0,
+            "provenance": {"future_pnl_inputs": future},
+        }
+        [row] = build_paper_shadow_lane_resolution_rows(
+            lane_rows=[lane], resolution_rows=[{
+                "shared_candidate_id": "candidate-recorded", "market_id": "KXHIGHSEA-3",
+                "resolution": {"outcome": "NO", "resolved_at": "2026-05-16T13:00:00+00:00"},
+            }],
+        )
+        self.assertIsNone(row["blocker"])
+        self.assertEqual(row["fill_price"], 0.58)
+
+    def test_router_does_not_promote_side_labelled_reference_as_executable_quote(self):
+        from bot.paper_shadow_lanes import _side_specific_price
+
+        diagnostic = {"side": "NO", "entry_price": 0.58, "estimated_fill_price": 0.58}
+        self.assertIsNone(_side_specific_price(diagnostic, "NO"))
+        self.assertEqual(_side_specific_price({**diagnostic, "best_no_ask": 0.58}, "NO"), 0.58)
+
     def test_shadow_source_scoreboard_uses_side_ask_when_signal_market_price_is_zero(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             dataset_path = Path(tmpdir) / "shared" / "prediction_lab" / "market_snapshots.jsonl"
@@ -2676,6 +2783,47 @@ parameters:
         self.assertEqual(confidence_row["reason_code"], "approved_confidence_floor")
 
 
+    def test_source_shadow_resolution_uses_recorded_no_ask_not_yes_side_estimate(self):
+        lane = {
+            "policy": "shadow_source_router", "shared_candidate_id": "candidate-no-ask",
+            "market_id": "KXHIGHSEA-1", "observed_at": "2026-05-14T12:00:00+00:00",
+            "action": "BUY_NO", "approved_position_size_usd": 10.0,
+            "provenance": {"future_pnl_inputs": {
+                "recommended_action": "BUY_NO", "side": "NO", "entry_price": 0.58,
+                "estimated_fill_price": 0.44, "best_no_ask": 0.58,
+            }},
+        }
+        [row] = build_paper_shadow_lane_resolution_rows(
+            lane_rows=[lane], resolution_rows=[{
+                "shared_candidate_id": "candidate-no-ask", "market_id": "KXHIGHSEA-1",
+                "resolution": {"outcome": "NO", "resolved_at": "2026-05-16T13:00:00+00:00"},
+            }],
+        )
+        self.assertIsNone(row["blocker"])
+        self.assertEqual(row["fill_price"], 0.58)
+        self.assertEqual(row["pnl"]["pnl_usd"], round(10 / 0.58 - 10, 4))
+
+    def test_legacy_complemented_shadow_ask_is_not_an_executable_fill(self):
+        lane = {
+            "policy": "shadow_source_router", "shared_candidate_id": "candidate-complement",
+            "market_id": "KXHIGHSEA-2", "observed_at": "2026-05-14T12:00:00+00:00",
+            "action": "BUY_NO", "approved_position_size_usd": 10.0,
+            "provenance": {"future_pnl_inputs": {
+                "recommended_action": "BUY_NO", "side": "NO", "entry_price": 0.56,
+                "estimated_fill_price": 0.56, "best_no_ask": 0.56,
+                "execution_snapshot_marker": "paper_shadow_source_scoreboard_hypothetical_execution",
+            }},
+        }
+        [row] = build_paper_shadow_lane_resolution_rows(
+            lane_rows=[lane], resolution_rows=[{
+                "shared_candidate_id": "candidate-complement", "market_id": "KXHIGHSEA-2",
+                "resolution": {"outcome": "NO", "resolved_at": "2026-05-16T13:00:00+00:00"},
+            }],
+        )
+        self.assertEqual(row["blocker"], "missing_fill_price")
+        self.assertIsNone(row["fill_price"])
+        self.assertIsNone(row["pnl"])
+
     def test_source_scoreboard_resolution_rows_preserve_replayable_pnl_inputs(self):
         lane_rows = [
             {
@@ -2698,6 +2846,7 @@ parameters:
                             "side": "YES",
                             "entry_price": 0.24,
                             "estimated_fill_price": 0.25,
+                            "best_yes_ask": 0.25,
                             "stable_approved_position_size_usd": 10.0,
                         },
                     }
@@ -2746,6 +2895,7 @@ parameters:
                             "recommended_action": "BUY_YES",
                             "side": "YES",
                             "estimated_fill_price": 0.25,
+                            "best_yes_ask": 0.25,
                             "stable_approved_position_size_usd": 10.0,
                         },
                     }
@@ -2765,6 +2915,7 @@ parameters:
                             "recommended_action": "BUY_NO",
                             "side": "NO",
                             "entry_price": 0.20,
+                            "best_no_ask": 0.20,
                             "stable_approved_position_size_usd": 5.0,
                         },
                     }
@@ -2862,6 +3013,7 @@ parameters:
                             "recommended_action": "BUY_YES",
                             "side": "YES",
                             "estimated_fill_price": 0.5,
+                            "best_yes_ask": 0.5,
                             "starting_balance_usd": 100.0,
                             "approved_position_size_usd": 10.0,
                         }
@@ -2884,6 +3036,7 @@ parameters:
                             "recommended_action": "BUY_YES",
                             "side": "YES",
                             "estimated_fill_price": 0.5,
+                            "best_yes_ask": 0.5,
                             "starting_balance_usd": 100.0,
                             "approved_position_size_usd": 10.0,
                         }
@@ -2956,6 +3109,7 @@ parameters:
                             "recommended_action": "BUY_NO",
                             "side": "NO",
                             "estimated_fill_price": 0.25,
+                            "best_no_ask": 0.25,
                             "approved_position_size_usd": 10.0,
                         },
                     },
@@ -2965,6 +3119,7 @@ parameters:
                         "recommended_action": "BUY_NO",
                         "side": "NO",
                         "estimated_fill_price": 0.25,
+                        "best_no_ask": 0.25,
                         "approved_position_size_usd": 10.0,
                     },
                 },
@@ -2981,6 +3136,7 @@ parameters:
                         "recommended_action": "BUY_YES",
                         "side": "YES",
                         "estimated_fill_price": 0.50,
+                        "best_yes_ask": 0.50,
                         "approved_position_size_usd": 10.0,
                     }
                 },
@@ -3009,6 +3165,7 @@ parameters:
                         "recommended_action": "BUY_YES",
                         "side": "YES",
                         "estimated_fill_price": 0.25,
+                        "best_yes_ask": 0.25,
                     }
                 },
             },
@@ -3096,6 +3253,7 @@ parameters:
                         "recommended_action": "BUY_YES",
                         "side": "YES",
                         "estimated_fill_price": 0.25,
+                        "best_yes_ask": 0.25,
                     }
                 },
             }
@@ -3154,6 +3312,7 @@ parameters:
                             "recommended_action": "BUY_NO",
                             "side": "NO",
                             "estimated_fill_price": 0.20,
+                            "best_no_ask": 0.20,
                         }
                     },
                 },

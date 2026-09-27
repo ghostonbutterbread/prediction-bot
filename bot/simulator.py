@@ -1757,6 +1757,8 @@ class Simulator:
                 "best_no_ask": _shadow_price(order_book.get("best_no_ask")),
                 "best_no_bid": _shadow_price(order_book.get("best_no_bid")),
             }
+            recorded_yes_ask = shadow_order_book["best_yes_ask"] or _shadow_price(signal.get("best_yes_ask"))
+            recorded_no_ask = shadow_order_book["best_no_ask"] or _shadow_price(signal.get("best_no_ask"))
             shadow_signal = dict(signal)
             for signal_key, book_key in (
                 ("best_yes_ask", "best_yes_ask"),
@@ -1801,6 +1803,8 @@ class Simulator:
                     "execution_snapshot_source": execution_snapshot.get("source"),
                     "execution_snapshot_as_of": observed_at,
                     "execution_snapshot_marker": execution_snapshot.get("marker"),
+                    "paper_shadow_recorded_best_yes_ask": recorded_yes_ask,
+                    "paper_shadow_recorded_best_no_ask": recorded_no_ask,
                     "estimated_fill_price": execution_snapshot.get("estimated_fill_price"),
                     "best_yes_ask": execution_snapshot.get("best_yes_ask"),
                     "best_yes_bid": execution_snapshot.get("best_yes_bid"),

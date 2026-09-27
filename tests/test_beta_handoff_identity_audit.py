@@ -209,6 +209,9 @@ class BetaHandoffIdentityAuditTests(unittest.TestCase):
             "shared_candidate_id": "candidate-A", "market_id": "market-A",
             "policy": "shadow_source_scoreboard", "observed_at": "2026-09-07T12:00:00+00:00",
             "action": "BUY_YES", "entry_price": 0.4, "approved_position_size_usd": 10.0,
+            # Keep the handoff tests focused on identity/time, with a recorded
+            # same-side ask rather than an unverified entry-only paper price.
+            "provenance": {"future_pnl_inputs": {"side": "YES", "best_yes_ask": 0.4}},
             "model_probability": 0.7,
         }
 

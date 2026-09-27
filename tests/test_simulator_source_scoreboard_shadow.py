@@ -228,6 +228,23 @@ class SimulatorSourceScoreboardShadowTests(unittest.TestCase):
         self.assertEqual(future_pnl_inputs["order_book_source"], "paper_scan_market_quote")
         self.assertIn("execution_snapshot_as_of", future_pnl_inputs)
 
+    def test_simulator_preserves_raw_ask_absence_before_hypothetical_fallback(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            scoreboard_path = Path(tmpdir) / "source_scoreboard_by_slice.jsonl"
+            decision_path = Path(tmpdir) / "paper_shadow_lane_decisions.jsonl"
+            sim = Simulator(shadow_config(tmpdir, scoreboard_path, decision_path))
+            inputs = {}
+            signal = {**weather_signal(), "market_id": "KXHIGHSEA-260515-T70"}
+            sim._prepare_shadow_source_scoreboard_signal(
+                signal, market=fake_weather_market(),
+                order_book={"best_yes_ask": 0.44, "best_no_ask": None},
+                inputs_by_shared_candidate_id=inputs,
+            )
+            self.assertTrue(inputs)
+            writer_signal = next(iter(inputs.values()))["stable_paper"].signal
+            self.assertEqual(writer_signal["paper_shadow_recorded_best_yes_ask"], 0.44)
+            self.assertIsNone(writer_signal["paper_shadow_recorded_best_no_ask"])
+
     def test_readiness_summary_counts_simulator_shadow_rows(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             scoreboard_path = Path(tmpdir) / "source_scoreboard_by_slice.jsonl"
@@ -291,7 +308,7 @@ class SimulatorSourceScoreboardShadowTests(unittest.TestCase):
         self.assertEqual(router_rows[0]["provenance"]["source_router"]["source_direction"], "NO")
         self.assertFalse(router_rows[0]["mutation_contract"]["mutates_accounting"])
 
-    def test_source_router_shadow_uses_side_specific_fill_when_trace_entry_price_is_zero(self):
+    def test_source_router_shadow_does_not_fill_yes_from_no_only_quote(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             scoreboard_path = Path(tmpdir) / "source_scoreboard_by_slice.jsonl"
             decision_path = Path(tmpdir) / "paper_shadow_lane_decisions.jsonl"
@@ -323,11 +340,11 @@ class SimulatorSourceScoreboardShadowTests(unittest.TestCase):
         self.assertEqual(len(router_rows), 1)
         self.assertEqual(router_rows[0]["action"], "BUY_YES")
         self.assertEqual(router_rows[0]["side"], "YES")
-        self.assertEqual(router_rows[0]["entry_price"], 0.42)
-        self.assertEqual(router_rows[0]["price"], 0.42)
+        self.assertIsNone(router_rows[0].get("entry_price"))
+        self.assertIsNone(router_rows[0].get("price"))
         future_inputs = router_rows[0]["provenance"]["source_router"]["future_pnl_inputs"]
-        self.assertEqual(future_inputs["estimated_fill_price"], 0.42)
-        self.assertEqual(future_inputs["best_yes_ask"], 0.42)
+        self.assertNotIn("estimated_fill_price", future_inputs)
+        self.assertNotIn("best_yes_ask", future_inputs)
         self.assertEqual(future_inputs["best_no_ask"], 0.58)
 
 
