@@ -2819,10 +2819,12 @@ def _future_pnl_inputs(
     candidate_observed_at = _parse_timestamp(_optional_text(
         signal.get("candidate_observed_at"), shared_candidate.get("observed_at"), source_row.get("observed_at"),
     ))
-    unquoted_snapshot = bool(order_book_snapshot) and (
-        order_book_snapshot.get("source") not in (None, "", "book")
-        or bool(book_market_id and candidate_market_id and book_market_id != candidate_market_id)
+    invalid_book_context = bool(order_book_snapshot) and (
+        bool(book_market_id and candidate_market_id and book_market_id != candidate_market_id)
         or bool(book_as_of and candidate_observed_at and book_as_of > candidate_observed_at)
+    )
+    unquoted_snapshot = bool(order_book_snapshot) and (
+        order_book_snapshot.get("source") != "book" or invalid_book_context
     )
     if unquoted_snapshot and not hypothetical_book:
         # Normalization flattens snapshot prices into best_*_ask. A fallback
@@ -2835,11 +2837,11 @@ def _future_pnl_inputs(
         eligible_book_data = {} if unquoted_snapshot else order_book_data
         eligible_artifact_book = {} if unquoted_snapshot else artifact_order_book
         best_yes_ask = _price_number(
-            signal.get("paper_shadow_recorded_best_yes_ask"),
+            signal.get("paper_shadow_recorded_best_yes_ask") if not invalid_book_context else None,
             eligible_book_data.get("best_yes_ask"), eligible_artifact_book.get("best_yes_ask"),
         )
         best_no_ask = _price_number(
-            signal.get("paper_shadow_recorded_best_no_ask"),
+            signal.get("paper_shadow_recorded_best_no_ask") if not invalid_book_context else None,
             eligible_book_data.get("best_no_ask"), eligible_artifact_book.get("best_no_ask"),
         )
         entry_price = _side_price_from_book(initial_side, {"best_yes_ask": best_yes_ask, "best_no_ask": best_no_ask})
