@@ -32,6 +32,7 @@ SOURCE_SCOREBOARD_LANE_ID = "shadow_source_scoreboard"
 SOURCE_ROUTER_LANE_ID = "shadow_source_router"
 SOURCE_ROUTER_NO_PRICE_GUARD_LANE_ID = "shadow_source_router_no_price_guard"
 FEE_AWARE_EDGE_FLOOR_LANE_ID = "shadow_fee_aware_edge_floor"
+FEE_AWARE_LOSS_GUARD_LANE_ID = "shadow_fee_aware_loss_guard"
 SOURCE_RELIABILITY_EVALUATOR_LANE_IDS = frozenset({SOURCE_RELIABILITY_LANE_ID, SOURCE_SCOREBOARD_LANE_ID})
 SOURCE_SCOREBOARD_LANE_IDS = frozenset({SOURCE_SCOREBOARD_LANE_ID})
 SOURCE_COLLECTION_LANE_IDS = frozenset(
@@ -53,6 +54,7 @@ KNOWN_LANE_IDS = (
     SOURCE_ROUTER_LANE_ID,
     SOURCE_ROUTER_NO_PRICE_GUARD_LANE_ID,
     FEE_AWARE_EDGE_FLOOR_LANE_ID,
+    FEE_AWARE_LOSS_GUARD_LANE_ID,
 )
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MAX_COMPACT_FUTURE_PNL_QUESTION_CHARS = 200
@@ -297,6 +299,12 @@ def _build_lane_row(
     }
     if isinstance(decision.get("payout_aware"), Mapping):
         row["provenance"]["payout_aware"] = dict(decision["payout_aware"])
+    if lane.lane_id == FEE_AWARE_LOSS_GUARD_LANE_ID:
+        # The generic helper can fall back to a reference market price.
+        # This lane records only its selected-side quote/estimate basis on BUYs.
+        price = decision.get("economic_entry_price") if _is_buy_action(action) else None
+        row["entry_price"] = price
+        row["price"] = price
     if isinstance(decision.get("source_reliability"), Mapping):
         row["provenance"]["source_reliability"] = dict(decision["source_reliability"])
         if _is_source_scoreboard_lane(lane.lane_id):
@@ -501,6 +509,82 @@ def _fee_aware_edge_floor_decision(
         "reason": f"Baseline buy fee-aware net edge {net_edge:.4f} meets configured floor {floor:.4f}",
     })
     return baseline
+
+
+def _fee_aware_loss_guard_decision(
+    lane: _LaneDefinition,
+    signal: Mapping[str, Any],
+    source_row: dict[str, Any] | None,
+    shared_candidate: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Filter stable buys with an executable side quote and fee-aware economics."""
+    action = str((source_row or {}).get("action") or "SKIP").upper()
+    if action not in {"BUY_YES", "BUY_NO"}:
+        return _fee_aware_edge_floor_decision(lane, signal, source_row, shared_candidate)
+
+    price_key = "best_yes_ask" if action == "BUY_YES" else "best_no_ask"
+    candidate = _mapping(shared_candidate)
+    book = _mapping(_mapping(candidate.get("prices")).get("order_book_snapshot"))
+    book_time = _parse_timestamp(book.get("observed_at"))
+    candidate_time = _parse_timestamp(candidate.get("observed_at"))
+    decision_time = _parse_timestamp((source_row or {}).get("observed_at"))
+    market_id = _optional_text(candidate.get("market_id"))
+    valid_book = (
+        book.get("source") == "book"
+        and market_id is not None
+        and market_id == _optional_text(book.get("market_id"))
+        and market_id == _optional_text((source_row or {}).get("market_id"))
+        and book_time is not None and candidate_time is not None and decision_time is not None
+        and book_time <= candidate_time <= decision_time
+    )
+    quote = _number(_mapping(book.get("data")).get(price_key)) if valid_book else None
+    min_ask = _number(lane.parameters.get("min_executable_ask"))
+    min_ask = 0.20 if min_ask is None else min_ask
+    if quote is None or not 0.0 < quote < 1.0:
+        reason_code = "executable_side_ask_unavailable"
+    elif quote < min_ask:
+        reason_code = "executable_side_ask_below_floor"
+    else:
+        reason_code = None
+    if reason_code:
+        baseline = _passthrough_decision(lane, signal, source_row, shared_candidate)
+        baseline.update({
+            "action": "SKIP", "reason_code": reason_code,
+            "reason": f"Stable buy requires selected-side executable ask >= {min_ask:.2f}",
+            "approved_position_size_usd": 0.0,
+        })
+        return baseline
+
+    assert quote is not None  # The missing-quote branch returned above.
+    snapshot = _mapping(signal.get("execution_snapshot"))
+    recorded_estimates = (
+        _number(value)
+        for value in (
+            signal.get("estimated_fill_price"), snapshot.get("estimated_fill_price"),
+            (source_row or {}).get("estimated_fill_price"),
+            _mapping((source_row or {}).get("execution_snapshot")).get("estimated_fill_price"),
+        )
+    )
+    recorded_estimate = max(
+        (value for value in recorded_estimates if value is not None and 0.0 < value < 1.0),
+        default=None,
+    )
+    economic_price = max(quote, recorded_estimate) if recorded_estimate is not None else quote
+    price_basis = "recorded_fill_estimate" if economic_price > quote else "selected_side_ask_quote"
+    guarded = _fee_aware_edge_floor_decision(
+        lane, {**signal, price_key: economic_price}, source_row, shared_candidate,
+    )
+    if "payout_aware" in guarded:
+        guarded["payout_aware"].update({
+            "selected_side_ask": quote,
+            "recorded_fill_estimate": recorded_estimate,
+            "price_basis": price_basis,
+            "quote_not_fill": True,
+            "min_executable_ask": min_ask,
+            "decision_contract": "stable_buy_only_executable_ask_and_fee_aware_loss_guard",
+        })
+    guarded["economic_entry_price"] = economic_price
+    return guarded
 
 
 def _premium_city_decision(
@@ -862,6 +946,7 @@ LANE_EVALUATORS = {
     "confidence_floor": _confidence_floor_decision,
     "premium_city": _premium_city_decision,
     "fee_aware_edge_floor": _fee_aware_edge_floor_decision,
+    "fee_aware_loss_guard": _fee_aware_loss_guard_decision,
     "source_reliability": _source_reliability_decision,
     "source_router": _source_router_decision,
 }
@@ -2031,7 +2116,8 @@ def _build_lane_resolution_row(
     outcome = _normalized_resolution_outcome(resolution)
     action = _action_label(_optional_text(future_inputs.get("recommended_action"), row.get("action"), row.get("side")))
     side = _side_from_action(action) or _optional_text(future_inputs.get("side"))
-    fill_price = _number(future_inputs.get("estimated_fill_price"), future_inputs.get("entry_price"), row.get("entry_price"), row.get("price"))
+    quote_only_buy = _lane_id_for_row(row) == FEE_AWARE_LOSS_GUARD_LANE_ID and _is_buy_action(action)
+    fill_price = None if quote_only_buy else _number(future_inputs.get("estimated_fill_price"), future_inputs.get("entry_price"), row.get("entry_price"), row.get("price"))
     entry_price = _number(future_inputs.get("entry_price"), row.get("entry_price"), row.get("price"))
     stake = _number(
         row.get("approved_position_size_usd"),
@@ -2044,6 +2130,8 @@ def _build_lane_resolution_row(
     observed_at = _optional_text(row.get("observed_at"), future_inputs.get("observed_at"))
     chronology_blocker = _resolution_chronology_blocker(resolution, observed_at)
     blocker = resolution_blocker or chronology_blocker or _resolution_row_blocker(action=action, outcome=outcome, side=side, fill_price=fill_price, stake=stake)
+    if quote_only_buy and blocker == "missing_fill_price":
+        blocker = "quote_not_fill"
     pnl = _resolution_row_pnl(action=action, outcome=outcome, side=side, fill_price=fill_price, stake=stake) if blocker is None else None
     return {
         "schema_name": "paper_shadow_lane_resolution",
