@@ -7,8 +7,8 @@
 - **Intended integration target:** `beta` (local integration lane; not runtime)
 - **Last updated:** 2026-09-27
 - **Owning feature branch/ref:** `feat/loss-controlled-picks`
-- **Latest immutable recovery checkpoint:** none yet
-- **Feature implementation commit(s):** none yet
+- **Latest immutable recovery checkpoint:** `2c6e18de2d19b15323e7de02b5a752d01b236fcd` (implementation and dossier; a later dossier-only handoff commit may be the feature tip)
+- **Feature implementation commit(s):** `2c6e18de2d19b15323e7de02b5a752d01b236fcd`
 - **Inspiration / canonical references:** Ryu's Discord thread `1553590583275298928`; existing disabled `shadow_fee_aware_edge_floor`; fresh-quote probe `data/derived_reports/price_normalization_20260921T044200Z/fresh-quote-probe-20260925T052252.954042_0000.json`.
 
 ## Intent
@@ -38,8 +38,8 @@ A new disabled `shadow_fee_aware_loss_guard` extends existing stable-BUY selecti
 ## Interruption / resume handoff
 
 - **Owning feature branch/ref:** `feat/loss-controlled-picks`
-- **Latest immutable recovery checkpoint:** none yet
-- **Feature implementation commit(s):** none yet
+- **Latest immutable recovery checkpoint:** `2c6e18de2d19b15323e7de02b5a752d01b236fcd` (implementation and dossier; a later dossier-only handoff commit may be the feature tip)
+- **Feature implementation commit(s):** `2c6e18de2d19b15323e7de02b5a752d01b236fcd`
 - **Exact resume point:** independently re-review the corrected committed feature, inspect beta target state and a non-committing compatibility merge, then decide whether disabled-code beta integration is warranted. Do not activate without a separately authorized fresh, event-disjoint forward-paper cohort.
 - **Working-tree state at handoff:** clean committed feature required before review; no raw/runtime/config mutation.
 
