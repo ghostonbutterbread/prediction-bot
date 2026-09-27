@@ -2813,19 +2813,23 @@ def _future_pnl_inputs(
         or signal_side
     )
     hypothetical_book = _optional_text(signal.get("execution_snapshot_marker"), execution_snapshot.get("marker")) == "paper_shadow_source_scoreboard_hypothetical_execution"
-    book_market_id = _optional_text(order_book_snapshot.get("market_id"))
     candidate_market_id = _optional_text(signal.get("market_id"), shared_candidate.get("market_id"), market.get("id"))
-    book_as_of = _parse_timestamp(_optional_text(order_book_snapshot.get("as_of"), order_book_snapshot.get("observed_at")))
     candidate_observed_at = _parse_timestamp(_optional_text(
         signal.get("candidate_observed_at"), shared_candidate.get("observed_at"), source_row.get("observed_at"),
     ))
-    invalid_book_context = bool(order_book_snapshot) and (
-        bool(book_market_id and candidate_market_id and book_market_id != candidate_market_id)
-        or bool(book_as_of and candidate_observed_at and book_as_of > candidate_observed_at)
-    )
-    unquoted_snapshot = bool(order_book_snapshot) and (
-        order_book_snapshot.get("source") != "book" or invalid_book_context
-    )
+    book_envelopes = tuple(book for book in (order_book_snapshot, artifact_order_book) if book)
+    invalid_book_context = False
+    for book in book_envelopes:
+        book_market_id = _optional_text(book.get("market_id"))
+        book_as_of = _parse_timestamp(_optional_text(book.get("as_of"), book.get("observed_at")))
+        if (book_market_id and candidate_market_id and book_market_id != candidate_market_id) or (
+            book_as_of and candidate_observed_at and book_as_of > candidate_observed_at
+        ):
+            invalid_book_context = True
+            break
+    eligible_book_data = order_book_data if order_book_snapshot.get("source") == "book" and not invalid_book_context else {}
+    eligible_artifact_book = artifact_order_book if artifact_order_book.get("source") == "book" and not invalid_book_context else {}
+    unquoted_snapshot = bool(book_envelopes) and not (eligible_book_data or eligible_artifact_book)
     if unquoted_snapshot and not hypothetical_book:
         # Normalization flattens snapshot prices into best_*_ask. A fallback
         # snapshot is a reference, not a recorded side-specific order-book ask.
@@ -2834,8 +2838,6 @@ def _future_pnl_inputs(
         # The execution snapshot can complement the opposite ask. Only the
         # pre-snapshot, side-labelled book quote proves a hypothetical entry.
         # A synthetic, wrong-market, or future artifact cannot supplement it.
-        eligible_book_data = {} if unquoted_snapshot else order_book_data
-        eligible_artifact_book = {} if unquoted_snapshot else artifact_order_book
         best_yes_ask = _price_number(
             signal.get("paper_shadow_recorded_best_yes_ask") if not invalid_book_context else None,
             eligible_book_data.get("best_yes_ask"), eligible_artifact_book.get("best_yes_ask"),
@@ -2847,22 +2849,27 @@ def _future_pnl_inputs(
         entry_price = _side_price_from_book(initial_side, {"best_yes_ask": best_yes_ask, "best_no_ask": best_no_ask})
     else:
         best_yes_ask = _price_number(
-            signal.get("best_yes_ask"), order_book_data.get("best_yes_ask"),
-            artifact_order_book.get("best_yes_ask"),
+            signal.get("best_yes_ask") if not book_envelopes else None,
+            eligible_book_data.get("best_yes_ask"),
+            eligible_artifact_book.get("best_yes_ask"),
         )
         best_no_ask = _price_number(
-            signal.get("best_no_ask"), order_book_data.get("best_no_ask"),
-            artifact_order_book.get("best_no_ask"),
+            signal.get("best_no_ask") if not book_envelopes else None,
+            eligible_book_data.get("best_no_ask"),
+            eligible_artifact_book.get("best_no_ask"),
         )
-        entry_price = _shadow_entry_price_for_side(initial_side, signal, source_row)
+        entry_price = (
+            _side_price_from_book(initial_side, {"best_yes_ask": best_yes_ask, "best_no_ask": best_no_ask})
+            if book_envelopes else _shadow_entry_price_for_side(initial_side, signal, source_row)
+        )
     # An estimate attached to the strategy's side cannot be relabelled as a
     # shadow lane's opposite-side fill. Retain it on the original side only.
     estimated_fill_price = None if unquoted_snapshot and not hypothetical_book else entry_price if hypothetical_book else (
         _price_number(
             signal.get("estimated_fill_price"),
             execution_snapshot.get("estimated_fill_price"),
-            order_book_data.get("estimated_fill_price"),
-            artifact_order_book.get("estimated_fill_price"),
+            eligible_book_data.get("estimated_fill_price"),
+            eligible_artifact_book.get("estimated_fill_price"),
         ) if signal_side is None or signal_side == initial_side else None
     )
     if estimated_fill_price is None:

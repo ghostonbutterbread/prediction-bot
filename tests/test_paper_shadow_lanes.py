@@ -1320,6 +1320,133 @@ parameters:
                 self.assertEqual(wallet["summary"]["opened_positions"], 0)
                 self.assertEqual(wallet["summary"]["settled_positions"], 0)
 
+    def test_artifact_only_book_must_prove_selected_side_quote(self):
+        from bot.collector_lane_replay_kelly import replay_recorded_collector_lane_with_kelly
+        from bot.paper_shadow_lanes import _future_pnl_inputs, _side_specific_price
+        from bot.shared_market_feed import build_shared_market_candidate_row, normalize_shared_candidate_input
+
+        cases = (
+            ("fallback", "M1", "2026-05-06T12:00:00+00:00", False),
+            (None, "M1", "2026-05-06T12:00:00+00:00", False),
+            ("book", "M2", "2026-05-06T12:00:00+00:00", False),
+            ("book", "M1", "2026-05-07T12:00:00+00:00", False),
+            ("fallback", "M2", "2026-05-06T12:00:00+00:00", True),
+            ("book", "M1", "2026-05-07T12:00:00+00:00", True),
+        )
+        for source, market_id, as_of, marked in cases:
+            with self.subTest(source=source, market_id=market_id, as_of=as_of, marked=marked):
+                book = {"market_id": market_id, "as_of": as_of, "best_no_ask": .58}
+                if source is not None:
+                    book["source"] = source
+                candidate = build_shared_market_candidate_row(
+                    run_id="r", market=self._market("M1"),
+                    signal={"direction": "BUY_YES", "market_price": .44},
+                    decision_artifact={"order_book": book},
+                    source_runtime="prediction_lab", observed_at="2026-05-06T12:00:00+00:00",
+                )
+                normalized = normalize_shared_candidate_input({"shared_candidate": candidate})
+                self.assertTrue(normalized.ok)
+                signal = {**normalized.signal, "decision_artifact": {"order_book": book}}
+                if marked:
+                    signal.update(
+                        execution_snapshot_marker="paper_shadow_source_scoreboard_hypothetical_execution",
+                        paper_shadow_recorded_best_no_ask=.58,
+                    )
+                future = _future_pnl_inputs(
+                    signal=signal, shared_candidate=candidate,
+                    source_row={"action": "BUY_NO"},
+                    source_reliability={"recommended_action": "BUY_NO"},
+                )
+                decision = {
+                    "decision_id": "artifact-book", "policy": "shadow_source_router",
+                    "shared_candidate_id": normalized.shared_candidate_id, "run_id": "r",
+                    "market_id": "M1", "observed_at": "2026-05-06T12:00:00+00:00",
+                    "action": "BUY_NO", "model_probability": .2, "entry_price": .58,
+                    "approved_position_size_usd": 10.0,
+                    "provenance": {"future_pnl_inputs": future},
+                }
+                [receipt] = build_paper_shadow_lane_resolution_rows(
+                    lane_rows=[decision], resolution_rows=[{
+                        "shared_candidate_id": normalized.shared_candidate_id, "run_id": "r",
+                        "market_id": "M1", "resolution_id": "resolved-M1", "outcome": "NO",
+                        "settlement_ts": "2026-05-08T12:00:00+00:00",
+                    }],
+                )
+                wallet = replay_recorded_collector_lane_with_kelly(
+                    decisions=[decision], resolutions=[receipt], starting_balance_usd=100.0,
+                )
+                self.assertIsNone(_side_specific_price(future, "NO"))
+                self.assertEqual(receipt["blocker"], "missing_fill_price")
+                self.assertIsNone(receipt["pnl"])
+                self.assertEqual(wallet["summary"]["opened_positions"], 0)
+                self.assertEqual(wallet["summary"]["settled_positions"], 0)
+                self.assertEqual(wallet["summary"]["final_balance_usd"], 100.0)
+
+    def test_nonbook_artifact_cannot_hide_behind_yes_only_recorded_snapshot(self):
+        from bot.paper_shadow_lanes import _future_pnl_inputs, _side_specific_price
+        from bot.shared_market_feed import build_shared_market_candidate_row, normalize_shared_candidate_input
+
+        artifact = {
+            "order_book_snapshot": {"source": "book", "market_id": "M1", "data": {"best_yes_ask": .44}},
+            "order_book": {"source": "fallback", "market_id": "M1", "best_no_ask": .58},
+        }
+        candidate = build_shared_market_candidate_row(
+            run_id="r", market=self._market("M1"),
+            signal={"direction": "BUY_YES", "market_price": .44},
+            decision_artifact=artifact, source_runtime="prediction_lab",
+            observed_at="2026-05-06T12:00:00+00:00",
+        )
+        normalized = normalize_shared_candidate_input({"shared_candidate": candidate})
+        self.assertTrue(normalized.ok)
+        future = _future_pnl_inputs(
+            signal={**normalized.signal, "best_no_ask": .58, "decision_artifact": artifact},
+            shared_candidate=candidate, source_row={"action": "BUY_NO"},
+            source_reliability={"recommended_action": "BUY_NO"},
+        )
+        self.assertIsNone(_side_specific_price(future, "NO"))
+        self.assertNotIn("entry_price", future)
+
+    def test_artifact_only_genuine_book_and_independent_marked_ask_remain_usable(self):
+        from bot.paper_shadow_lanes import _future_pnl_inputs, _side_specific_price
+        from bot.shared_market_feed import build_shared_market_candidate_row, normalize_shared_candidate_input
+
+        cases = (
+            ("book", "M1", "2026-05-06T05:00:00-07:00", False),
+            ("book", None, None, False),
+            ("synthetic", "M1", "2026-05-06T12:00:00+00:00", True),
+            (None, None, None, True),
+        )
+        for source, market_id, as_of, marked in cases:
+            with self.subTest(source=source, market_id=market_id, as_of=as_of, marked=marked):
+                book: dict[str, object] = {"best_no_ask": .58}
+                if source is not None:
+                    book["source"] = source
+                if market_id is not None:
+                    book["market_id"] = market_id
+                if as_of is not None:
+                    book["as_of"] = as_of
+                candidate = build_shared_market_candidate_row(
+                    run_id="r", market=self._market("M1"),
+                    signal={"direction": "BUY_YES", "market_price": .44},
+                    decision_artifact={"order_book": book},
+                    source_runtime="prediction_lab", observed_at="2026-05-06T12:00:00+00:00",
+                )
+                normalized = normalize_shared_candidate_input({"shared_candidate": candidate})
+                self.assertTrue(normalized.ok)
+                signal = {**normalized.signal, "decision_artifact": {"order_book": book}}
+                if marked:
+                    signal.update(
+                        execution_snapshot_marker="paper_shadow_source_scoreboard_hypothetical_execution",
+                        paper_shadow_recorded_best_no_ask=.58,
+                    )
+                future = _future_pnl_inputs(
+                    signal=signal, shared_candidate=candidate,
+                    source_row={"action": "BUY_NO"},
+                    source_reliability={"recommended_action": "BUY_NO"},
+                )
+                self.assertEqual(_side_specific_price(future, "NO"), .58)
+                self.assertEqual(future["entry_price"], .58)
+
     def test_marked_retained_ask_cannot_override_wrong_market_book(self):
         from bot.collector_lane_replay_kelly import replay_recorded_collector_lane_with_kelly
         from bot.paper_shadow_lanes import _future_pnl_inputs, _side_specific_price
