@@ -2387,22 +2387,20 @@ def _find_resolution(
     shared_snapshot_id: str | None = None,
     observed_at: str | None = None,
 ) -> dict[str, Any]:
-    lookup_plan: list[tuple[str, Any, str | None]] = []
-    if shared_candidate_id:
-        lookup_plan.append(("shared_candidate_id", shared_candidate_id, shared_candidate_id))
-    if run_id and market_id:
-        lookup_plan.append(("run_id_market_id", (run_id, market_id), f"{run_id}|{market_id}"))
-    if market_id:
-        lookup_plan.append(("market_id", market_id, market_id))
-
     entries = list(index.get("entries", []) or [])
-    for matched_by, key, display_key in lookup_plan:
-        bucket_name = {
-            "shared_candidate_id": "by_shared_candidate_id",
-            "run_id_market_id": "by_run_market",
-            "market_id": "by_market_id",
-        }[matched_by]
-        entry_indexes = list(_mapping(index.get(bucket_name)).get(key, []) or [])
+    candidate_indexes = list(_mapping(index.get("by_shared_candidate_id")).get(shared_candidate_id, []) or []) if shared_candidate_id else []
+    run_market_bucket = index.get("by_run_market")
+    run_market_indexes = list(run_market_bucket.get((run_id, market_id), []) or []) if isinstance(run_market_bucket, Mapping) and run_id and market_id else []
+    lookup_plan: list[tuple[str, list[int], str | None]] = []
+    strong_indexes = list(dict.fromkeys(candidate_indexes + run_market_indexes))
+    if strong_indexes:
+        matched_by = "shared_candidate_id" if candidate_indexes else "run_id_market_id"
+        display_key = shared_candidate_id if candidate_indexes else f"{run_id}|{market_id}"
+        lookup_plan.append((matched_by, strong_indexes, display_key))
+    if market_id:
+        lookup_plan.append(("market_id", list(_mapping(index.get("by_market_id")).get(market_id, []) or []), market_id))
+
+    for matched_by, entry_indexes, display_key in lookup_plan:
         if not entry_indexes:
             continue
         # A receipt for another market cannot dispute a matching-market
@@ -2498,7 +2496,11 @@ def _find_resolution(
             ))
             return (not has_settlement, json.dumps(candidate, sort_keys=True, default=str))
 
-        entry = entries[min(entry_indexes, key=receipt_rank)]
+        chosen_index = min(entry_indexes, key=receipt_rank)
+        entry = entries[chosen_index]
+        if matched_by != "market_id" and chosen_index not in candidate_indexes:
+            matched_by = "run_id_market_id"
+            display_key = f"{run_id}|{market_id}"
         return {
             "row": _mapping(entry.get("row")),
             "matched_by": matched_by,
