@@ -41,7 +41,8 @@ class UnifiedReplayCorpusTests(unittest.TestCase):
                 ],
             )
             original_decisions = decisions.read_text(encoding="utf-8")
-            _write_jsonl(resolutions, [{"market_id": "KXTEST-1", "outcome": "YES"}])
+            _write_jsonl(resolutions, [{"market_id": "KXTEST-1", "outcome": "YES",
+                                        "settlement_ts": "2026-06-02T00:00:00+00:00"}])
 
             result = build_unified_replay_corpus(
                 output_dir=output_dir,
@@ -141,13 +142,15 @@ class UnifiedReplayCorpusTests(unittest.TestCase):
                     {
                         "policy": "shadow_test",
                         "market_id": "KXTEST-4",
+                        "observed_at": "2026-06-03T00:00:00+00:00",
                         "action": "BUY_NO",
                         "approved_position_size_usd": 10.0,
                         "price": 0.50,
                     }
                 ],
             )
-            resolution_row = {"market_id": "KXTEST-4", "outcome": "NO"}
+            resolution_row = {"market_id": "KXTEST-4", "outcome": "NO",
+                              "settlement_ts": "2026-06-04T00:00:00+00:00"}
             _write_jsonl(resolutions_a, [resolution_row])
             _write_jsonl(resolutions_b, [dict(resolution_row)])
 

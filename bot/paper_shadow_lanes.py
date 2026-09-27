@@ -1758,21 +1758,27 @@ def _summarize_paper_shadow_lane_resolution_stream(
     by_lane: dict[str, dict[str, Any]] = {}
     blocker_counts: dict[str, int] = {}
 
-    for row in lane_rows:
-        joined = _build_lane_resolution_row(row, resolution_index)
-        _accumulate_paper_shadow_lane_resolution_row(
-            joined,
-            totals=totals,
-            by_lane=by_lane,
-            blocker_counts=blocker_counts,
-        )
+    def joined_rows() -> Iterable[dict[str, Any]]:
+        for row in lane_rows:
+            joined = _build_lane_resolution_row(row, resolution_index)
+            _accumulate_paper_shadow_lane_resolution_row(
+                joined,
+                totals=totals,
+                by_lane=by_lane,
+                blocker_counts=blocker_counts,
+            )
+            yield joined
+
+    # Consume once, without retaining the ledger, through the same router
+    # directional/economic summary used by the in-memory report.
+    source_router = _summarize_source_router_resolution_rows(joined_rows())
 
     return _finalize_pnl_bucket(
         {
             **totals,
             "by_lane": by_lane,
             "blocker_counts": blocker_counts,
-            "source_router": _finalize_pnl_bucket(_empty_pnl_bucket()),
+            "source_router": source_router,
         }
     )
 
@@ -2143,7 +2149,14 @@ def _build_lane_resolution_row(
     observed_at = _optional_text(row.get("observed_at"), future_inputs.get("observed_at"))
     assertion_blocker = _resolution_assertion_blocker(resolution)
     chronology_blocker = _resolution_chronology_blocker(resolution, observed_at)
+    settlement_ts = _optional_text(
+        _mapping(resolution).get("settlement_ts"), _mapping(_mapping(resolution).get("resolution")).get("settlement_ts"),
+    )
     blocker = resolution_blocker or chronology_blocker or assertion_blocker or _resolution_row_blocker(action=action, outcome=outcome, side=side, fill_price=fill_price, stake=stake)
+    if blocker is None and _is_buy_action(action) and resolution_match.get("matched_by") == "market_id" and settlement_ts is None:
+        # A bare market outcome cannot prove that this decision preceded
+        # settlement. Keep its directional match but not an economic PnL claim.
+        blocker = "missing_settlement_timestamp"
     if quote_only_buy and blocker == "missing_fill_price":
         blocker = "quote_not_fill"
     pnl = _resolution_row_pnl(action=action, outcome=outcome, side=side, fill_price=fill_price, stake=stake) if blocker is None else None
@@ -2174,9 +2187,7 @@ def _build_lane_resolution_row(
             "resolved_at": _optional_text(_mapping(resolution).get("resolved_at"), _mapping(_mapping(resolution).get("resolution")).get("resolved_at")),
             # Preserve distinct settlement and outcome-availability clocks. An
             # outcome-known timestamp cannot establish when settlement occurred.
-            "settlement_ts": _optional_text(
-                _mapping(resolution).get("settlement_ts"), _mapping(_mapping(resolution).get("resolution")).get("settlement_ts"),
-            ),
+            "settlement_ts": settlement_ts,
             "outcome_known_at": _optional_text(resolution_match.get("latest_outcome_known_at"), _mapping(resolution).get("outcome_known_at"), _mapping(_mapping(resolution).get("resolution")).get("outcome_known_at")),
             "run_id": _optional_text(_mapping(resolution).get("run_id"), _mapping(_mapping(resolution).get("resolution")).get("run_id")),
             "market_id": _optional_text(_mapping(resolution).get("market_id"), market_id),
@@ -2590,6 +2601,13 @@ def _summarize_source_router_resolution_rows(rows: Iterable[Mapping[str, Any]]) 
         outcome = _optional_text(resolution.get("outcome"))
         if outcome is not None:
             _increment_pnl_bucket(summary, "resolved_rows")
+        # Directional accuracy needs a valid matched outcome, not an eligible
+        # economic receipt. A missing quote/stake/settlement clock blocks PnL,
+        # but must not erase a correctly predicted YES/NO outcome.
+        if _is_buy_action(action) and resolution.get("matched") is True and outcome in {"YES", "NO"}:
+            resolved_buy_rows += 1
+            if _side_from_action(action) == outcome:
+                correct_side_rows += 1
 
         blocker = _optional_text(row.get("blocker"))
         if blocker:
@@ -2610,9 +2628,6 @@ def _summarize_source_router_resolution_rows(rows: Iterable[Mapping[str, Any]]) 
         payout = float(_number(pnl.get("payout_usd")) or 0.0)
         pnl_value = float(_number(pnl.get("pnl_usd")) or 0.0)
 
-        resolved_buy_rows += 1
-        if won:
-            correct_side_rows += 1
         _increment_pnl_bucket(summary, "buy_rows")
         _increment_pnl_bucket(summary, "pnl_calculable_rows")
         _increment_pnl_bucket(summary, "winning_buy_rows" if won else "losing_buy_rows")

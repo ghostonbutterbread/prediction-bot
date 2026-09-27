@@ -631,7 +631,8 @@ class PaperShadowLaneComposeReplayTests(unittest.TestCase):
 
         result = compose_lane_replay(
             lane_rows=lane_rows,
-            resolution_rows=[{"market_id": "KXCOMPOSE-10", "outcome": "NO"}],
+            resolution_rows=[{"market_id": "KXCOMPOSE-10", "outcome": "NO",
+                              "settlement_ts": "2026-06-02T00:00:00+00:00"}],
             config=_load_composition("nws_only_cap1"),
         )
 

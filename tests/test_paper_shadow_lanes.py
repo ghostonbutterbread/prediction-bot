@@ -3821,7 +3821,10 @@ parameters:
                 },
             }
         ]
-        resolution_rows = [{"market_id": "KXHIGHSEA-1", "resolution": {"outcome": "YES", "resolved_at": "2026-05-16T13:00:00+00:00"}}]
+        resolution_rows = [{"market_id": "KXHIGHSEA-1", "resolution": {
+            "outcome": "YES", "settlement_ts": "2026-05-16T12:00:00+00:00",
+            "resolved_at": "2026-05-16T13:00:00+00:00",
+        }}]
 
         joined = build_paper_shadow_lane_resolution_rows(lane_rows=lane_rows, resolution_rows=resolution_rows)
 
@@ -3872,6 +3875,7 @@ parameters:
             {
                 "policy": "shadow_source_scoreboard",
                 "shared_candidate_id": "candidate-loss",
+                "observed_at": "2026-05-14T12:00:00+00:00",
                 "action": "BUY_NO",
                 "approved_position_size_usd": 5.0,
                 "provenance": {
@@ -3907,7 +3911,7 @@ parameters:
         ]
         resolution_rows = [
             {"shared_candidate_id": "candidate-win", "market_id": "KXHIGHSEA-1", "outcome": "YES"},
-            {"market_id": "KXHIGHSEA-2", "outcome": "YES"},
+            {"market_id": "KXHIGHSEA-2", "outcome": "YES", "settlement_ts": "2026-05-16T12:00:00+00:00"},
             {"shared_candidate_id": "candidate-skip", "market_id": "KXHIGHSEA-3", "outcome": "NO"},
         ]
 
@@ -4159,6 +4163,108 @@ parameters:
         self.assertEqual(router["standardized_hypothetical_roi_pct"], 100.0)
         self.assertEqual(router["action_counts"], {"BUY_NO": 1, "BUY_YES": 1, "SKIP": 1})
         self.assertEqual(report["by_lane"]["shadow_source_router"]["total_pnl_usd"], 20.0)
+
+    def test_source_router_directional_win_rate_does_not_require_market_only_settlement_clock(self):
+        lane = {
+            "policy": "shadow_source_router", "shared_candidate_id": "router-untimed",
+            "market_id": "KXROUTER-UNTIMED", "observed_at": "2026-09-07T12:00:00+00:00",
+            "action": "BUY_YES", "approved_position_size_usd": 10.0,
+            "provenance": {"future_pnl_inputs": {
+                "shared_candidate_id": "router-untimed", "market_id": "KXROUTER-UNTIMED",
+                "recommended_action": "BUY_YES", "side": "YES", "best_yes_ask": 0.4,
+            }},
+        }
+        for settlement_ts, economic_buys in ((None, 0), ("2026-09-08T12:00:00+00:00", 1)):
+            with self.subTest(settlement_ts=settlement_ts):
+                resolution = {"market_id": "KXROUTER-UNTIMED", "outcome": "YES"}
+                if settlement_ts:
+                    resolution["settlement_ts"] = settlement_ts
+                [receipt] = build_paper_shadow_lane_resolution_rows(
+                    lane_rows=[lane], resolution_rows=[resolution],
+                )
+                report = summarize_paper_shadow_lane_resolved_pnl(
+                    lane_rows=[lane], resolution_rows=[resolution],
+                )
+                router = report["source_router"]
+                self.assertTrue(receipt["resolution"]["matched"])
+                self.assertEqual(receipt["resolution"]["matched_by"], "market_id")
+                self.assertEqual(router["raw_router_resolved_buy_rows"], 1)
+                self.assertEqual(router["raw_router_correct_side_rows"], 1)
+                self.assertEqual(router["raw_router_win_rate_pct"], 100.0)
+                self.assertEqual(router["buy_rows"], economic_buys)
+                self.assertEqual(router["pnl_calculable_rows"], economic_buys)
+                self.assertEqual(receipt["blocker"], None if settlement_ts else "missing_settlement_timestamp")
+                self.assertEqual(receipt["pnl"] is not None, bool(settlement_ts))
+
+    def test_source_router_directional_metric_keeps_missing_quote_but_excludes_nonfinal_outcome(self):
+        lane = {
+            "policy": "shadow_source_router", "shared_candidate_id": "router-no-quote",
+            "market_id": "KXROUTER-NOQUOTE", "observed_at": "2026-09-07T12:00:00+00:00",
+            "action": "BUY_NO", "approved_position_size_usd": 10.0,
+            "provenance": {"future_pnl_inputs": {
+                "market_id": "KXROUTER-NOQUOTE", "recommended_action": "BUY_NO", "side": "NO",
+            }},
+        }
+        for market_status, matched, directional_buys in ((None, True, 1), ("open", False, 0)):
+            with self.subTest(market_status=market_status):
+                resolution = {"market_id": "KXROUTER-NOQUOTE", "outcome": "NO"}
+                if market_status:
+                    resolution["market_status"] = market_status
+                [receipt] = build_paper_shadow_lane_resolution_rows(
+                    lane_rows=[lane], resolution_rows=[resolution],
+                )
+                report = summarize_paper_shadow_lane_resolved_pnl(
+                    lane_rows=[lane], resolution_rows=[resolution],
+                )
+                router = report["source_router"]
+                self.assertEqual(receipt["resolution"]["matched"], matched)
+                self.assertEqual(router["raw_router_resolved_buy_rows"], directional_buys)
+                self.assertEqual(router["raw_router_correct_side_rows"], directional_buys)
+                self.assertEqual(router["buy_rows"], 0)
+                self.assertIsNone(receipt["pnl"])
+
+    def test_resolved_pnl_cli_stream_preserves_router_directional_and_economic_summary(self):
+        lane = {
+            "policy": "shadow_source_router", "shared_candidate_id": "router-stream",
+            "market_id": "KXROUTER-STREAM", "observed_at": "2026-09-07T12:00:00+00:00",
+            "action": "BUY_YES", "approved_position_size_usd": 10.0,
+            "provenance": {"future_pnl_inputs": {
+                "market_id": "KXROUTER-STREAM", "recommended_action": "BUY_YES",
+                "side": "YES", "best_yes_ask": 0.4,
+            }},
+        }
+        resolution = {"market_id": "KXROUTER-STREAM", "outcome": "YES"}
+        expected = summarize_paper_shadow_lane_resolved_pnl(
+            lane_rows=[lane], resolution_rows=[resolution],
+        )
+        self.assertEqual(expected["source_router"]["raw_router_win_rate_pct"], 100.0)
+        self.assertEqual(expected["source_router"]["buy_rows"], 0)
+        with tempfile.TemporaryDirectory() as tmp:
+            lane_path = Path(tmp) / "lanes.jsonl"
+            resolution_path = Path(tmp) / "resolutions.jsonl"
+            lane_path.write_text(json.dumps(lane) + "\n", encoding="utf-8")
+            resolution_path.write_text(json.dumps(resolution) + "\n", encoding="utf-8")
+            streamed = summarize_paper_shadow_lane_resolved_pnl(
+                lane_decision_path=lane_path, resolution_path=resolution_path,
+            )
+            self.assertEqual(streamed, expected)
+            output = StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(paper_shadow_lane_report_main([
+                    "--section", "resolved_pnl", "--format", "json",
+                    "--lane-decision-path", str(lane_path),
+                    "--resolution-path", str(resolution_path),
+                ]), 0)
+            self.assertEqual(json.loads(output.getvalue()), expected)
+            text_output = StringIO()
+            with redirect_stdout(text_output):
+                self.assertEqual(paper_shadow_lane_report_main([
+                    "--section", "resolved_pnl",
+                    "--lane-decision-path", str(lane_path),
+                    "--resolution-path", str(resolution_path),
+                ]), 0)
+            self.assertIn('"raw_win_rate_pct": 100.0', text_output.getvalue())
+            self.assertIn('"missing_settlement_timestamp": 1', text_output.getvalue())
 
     def test_source_scoreboard_resolved_pnl_reports_blockers_without_guessing(self):
         lane_rows = [

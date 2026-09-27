@@ -197,6 +197,7 @@ class MorningBotStatusReportTests(unittest.TestCase):
                         "policy": "shadow_test_lane",
                         "selected_lane": "shadow_test_lane",
                         "market_id": "KXTEST",
+                        "observed_at": "2026-04-28T12:00:00+00:00",
                         "action": "BUY_YES",
                         "side": "YES",
                         "price": 0.25,
@@ -209,7 +210,8 @@ class MorningBotStatusReportTests(unittest.TestCase):
             resolution_dir = root / "resolutions"
             resolution_dir.mkdir()
             (resolution_dir / "latest_resolutions.jsonl").write_text(
-                json.dumps({"market_id": "KXTEST", "outcome": "YES"}) + "\n",
+                json.dumps({"market_id": "KXTEST", "outcome": "YES",
+                            "settlement_ts": "2026-04-29T12:00:00+00:00"}) + "\n",
                 encoding="utf-8",
             )
             config = root / "shadow.yaml"
