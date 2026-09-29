@@ -83,7 +83,39 @@ class CrossMonthSourceHistoryTests(unittest.TestCase):
             self.assertEqual(row["policy"], "shadow_source_router")
             self.assertTrue(row["provenance"]["source_router"]["available"])
             self.assertTrue(row["provenance"]["source_router"]["source_observations"])
+            direct_receipt = row["provenance"]["source_router"]["direct_history"]
+            self.assertEqual(len(direct_receipt["archive_receipts"]), 2)
+            self.assertEqual(direct_receipt["bucket_coverage"][0]["selected_units"], 2)
+            self.assertEqual(direct_receipt["history_events_per_bucket"], 2)
+            self.assertTrue(all(receipt["index_manifest_sha256"] and receipt["resolution_sha256"]
+                                for receipt in direct_receipt["archive_receipts"]))
             self.assertFalse(row["mutation_contract"]["places_orders"])
+
+    def test_receipt_in_earlier_archive_cannot_contradict_later_selected_market(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            aug = _day_row(date(2026, 8, 29))
+            sep = _day_row(date(2026, 9, 2))
+            first = _archive(root, "first", [aug], [_receipt(aug), {**_receipt(sep), "kalshi_result": "no"}])
+            second = _archive(root, "second", [sep], [_receipt(sep)])
+            with self.assertRaisesRegex(ValueError, "conflicting strict resolutions across archives"):
+                load_direct_strict_source_history(
+                    archive_sources=[first, second], accepted_limit=2,
+                    as_of_decision_time="2026-09-05T00:00:00Z",
+                )
+
+    def test_ambiguous_receipt_in_other_archive_cannot_train_selected_market(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sep = _day_row(date(2026, 9, 2))
+            newer = _archive(root, "first", [sep], [_receipt(sep)])
+            duplicate = _receipt(sep)
+            older = _archive(root, "second", [], [duplicate, copy.deepcopy(duplicate)])
+            with self.assertRaisesRegex(ValueError, "ambiguous strict resolutions across archives"):
+                load_direct_strict_source_history(
+                    archive_sources=[newer, older], accepted_limit=2,
+                    as_of_decision_time="2026-09-05T00:00:00Z",
+                )
 
     def test_conflicting_overlap_resolution_cannot_train_from_either_archive(self):
         with tempfile.TemporaryDirectory() as tmp:

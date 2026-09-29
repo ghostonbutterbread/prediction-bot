@@ -50,7 +50,9 @@ def load_direct_strict_source_history(
     its earliest eligible source observation, never its best outcome.
     No derived history, replay input, outcome, or scorecard artifact is written.
     The whole committed index is validated and scanned: a global early exit
-    would starve sparse buckets. Memory scales with buckets times the budget.
+    would starve sparse buckets. Selected-history memory scales with buckets
+    times the budget, plus one archive's strict-resolution market index.
+    Multi-archive reads recheck every resolution receipt for selected markets.
     """
     if type(accepted_limit) is not int or accepted_limit <= 0:
         raise ValueError("accepted_limit must be a positive integer")
@@ -87,16 +89,6 @@ def load_direct_strict_source_history(
     def archive_rows():
         for index_file, manifest_file, resolution_path in archives:
             resolution_index, resolution_sha256 = _load_stable_resolution_index(resolution_path)
-            # Only authorities that can affect retained events need to be
-            # compared; do not retain every market from every archive.
-            for events in buckets.values():
-                for selected in events.values():
-                    other = resolution_index.accepted.get(selected["market_id"])
-                    if other is not None and any(
-                        other[key] != selected[key]
-                        for key in ("official_outcome", "settlement_ts", "resolution_id")
-                    ):
-                        raise ValueError("conflicting strict resolutions across archives")
             archive_receipts.append({
                 "index_path": str(index_file), "manifest_path": str(manifest_file),
                 "strict_resolutions_path": str(resolution_path),
@@ -163,6 +155,8 @@ def load_direct_strict_source_history(
         source_name = min(str(row.get('source_name') or 'unknown') for row in events.values())
         settled.extend({**row, 'source_name': source_name} for row in events.values())
     settled.sort(key=_history_representative_key)
+    if len(archives) > 1:
+        _verify_selected_cross_archive_resolutions(settled, archive_receipts)
     accepted = {row['canonical_input_sha256'] for row in settled}
     bound_count = len(accepted)
     collapsed, collapse_counts = collapse_strict_source_history_rows(settled)
@@ -213,6 +207,30 @@ def load_direct_strict_source_history(
         ],
         archive_receipts=archive_receipts,
     )
+
+
+def _verify_selected_cross_archive_resolutions(
+    selected: Sequence[Mapping[str, Any]], archive_receipts: Sequence[Mapping[str, str]],
+) -> None:
+    """Reconcile only finally retained markets across every pinned receipt."""
+    fields = ("official_outcome", "settlement_ts", "resolution_id")
+    authority: dict[str, tuple[str, ...]] = {}
+    for row in selected:
+        market_id = str(row["market_id"])
+        value = tuple(str(row[key]) for key in fields)
+        if market_id in authority and authority[market_id] != value:
+            raise ValueError("conflicting strict resolutions across archives")
+        authority[market_id] = value
+    for receipt in archive_receipts:
+        index, digest = _load_stable_resolution_index(Path(receipt["strict_resolutions_path"]))
+        if digest != receipt["resolution_sha256"]:
+            raise ValueError("strict resolutions changed across archive reads")
+        if authority.keys() & index.ambiguous_market_ids:
+            raise ValueError("ambiguous strict resolutions across archives")
+        for market_id, original in authority.items():
+            other = index.accepted.get(market_id)
+            if other is not None and tuple(str(other[key]) for key in fields) != original:
+                raise ValueError("conflicting strict resolutions across archives")
 
 
 def _history_event_key(row: Mapping[str, Any]) -> tuple[str, ...]:

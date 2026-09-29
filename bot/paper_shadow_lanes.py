@@ -2908,6 +2908,7 @@ def _source_router_provenance(
     future_pnl_inputs["source_router_source_grade"] = _optional_text(source_router.get("source_grade"))
 
     compact_observations = _compact_source_observations(source_router.get("source_observations"))
+    direct_history = source_router.get("direct_history")
     summary = {
         "lane_id": lane.lane_id,
         "available": bool(source_router.get("available")),
@@ -2925,6 +2926,15 @@ def _source_router_provenance(
         "sources_used": _list_of_mappings(source_router.get("sources_used")),
         "sources_excluded": _list_of_mappings(source_router.get("sources_excluded")),
         "source_observations": compact_observations,
+        # Retain the evidence identity used by this decision, not the full
+        # diagnostic counters (which can describe later, ineligible outcomes).
+        "direct_history": {
+            key: direct_history.get(key)
+            for key in (
+                "mode", "history_events_per_bucket", "selection_unit", "bucket_coverage",
+                "index_manifest_sha256", "resolution_sha256", "archive_receipts",
+            )
+        } if isinstance(direct_history, Mapping) else None,
         "future_pnl_inputs": future_pnl_inputs or None,
         "decision_contract": _optional_text(source_router.get("decision_contract")),
     }
