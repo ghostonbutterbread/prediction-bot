@@ -7,7 +7,7 @@ import os
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from bot.collector_replay_index import load_indexed_collector_rows_reverse
 from bot.replay_decision_input import build_replay_decision_input_v1, verify_replay_decision_input_record_v1
@@ -23,20 +23,22 @@ from bot.weather.source_observation_ledger import (
 
 @dataclass(frozen=True, slots=True)
 class DirectSourceHistoryResult:
-    """In-memory, provenance-bound router history for one committed checkpoint."""
+    """In-memory, provenance-bound router history for committed checkpoints."""
 
     scorecard_rows: list[dict[str, Any]]
     counts: dict[str, int]
     index_manifest_sha256: str
     resolution_sha256: str
     bucket_coverage: list[dict[str, Any]]
+    archive_receipts: list[dict[str, str]]
 
 
 def load_direct_strict_source_history(
     *,
-    index_path: str | Path,
-    manifest_path: str | Path,
-    strict_resolutions_path: str | Path,
+    index_path: str | Path | None = None,
+    manifest_path: str | Path | None = None,
+    strict_resolutions_path: str | Path | None = None,
+    archive_sources: Sequence[Mapping[str, str | Path]] | None = None,
     accepted_limit: int = 100,
     as_of_decision_time: str | None = None,
 ) -> DirectSourceHistoryResult:
@@ -52,23 +54,59 @@ def load_direct_strict_source_history(
     """
     if type(accepted_limit) is not int or accepted_limit <= 0:
         raise ValueError("accepted_limit must be a positive integer")
-    index_file, manifest_file = Path(index_path).resolve(), Path(manifest_path).resolve()
-    if not index_file.is_file() or not manifest_file.is_file():
-        raise ValueError("committed collector replay index and manifest must be readable files")
-    resolution_path = Path(strict_resolutions_path).resolve()
-    if not resolution_path.is_file():
-        raise ValueError("strict resolutions must be a readable file")
-
     if not isinstance(as_of_decision_time, str) or not as_of_decision_time:
         raise ValueError("direct Source Router history requires an immutable decision timestamp")
-    resolution_index, resolution_sha256 = _load_stable_resolution_index(resolution_path)
+    if archive_sources is not None:
+        if any(value is not None for value in (index_path, manifest_path, strict_resolutions_path)):
+            raise ValueError("direct Source Router archives cannot be mixed with single-archive paths")
+        if not isinstance(archive_sources, (list, tuple)) or not archive_sources:
+            raise ValueError("direct Source Router archives require a nonempty ordered list")
+        sources = archive_sources
+    else:
+        sources = ({"index_path": index_path, "manifest_path": manifest_path,
+                    "strict_resolutions_path": strict_resolutions_path},)
+    archives: list[tuple[Path, Path, Path]] = []
+    for source in sources:
+        if not isinstance(source, Mapping) or not all(source.get(key) for key in
+                ("index_path", "manifest_path", "strict_resolutions_path")):
+            raise ValueError("each direct Source Router archive requires index, manifest, and strict resolutions paths")
+        index_file, manifest_file = Path(source["index_path"]).resolve(), Path(source["manifest_path"]).resolve()
+        if not index_file.is_file() or not manifest_file.is_file():
+            raise ValueError("committed collector replay index and manifest must be readable files")
+        resolution_path = Path(source["strict_resolutions_path"]).resolve()
+        if not resolution_path.is_file():
+            raise ValueError("strict resolutions must be a readable file")
+        archives.append((index_file, manifest_file, resolution_path))
     buckets: dict[tuple[str, ...], dict[tuple[str, ...], dict[str, Any]]] = {}
     qualified_observations = repeat_observations = outside_budget = 0
     rejections: Counter[str] = Counter()
     settlement_counts: Counter[str] = Counter()
     inspected = 0
     bound_count = 0
-    for raw in load_indexed_collector_rows_reverse(Path(index_path), Path(manifest_path)):
+    archive_receipts: list[dict[str, str]] = []
+    def archive_rows():
+        for index_file, manifest_file, resolution_path in archives:
+            resolution_index, resolution_sha256 = _load_stable_resolution_index(resolution_path)
+            # Only authorities that can affect retained events need to be
+            # compared; do not retain every market from every archive.
+            for events in buckets.values():
+                for selected in events.values():
+                    other = resolution_index.accepted.get(selected["market_id"])
+                    if other is not None and any(
+                        other[key] != selected[key]
+                        for key in ("official_outcome", "settlement_ts", "resolution_id")
+                    ):
+                        raise ValueError("conflicting strict resolutions across archives")
+            archive_receipts.append({
+                "index_path": str(index_file), "manifest_path": str(manifest_file),
+                "strict_resolutions_path": str(resolution_path),
+                "index_manifest_sha256": hashlib.sha256(manifest_file.read_bytes()).hexdigest(),
+                "resolution_sha256": resolution_sha256,
+            })
+            for raw in load_indexed_collector_rows_reverse(index_file, manifest_file):
+                yield raw, resolution_index, resolution_sha256
+
+    for raw, resolution_index, resolution_sha256 in archive_rows():
         inspected += 1
         built = build_replay_decision_input_v1(raw, source_history_only=True)
         if not built.ok or built.record is None:
@@ -103,6 +141,17 @@ def load_direct_strict_source_history(
                     representatives[event] = observation
             elif len(representatives) < accepted_limit:
                 representatives[event] = observation
+            elif len(archives) > 1:
+                # Each archive is newest-first internally; separate archives
+                # can be provided in any order and may overlap at month edges.
+                oldest = min(representatives, key=lambda key:
+                             (_history_event_recency_key(representatives[key]), key))
+                if (_history_event_recency_key(observation), event) > (
+                    _history_event_recency_key(representatives[oldest]), oldest
+                ):
+                    del representatives[oldest]
+                    representatives[event] = observation
+                outside_budget += 1
             else:
                 outside_budget += 1
     settled = []
@@ -122,7 +171,13 @@ def load_direct_strict_source_history(
     from bot.auto_source_router_promotion import strict_scorecard_rows_from_history
     source_sha256 = hashlib.sha256(_canonical_jsonl(collapsed)).hexdigest()
     scorecards = strict_scorecard_rows_from_history(collapsed, source_sha256=source_sha256)
-    manifest_bytes = Path(manifest_path).read_bytes()
+    if len(archive_receipts) == 1:
+        manifest_sha256 = archive_receipts[0]["index_manifest_sha256"]
+        resolution_sha256 = archive_receipts[0]["resolution_sha256"]
+    else:
+        receipt_bytes = json.dumps(archive_receipts, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        manifest_sha256 = hashlib.sha256(receipt_bytes).hexdigest()
+        resolution_sha256 = hashlib.sha256("\n".join(r["resolution_sha256"] for r in archive_receipts).encode()).hexdigest()
     return DirectSourceHistoryResult(
         scorecard_rows=scorecards,
         counts={
@@ -140,7 +195,7 @@ def load_direct_strict_source_history(
             **{f"settlement_{key}": int(value) for key, value in sorted(settlement_counts.items())},
             **{f"collapse_{key}": int(value) for key, value in sorted(collapse_counts.items())},
         },
-        index_manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
+        index_manifest_sha256=manifest_sha256,
         resolution_sha256=resolution_sha256,
         bucket_coverage=[
             {
@@ -156,6 +211,7 @@ def load_direct_strict_source_history(
             }
             for bucket, events in sorted(buckets.items())
         ],
+        archive_receipts=archive_receipts,
     )
 
 
@@ -169,6 +225,12 @@ def _history_event_key(row: Mapping[str, Any]) -> tuple[str, ...]:
     if event:
         return ('event', str(event).strip().casefold())
     return ('contract_only', str(row['market_id']))
+
+
+def _history_event_recency_key(row: Mapping[str, Any]) -> tuple[str, str]:
+    """Order independent weather events across archives, not archive paths."""
+    source_as_of = str(row['source_as_of'])
+    return (str(row.get('market_date') or source_as_of[:10]), source_as_of)
 
 
 def _history_representative_key(row: Mapping[str, Any]) -> tuple[Any, ...]:

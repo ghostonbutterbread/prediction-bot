@@ -346,6 +346,9 @@ def _prepare_snapshot(
     if source_context:
         evidence["source_context"] = source_context
         evidence.setdefault("source_details", source_context.get("source_details", []))
+        weather_snapshot = _mapping(_mapping(source_context.get("data")).get("weather_source_snapshot"))
+        if weather_snapshot:
+            evidence.setdefault("weather_source_snapshot", weather_snapshot)
     if source_snapshots:
         evidence["source_snapshots"] = source_snapshots
     shared_candidate.update(

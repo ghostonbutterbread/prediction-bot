@@ -748,6 +748,7 @@ def _source_router_decision(
                 "counts": direct.counts,
                 "index_manifest_sha256": direct.index_manifest_sha256,
                 "resolution_sha256": direct.resolution_sha256,
+                "archive_receipts": direct.archive_receipts,
             }
         else:
             strict_rows = _load_compatible_strict_scorecard_rows(scoreboard_path) if scoreboard_path else None
@@ -836,9 +837,20 @@ def _direct_source_history_parameters(lane: _LaneDefinition) -> dict[str, Any] |
     """Read explicit direct-history paths; never infer persistent evidence roots."""
     keys = ("collector_replay_index_path", "collector_replay_manifest_path", "strict_resolutions_path")
     values = {key: _optional_text(lane.parameters.get(key)) for key in keys}
-    if not any(values.values()):
+    archive_sources = lane.parameters.get("collector_replay_archives")
+    if archive_sources is None and not any(values.values()):
         return None
-    if not all(values.values()):
+    if archive_sources is not None:
+        if any(values.values()):
+            raise ValueError("direct Source Router archives cannot be mixed with single-archive paths")
+        if not isinstance(archive_sources, (list, tuple)) or not archive_sources:
+            raise ValueError("direct Source Router archives require a nonempty ordered list")
+        for archive in archive_sources:
+            if not isinstance(archive, Mapping) or not all(
+                _optional_text(archive.get(key)) for key in ("index_path", "manifest_path", "strict_resolutions_path")
+            ):
+                raise ValueError("each direct Source Router archive requires index, manifest, and strict resolutions paths")
+    elif not all(values.values()):
         raise ValueError("direct Source Router history requires index, manifest, and strict resolutions paths")
     limit_keys = ('history_events_per_bucket', 'history_row_limit')
     for key in limit_keys:
@@ -847,6 +859,8 @@ def _direct_source_history_parameters(lane: _LaneDefinition) -> dict[str, Any] |
     if all(key in lane.parameters for key in limit_keys) and lane.parameters[limit_keys[0]] != lane.parameters[limit_keys[1]]:
         raise ValueError('conflicting direct Source Router history limit aliases')
     limit = lane.parameters.get('history_events_per_bucket', lane.parameters.get('history_row_limit', 100))
+    if archive_sources is not None:
+        return {"archive_sources": archive_sources, "accepted_limit": limit}
     return {
         "index_path": values["collector_replay_index_path"],
         "manifest_path": values["collector_replay_manifest_path"],
