@@ -7,8 +7,8 @@
 - **Intended integration target:** local `beta` only
 - **Last updated:** 2026-09-28 PDT
 - **Owning feature branch/ref:** `feat/source-router-cross-month-history`
-- **Latest immutable recovery checkpoint:** pending initial implementation commit
-- **Feature implementation commit(s):** pending initial implementation commit
+- **Latest immutable recovery checkpoint:** `7f310c33b64d5b024c94e75faf20f51fce221ff2`
+- **Feature implementation commit(s):** `7f310c33b64d5b024c94e75faf20f51fce221ff2`
 - **Inspiration:** Discord message `1554374234086576268`; collector-first replay and existing monthly replay-window selection. The latter discovers JSONL months but does not verify committed replay indexes, so the new reader takes explicit verified archive triples instead of importing discovery as an integrity proof.
 
 ## Intent
@@ -40,10 +40,10 @@ Allow the paper Source Router's direct, read-only history path to consider sever
 ## Interruption / resume handoff
 
 - **Owning feature branch/ref:** `feat/source-router-cross-month-history`
-- **Latest immutable recovery checkpoint:** pending initial implementation commit
-- **Feature implementation commit(s):** pending initial implementation commit
+- **Latest immutable recovery checkpoint:** `7f310c33b64d5b024c94e75faf20f51fce221ff2`
+- **Feature implementation commit(s):** `7f310c33b64d5b024c94e75faf20f51fce221ff2`
 - **Exact resume point:** reconcile independent audit, add tests for any confirmed gaps, obtain fresh independent feature review, then noncommitting beta preflight and exact staged-tree verdict if eligible. No push/deployment.
-- **Working-tree state at handoff:** precommit edits and tests; commit after this dossier before leaving.
+- **Working-tree state at handoff:** clean after this dossier-only commit; review the current tip and separately named implementation commit.
 
 ## Decision gates
 
