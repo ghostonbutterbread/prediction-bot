@@ -235,17 +235,23 @@ def load_indexed_collector_rows(
 
 def load_indexed_collector_rows_reverse(
     index_path: Path, manifest_path: Path, *, max_rows: int | None = None,
+    expected_manifest_sha256: str | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Yield newest committed raw rows first without materializing the archive.
 
     Archive row number/locator order, rather than a producer timestamp, defines
     newest.  The entire compact checkpoint is verified before the first raw
     hydration so a checksum-consistent malformed index cannot influence a
-    bounded newest-row query.
+    bounded newest-row query. An expected digest pins the exact manifest bytes
+    used by a caller's persisted provenance receipt, even during an update.
     """
     if max_rows is not None and max_rows <= 0:
         raise ValueError("max_rows must be positive")
-    manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    manifest_bytes = Path(manifest_path).read_bytes()
+    if (expected_manifest_sha256 is not None
+            and hashlib.sha256(manifest_bytes).hexdigest() != expected_manifest_sha256):
+        raise ValueError("collector replay index manifest changed during read")
+    manifest = json.loads(manifest_bytes)
     _validate_manifest(manifest)
     if manifest.get("schema_version") != 2:
         raise ValueError("legacy replay index does not support reverse committed reads")

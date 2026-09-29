@@ -89,13 +89,16 @@ def load_direct_strict_source_history(
     def archive_rows():
         for index_file, manifest_file, resolution_path in archives:
             resolution_index, resolution_sha256 = _load_stable_resolution_index(resolution_path)
+            manifest_sha256 = hashlib.sha256(manifest_file.read_bytes()).hexdigest()
             archive_receipts.append({
                 "index_path": str(index_file), "manifest_path": str(manifest_file),
                 "strict_resolutions_path": str(resolution_path),
-                "index_manifest_sha256": hashlib.sha256(manifest_file.read_bytes()).hexdigest(),
+                "index_manifest_sha256": manifest_sha256,
                 "resolution_sha256": resolution_sha256,
             })
-            for raw in load_indexed_collector_rows_reverse(index_file, manifest_file):
+            for raw in load_indexed_collector_rows_reverse(
+                index_file, manifest_file, expected_manifest_sha256=manifest_sha256,
+            ):
                 yield raw, resolution_index, resolution_sha256
 
     for raw, resolution_index, resolution_sha256 in archive_rows():

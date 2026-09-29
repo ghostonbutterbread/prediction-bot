@@ -7,8 +7,11 @@ import tempfile
 import unittest
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
-from bot.collector_replay_index import build_collector_replay_index
+from bot.collector_replay_index import (
+    build_collector_replay_index, load_indexed_collector_rows_reverse, update_collector_replay_index,
+)
 from bot.paper_shadow_lanes import _LaneDefinition, _direct_source_history_parameters, _source_router_decision
 from bot.weather.source_router_direct_history import load_direct_strict_source_history
 from scripts.collector_lane_replay import build_collector_lane_replay
@@ -54,6 +57,29 @@ def _archive(root: Path, name: str, rows: list[dict], resolutions: list[dict]) -
 
 
 class CrossMonthSourceHistoryTests(unittest.TestCase):
+    def test_index_manifest_receipt_rejects_concurrent_committed_update(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            aug = _day_row(date(2026, 8, 29))
+            sep = _day_row(date(2026, 9, 2))
+            source = root / "2026-09" / "market_snapshots.jsonl"
+            archive = _archive(root, "2026-09", [aug], [_receipt(aug), _receipt(sep)])
+            index, manifest = Path(archive["index_path"]), Path(archive["manifest_path"])
+
+            def commit_before_reader(index_path, manifest_path, **kwargs):
+                with source.open("a", encoding="utf-8") as stream:
+                    stream.write(json.dumps(sep, sort_keys=True) + "\n")
+                update_collector_replay_index(source, index, manifest)
+                return load_indexed_collector_rows_reverse(index_path, manifest_path, **kwargs)
+
+            with patch("bot.weather.source_router_direct_history.load_indexed_collector_rows_reverse",
+                       side_effect=commit_before_reader):
+                with self.assertRaisesRegex(ValueError, "manifest changed"):
+                    load_direct_strict_source_history(
+                        archive_sources=[archive], accepted_limit=2,
+                        as_of_decision_time="2026-09-05T00:00:00Z",
+                    )
+
     def test_indexed_offline_replay_calls_paper_router_with_older_month_history(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
