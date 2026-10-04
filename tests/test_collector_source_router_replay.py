@@ -167,6 +167,93 @@ class CollectorSourceRouterReplayTests(unittest.TestCase):
             self.assertNotIn("settlement_ts", json.dumps(control_row))
             self.assertNotIn("settlement_ts", json.dumps(candidate_row))
 
+    def test_control_no_uses_selected_side_probability_for_edge(self):
+        record = replay_input(
+            market_id="KXCONTROLNO", observed_at="2026-01-03T12:00:00+00:00",
+            raw_hash="a" * 64, predicted_prob=0.2,
+        )
+        record["market"]["best_no_ask"] = 0.3
+
+        control, _, _ = build_sealed_source_probability_decisions([record], [], min_sample_count=1)
+
+        self.assertEqual(control[0]["side"], "NO")
+        self.assertEqual(control[0]["probability"], 0.2)
+        self.assertEqual(control[0]["action"], "BUY_NO")
+        self.assertEqual(control[0]["entry_price"], 0.3)
+        self.assertIsNone(control[0]["skip_reason"])
+
+    def test_control_no_skips_when_complement_does_not_clear_edge(self):
+        record = replay_input(
+            market_id="KXCONTROLNOREJECT", observed_at="2026-01-03T12:00:00+00:00",
+            raw_hash="b" * 64, predicted_prob=0.2,
+        )
+        record["market"]["best_no_ask"] = 0.76
+
+        control, _, _ = build_sealed_source_probability_decisions([record], [], min_sample_count=1)
+
+        self.assertEqual(control[0]["side"], "NO")
+        self.assertEqual(control[0]["probability"], 0.2)
+        self.assertEqual(control[0]["action"], "SKIP")
+        self.assertEqual(control[0]["skip_reason"], "below_source_probability_edge_threshold")
+
+    def test_control_yes_uses_direct_probability_for_edge(self):
+        record = replay_input(
+            market_id="KXCONTROLYES", observed_at="2026-01-03T12:00:00+00:00",
+            raw_hash="c" * 64, predicted_prob=0.8,
+        )
+        record["market"]["best_yes_ask"] = 0.7
+
+        control, _, _ = build_sealed_source_probability_decisions([record], [], min_sample_count=1)
+
+        self.assertEqual(control[0]["side"], "YES")
+        self.assertEqual(control[0]["probability"], 0.8)
+        self.assertEqual(control[0]["action"], "BUY_YES")
+        self.assertEqual(control[0]["entry_price"], 0.7)
+
+    def test_candidate_no_prior_win_rate_is_already_selected_side_probability(self):
+        record = replay_input(
+            market_id="KXCANDIDATENO", observed_at="2026-01-03T12:00:00+00:00",
+            raw_hash="d" * 64, predicted_prob=0.2,
+            contract_shape="tail",
+            sources=[{"source_id": "nws", "source_name": "NWS", "forecast_high": 78.0}],
+        )
+        record["market"]["best_no_ask"] = 0.3
+        prior = source_history_row(market_id="HIST-NO", settlement_ts="2026-01-02T00:00:00+00:00", outcome="NO")
+        prior["forecast_temp_f"] = 78.0
+        prior["predicted_outcome"] = "NO"
+
+        _, candidate, _ = build_sealed_source_probability_decisions(
+            [record], [], history_ledger=[prior], min_sample_count=1,
+        )
+
+        self.assertEqual(candidate[0]["selected_source_id"], "nws")
+        self.assertEqual(candidate[0]["side"], "NO")
+        self.assertEqual(candidate[0]["probability"], 1.0)
+        self.assertEqual(candidate[0]["action"], "BUY_NO")
+        self.assertEqual(candidate[0]["entry_price"], 0.3)
+
+    def test_candidate_no_low_prior_win_rate_does_not_get_complemented(self):
+        record = replay_input(
+            market_id="KXCANDIDATENOREJECT", observed_at="2026-01-03T12:00:00+00:00",
+            raw_hash="e" * 64, predicted_prob=0.2,
+            contract_shape="tail",
+            sources=[{"source_id": "nws", "source_name": "NWS", "forecast_high": 78.0}],
+        )
+        record["market"]["best_no_ask"] = 0.3
+        prior = source_history_row(market_id="HIST-NO-LOSS", settlement_ts="2026-01-02T00:00:00+00:00", outcome="YES")
+        prior["forecast_temp_f"] = 78.0
+        prior["predicted_outcome"] = "NO"
+
+        _, candidate, _ = build_sealed_source_probability_decisions(
+            [record], [], history_ledger=[prior], min_sample_count=1,
+        )
+
+        self.assertEqual(candidate[0]["selected_source_id"], "nws")
+        self.assertEqual(candidate[0]["side"], "NO")
+        self.assertEqual(candidate[0]["probability"], 0.0)
+        self.assertEqual(candidate[0]["action"], "SKIP")
+        self.assertEqual(candidate[0]["skip_reason"], "below_source_probability_edge_threshold")
+
     def test_sealed_decisions_carry_safe_market_traits_and_explicit_event_unit_without_outcomes(self):
         record = replay_input(
             market_id="KXTRAITS", observed_at="2026-01-03T12:00:00+00:00", raw_hash="7" * 64,
