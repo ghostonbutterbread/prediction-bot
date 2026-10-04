@@ -1,6 +1,6 @@
 # Prediction Bot Docs Index
 
-_Last updated: 2026-05-13_
+_Last updated: 2026-10-04_
 
 ## Why this file exists
 
@@ -31,6 +31,13 @@ This index reflects the current direction:
 - tiny supervised live is plausible with strict caps
 - unattended live still needs more lifecycle/reconciliation/audit hardening
 - the immediate high-value direction is to use Prediction Lab evidence to improve trade selection
+
+## Versioned lane releases and stage handoff
+
+Read [`architecture/lane_release_promotion_spec.md`](architecture/lane_release_promotion_spec.md)
+for the proposed immutable lane-release file, pinned Git provenance, replay/paper
+consumers, stage binding, and promotion evidence boundary. This is a spec, not
+an implemented loader or an authorization to activate paper/live.
 
 ---
 
