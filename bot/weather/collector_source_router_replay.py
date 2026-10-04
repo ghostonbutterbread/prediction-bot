@@ -410,7 +410,7 @@ def _control_decision(record: Mapping[str, Any]) -> dict[str, Any]:
     probability = _snapshot_probability(record)
     side = "YES" if probability is not None and probability >= 0.5 else ("NO" if probability is not None else None)
     price, price_basis = _select_price(record, side)
-    action, reason = _threshold_action(probability, side, price)
+    action, reason = _threshold_action(probability, side, price, probability_is_yes=True)
     return _sealed_decision(
         record, lane_id=CONTROL_LANE_ID, probability=probability, side=side, action=action,
         entry_price=price if action != SKIP else None, price_basis=price_basis, skip_reason=reason,
@@ -437,9 +437,10 @@ def _candidate_decision(
     selected_id = str(selector.get("chosen_source_id") or "")
     current = next((edge for edge in current_edges if str(edge.get("source_id") or "") == selected_id), None)
     side = current.get("source_implied_side") if current else None
+    # Router win rate measures correctness of the selected side, not YES probability.
     probability = _finite_number(selector.get("prior_win_rate"))
     price, price_basis = _select_price(record, side)
-    action, reason = _threshold_action(probability, side, price)
+    action, reason = _threshold_action(probability, side, price, probability_is_yes=False)
     if current is None:
         action, reason = SKIP, "chosen_source_missing_current_observation"
     return _sealed_decision(
@@ -716,14 +717,17 @@ def _candidate_context(record: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _threshold_action(probability: float | None, side: str | None, price: float | None) -> tuple[str, str | None]:
+def _threshold_action(
+    probability: float | None, side: str | None, price: float | None, *, probability_is_yes: bool,
+) -> tuple[str, str | None]:
     if probability is None:
         return SKIP, "missing_probability"
     if side not in {"YES", "NO"}:
         return SKIP, "missing_source_implied_side"
     if price is None:
         return SKIP, "missing_decision_price"
-    if probability - price < MIN_ABSOLUTE_EDGE:
+    selected_side_probability = 1 - probability if probability_is_yes and side == "NO" else probability
+    if selected_side_probability - price < MIN_ABSOLUTE_EDGE:
         return SKIP, "below_source_probability_edge_threshold"
     return (BUY_YES if side == "YES" else BUY_NO), None
 
