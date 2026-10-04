@@ -7,8 +7,8 @@
 - **Base commit:** `b980ece98874d8039d3aebddea61d69989071135`
 - **Intended integration target:** local `beta` (parent owns merge and descendant propagation)
 - **Last updated:** 2026-10-04
-- **Latest immutable recovery checkpoint:** none yet; first implementation commit pending
-- **Feature implementation commit(s):** none yet
+- **Latest immutable recovery checkpoint:** `b79d805e45327396d9347077db264604f6a5cd5b` (implementation and initial dossier)
+- **Feature implementation commit(s):** `b79d805e45327396d9347077db264604f6a5cd5b`
 - **Inspiration:** independent review of `feat/combined-lanes-market-replay` at `962e39ad29689e589cbf591e5e411424e1cf5262`; the replay owner is the local beta ancestor.
 
 ## Intent and scope
@@ -25,7 +25,7 @@ Correct the source-only historical control replay's BUY_NO threshold. The contro
 - **GREEN:** same regression passed after the fix. `PYTHONPATH=<this worktree> python3 -m unittest tests.test_collector_source_router_replay -v` passed 22 tests, including YES, NO reject, and candidate NO win-rate semantics.
 - **Full suite:** `PYTHONPATH=<this worktree> python3 -m unittest discover -s tests` passed 1,363 tests, 7 skipped, in 385.836s. `git diff --check` passed. No checkout-local `.venv/bin/python`; used `python3` with the isolated worktree first on `PYTHONPATH`.
 - **Ancestry:** local beta was clean at base; fetched `origin/beta`, which remains at `295f69cf3199782d192a95950ed101779adea3db`, an ancestor of the local beta (128 commits behind). The combined feature's merge-base with this branch/base is `b980ece98874d8039d3aebddea61d69989071135`. No beta merge or push.
-- **Independent review:** reserved for parent; no acceptance claim.
+- **Independent review:** reserved for parent; no acceptance claim. Review implementation commit `b79d805e45327396d9347077db264604f6a5cd5b` against base and exclude this branch-local dossier at integration.
 - **Replay/cohort fixture:** focused synthetic decision-time fixtures only; no measured recomputation of the reviewed 13 control and 12 guard skips or full historical cohort, which belongs to combined-branch propagation.
 
 ## Blockers and deferred work
@@ -38,10 +38,10 @@ Correct the source-only historical control replay's BUY_NO threshold. The contro
 ## Interruption / resume handoff
 
 - **Owning feature branch/ref:** `fix/source-replay-no-edge`
-- **Latest immutable recovery checkpoint:** none yet; pending commit
-- **Feature implementation commit(s):** none yet
-- **Exact resume point:** commit verified implementation/test/dossier, update this dossier with the resulting immutable SHA, then hand off to parent for independent review and propagation.
-- **Working-tree state at handoff:** not yet handed off.
+- **Latest immutable recovery checkpoint:** `b79d805e45327396d9347077db264604f6a5cd5b`; current branch tip will also contain a later dossier-only handoff commit.
+- **Feature implementation commit(s):** `b79d805e45327396d9347077db264604f6a5cd5b`
+- **Exact resume point:** review the implementation commit against beta base, then integrate only with parent authorization. Parent propagates to combined replay after its independent guard-ID work, reruns the descendant checks, and recomputes historical derived artifacts.
+- **Working-tree state at handoff:** clean after the dossier-only handoff commit.
 
 ## Decision gates
 
