@@ -1,6 +1,6 @@
 # Source-only historical replay NO edge fix
 
-- **Status:** feature; pending parent-coordinated independent review and integration
+- **Status:** independent read-only review accepted the narrow source-only fix; beta integration and historical cohort recomputation remain pending
 - **Owner:** delegated source replay fix agent
 - **Branch / owning ref:** `fix/source-replay-no-edge`
 - **Worktree:** `/home/ryushe/worktrees/prediction-bot-source-replay-no-edge`
@@ -25,15 +25,15 @@ Correct the source-only historical control replay's BUY_NO threshold. The contro
 - **GREEN:** same regression passed after the fix. `PYTHONPATH=<this worktree> python3 -m unittest tests.test_collector_source_router_replay -v` passed 22 tests, including YES, NO reject, and candidate NO win-rate semantics.
 - **Full suite:** `PYTHONPATH=<this worktree> python3 -m unittest discover -s tests` passed 1,363 tests, 7 skipped, in 385.836s. `git diff --check` passed. No checkout-local `.venv/bin/python`; used `python3` with the isolated worktree first on `PYTHONPATH`.
 - **Ancestry:** local beta was clean at base; fetched `origin/beta`, which remains at `295f69cf3199782d192a95950ed101779adea3db`, an ancestor of the local beta (128 commits behind). The combined feature's merge-base with this branch/base is `b980ece98874d8039d3aebddea61d69989071135`. No beta merge or push.
-- **Independent review:** reserved for parent; no acceptance claim. Review implementation commit `b79d805e45327396d9347077db264604f6a5cd5b` against base and exclude this branch-local dossier at integration.
+- **Independent review:** fresh reviewer found no blocking issue in `b79d805e45327396d9347077db264604f6a5cd5b` or the separate combined-feature guard-ID fix, reran 22 focused tests, and reproduced source SKIP→BUY_NO with candidate prior-win-rate unchanged. This accepts the narrow repair only; no combined-wallet evidence claim.
 - **Replay/cohort fixture:** focused synthetic decision-time fixtures only; no measured recomputation of the reviewed 13 control and 12 guard skips or full historical cohort, which belongs to combined-branch propagation.
 
 ## Blockers and deferred work
 
-- **Missing evidence:** independent review and integrated combined-feature replay/counts after propagation.
+- **Missing evidence:** integrated combined-feature replay/counts after propagation; beta staged-tree focused/full tests and fresh receipt are required before relying on the changed control.
 - **Command / fixture:** parent to merge this commit into current beta, then propagate from corrected beta to affected descendant and rerun its focused/full tests plus the historical market replay with its recorded fixture.
 - **Trigger / boundary:** after parent accepts this branch and its separate guard-ID repair. Until then do not merge, push, activate, or interpret old derived replay artifacts as corrected; recompute them from immutable inputs.
-- **Next completion step:** parent reviews the exact implementation commit, integrates into beta intentionally, propagates to `feat/combined-lanes-market-replay`, and verifies results; do not cherry-pick duplicate logical fixes into descendants.
+- **Next completion step:** parent preflights and integrates only the reviewed repair into beta (excluding this dossier), propagates to `feat/combined-lanes-market-replay`, and verifies results; do not cherry-pick duplicate logical fixes into descendants.
 
 ## Interruption / resume handoff
 
@@ -45,7 +45,7 @@ Correct the source-only historical control replay's BUY_NO threshold. The contro
 
 ## Decision gates
 
-- **Integration gate:** parent-owned independent review and beta merge; remove this branch-local dossier from the beta merge index.
+- **Integration gate:** independent review accepted; beta staged-tree tests still required. Remove this branch-local dossier from the beta merge index.
 - **Activation / cohort gate:** no activation; historical replay remains diagnostic, not forward evidence.
 - **Promotion gate:** requires independent forward-paper evidence per repository AGENTS.md, not this fix or historical replay alone.
 
