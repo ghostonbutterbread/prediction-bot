@@ -115,6 +115,20 @@ class ForwardCompositionTests(unittest.TestCase):
             self.assertEqual(pair["combined_action"], "SKIP")
         self.assertEqual(compose_forward_rows([control, router, guard])[0][0]["combined_action"], "BUY_NO")
 
+    def test_control_uses_recorded_ask_when_guard_estimates_higher_entry(self):
+        control, router, guard = cohort(price=0.4)
+        guard = {**guard, "entry_price": 0.45, "provenance": {"payout_aware": {
+            "selected_side_ask": 0.4, "entry_price": 0.45,
+            "fee_rate": 0.07, "quote_not_fill": True}}}
+        result = evaluate_forward_composition([control, router, guard], [], starting_balance_usd=100,
+            kelly_sizer=FixedKelly(), risk_policy=ApprovingRisk(), min_edge=0.01,
+            min_confidence=0.5, max_entry_price=0.99)
+        self.assertEqual(result["pairs"][0]["control_economics_status"], "quote_proxy")
+        self.assertEqual(result["control_wallet"]["summary"]["opened_positions"], 1)
+        self.assertEqual(result["control_wallet"]["open_positions"][0]["entry_price"], 0.4)
+        self.assertEqual(result["combined_wallet"]["summary"]["opened_positions"], 1)
+        self.assertEqual(result["combined_wallet"]["open_positions"][0]["entry_price"], 0.45)
+
     def test_reference_only_control_has_no_synthetic_economic_position(self):
         control, router, guard = cohort()
         guard = {**guard, "action": "SKIP", "reason_code": "executable_side_ask_unavailable",

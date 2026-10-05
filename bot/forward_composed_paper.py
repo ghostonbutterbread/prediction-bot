@@ -70,19 +70,20 @@ def compose_forward_rows(rows: list[Mapping[str, Any]]) -> tuple[list[dict[str, 
                 elif group[GUARD][0].get("action") != action:
                     reason = str(group[GUARD][0].get("reason_code") or "guard_disagrees") if group[GUARD][0].get("action") == "SKIP" else "guard_disagrees"
             price = None
+            quoted_ask = None
             guard = group.get(GUARD, [None])[0]
             economics = (guard.get("provenance") or {}).get("payout_aware") if guard else None
             if isinstance(economics, Mapping) and economics.get("quote_not_fill") is True:
                 try:
                     quote, proposed = float(economics["selected_side_ask"]), float(economics["entry_price"])
                     if all(math.isfinite(v) and 0 < v < 1 for v in (quote, proposed)) and proposed >= quote:
-                        price = proposed
+                        quoted_ask, price = quote, proposed
                 except (KeyError, TypeError, ValueError):
                     pass
             if reason is None and (price is None or _finite_price(guard.get("entry_price")) != price):
                 reason = "guard_quote_unavailable"
             stable_price = _finite_price(control.get("entry_price"))
-            control_quoted = price is not None and stable_price == price
+            control_quoted = quoted_ask is not None and stable_price == quoted_ask
             route = control.get("market_route") or (control.get("provenance") or {}).get("market_route")
             question = control.get("question") or (control.get("provenance") or {}).get("future_pnl_inputs", {}).get("question")
             wallet_ready = (bool(question) and isinstance(route, Mapping)

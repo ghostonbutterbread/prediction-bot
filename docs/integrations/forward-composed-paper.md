@@ -1,6 +1,6 @@
 # Forward composed paper observer integration dossier
 
-- **Status:** blocked (reviewable, disabled checkpoint; not a full pre-risk picker connection)
+- **Status:** corrected after independent review blocker; disabled, pending fresh review (not a full pre-risk picker connection)
 - **Owner:** forward-composed-paper task, isolated implementation agent
 - **Branch / owning ref:** `feat/forward-composed-paper`
 - **Base commit:** `14982f867bc324aae21bb1c2c8e396fb176b4dfe`
@@ -33,7 +33,7 @@ Omit `--resolution-path` to inspect only open synthetic reservations and paired 
 - RED receipts: focused tests failed on missing module, absent CLI, missing stable wallet fields, reference-only control wallet opening, legacy wallet-input crash, and early/duplicate settlement.
 - GREEN: `PYTHONPATH=. python3 -m unittest discover -s tests -p 'test_forward_composed_paper.py' -q` — 12 passed; `PYTHONPATH=. python3 -m unittest discover -s tests -p 'test_composed_lane_wallet.py' -q` — 4 passed.
 - Full suite on the final code: `PYTHONPATH=. python3 -m unittest discover -s tests -q > /home/ryushe/.hermes/cache/scratch/forward-composed-full-suite.log 2>&1` — 1,375 tests, 7 skipped, OK (64.198s); log line 1361 and 1363. Rerun on the reviewed merge tree before integration.
-- `git diff --check` — passed. Independent review: **not yet requested**; assigned to parent.
+- Independent read-only review of `916d0e6` found a paired-wallet blocker: a guard's recorded fill estimate above the genuine selected-side ask suppressed the control wallet but opened the combined wallet. RED regression: `test_control_uses_recorded_ask_when_guard_estimates_higher_entry` failed (`control_quote_unavailable` rather than `quote_proxy`) at .40 ask / .45 estimate. GREEN: control uses the proven ask .40, combined retains conservative estimate .45; 13 observer and 4 wallet tests passed. Full isolated suite on the correction: 1,376 tests, 7 skipped, OK (64.5s). `git diff --check` passed. Fresh independent review of the corrected commit is pending.
 - Synthetic three-candidate fixture (outcomes not supplied): before/control recorded actions = three BUY_YES; after/composed = one BUY_YES, two SKIP (`router_disagrees`, `executable_side_ask_unavailable`). With $100 starting balance and fixed test Kelly/risk, quote-qualified control opens two synthetic reservations and combined opens one; **zero settled rows on both sides**. This is wiring/coverage, not profit evidence. Separate exact later YES fixture at $0.40, $10 stake, 7% profit fee gives quote-proxy model P&L +$13.95, not an actual fill.
 - Merge base `git merge-base HEAD beta` at start: `14982f867bc324aae21bb1c2c8e396fb176b4dfe`. No merge/push/activation.
 
@@ -47,7 +47,7 @@ Omit `--resolution-path` to inspect only open synthetic reservations and paired 
 ## Interruption / resume handoff
 
 - **Owning feature branch/ref:** `feat/forward-composed-paper`
-- **Latest immutable recovery checkpoint / implementation commit(s):** `baf3cdd062041282adaf414ba8c47ea0dba05a82`; the branch tip additionally carries this dossier-only handoff commit. Review both commits.
+- **Previous immutable recovery checkpoint:** `baf3cdd062041282adaf414ba8c47ea0dba05a82`; the correction is being committed with this dossier update. Record and verify its exact SHA in the next dossier-only handoff.
 - **Exact resume point:** review the full diff and this dossier; rerun focused/full on the exact commit, then decide whether to expand the producer to genuine pre-risk intents or retain as a strictly narrower diagnostic. Parent controls integration.
 - **Working-tree state at handoff:** clean after commit (verify).
 
@@ -60,3 +60,4 @@ Omit `--resolution-path` to inspect only open synthetic reservations and paired 
 ## Decision record
 
 - 2026-10-04 PDT — disabled read-only adapter and synthetic-wallet checkpoint; intentionally blocked on pre-risk capture and forward evidence.
+- 2026-10-04 PDT — independent review blocked code-only integration over control ask versus guard estimated-price mismatch; focused RED/GREEN fix and full suite passed, awaiting corrected-tree review.
