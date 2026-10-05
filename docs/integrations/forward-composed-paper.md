@@ -6,8 +6,8 @@
 - **Base commit:** `14982f867bc324aae21bb1c2c8e396fb176b4dfe`
 - **Intended integration target:** `beta` (parent owns independent review and decision)
 - **Last updated:** 2026-10-04 (local PDT)
-- **Latest immutable recovery checkpoint:** `baf3cdd062041282adaf414ba8c47ea0dba05a82` (`feat/forward-composed-paper`)
-- **Feature implementation commit(s):** `baf3cdd062041282adaf414ba8c47ea0dba05a82`
+- **Latest immutable recovery checkpoint:** `2ea3a4e94893f1c21b08f3fa51d2bc301d58241b` (`feat/forward-composed-paper`)
+- **Feature implementation commit(s):** `baf3cdd062041282adaf414ba8c47ea0dba05a82`, `2ea3a4e94893f1c21b08f3fa51d2bc301d58241b`
 - **Inspiration:** picker → strictly prior-settled Source Router → selected-side executable ask / fee-aware loss guard → synthetic Kelly/risk; existing `bot/paper_shadow_lanes.py`, `bot/composed_lane_wallet.py`, shared snapshot runtime.
 
 ## Intent and implemented contract
@@ -47,7 +47,7 @@ Omit `--resolution-path` to inspect only open synthetic reservations and paired 
 ## Interruption / resume handoff
 
 - **Owning feature branch/ref:** `feat/forward-composed-paper`
-- **Previous immutable recovery checkpoint:** `baf3cdd062041282adaf414ba8c47ea0dba05a82`; the correction is being committed with this dossier update. Record and verify its exact SHA in the next dossier-only handoff.
+- **Latest immutable recovery checkpoint / implementation commits:** `2ea3a4e94893f1c21b08f3fa51d2bc301d58241b` (ask-versus-estimate correction), preceded by `baf3cdd062041282adaf414ba8c47ea0dba05a82` (initial observer). The feature tip additionally carries this dossier-only handoff. Review both implementation commits and the current tip.
 - **Exact resume point:** review the full diff and this dossier; rerun focused/full on the exact commit, then decide whether to expand the producer to genuine pre-risk intents or retain as a strictly narrower diagnostic. Parent controls integration.
 - **Working-tree state at handoff:** clean after commit (verify).
 
