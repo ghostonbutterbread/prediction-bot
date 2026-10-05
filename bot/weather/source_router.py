@@ -61,10 +61,24 @@ def source_history_target_proof_rejection_key(row: Mapping[str, Any]) -> str | N
         return "history_rows_rejected_v1_forecast_not_scoreable"
     return "history_rows_rejected_target_unproven"
 
+def source_history_outcomes_conflict(row: Mapping[str, Any], *, official_outcome: Any = None) -> bool:
+    """Reject contradictory recorded/independently supplied market outcomes."""
+
+    market = row.get("market_outcome")
+    values = [row.get("actual_outcome"), row.get("official_outcome"), official_outcome]
+    if isinstance(market, Mapping):
+        values.extend(market.get(key) for key in ("official_outcome", "actual_outcome", "outcome", "result"))
+        resolution = market.get("resolution")
+        if isinstance(resolution, Mapping):
+            values.extend(resolution.get(key) for key in ("official_outcome", "outcome", "result"))
+    else:
+        values.append(market)
+    return len({side for value in values if (side := _normalized_side(value)) in {"YES", "NO"}}) > 1
+
 def source_history_correctness_eligible(row: Mapping[str, Any]) -> bool:
     """Admit strict settled correctness without relaxing priced edge eligibility."""
 
-    if source_history_target_proof_rejection_key(row) is not None:
+    if source_history_target_proof_rejection_key(row) is not None or source_history_outcomes_conflict(row):
         return False
     if (row.get("source_implied_side") not in {"YES", "NO"}
             or row.get("official_outcome") not in {"YES", "NO"}
@@ -103,12 +117,13 @@ def build_source_router_replay_rows(
             continue
         ledger = dict(row)
         edge = build_source_edge_evaluation_row(ledger, outcome_lookup=lookup)
+        outcome_conflict = source_history_outcomes_conflict(ledger, official_outcome=edge.get("official_outcome"))
         edge["settlement_ts"] = _optional_text(ledger.get("settlement_ts"))
         if ledger.get("source_router_history_only") is True:
             _allow_history_actual_outcome(edge, ledger)
         elif edge.get("outcome_known_at") in (None, ""):
             edge["outcome_known_at"] = _optional_text(ledger.get("outcome_known_at"), ledger.get("known_after"))
-        paired_rows.append({"ledger": ledger, "edge": edge})
+        paired_rows.append({"ledger": ledger, "edge": edge, "outcome_conflict": outcome_conflict})
 
     paired_rows.sort(
         key=lambda pair: (
@@ -147,13 +162,9 @@ def build_source_router_replay_rows(
         if key != current_group_key:
             flush_group()
             for pair_ in current_group:
-                ledger_ = pair_["ledger"]
-                if ledger_.get("source_router_history_only") is True:
-                    recorded = _normalized_side(ledger_.get("actual_outcome"))
-                    supplied = _normalized_side(ledger_.get("official_outcome"))
-                    if recorded in {"YES", "NO"} and supplied in {"YES", "NO"} and recorded != supplied:
-                        history_exclusions["history_rows_rejected_conflicting_outcome"] += 1
-                        continue
+                if pair_["outcome_conflict"]:
+                    history_exclusions["history_rows_rejected_conflicting_outcome"] += 1
+                    continue
                 rejection_key = source_history_target_proof_rejection_key(pair_["ledger"])
                 if rejection_key is not None:
                     history_exclusions[rejection_key] += 1

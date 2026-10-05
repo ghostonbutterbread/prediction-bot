@@ -390,6 +390,20 @@ class CollectorSourceRouterReplayTests(unittest.TestCase):
         self.assertEqual(candidates[0]["prior_sample_count"], 1)
         self.assertEqual(stats["selector_history"]["selector_edges_accepted"], 3)
 
+    def test_unpriced_history_rejects_conflicting_market_outcome_envelope(self):
+        record = replay_input(market_id="KXENVELOPE", observed_at="2026-01-03T12:00:00+00:00", raw_hash="9" * 64,
+                              contract_shape="tail")
+        prior = source_history_row(market_id="HIST-ENVELOPE", settlement_ts="2026-01-02T00:00:00+00:00")
+        prior.pop("yes_price")
+        prior.pop("no_price")
+        prior["market_outcome"] = {"official_outcome": "NO"}
+        _, candidates, stats = build_sealed_source_probability_decisions(
+            [record], [], history_ledger=[prior], min_sample_count=1,
+        )
+        self.assertIsNone(candidates[0]["selected_source_id"])
+        self.assertEqual(candidates[0]["skip_reason"], "insufficient_prior_history")
+        self.assertEqual(stats["selector_history"]["conflicting_authoritative_outcome"], 1)
+
     def test_history_settlement_at_or_after_decision_is_excluded(self):
         record = replay_input(market_id="KXCUTOFF", observed_at="2026-01-03T12:00:00+00:00", raw_hash="8" * 64)
         history = [

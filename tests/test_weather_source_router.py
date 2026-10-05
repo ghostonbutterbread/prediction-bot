@@ -269,6 +269,33 @@ class WeatherSourceRouterTests(unittest.TestCase):
         self.assertFalse(replay[0]["router"]["routeable"])
         self.assertEqual(replay[0]["router"]["prior_sample_count"], 0)
 
+    def test_progressive_ordinary_unpriced_history_with_conflicting_outcomes_cannot_route(self):
+        old = ledger_row(source_id="nws", source_side="YES", official="NO",
+                         observed_at="2026-05-01T12:00:00+00:00", outcome_known_at="2026-05-02T00:00:00+00:00",
+                         shared_candidate_id="old", market_id="KXOLD", stable_action="SKIP")
+        old["actual_outcome"] = "YES"
+        old.pop("best_yes_ask")
+        old.pop("best_no_ask")
+        current = ledger_row(source_id="nws", source_side="YES", official="YES",
+                             observed_at="2026-05-03T12:00:00+00:00", outcome_known_at="2026-05-04T00:00:00+00:00",
+                             shared_candidate_id="current", market_id="KXCURRENT")
+        selected = next(row for row in build_source_router_replay_rows([old, current], min_sample_count=1)
+                        if row["market_id"] == "KXCURRENT")
+        self.assertFalse(selected["router"]["routeable"])
+        self.assertEqual(selected["router"]["prior_sample_count"], 0)
+
+    def test_direct_priced_history_with_conflicting_outcomes_cannot_route(self):
+        candidate = {"city_id": "miami_fl", "market_kind": "high", "contract_shape": "range",
+                     "question_side": "above", "observed_at": "2026-05-03T12:00:00+00:00"}
+        row = ledger_row(source_id="nws", source_side="YES", official="NO",
+                         observed_at="2026-05-01T12:00:00+00:00", outcome_known_at="2026-05-02T00:00:00+00:00",
+                         shared_candidate_id="old", market_id="KXOLD")
+        row.update(actual_outcome="YES", source_implied_side="YES", win=False,
+                   eligible_for_edge_validation=True, binary_edge_realized=-0.25)
+        selected = select_source_for_candidate(candidate, [row], min_sample_count=1)
+        self.assertFalse(selected["routeable"])
+        self.assertEqual(selected["prior_sample_count"], 0)
+
     def test_unpriced_postsettlement_forecast_cannot_count_as_prior_history(self):
         candidate = {"city_id": "miami_fl", "market_kind": "high", "contract_shape": "range",
                      "question_side": "above", "observed_at": "2026-05-03T12:00:00+00:00"}
