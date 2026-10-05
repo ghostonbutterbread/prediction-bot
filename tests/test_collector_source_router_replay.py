@@ -16,7 +16,7 @@ from bot.weather.collector_source_router_replay import (
     run_collector_source_router_replay,
 )
 from bot.weather.source_history_manifest import SourceHistoryManifestError
-from bot.weather.collector_source_router_replay import _source_history_edge_rows
+from bot.weather.collector_source_router_replay import _source_history_edge_rows, _strict_history_resolution_index
 from bot.weather.source_router import select_source_for_candidate
 
 
@@ -419,6 +419,21 @@ class CollectorSourceRouterReplayTests(unittest.TestCase):
                 self.assertIsNone(candidates[0]["selected_source_id"])
                 self.assertEqual(stats["selector_history"]["conflicting_authoritative_outcome"], 1)
 
+    def test_unpriced_history_rejects_root_and_resolution_outcome_aliases(self):
+        record = replay_input(market_id="KXALIAS", observed_at="2026-01-03T12:00:00+00:00", raw_hash="9" * 64,
+                              contract_shape="tail")
+        for claim in ({"kalshi_result": "NO"}, {"market_outcome": {"resolution": {"settlement_value": "VOID"}}}):
+            with self.subTest(claim=claim):
+                prior = source_history_row(market_id="HIST-ALIAS", settlement_ts="2026-01-02T00:00:00+00:00")
+                prior.pop("yes_price")
+                prior.pop("no_price")
+                prior.update(claim)
+                _, candidates, stats = build_sealed_source_probability_decisions(
+                    [record], [], history_ledger=[prior], min_sample_count=1,
+                )
+                self.assertIsNone(candidates[0]["selected_source_id"])
+                self.assertEqual(stats["selector_history"]["conflicting_authoritative_outcome"], 1)
+
     def test_history_settlement_at_or_after_decision_is_excluded(self):
         record = replay_input(market_id="KXCUTOFF", observed_at="2026-01-03T12:00:00+00:00", raw_hash="8" * 64)
         history = [
@@ -607,6 +622,15 @@ class CollectorSourceRouterReplayTests(unittest.TestCase):
         provenance = result.metadata["inputs"]["selector_history"]
         self.assertEqual(provenance["verification"], "manifest_sha256_verified")
         self.assertEqual(provenance["strict_resolution_join_counts"]["source_history_rows_with_exact_authoritative_resolution"], 1)
+
+    def test_manifest_resolution_rejects_contradictory_outcome_aliases(self):
+        rows = [{
+            "market_id": "HIST-X", "market_status": "finalized", "official_outcome": "YES",
+            "kalshi_result": "NO", "settlement_ts": "2026-01-02T00:00:00+00:00",
+        }]
+        index, stats = _strict_history_resolution_index(rows)
+        self.assertEqual(index, {})
+        self.assertEqual(stats["invalid_rows"], 1)
 
     def test_resolution_requires_exact_identity_join_and_keeps_pnl_separate(self):
         records, outcomes = self._records_and_outcomes()

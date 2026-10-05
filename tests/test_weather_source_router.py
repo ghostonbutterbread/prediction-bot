@@ -207,6 +207,43 @@ class WeatherSourceRouterTests(unittest.TestCase):
         self.assertEqual(selected["history_independent_rows_used"], 2)
         self.assertEqual(selected["history_reobservation_excluded"], 0)
 
+    def test_selector_collapses_same_market_without_event_despite_target_variation(self):
+        candidate = {"city_id": "miami_fl", "market_kind": "high", "contract_shape": "range",
+                     "question_side": "above", "observed_at": "2026-05-10T12:00:00+00:00"}
+        history = []
+        for target, observed in (("2026-05-01", "2026-05-01T12:00:00+00:00"),
+                                 ("2026-05-02", "2026-05-02T12:00:00+00:00")):
+            prior = ledger_row(source_id="nws", source_side="YES", official="YES",
+                               observed_at=observed, outcome_known_at="2026-05-04T00:00:00+00:00",
+                               shared_candidate_id=f"old-{target}", market_id="KXSAME")
+            prior.update(source_implied_side="YES", eligible_for_edge_validation=True, win=True,
+                         target_identity={"source_target": target})
+            history.append(prior)
+        selected = select_source_for_candidate(candidate, history, min_sample_count=2)
+        self.assertFalse(selected["routeable"])
+        self.assertEqual(selected["prior_sample_count"], 1)
+        self.assertEqual(selected["history_independent_rows_used"], 1)
+        self.assertEqual(selected["history_reobservation_excluded"], 1)
+        distinct = select_source_for_candidate(candidate, [history[0], {**history[1], "market_id": "KXOTHER"}],
+                                               min_sample_count=2)
+        self.assertTrue(distinct["routeable"])
+        self.assertEqual(distinct["prior_sample_count"], 2)
+
+    def test_selector_collapses_one_market_even_with_conflicting_event_labels(self):
+        candidate = {"city_id": "miami_fl", "market_kind": "high", "contract_shape": "range",
+                     "question_side": "above", "observed_at": "2026-05-10T12:00:00+00:00"}
+        history = []
+        for event_id, observed in (("EVENT-ONE", "2026-05-01T12:00:00+00:00"),
+                                   ("EVENT-TWO", "2026-05-02T12:00:00+00:00")):
+            prior = ledger_row(source_id="nws", source_side="YES", official="YES",
+                               observed_at=observed, outcome_known_at="2026-05-04T00:00:00+00:00",
+                               shared_candidate_id=f"old-{event_id}", market_id="KXSAME")
+            prior.update(event_id=event_id, source_implied_side="YES", eligible_for_edge_validation=True, win=True)
+            history.append(prior)
+        selected = select_source_for_candidate(candidate, history, min_sample_count=2)
+        self.assertFalse(selected["routeable"])
+        self.assertEqual(selected["prior_sample_count"], 1)
+
     def test_selector_collapses_different_market_contracts_on_same_physical_event(self):
         candidate = {"city_id": "miami_fl", "market_kind": "high", "contract_shape": "tail",
                      "question_side": "above", "observed_at": "2026-08-10T12:00:00+00:00"}
@@ -301,6 +338,36 @@ class WeatherSourceRouterTests(unittest.TestCase):
         selected = next(row for row in replay if row["market_id"] == "KXCURRENT")
         self.assertFalse(selected["router"]["routeable"])
         self.assertEqual(selected["router"]["prior_sample_count"], 0)
+
+    def test_progressive_unpriced_history_rejects_conflicting_forecast_sides(self):
+        for history_only in (True, False):
+            with self.subTest(history_only=history_only):
+                old = ledger_row(source_id="nws", source_side="YES", official="YES",
+                                 observed_at="2026-05-01T12:00:00+00:00", outcome_known_at="2026-05-02T00:00:00+00:00",
+                                 shared_candidate_id="old", market_id="KXOLD", stable_action="SKIP")
+                old.update(source_implied_outcome="NO", actual_outcome="YES")
+                old.pop("best_yes_ask")
+                old.pop("best_no_ask")
+                if history_only:
+                    old["source_router_history_only"] = True
+                current = ledger_row(source_id="nws", source_side="YES", official="YES",
+                                     observed_at="2026-05-03T12:00:00+00:00", outcome_known_at="2026-05-04T00:00:00+00:00",
+                                     shared_candidate_id="current", market_id="KXCURRENT")
+                selected = next(row for row in build_source_router_replay_rows([old, current], min_sample_count=1)
+                                if row["market_id"] == "KXCURRENT")
+                self.assertFalse(selected["router"]["routeable"])
+                self.assertEqual(selected["router"]["prior_sample_count"], 0)
+
+    def test_direct_selector_rejects_conflicting_forecast_sides(self):
+        candidate = {"city_id": "miami_fl", "market_kind": "high", "contract_shape": "range",
+                     "question_side": "above", "observed_at": "2026-05-03T12:00:00+00:00"}
+        prior = ledger_row(source_id="nws", source_side="YES", official="YES",
+                           observed_at="2026-05-01T12:00:00+00:00", outcome_known_at="2026-05-02T00:00:00+00:00",
+                           shared_candidate_id="old", market_id="KXOLD")
+        prior.update(source_implied_side="NO", eligible_for_edge_validation=True, win=False)
+        selected = select_source_for_candidate(candidate, [prior], min_sample_count=1)
+        self.assertFalse(selected["routeable"])
+        self.assertEqual(selected["prior_sample_count"], 0)
 
     def test_direct_priced_history_with_conflicting_outcomes_cannot_route(self):
         candidate = {"city_id": "miami_fl", "market_kind": "high", "contract_shape": "range",

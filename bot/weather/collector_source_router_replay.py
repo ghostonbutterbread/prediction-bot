@@ -676,7 +676,7 @@ def _strict_history_resolution_index(rows: Iterable[Mapping[str, Any]]) -> tuple
         resolution = row.get("resolution") if isinstance(row.get("resolution"), Mapping) else {}
         outcome = str(row.get("official_outcome") or resolution.get("official_outcome") or resolution.get("outcome") or row.get("kalshi_result") or "").upper()
         settlement = _parse_datetime(row.get("settlement_ts"))
-        if not isinstance(market_id, str) or not market_id or str(row.get("market_status") or "").lower() != "finalized" or outcome not in {"YES", "NO"} or settlement is None:
+        if not isinstance(market_id, str) or not market_id or str(row.get("market_status") or "").lower() != "finalized" or outcome not in {"YES", "NO"} or settlement is None or source_history_outcomes_conflict(row):
             stats["invalid_rows"] += 1
             continue
         if market_id in index:

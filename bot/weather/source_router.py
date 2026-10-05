@@ -66,15 +66,17 @@ def source_history_outcomes_conflict(
 ) -> bool:
     """Reject contradictory recorded/independently supplied market outcomes."""
 
-    values = [row.get("actual_outcome"), row.get("official_outcome"), official_outcome]
-    for market in (row.get("market_outcome"), *lookup_outcomes):
+    values = [official_outcome]
+    for market in (row, row.get("market_outcome"), *lookup_outcomes):
         if isinstance(market, Mapping):
             values.extend(market.get(key) for key in (
                 "official_outcome", "actual_outcome", "outcome", "result", "kalshi_result", "settlement_value",
             ))
             resolution = market.get("resolution")
             if isinstance(resolution, Mapping):
-                values.extend(resolution.get(key) for key in ("official_outcome", "outcome", "result"))
+                values.extend(resolution.get(key) for key in (
+                    "official_outcome", "actual_outcome", "outcome", "result", "kalshi_result", "settlement_value",
+                ))
         else:
             values.append(market)
     sides = {
@@ -83,10 +85,19 @@ def source_history_outcomes_conflict(
     } - {None}
     return "VOID" in sides or len(sides) > 1
 
+def source_history_sides_conflict(row: Mapping[str, Any]) -> bool:
+    """A source forecast cannot claim opposing implied market sides."""
+
+    sides = {str(row.get(key)).upper() for key in (
+        "predicted_outcome", "source_implied_outcome", "source_implied_side",
+    ) if row.get(key) is not None}
+    return len(sides) > 1
+
 def source_history_correctness_eligible(row: Mapping[str, Any]) -> bool:
     """Admit strict settled correctness without relaxing priced edge eligibility."""
 
-    if source_history_target_proof_rejection_key(row) is not None or source_history_outcomes_conflict(row):
+    if (source_history_target_proof_rejection_key(row) is not None
+            or source_history_outcomes_conflict(row) or source_history_sides_conflict(row)):
         return False
     if (row.get("source_implied_side") not in {"YES", "NO"}
             or row.get("official_outcome") not in {"YES", "NO"}
@@ -138,7 +149,10 @@ def build_source_router_replay_rows(
             _allow_history_actual_outcome(edge, ledger)
         elif edge.get("outcome_known_at") in (None, ""):
             edge["outcome_known_at"] = _optional_text(ledger.get("outcome_known_at"), ledger.get("known_after"))
-        paired_rows.append({"ledger": ledger, "edge": edge, "outcome_conflict": outcome_conflict})
+        paired_rows.append({
+            "ledger": ledger, "edge": edge, "outcome_conflict": outcome_conflict,
+            "side_conflict": source_history_sides_conflict(ledger),
+        })
 
     paired_rows.sort(
         key=lambda pair: (
@@ -179,6 +193,9 @@ def build_source_router_replay_rows(
             for pair_ in current_group:
                 if pair_["outcome_conflict"]:
                     history_exclusions["history_rows_rejected_conflicting_outcome"] += 1
+                    continue
+                if pair_["side_conflict"]:
+                    history_exclusions["history_rows_rejected_conflicting_source_side"] += 1
                     continue
                 rejection_key = source_history_target_proof_rejection_key(pair_["ledger"])
                 if rejection_key is not None:
@@ -695,9 +712,22 @@ def _collapse_selector_history(
     within an outcome unit, never an observation's correctness or outcome.
     """
 
+    # A contract can carry inconsistent optional event labels across polls.
+    # Collapse it once before grouping different contracts by physical event.
+    markets: dict[str, Mapping[str, Any]] = {}
+    unanchored: list[Mapping[str, Any]] = []
+    for row in rows:
+        market = _normalized_identity_text(row.get("market_id"), row.get("market_ticker"), row.get("ticker"))
+        if market is None:
+            unanchored.append(row)
+            continue
+        representative = markets.get(market)
+        if representative is None or _recorded_forecast_sort_key(row) < _recorded_forecast_sort_key(representative):
+            markets[market] = row
+
     units: dict[tuple[str, ...], dict[str, Any]] = {}
     stats: Counter[str] = Counter()
-    for row in rows:
+    for row in (*markets.values(), *unanchored):
         unit, used_fallback = _independent_source_outcome_unit(row, source_id=source_id)
         if used_fallback:
             stats["history_conservative_identity_fallback_rows"] += 1
@@ -721,15 +751,6 @@ def _independent_source_outcome_unit(row: Mapping[str, Any], *, source_id: str) 
         row.get("market_id"), row.get("market_ticker"), row.get("ticker")
     )
     event_identity = _normalized_identity_text(row.get("event_ticker"), row.get("event_id"))
-    target = _mapping(row.get("target_identity"))
-    target_identity = _normalized_identity_text(
-        target.get("source_target"), target.get("target_forecast_date"), target.get("target_date"),
-        target.get("forecast_date"), row.get("target_id"),
-        row.get("target_forecast_date"), row.get("target_date"), row.get("forecast_date"), row.get("city_id"),
-    ) or "unknown_target"
-    market_date = _normalized_identity_text(
-        row.get("market_date"), target.get("market_date"), row.get("target_market_date")
-    ) or "unknown_market_date"
     shape = "|".join(
         _normalized_identity_text(value) or "unknown"
         for value in (row.get("market_kind"), row.get("contract_shape"), row.get("question_side"))
@@ -737,13 +758,7 @@ def _independent_source_outcome_unit(row: Mapping[str, Any], *, source_id: str) 
     if event_identity:
         return ("source", source_id, "event", event_identity, "shape", shape), False
     if market_identity:
-        return (
-            "source", source_id,
-            "contract_only", market_identity,
-            "target", target_identity,
-            "market_date", market_date,
-            "shape", shape,
-        ), False
+        return ("source", source_id, "contract_only", market_identity), False
 
     # Without a market/event anchor, collapsing would manufacture independence.
     # Keep the observation distinct with an explicit, deterministic fallback.
