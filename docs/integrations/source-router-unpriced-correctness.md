@@ -6,9 +6,9 @@
 - **Worktree:** `/home/ryushe/worktrees/prediction-bot-source-router-unpriced-correctness`
 - **Base commit:** `14982f867bc324aae21bb1c2c8e396fb176b4dfe`
 - **Intended integration target:** `beta` (handoff only; no merge/push/runtime authorized)
-- **Last updated:** 2026-10-04
-- **Latest immutable recovery checkpoint:** `efb4a02ec5884572aa1aa9128b972cdc53b24616`
-- **Feature implementation commits:** `28e99bc2d18f5981ec5a614726cf752d48a648c9`, `9b6d1880d16c3239f91c79297a2e5942a0dfe1e7`, `efb4a02ec5884572aa1aa9128b972cdc53b24616`
+- **Last updated:** 2026-10-05
+- **Latest immutable recovery checkpoint:** `03d24ab8727805434d66aeeccf190b741e4cd8ac`
+- **Feature implementation commits:** `28e99bc2d18f5981ec5a614726cf752d48a648c9`, `9b6d1880d16c3239f91c79297a2e5942a0dfe1e7`, `efb4a02ec5884572aa1aa9128b972cdc53b24616`, `03d24ab8727805434d66aeeccf190b741e4cd8ac`
 
 ## Intent and implemented contract
 
@@ -36,9 +36,9 @@ No collector, raw archive, configuration, wallet, service, or runtime changes. H
 ## Interruption / resume handoff
 
 - **Owning feature branch/ref:** `fix/source-router-unpriced-correctness`
-- **Latest immutable recovery checkpoint:** `efb4a02ec5884572aa1aa9128b972cdc53b24616` (third implementation); branch tip may also contain a later dossier-only handoff commit.
-- **Feature implementation commits:** `28e99bc2d18f5981ec5a614726cf752d48a648c9`, `9b6d1880d16c3239f91c79297a2e5942a0dfe1e7`, `efb4a02ec5884572aa1aa9128b972cdc53b24616`.
-- **Exact resume point:** independent read-only review of `efb4a02ec5884572aa1aa9128b972cdc53b24616`; then separately authorized beta staged-tree reconciliation, excluding this branch-local dossier.
+- **Latest immutable recovery checkpoint:** `03d24ab8727805434d66aeeccf190b741e4cd8ac` (fourth implementation); branch tip may also contain a later dossier-only handoff commit.
+- **Feature implementation commits:** `28e99bc2d18f5981ec5a614726cf752d48a648c9`, `9b6d1880d16c3239f91c79297a2e5942a0dfe1e7`, `efb4a02ec5884572aa1aa9128b972cdc53b24616`, `03d24ab8727805434d66aeeccf190b741e4cd8ac`.
+- **Exact resume point:** independent read-only review of `03d24ab8727805434d66aeeccf190b741e4cd8ac`; then separately authorized beta staged-tree reconciliation, excluding this branch-local dossier.
 - **Working-tree state:** clean after this dossier handoff commit.
 
 ## Decision gates
@@ -52,4 +52,4 @@ No collector, raw archive, configuration, wallet, service, or runtime changes. H
 - 2026-10-04 — isolated TDD repair under strict history and event-independence boundary; no merge/push/runtime.
 - 2026-10-04 — corrected two additional outcome-conflict bypasses found by independent review; RED→GREEN regressions and complete isolated suite; third read-only review pending; still no merge/push/runtime.
 - 2026-10-04 — corrected exchange outcome aliases and VOID-lookup bypass from third review; full isolated suite passes; next independent review pending; still no merge/push/runtime.
-- 2026-10-04 — closed fourth-review outcome/side/independence blockers with RED→GREEN tests and full suite; independent review of corrected tree pending; still no merge/push/runtime.
+- 2026-10-05 — closed fourth-review outcome/side/independence blockers with RED→GREEN tests and full suite; independent review of corrected tree pending; still no merge/push/runtime.
