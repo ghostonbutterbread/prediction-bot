@@ -6,9 +6,9 @@
 - **Worktree:** `/home/ryushe/worktrees/prediction-bot-source-router-unpriced-correctness`
 - **Base commit:** `14982f867bc324aae21bb1c2c8e396fb176b4dfe`
 - **Intended integration target:** `beta` (handoff only; no merge/push/runtime authorized)
-- **Last updated:** 2026-10-04
-- **Latest immutable recovery checkpoint:** `28e99bc2d18f5981ec5a614726cf752d48a648c9`
-- **Feature implementation commits:** `28e99bc2d18f5981ec5a614726cf752d48a648c9`
+- **Last updated:** 2026-10-05
+- **Latest immutable recovery checkpoint:** `9b6d1880d16c3239f91c79297a2e5942a0dfe1e7`
+- **Feature implementation commits:** `28e99bc2d18f5981ec5a614726cf752d48a648c9`, `9b6d1880d16c3239f91c79297a2e5942a0dfe1e7`
 
 ## Intent and implemented contract
 
@@ -20,26 +20,26 @@ No collector, raw archive, configuration, wallet, service, or runtime changes. H
 
 - RED: `PYTHONPATH="$PWD" python3 -m unittest tests.test_collector_source_router_replay.CollectorSourceRouterReplayTests.test_unpriced_strict_settled_history_routes_without_creating_edge_or_pnl tests.test_collector_source_router_replay.CollectorSourceRouterReplayTests.test_unpriced_history_rejects_missing_proof_conflicts_and_nonprior_settlements -v` failed on price-only selector rejection.
 - RED: event collapse across two same-event market thresholds, and priced marker without independent outcome, failed before implementation.
-- GREEN focused after review-blocker repair: `PYTHONPATH="$PWD" python3 -m unittest tests.test_weather_source_router tests.test_collector_source_router_replay -q` — 48 tests OK. New RED cases demonstrated conflicting progressive outcome and post-settlement forecast admission before the fix.
-- Full suite: initial interpreter lacked `rich` and `kalshi_python_sync` (1256 tests, 22 import errors). Final committed implementation tree with provisioned project interpreter and this worktree first on `PYTHONPATH`: `PYTHONPATH="$PWD" /home/ryushe/projects/prediction-bot/.venv/bin/python -m unittest discover -s tests -q` — 1370 tests OK, 7 skipped (81.807s). Go `GOROOT` warning from a subprocess was nonfatal.
+- GREEN focused after both review-blocker repairs: `PYTHONPATH="$PWD" /home/ryushe/projects/prediction-bot/.venv/bin/python -m unittest tests.test_weather_source_router tests.test_collector_source_router_replay -q` — 51 tests OK. Three additional RED cases demonstrated contradictory outcomes bypassing ordinary progressive history, direct priced selection, and collector `market_outcome` envelope checks.
+- Full suite: initial interpreter lacked `rich` and `kalshi_python_sync` (1256 tests, 22 import errors). Final source tree with provisioned project interpreter and this worktree first on `PYTHONPATH`: `PYTHONPATH="$PWD" /home/ryushe/projects/prediction-bot/.venv/bin/python -m unittest discover -s tests -q` — 1373 tests OK, 7 skipped (63.909s). Go `GOROOT` warning from a subprocess was nonfatal.
 - `git diff --check` and `git diff --cached --check` passed before committing implementation.
-- Independent read-only review found two progressive-history blockers: conflicting `actual_outcome`/`official_outcome`, and a forecast observed at/after settlement. Both were repaired with failing regressions first; fresh read-only review of the corrected tree is pending. No integration decision delegated or implied.
+- First independent read-only review found history-only conflicting outcomes and post-settlement observations; both were repaired with RED regressions. Second review found conflicting outcomes in ordinary progressive, direct priced, and collector nested market-outcome paths; all three were reproduced RED and repaired with a shared conflict check. Fresh read-only review of the corrected follow-up commit is pending. No integration decision delegated or implied.
 - Ancestry: branch started at local `beta` commit `14982f867bc324aae21bb1c2c8e396fb176b4dfe`.
 - Published 168/168 strict source rows remain a frozen diagnostic with at most two independent samples per source/slice; production 100-sample threshold unchanged. No published generation was rewritten or used to claim a BUY/PnL improvement.
 
 ## Blockers / deferred work
 
-- **Verification:** full isolated suite passed on the implementation tree; `GOROOT` emitted a nonfatal subprocess warning. Synthetic fixtures prove the admission boundary, not the published generation's hash/readback or forward readiness. Fresh independent review remains pending.
+- **Verification:** full isolated suite passed on the follow-up implementation tree; `GOROOT` emitted a nonfatal subprocess warning. Synthetic fixtures prove the admission boundary, not the published generation's hash/readback or forward readiness. Fresh independent review remains pending.
 - **Review/merge:** independent review of this feature and any staged-tree integration check belong to the next authorized owner; no merge or push in this task.
 - **Forward evidence:** event-disjoint, independently resolved paper cohort required before activating/promoting any trading behavior.
 
 ## Interruption / resume handoff
 
 - **Owning feature branch/ref:** `fix/source-router-unpriced-correctness`
-- **Latest immutable recovery checkpoint:** `28e99bc2d18f5981ec5a614726cf752d48a648c9` (implementation); the branch tip also contains this later dossier-only handoff commit.
-- **Feature implementation commits:** `28e99bc2d18f5981ec5a614726cf752d48a648c9`.
-- **Exact resume point:** independent read-only review of implementation, then separately authorized beta staged-tree reconciliation; exclude this branch-local dossier from beta.
-- **Working-tree state:** clean after the dossier handoff commit.
+- **Latest immutable recovery checkpoint:** `9b6d1880d16c3239f91c79297a2e5942a0dfe1e7` (second implementation); the branch tip may also contain a later dossier-only handoff commit.
+- **Feature implementation commits:** `28e99bc2d18f5981ec5a614726cf752d48a648c9`, `9b6d1880d16c3239f91c79297a2e5942a0dfe1e7`.
+- **Exact resume point:** fresh independent read-only review of `9b6d1880d16c3239f91c79297a2e5942a0dfe1e7`; then separately authorized beta staged-tree reconciliation, excluding this branch-local dossier.
+- **Working-tree state:** clean after the follow-up dossier handoff commit.
 
 ## Decision gates
 
@@ -50,3 +50,4 @@ No collector, raw archive, configuration, wallet, service, or runtime changes. H
 ## Decision record
 
 - 2026-10-04 — isolated TDD repair under strict history and event-independence boundary; no merge/push/runtime.
+- 2026-10-05 — corrected two additional outcome-conflict bypasses found by independent review; RED→GREEN regressions and complete isolated suite; third read-only review pending; still no merge/push/runtime.
