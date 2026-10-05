@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
+import math
 
 from bot.shared_core import AccountState, TradeContext, build_trade_decision
 
@@ -64,6 +65,7 @@ def build_composed_trade_context(
             "composed_decision_id": str(row.get("decision_id") or ""),
             "observed_at": observed_at,
             "market_route": dict(route),
+            **({"event_snapshot": row["event_snapshot"]} if "event_snapshot" in row else {}),
         },
     )
     return context, {
@@ -92,23 +94,49 @@ def evaluate_composed_intents(
     min_edge: float,
     min_confidence: float,
     max_entry_price: float,
+    fee_rate: float = 0.0,
+    event_cap_pct: float | None = None,
 ) -> dict[str, Any]:
     """Run sealed composed intents through shared-core sizing in memory only."""
     if starting_balance_usd <= 0:
         raise ValueError("starting_balance_usd must be positive")
+    if not math.isfinite(fee_rate) or not 0 <= fee_rate < 1:
+        raise ValueError("fee_rate must be in [0, 1)")
+    if event_cap_pct is not None and (not math.isfinite(event_cap_pct) or not 0 < event_cap_pct <= 1):
+        raise ValueError("event_cap_pct must be in (0, 1]")
     settlement_by_id = _strict_resolution_index(resolutions)
     ordered = sorted((dict(row) for row in intents), key=lambda row: (_timestamp(row["observed_at"]), str(row.get("decision_id") or "")))
     cash, positions, decisions, settlements = float(starting_balance_usd), [], [], []
+    settled_markets: set[str] = set()
     for intent in ordered:
         now = _timestamp(intent["observed_at"])
-        cash, due = _settle_due(positions, settlement_by_id, cash, now)
+        cash, due = _settle_due(positions, settlement_by_id, cash, now, fee_rate=fee_rate)
         settlements.extend(due)
+        settled_markets.update(row["market_id"] for row in due)
         state = AccountState(
             starting_balance=float(starting_balance_usd), current_balance=cash + sum(p["stake_usd"] for p in positions),
             available_cash=cash, reserved_capital=sum(p["stake_usd"] for p in positions),
             total_exposure=sum(p["stake_usd"] for p in positions), open_positions=len(positions),
         )
         context, intent_receipt = build_composed_trade_context(intent, state)
+        if event_cap_pct is not None and context.market_id in settled_markets:
+            decisions.append({"decision_id": intent_receipt["decision_id"], "market_id": context.market_id,
+                              "observed_at": intent_receipt["observed_at"], "action": "SKIP",
+                              "available_cash_before_usd": round(cash, 6), "approved_stake_usd": 0.0,
+                              "reason_code": "market_already_settled", "status": "skipped"})
+            continue
+        if event_cap_pct is not None:
+            event_key = str(intent.get("event_key") or context.market_id)
+            held = [p for p in positions if p["event_key"] == event_key]
+            context.metadata["event_snapshot"] = {
+                "event_key": event_key, "max_event_exposure_pct": event_cap_pct,
+                "event_exposure_before": sum(p["stake_usd"] for p in held),
+                "event_position_count_before": len(held),
+                "held_market_ids": [p["market_id"] for p in positions],
+                "same_event_directions": [p["action"] for p in held],
+                "same_family_markets": [p["market_id"] for p in held],
+                "opposite_side_detected": any(p["action"] != intent["action"] for p in held),
+            }
         decision = build_trade_decision(context, kelly_sizer=kelly_sizer, risk_policy=risk_policy, min_edge=min_edge, min_confidence=min_confidence, max_entry_price=max_entry_price)
         row = {"decision_id": intent_receipt["decision_id"], "market_id": context.market_id, "observed_at": intent_receipt["observed_at"], "action": decision.action if decision.approved else "SKIP", "available_cash_before_usd": round(cash, 6), "requested_size_usd": decision.requested_position_size, "approved_stake_usd": decision.position_size or 0.0, "reason_code": decision.reason_code, "shared_core_reasoning": decision.reasoning, "status": "skipped"}
         if decision.approved and decision.position_size and decision.position_size > 0:
@@ -117,13 +145,13 @@ def evaluate_composed_intents(
                 row["reason_code"] = "insufficient_available_cash"
             else:
                 cash -= stake
-                positions.append({"decision_id": row["decision_id"], "shared_candidate_id": _required_text(intent, "shared_candidate_id"), "run_id": _required_text(intent, "run_id"), "market_id": context.market_id, "action": decision.action, "entry_price": float(decision.entry_price or 0.0), "stake_usd": stake, "observed_at": now})
+                positions.append({"decision_id": row["decision_id"], "shared_candidate_id": _required_text(intent, "shared_candidate_id"), "run_id": _required_text(intent, "run_id"), "market_id": context.market_id, "action": decision.action, "entry_price": float(decision.entry_price or 0.0), "model_probability": context.model_probability, "event_key": str(intent.get("event_key") or context.market_id), "stake_usd": stake, "observed_at": now})
                 row.update(status="opened", available_cash_after_usd=round(cash, 6))
         decisions.append(row)
-    cash, due = _settle_due(positions, settlement_by_id, cash, None)
+    cash, due = _settle_due(positions, settlement_by_id, cash, None, fee_rate=fee_rate)
     settlements.extend(due)
     reserved = sum(p["stake_usd"] for p in positions)
-    return {"schema_name": "composed_lane_synthetic_wallet", "schema_version": 1, "non_mutating": True, "paper_only": True, "paper_parity_claim": False, "promotion_eligible": False, "decision_rows": decisions, "settlement_rows": settlements, "open_positions": positions, "summary": {"starting_balance_usd": starting_balance_usd, "final_balance_usd": round(cash + reserved, 6), "reserved_capital_usd": round(reserved, 6), "opened_positions": sum(row["status"] == "opened" for row in decisions)}}
+    return {"schema_name": "composed_lane_synthetic_wallet", "schema_version": 1, "non_mutating": True, "paper_only": True, "paper_parity_claim": False, "promotion_eligible": False, "fee_rate_on_winning_profit": fee_rate, "event_cap_pct": event_cap_pct, "decision_rows": decisions, "settlement_rows": settlements, "open_positions": positions, "summary": {"starting_balance_usd": starting_balance_usd, "final_balance_usd": round(cash + reserved, 6), "reserved_capital_usd": round(reserved, 6), "opened_positions": sum(row["status"] == "opened" for row in decisions)}}
 
 
 def _strict_resolution_index(resolutions: list[Mapping[str, Any]]) -> dict[tuple[str, str, str, str], Mapping[str, Any]]:
@@ -136,6 +164,8 @@ def _strict_resolution_index(resolutions: list[Mapping[str, Any]]) -> dict[tuple
         try:
             key = _resolution_key(row)
             _timestamp(row.get("settlement_ts"))
+            if row.get("outcome_known_at") is not None:
+                _timestamp(row["outcome_known_at"])
         except ValueError:
             continue
         candidates.setdefault(key, []).append(row)
@@ -158,11 +188,15 @@ def _is_sha256(value: Any) -> bool:
     return isinstance(value, str) and len(value) == 64 and all(character in "0123456789abcdef" for character in value.lower())
 
 
-def _settle_due(positions: list[dict[str, Any]], resolutions: Mapping[tuple[str, str, str, str], Mapping[str, Any]], cash: float, before: datetime | None) -> tuple[float, list[dict[str, Any]]]:
+def _settle_due(positions: list[dict[str, Any]], resolutions: Mapping[tuple[str, str, str, str], Mapping[str, Any]], cash: float, before: datetime | None, *, fee_rate: float = 0.0) -> tuple[float, list[dict[str, Any]]]:
     settled, remaining = [], []
     for position in positions:
         receipt = resolutions.get((position["decision_id"], position["shared_candidate_id"], position["run_id"], position["market_id"]))
-        if not receipt or _timestamp(receipt.get("settlement_ts")) <= position["observed_at"] or (before is not None and _timestamp(receipt.get("settlement_ts")) > before):
+        if not receipt or _timestamp(receipt.get("settlement_ts")) <= position["observed_at"]:
+            remaining.append(position)
+            continue
+        available_at = max(_timestamp(receipt["settlement_ts"]), _timestamp(receipt["outcome_known_at"])) if receipt.get("outcome_known_at") else _timestamp(receipt["settlement_ts"])
+        if before is not None and available_at > before:
             remaining.append(position)
             continue
         outcome = str(receipt.get("outcome") or "").upper()
@@ -174,9 +208,13 @@ def _settle_due(positions: list[dict[str, Any]], resolutions: Mapping[tuple[str,
             settled.append({"decision_id": position["decision_id"], "market_id": position["market_id"], "outcome": outcome, "settlement_ts": receipt["settlement_ts"], "void_resolution": True, "resolution_row_sha256": receipt["resolution_row_sha256"]})
             continue
         won = outcome == position["action"].removeprefix("BUY_")
-        payout = position["stake_usd"] / position["entry_price"] if won else 0.0
+        gross_payout = position["stake_usd"] / position["entry_price"] if won else 0.0
+        if not math.isfinite(gross_payout):
+            remaining.append(position)
+            continue
+        payout = gross_payout - max(0.0, gross_payout - position["stake_usd"]) * fee_rate
         cash += payout
-        settled.append({"decision_id": position["decision_id"], "market_id": position["market_id"], "outcome": outcome, "settlement_ts": receipt["settlement_ts"], "stake_usd": round(position["stake_usd"], 6), "pnl_usd": round(payout - position["stake_usd"], 6), "resolution_row_sha256": receipt["resolution_row_sha256"]})
+        settled.append({"decision_id": position["decision_id"], "market_id": position["market_id"], "outcome": outcome, "settlement_ts": receipt["settlement_ts"], "stake_usd": round(position["stake_usd"], 6), "pnl_usd": round(payout - position["stake_usd"], 6), "pnl_basis": "quote_proxy_not_fill", "fee_usd": round(gross_payout - payout, 6), "resolution_row_sha256": receipt["resolution_row_sha256"]})
     positions[:] = remaining
     return cash, settled
 

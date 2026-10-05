@@ -349,6 +349,13 @@ def _build_lane_row(
     if shared_snapshot_id:
         row["shared_snapshot_id"] = shared_snapshot_id
         row["provenance"]["shared_snapshot_id"] = shared_snapshot_id
+    if lane.lane_id == "control_stable":
+        # The compact stable lane row previously omitted the decision-time
+        # wallet inputs. Project only the recorded signal (never later outcomes).
+        row["question"] = _optional_text(signal.get("question"))
+        row["exchange"] = _optional_text(signal.get("exchange"))
+        row["event_ticker"] = _optional_text(signal.get("event_ticker"))
+        row["market_route"] = dict(_mapping(signal.get("market_route")))
     return validate_agent_decision_row(row)
 
 
