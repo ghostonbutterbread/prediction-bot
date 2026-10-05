@@ -61,19 +61,27 @@ def source_history_target_proof_rejection_key(row: Mapping[str, Any]) -> str | N
         return "history_rows_rejected_v1_forecast_not_scoreable"
     return "history_rows_rejected_target_unproven"
 
-def source_history_outcomes_conflict(row: Mapping[str, Any], *, official_outcome: Any = None) -> bool:
+def source_history_outcomes_conflict(
+    row: Mapping[str, Any], *, official_outcome: Any = None, lookup_outcomes: Iterable[Any] = (),
+) -> bool:
     """Reject contradictory recorded/independently supplied market outcomes."""
 
-    market = row.get("market_outcome")
     values = [row.get("actual_outcome"), row.get("official_outcome"), official_outcome]
-    if isinstance(market, Mapping):
-        values.extend(market.get(key) for key in ("official_outcome", "actual_outcome", "outcome", "result"))
-        resolution = market.get("resolution")
-        if isinstance(resolution, Mapping):
-            values.extend(resolution.get(key) for key in ("official_outcome", "outcome", "result"))
-    else:
-        values.append(market)
-    return len({side for value in values if (side := _normalized_side(value)) in {"YES", "NO"}}) > 1
+    for market in (row.get("market_outcome"), *lookup_outcomes):
+        if isinstance(market, Mapping):
+            values.extend(market.get(key) for key in (
+                "official_outcome", "actual_outcome", "outcome", "result", "kalshi_result", "settlement_value",
+            ))
+            resolution = market.get("resolution")
+            if isinstance(resolution, Mapping):
+                values.extend(resolution.get(key) for key in ("official_outcome", "outcome", "result"))
+        else:
+            values.append(market)
+    sides = {
+        "VOID" if str(value or "").strip().upper() == "VOID" else _normalized_side(value)
+        for value in values if value is not None
+    } - {None}
+    return "VOID" in sides or len(sides) > 1
 
 def source_history_correctness_eligible(row: Mapping[str, Any]) -> bool:
     """Admit strict settled correctness without relaxing priced edge eligibility."""
@@ -117,7 +125,14 @@ def build_source_router_replay_rows(
             continue
         ledger = dict(row)
         edge = build_source_edge_evaluation_row(ledger, outcome_lookup=lookup)
-        outcome_conflict = source_history_outcomes_conflict(ledger, official_outcome=edge.get("official_outcome"))
+        market_id = _optional_text(ledger.get("market_id"))
+        lookup_outcomes = (
+            (lookup.get(market_id), lookup.get(market_id.upper()), lookup.get(market_id.lower()))
+            if market_id is not None else ()
+        )
+        outcome_conflict = source_history_outcomes_conflict(
+            ledger, official_outcome=edge.get("official_outcome"), lookup_outcomes=lookup_outcomes,
+        )
         edge["settlement_ts"] = _optional_text(ledger.get("settlement_ts"))
         if ledger.get("source_router_history_only") is True:
             _allow_history_actual_outcome(edge, ledger)

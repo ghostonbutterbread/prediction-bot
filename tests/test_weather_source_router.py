@@ -284,6 +284,24 @@ class WeatherSourceRouterTests(unittest.TestCase):
         self.assertFalse(selected["router"]["routeable"])
         self.assertEqual(selected["router"]["prior_sample_count"], 0)
 
+    def test_history_only_void_lookup_cannot_be_replaced_by_actual_outcome(self):
+        old = ledger_row(source_id="nws", source_side="YES", official="YES",
+                         observed_at="2026-05-01T12:00:00+00:00", outcome_known_at="2026-05-02T00:00:00+00:00",
+                         shared_candidate_id="old", market_id="KXOLD", stable_action="SKIP")
+        old.pop("official_outcome")
+        old.pop("best_yes_ask")
+        old.pop("best_no_ask")
+        old.update(source_router_history_only=True, actual_outcome="YES")
+        current = ledger_row(source_id="nws", source_side="YES", official="YES",
+                             observed_at="2026-05-03T12:00:00+00:00", outcome_known_at="2026-05-04T00:00:00+00:00",
+                             shared_candidate_id="current", market_id="KXCURRENT")
+        replay = build_source_router_replay_rows(
+            [old, current], outcome_lookup={"KXOLD": {"official_outcome": "VOID"}}, min_sample_count=1,
+        )
+        selected = next(row for row in replay if row["market_id"] == "KXCURRENT")
+        self.assertFalse(selected["router"]["routeable"])
+        self.assertEqual(selected["router"]["prior_sample_count"], 0)
+
     def test_direct_priced_history_with_conflicting_outcomes_cannot_route(self):
         candidate = {"city_id": "miami_fl", "market_kind": "high", "contract_shape": "range",
                      "question_side": "above", "observed_at": "2026-05-03T12:00:00+00:00"}
