@@ -648,6 +648,26 @@ class CollectorSourceRouterReplayTests(unittest.TestCase):
         self.assertEqual(blocked["summary"]["exactly_resolved_decisions"], len(control) + len(candidate) - 2)
         self.assertEqual(blocked["summary"]["unresolved_decisions"], 2)
 
+    def test_conflicting_final_outcome_cannot_create_correctness_or_pnl(self):
+        record = replay_input(market_id="KXCONFLICTFINAL", observed_at="2026-01-03T12:00:00+00:00",
+                              raw_hash="9" * 64, contract_shape="tail")
+        prior = source_history_row(market_id="HIST-FINAL", settlement_ts="2026-01-02T00:00:00+00:00")
+        prior.pop("yes_price")
+        prior.pop("no_price")
+        control, candidate, _ = build_sealed_source_probability_decisions(
+            [record], [], history_ledger=[prior], min_sample_count=1,
+        )
+        self.assertEqual(candidate[0]["action"], "BUY_YES")
+        for claim in ({"kalshi_result": "NO"}, {"resolution": {"outcome": "VOID"}}):
+            with self.subTest(claim=claim):
+                outcome = {**finalized_outcome(record, outcome="YES", settlement_ts="2026-01-04T00:00:00+00:00"),
+                           **claim}
+                report = resolve_sealed_source_probability_decisions(control + candidate, [outcome])
+                self.assertEqual(report["summary"]["outcome_ledger"].get("invalid_rows", 0), 1)
+                self.assertEqual(report["summary"]["exactly_resolved_decisions"], 0)
+                self.assertEqual(report["summary"]["executable_pnl_decisions"], 0)
+                self.assertEqual(report["source_correctness"]["total_routeable_resolved_selected_source_observations"], 0)
+
     def test_source_selection_correctness_counts_edge_skips_but_not_unroutable_candidates(self):
         edge_skipped = replay_input(
             market_id="KXEDGE_SKIP", observed_at="2026-01-03T12:00:00+00:00", raw_hash="2" * 64,

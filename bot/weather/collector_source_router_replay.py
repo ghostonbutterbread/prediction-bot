@@ -809,7 +809,7 @@ def _strict_outcome_index(rows: Iterable[Mapping[str, Any]]) -> tuple[dict[tuple
         identity = _identity(row)
         outcome = str(row.get("official_outcome") or "").upper()
         settled = _parse_datetime(row.get("settlement_ts"))
-        if identity is None or outcome not in {"YES", "NO"} or settled is None or str(row.get("market_status") or "").lower() != "finalized":
+        if identity is None or outcome not in {"YES", "NO"} or settled is None or str(row.get("market_status") or "").lower() != "finalized" or source_history_outcomes_conflict(row):
             stats["invalid_rows"] += 1
             continue
         if identity in index:
