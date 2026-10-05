@@ -434,6 +434,32 @@ class CollectorSourceRouterReplayTests(unittest.TestCase):
                 self.assertIsNone(candidates[0]["selected_source_id"])
                 self.assertEqual(stats["selector_history"]["conflicting_authoritative_outcome"], 1)
 
+    def test_later_event_identity_collapses_earlier_unlabeled_market_history(self):
+        record = replay_input(market_id="KXCURRENT-EVENT", observed_at="2026-01-03T12:00:00+00:00",
+                              raw_hash="9" * 64, contract_shape="tail")
+        for earliest_event in (None, "EVENT-OTHER"):
+            with self.subTest(earliest_event=earliest_event):
+                history = []
+                for market, observed, event in (
+                    ("KXOLD-A", "2026-01-01T08:00:00+00:00", earliest_event),
+                    ("KXOLD-A", "2026-01-01T09:00:00+00:00", "EVENT-X"),
+                    ("KXOLD-B", "2026-01-01T10:00:00+00:00", "EVENT-X"),
+                ):
+                    prior = source_history_row(market_id=market, settlement_ts="2026-01-02T00:00:00+00:00")
+                    prior["observed_at"] = observed
+                    prior.pop("yes_price")
+                    prior.pop("no_price")
+                    if event:
+                        prior["event_ticker"] = event
+                    history.append(prior)
+                _, candidates, stats = build_sealed_source_probability_decisions(
+                    [record], [], history_ledger=history, min_sample_count=2,
+                )
+                self.assertIsNone(candidates[0]["selected_source_id"])
+                self.assertEqual(candidates[0]["action"], "SKIP")
+                self.assertEqual(candidates[0]["prior_sample_count"], 1)
+                self.assertEqual(stats["selector_history"]["selector_edges_accepted"], 3)
+
     def test_history_settlement_at_or_after_decision_is_excluded(self):
         record = replay_input(market_id="KXCUTOFF", observed_at="2026-01-03T12:00:00+00:00", raw_hash="8" * 64)
         history = [

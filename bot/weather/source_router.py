@@ -712,30 +712,42 @@ def _collapse_selector_history(
     within an outcome unit, never an observation's correctness or outcome.
     """
 
-    # A contract can carry inconsistent optional event labels across polls.
-    # Collapse it once before grouping different contracts by physical event.
-    markets: dict[str, Mapping[str, Any]] = {}
-    unanchored: list[Mapping[str, Any]] = []
-    for row in rows:
+    history_rows = list(rows)
+    # Link every known event label to its market across valid observations,
+    # including labels recorded after that market's earliest forecast. Then
+    # take the earliest forecast per connected unit, never the best outcome.
+    parent: dict[tuple[str, ...], tuple[str, ...]] = {}
+
+    def root(unit: tuple[str, ...]) -> tuple[str, ...]:
+        parent.setdefault(unit, unit)
+        while parent[unit] != unit:
+            parent[unit] = parent[parent[unit]]
+            unit = parent[unit]
+        return unit
+
+    for row in history_rows:
+        unit, _ = _independent_source_outcome_unit(row, source_id=source_id)
         market = _normalized_identity_text(row.get("market_id"), row.get("market_ticker"), row.get("ticker"))
-        if market is None:
-            unanchored.append(row)
-            continue
-        representative = markets.get(market)
-        if representative is None or _recorded_forecast_sort_key(row) < _recorded_forecast_sort_key(representative):
-            markets[market] = row
+        contract = ("source", source_id, "contract_only", market) if market else unit
+        if unit != contract:
+            parent[root(unit)] = root(contract)
+        else:
+            root(contract)
 
     units: dict[tuple[str, ...], dict[str, Any]] = {}
     stats: Counter[str] = Counter()
-    for row in (*markets.values(), *unanchored):
+    for row in history_rows:
         unit, used_fallback = _independent_source_outcome_unit(row, source_id=source_id)
         if used_fallback:
             stats["history_conservative_identity_fallback_rows"] += 1
-        representative = units.get(unit)
+        market = _normalized_identity_text(row.get("market_id"), row.get("market_ticker"), row.get("ticker"))
+        contract = ("source", source_id, "contract_only", market) if market else unit
+        key = root(contract)
+        representative = units.get(key)
         if representative is None or _recorded_forecast_sort_key(row) < _recorded_forecast_sort_key(representative):
-            units[unit] = dict(row)
+            units[key] = dict(row)
     stats["history_independent_rows_used"] = len(units)
-    stats["history_reobservation_excluded"] = len(rows) - len(units)
+    stats["history_reobservation_excluded"] = len(history_rows) - len(units)
     return list(units.values()), stats
 
 
