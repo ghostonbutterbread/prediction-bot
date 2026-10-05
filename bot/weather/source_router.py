@@ -61,6 +61,26 @@ def source_history_target_proof_rejection_key(row: Mapping[str, Any]) -> str | N
         return "history_rows_rejected_v1_forecast_not_scoreable"
     return "history_rows_rejected_target_unproven"
 
+def source_history_correctness_eligible(row: Mapping[str, Any]) -> bool:
+    """Admit strict settled correctness without relaxing priced edge eligibility."""
+
+    if source_history_target_proof_rejection_key(row) is not None:
+        return False
+    if (row.get("source_implied_side") not in {"YES", "NO"}
+            or row.get("official_outcome") not in {"YES", "NO"}
+            or row.get("win") is not (row["source_implied_side"] == row["official_outcome"])):
+        return False
+    if row.get("eligible_for_edge_validation") is True:
+        return True
+    # The edge evaluator deliberately rejects an unpriced observation. Only
+    # that price-only rejection may be bypassed for directional correctness.
+    return (
+        row.get("exclusion_reason") == "missing_source_side_price"
+        and row.get("source_side_price") is None
+        and row.get("binary_edge_realized") is None
+        and row.get("flat_1usd_pnl") is None
+    )
+
 
 def build_source_router_replay_rows(
     ledger_rows: Iterable[Mapping[str, Any]],
@@ -127,6 +147,13 @@ def build_source_router_replay_rows(
         if key != current_group_key:
             flush_group()
             for pair_ in current_group:
+                ledger_ = pair_["ledger"]
+                if ledger_.get("source_router_history_only") is True:
+                    recorded = _normalized_side(ledger_.get("actual_outcome"))
+                    supplied = _normalized_side(ledger_.get("official_outcome"))
+                    if recorded in {"YES", "NO"} and supplied in {"YES", "NO"} and recorded != supplied:
+                        history_exclusions["history_rows_rejected_conflicting_outcome"] += 1
+                        continue
                 rejection_key = source_history_target_proof_rejection_key(pair_["ledger"])
                 if rejection_key is not None:
                     history_exclusions[rejection_key] += 1
@@ -362,12 +389,16 @@ def select_source_for_candidate(
         if rejection_key is not None:
             history_stats[rejection_key] += 1
             continue
-        if row.get("eligible_for_edge_validation") is not True:
+        if not source_history_correctness_eligible(row):
             continue
         history_stats["history_rows_eligible"] += 1
         settlement_dt = _parse_dt(row.get("settlement_ts"))
         if settlement_dt is None:
             history_stats["history_rows_missing_or_invalid_settlement_ts"] += 1
+            continue
+        observed_dt = _parse_dt(row.get("observed_at"))
+        if observed_dt is None or observed_dt >= settlement_dt:
+            history_stats["history_rows_not_observed_before_settlement"] += 1
             continue
         if cutoff_dt is None or settlement_dt >= cutoff_dt:
             continue
@@ -399,6 +430,8 @@ def select_source_for_candidate(
         "history_rows_rejected_target_unproven": history_stats["history_rows_rejected_target_unproven"],
         "history_rows_rejected_v1_forecast_not_scoreable": history_stats["history_rows_rejected_v1_forecast_not_scoreable"],
         "history_rows_missing_or_invalid_settlement_ts": history_stats["history_rows_missing_or_invalid_settlement_ts"],
+        "history_rows_not_observed_before_settlement": history_stats["history_rows_not_observed_before_settlement"],
+        "history_rows_rejected_conflicting_outcome": history_stats["history_rows_rejected_conflicting_outcome"],
         "history_representative_selection": "newest_recorded_forecast_observation_v1",
     }
     ranked = [_source_stats(source_id, rows) for source_id, rows in independent_candidates.items()]
@@ -653,15 +686,15 @@ def _collapse_selector_history(
 def _independent_source_outcome_unit(row: Mapping[str, Any], *, source_id: str) -> tuple[tuple[str, ...], bool]:
     """Return the conservative source-outcome unit used only for selection.
 
-    A market or event identity anchors a settled unit. Target/date/shape fields
-    prevent accidental collapse where one upstream identity spans variants. If
-    neither market nor event exists, retain each observation independently.
+    A physical event anchors one unit per source and contract shape even when
+    its different market thresholds settle separately. With no event identity,
+    market identity is explicitly contract-only; never infer an event from it.
     """
 
     market_identity = _normalized_identity_text(
         row.get("market_id"), row.get("market_ticker"), row.get("ticker")
     )
-    event_identity = _normalized_identity_text(row.get("event_id"), row.get("event_ticker"))
+    event_identity = _normalized_identity_text(row.get("event_ticker"), row.get("event_id"))
     target = _mapping(row.get("target_identity"))
     target_identity = _normalized_identity_text(
         target.get("source_target"), target.get("target_forecast_date"), target.get("target_date"),
@@ -673,13 +706,14 @@ def _independent_source_outcome_unit(row: Mapping[str, Any], *, source_id: str) 
     ) or "unknown_market_date"
     shape = "|".join(
         _normalized_identity_text(value) or "unknown"
-        for value in (row.get("market_kind"), row.get("contract_shape"), row.get("question_side"), row.get("threshold"))
+        for value in (row.get("market_kind"), row.get("contract_shape"), row.get("question_side"))
     )
-    if market_identity or event_identity:
+    if event_identity:
+        return ("source", source_id, "event", event_identity, "shape", shape), False
+    if market_identity:
         return (
             "source", source_id,
-            "market", market_identity or "no_market_id",
-            "event", event_identity or "no_event_id",
+            "contract_only", market_identity,
             "target", target_identity,
             "market_date", market_date,
             "shape", shape,

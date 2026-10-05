@@ -28,7 +28,8 @@ from bot.weather.source_observation_ledger import source_correctness_target_proo
 from bot.weather.source_history_manifest import load_source_history_manifest
 from bot.weather.source_correctness_cohorts import DEFAULT_PER_SHAPE_TARGET, select_source_correctness_cohort
 from bot.weather.source_router import (
-    BUY_NO, BUY_YES, SKIP, source_history_target_proof_rejection_key, select_source_for_candidate,
+    BUY_NO, BUY_YES, SKIP, source_history_correctness_eligible,
+    source_history_target_proof_rejection_key, select_source_for_candidate,
 )
 
 
@@ -563,6 +564,15 @@ def _source_history_edge_rows(rows: Iterable[Mapping[str, Any]]) -> tuple[list[d
         if outcome not in {"YES", "NO"}:
             stats["missing_authoritative_outcome"] += 1
             continue
+        if (row.get("actual_outcome") is not None and row.get("official_outcome") is not None
+                and str(row["actual_outcome"]).upper() != str(row["official_outcome"]).upper()):
+            stats["conflicting_authoritative_outcome"] += 1
+            continue
+        implied = {str(row.get(key) or "").upper() for key in ("predicted_outcome", "source_implied_outcome", "source_implied_side")
+                   if row.get(key) is not None}
+        if len(implied) > 1:
+            stats["conflicting_source_implied_side"] += 1
+            continue
         historical = dict(row)
         historical["official_outcome"] = outcome
         historical["settlement_ts"] = _timestamp(settlement)
@@ -574,7 +584,7 @@ def _source_history_edge_rows(rows: Iterable[Mapping[str, Any]]) -> tuple[list[d
         # availability time for this selector-only history.
         edge["settlement_ts"] = historical["settlement_ts"]
         edge["outcome_known_at"] = historical["settlement_ts"]
-        if edge.get("eligible_for_edge_validation") is not True:
+        if not source_history_correctness_eligible(edge):
             stats["ineligible_for_selector"] += 1
             continue
         edges.append(edge)

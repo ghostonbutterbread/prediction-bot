@@ -16,6 +16,8 @@ from bot.weather.collector_source_router_replay import (
     run_collector_source_router_replay,
 )
 from bot.weather.source_history_manifest import SourceHistoryManifestError
+from bot.weather.collector_source_router_replay import _source_history_edge_rows
+from bot.weather.source_router import select_source_for_candidate
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -103,6 +105,7 @@ def source_history_row(*, market_id: str, settlement_ts: str, outcome: str = "YE
         "question_side": "above",
         "forecast_temp_f": 82.0,
         "threshold": 80.0,
+        "observed_at": "2026-01-01T12:00:00+00:00",
         "predicted_outcome": "YES",
         "actual_outcome": outcome,
         "yes_price": 0.40,
@@ -318,6 +321,74 @@ class CollectorSourceRouterReplayTests(unittest.TestCase):
         self.assertEqual(with_history["selected_source_id"], "nws")
         self.assertEqual(with_history["prior_sample_count"], 5)
         self.assertEqual(with_history["action"], "BUY_YES")
+
+    def test_unpriced_strict_settled_history_routes_without_creating_edge_or_pnl(self):
+        record = replay_input(market_id="KXUNPRICED", observed_at="2026-01-03T12:00:00+00:00", raw_hash="9" * 64,
+                              contract_shape="tail")
+        history = [source_history_row(market_id=f"HIST-{n}", settlement_ts="2026-01-02T00:00:00+00:00") for n in range(2)]
+        for row in history:
+            row.pop("yes_price")
+            row.pop("no_price")
+            row["source_implied_outcome"] = row.pop("predicted_outcome")
+            row["event_ticker"] = row["market_id"]
+        edges, edge_stats = _source_history_edge_rows(history)
+        self.assertEqual(edge_stats["selector_edges_accepted"], 2)
+        self.assertTrue(all(edge["eligible_for_edge_validation"] is False for edge in edges))
+        self.assertTrue(all(edge["exclusion_reason"] == "missing_source_side_price" for edge in edges))
+        self.assertTrue(all(edge["binary_edge_realized"] is None and edge["flat_1usd_pnl"] is None for edge in edges))
+        selection = select_source_for_candidate(
+            {"city_id": "miami_fl", "market_kind": "high", "contract_shape": "tail", "question_side": "above",
+             "observed_at": record["observed_at"]}, edges, min_sample_count=2,
+        )
+        self.assertTrue(selection["routeable"])
+        self.assertEqual(selection["prior_sample_count"], 2)
+        self.assertIsNone(selection["prior_avg_binary_edge_realized"])
+        _, candidates, stats = build_sealed_source_probability_decisions(
+            [record], [], history_ledger=history, min_sample_count=2,
+        )
+        self.assertEqual(stats["selector_history"]["selector_edges_accepted"], 2)
+        self.assertEqual(candidates[0]["selected_source_id"], "nws")
+        self.assertEqual(candidates[0]["action"], "BUY_YES")
+        self.assertEqual(candidates[0]["entry_price"], 0.4)  # current market's ask, never historical price
+
+        no_ask = replay_input(market_id="KXNOASK", observed_at=record["observed_at"], raw_hash="a" * 64,
+                              contract_shape="tail")
+        no_ask["market"].pop("best_yes_ask")
+        _, candidates, _ = build_sealed_source_probability_decisions(
+            [no_ask], [], history_ledger=history, min_sample_count=2,
+        )
+        self.assertEqual(candidates[0]["selected_source_id"], "nws")
+        self.assertEqual(candidates[0]["action"], "SKIP")
+        self.assertIsNone(candidates[0]["entry_price"])
+        self.assertEqual(candidates[0]["skip_reason"], "missing_decision_price")
+
+    def test_unpriced_history_rejects_missing_proof_conflicts_and_nonprior_settlements(self):
+        record = replay_input(market_id="KXSAFETY", observed_at="2026-01-03T12:00:00+00:00", raw_hash="9" * 64,
+                              contract_shape="tail")
+        valid = source_history_row(market_id="HIST-VALID", settlement_ts="2026-01-02T00:00:00+00:00")
+        invalid = []
+        for n, mutation in enumerate((
+            {"source_provenance": {}},
+            {"strict_source_proof": {"status": "ineligible", "reasons": ["missing_source_as_of"]}},
+            {"eligible_for_source_history": False},
+            {"official_outcome": "NO"},  # conflicts with actual_outcome
+            {"predicted_outcome": "NO", "source_implied_outcome": "YES"},
+            {"settlement_ts": record["observed_at"]},
+            {"settlement_ts": "2026-01-04T00:00:00+00:00"},
+        )):
+            row = {**valid, "market_id": f"HIST-INVALID-{n}", "event_ticker": f"EVENT-{n}", **mutation}
+            row.pop("yes_price")
+            row.pop("no_price")
+            invalid.append(row)
+        valid.pop("yes_price")
+        valid.pop("no_price")
+        valid["event_ticker"] = "EVENT-VALID"
+        _, candidates, stats = build_sealed_source_probability_decisions(
+            [record], [], history_ledger=[valid, *invalid], min_sample_count=2,
+        )
+        self.assertEqual(candidates[0]["action"], "SKIP")
+        self.assertEqual(candidates[0]["prior_sample_count"], 1)
+        self.assertEqual(stats["selector_history"]["selector_edges_accepted"], 3)
 
     def test_history_settlement_at_or_after_decision_is_excluded(self):
         record = replay_input(market_id="KXCUTOFF", observed_at="2026-01-03T12:00:00+00:00", raw_hash="8" * 64)
