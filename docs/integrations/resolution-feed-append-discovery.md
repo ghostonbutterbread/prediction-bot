@@ -1,13 +1,13 @@
 # Resolution feed append discovery integration dossier
 
-- Status: review-ready; independent review corrections implemented
+- Status: accepted independent release review; owner main / beta integration underway
 - Owner: collector_incremental_fix; fresh release gate owns independent review/integration
 - Branch / owning feature ref: fix/resolution-feed-append-discovery
 - Base commit: 4ca50c30c39707fd13e4b657d6299667cd761580 (Ghost local main)
 - Intended integration targets: Ghost local main, then deployed beta
 - Beta base: 14982f8 (descends from main base; retains bounded polling rotation fixes)
 - Last updated: 2026-10-08
-- Latest immutable recovery checkpoint: 45ac095; initial implementation: 7221f66; current tip also contains review corrections
+- Latest immutable reviewed recovery checkpoint: 7e4bcbd; initial implementation: 7221f66; ongoing compact cursor: 45ac095
 
 ## Intent and implemented contract
 
@@ -48,3 +48,10 @@ All implementation and focused receipts are in the branch checkpoints. Local .ve
 - 2026-10-08: created emergency defect patch from lowest owning local main; targeted beta activation only authorized by root/user.
 - 2026-10-08: retained compact cursor for ongoing commits to avoid raw append bandwidth exceeding the routine raw budget; synthetic steady-state regression passed. Recovery checkpoint 7221f66 contains initial implementation; later tip owns this adjustment.
 - 2026-10-08: applied independent release-gate corrections with three new regression cases (including three missing/rotation/truncation subcases). Runtime config/service remains untouched.
+
+## Accepted release review
+
+- 2026-10-08: resolution_feed_release_gate independently reviewed the complete main-base diff and correction commit 7e4bcbd. Accepted after resolving three reproduced cursor defects. Scoped paths and portable configured/sibling index discovery verified. Atomic checkpoint keeps IDs and offsets together; unresolved authority remains network-based.
+- Independent final full suite on Python 3.13.12: `PYTHONPATH=. .venv/bin/python -m unittest discover -s tests`: 1061 tests, 8 skipped, passed in 13.384s. `git diff --check 4ca50c3..HEAD`: passed; feature tree clean. Earlier focused check: 26 tests, 6 skipped, passed before correction; final suite includes all 17 discovery tests.
+- Ghost fetched origin again: main 256 ahead / 185 behind origin/main; beta 134 ahead / 0 behind origin/beta. Lowest owner main is ancestor of selected beta. Integrate feature into local main, retire this temporary dossier immediately, merge corrected main into beta preserving downstream cap and rotation, run focused/full integrated checks, push beta only and read back remote SHA.
+- Deferred evidence remains root-owned activation: verify actual beta runtime import and first bounded refresh against existing compact metadata before any restart. Release gate performs no restart or Hermes database operation. Historical experiment descendants and origin/main reconciliation remain outside emergency scope.
