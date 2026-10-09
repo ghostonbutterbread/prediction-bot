@@ -412,10 +412,12 @@ def write_incremental_market_refs(
             identity = {"device": stat.st_dev, "inode": stat.st_ino}
             previous = sources.get(str(source), {})
             seed = previous.get("seed_index")
-            coverage = seed["prefix_bytes"] if seed else int(previous.get("offset", 0))
-            if previous.get("identity") != identity or stat.st_size < coverage:
+            coverage = max(int(previous.get("offset", 0)), seed["prefix_bytes"] if seed else 0)
+            truncated = stat.st_size < coverage
+            if previous.get("identity") != identity or truncated:
                 previous = {"identity": identity, "offset": 0}
-                seed = _discovery_index_seed(source, stat, index_manifest_paths or [])
+                # A same-inode truncation invalidates its old compact prefix.
+                seed = None if truncated else _discovery_index_seed(source, stat, index_manifest_paths or [])
                 if seed:
                     previous["seed_index"] = seed
             if seed:
@@ -436,10 +438,13 @@ def write_incremental_market_refs(
                         seed = None
             if seed:
                 index_path = Path(seed["path"])
-                index_stat = index_path.stat()
-                if ((index_stat.st_dev, index_stat.st_ino) != (seed["device"], seed["inode"])
+                index_stat = index_path.stat() if index_path.is_file() else None
+                if (index_stat is None
+                        or (index_stat.st_dev, index_stat.st_ino) != (seed["device"], seed["inode"])
                         or index_stat.st_size < seed["extent"]):
-                    raise ValueError("market discovery bootstrap index rotated or truncated")
+                    del previous["seed_index"]
+                    seed = None
+            if seed:
                 seed["offset"], read = _read_discovery_suffix(
                     index_path, offset=seed["offset"], extent=seed["extent"], budget=index_budget,
                     market_ids=market_ids, index=True,
@@ -449,9 +454,9 @@ def write_incremental_market_refs(
                 remaining_index += seed["extent"] - seed["offset"]
                 if seed["offset"] == seed["extent"]:
                     previous["offset"] = max(previous["offset"], seed["prefix_bytes"])
-                elif previous["offset"] == 0:
+                else:
                     sources[str(source)] = previous
-                    remaining_raw += stat.st_size
+                    remaining_raw += stat.st_size - previous["offset"]
                     continue
             previous["offset"], read = _read_discovery_suffix(
                 input_path, offset=previous["offset"], extent=stat.st_size, budget=raw_budget, market_ids=market_ids,

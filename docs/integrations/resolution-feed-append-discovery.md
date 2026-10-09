@@ -1,13 +1,13 @@
 # Resolution feed append discovery integration dossier
 
-- Status: review-ready (focused checks); full-suite environment preparation underway
+- Status: review-ready; independent review corrections implemented
 - Owner: collector_incremental_fix; fresh release gate owns independent review/integration
 - Branch / owning feature ref: fix/resolution-feed-append-discovery
 - Base commit: 4ca50c30c39707fd13e4b657d6299667cd761580 (Ghost local main)
 - Intended integration targets: Ghost local main, then deployed beta
 - Beta base: 14982f8 (descends from main base; retains bounded polling rotation fixes)
 - Last updated: 2026-10-08
-- Latest immutable recovery checkpoint / implementation commit: first commit containing this dossier (resolve from branch history)
+- Latest immutable recovery checkpoint: 45ac095; initial implementation: 7221f66; current tip also contains review corrections
 
 ## Intent and implemented contract
 
@@ -22,11 +22,12 @@ After bootstrap, the compact cursor follows newly committed index suffixes on ev
 ## Evidence and review
 
 - Initial red: discovery test module failed to import the absent incremental helper before implementation.
-- Green: `PYTHONPATH=. python3 -m unittest discover -s tests -p test_resolution_feed_discovery.py`: 14 passed. Fixtures cover unchanged/restart no raw open, appended suffix only, bounded reads, partial lines, rotation/truncation, separate sources, compact committed bootstrap, migration progress, skipped-index-row fallback, atomic publication failure recovery, actual runtime retries/resolved filtering, custom index root configuration, ongoing compact index appends without raw reads, and fallback when later index coverage omits rows.
+- Green: `PYTHONPATH=. .venv/bin/python -m unittest discover -s tests -p test_resolution_feed_discovery.py`: 17 passed. Fixtures cover unchanged/restart no raw open, appended suffix only, bounded reads, partial lines, rotation/truncation, separate sources, compact committed bootstrap, migration progress, skipped-index-row fallback, atomic publication failure recovery, actual runtime retries/resolved filtering, custom index root configuration, ongoing compact index appends without raw reads, fallback when later index coverage omits rows, raw-tail truncation beyond old index prefix, interruption followed by index deletion/rotation/truncation, and no raw read during capped ongoing index discovery.
 - `PYTHONPATH=. python3 -m unittest discover -s tests -p test_resolution_feed.py`: 12 run, 6 skipped, passed on owning main.
 - `git diff --check`, compilation: passed.
 - Initial full suite with system Python 3.12: 989 tests, 5 environment errors (missing kalshi_python_sync requiring Python >=3.13; absent ignored data/summaries directory), 8 skipped. This is not a release receipt.
-- Independent review: pending fresh release-gate agent. Re-run full suite in a provisioned Python >=3.13 environment and beta fairness tests after propagation.
+- Python 3.13 provisioned through setup.sh: 1058 tests initially had 15 unrelated import errors because requirements.txt omits rich, used by bot/dashboard.py. Installed rich only in local test environment; no dependency/product change made. Full suite then passed: 1061 tests, 8 skipped, 13.972s (before final same-inode truncation safeguard; final focused 17 tests passed afterward). Fresh reviewer reruns final full tree independently.
+- Independent review: fresh resolution_feed_release_gate reproduced three scoped defects and requested corrections. Implemented all with red/green regressions: include raw-tail offset when checking truncation, fall back safely after missing/rotated/truncated compact seed, defer raw scanning whenever compact discovery is pending. Same-inode truncation also avoids reusing its stale compact prefix.
 - Main/beta ownership: `git merge-base main beta` equals base main SHA. Remote fetch on Ghost succeeded before implementation.
 
 ## Boundaries and remaining gates
@@ -40,9 +41,10 @@ After bootstrap, the compact cursor follows newly committed index suffixes on ev
 
 ## Resume handoff
 
-All implementation and focused receipts are in the branch checkpoint. Prepare Python 3.13 via uv locally, provision from requirements.txt via setup.sh, create ignored data/summaries expected by unrelated existing tests, then rerun full checks. Delegate fresh release gate with exact local worktree and Ghost integration paths. Record accepted review on feature branch before retiring this dossier from integration targets.
+All implementation and focused receipts are in the branch checkpoints. Local .venv is Python 3.13.12, provisioned from requirements.txt via setup.sh with rich added only for testing and ignored data/summaries created for existing tests. Fresh gate must independently rerun final full tree, preserve beta fairness on propagation, record accepted review on feature branch, then retire this dossier from integrated targets.
 
 ## Decision record
 
 - 2026-10-08: created emergency defect patch from lowest owning local main; targeted beta activation only authorized by root/user.
 - 2026-10-08: retained compact cursor for ongoing commits to avoid raw append bandwidth exceeding the routine raw budget; synthetic steady-state regression passed. Recovery checkpoint 7221f66 contains initial implementation; later tip owns this adjustment.
+- 2026-10-08: applied independent release-gate corrections with three new regression cases (including three missing/rotation/truncation subcases). Runtime config/service remains untouched.

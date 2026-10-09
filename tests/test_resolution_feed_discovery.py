@@ -225,6 +225,50 @@ class ResolutionFeedDiscoveryTests(unittest.TestCase):
         self.make_index(["A"], invalid_rows=1)
         self.assertEqual(self.discover(index_manifest_paths=[manifest]), ["A", "OMITTED"])
 
+    def test_truncation_checks_raw_tail_coverage_beyond_index_prefix(self):
+        self.write(self.raw, ["A"])
+        _, manifest = self.make_index(["A"])
+        self.discover(index_manifest_paths=[manifest])
+        with self.raw.open("a") as handle:
+            for mid in ["LONG_UNINDEXED", "LONGER_UNINDEXED"]:
+                handle.write(json.dumps({"market_id": mid}) + "\n")
+        self.discover(index_manifest_paths=[manifest])
+        self.write(self.raw, ["X", "NEW"])
+        discovered = self.discover(index_manifest_paths=[manifest])
+        self.assertIn("NEW", discovered)
+        self.assertIn("X", discovered)
+        self.assertGreaterEqual(self.checkpoint()["progress"]["remaining_raw_bytes"], 0)
+
+    def test_interrupted_seed_index_missing_rotated_or_truncated_falls_back(self):
+        for mutation in ["missing", "rotated", "truncated"]:
+            with self.subTest(mutation=mutation):
+                self.output = self.root / mutation
+                self.write(self.raw, ["A", "B"])
+                index, manifest = self.make_index(["A", "B"])
+                line_bytes = len(index.read_bytes().splitlines(keepends=True)[0])
+                self.assertEqual(self.discover(index_manifest_paths=[manifest], max_index_bootstrap_bytes=line_bytes), ["A"])
+                if mutation == "missing":
+                    index.unlink()
+                elif mutation == "rotated":
+                    index.rename(self.root / "old-index.jsonl")
+                    self.write(index, ["UNRELATED"])
+                else:
+                    index.write_bytes(b"")
+                self.assertEqual(self.discover(index_manifest_paths=[manifest]), ["A", "B"])
+
+    def test_capped_ongoing_index_commit_defers_raw_prefix(self):
+        self.write(self.raw, ["A"])
+        _, manifest = self.make_index(["A"])
+        self.discover(index_manifest_paths=[manifest])
+        with self.raw.open("a") as handle:
+            for mid in ["B", "C"]:
+                handle.write(json.dumps({"market_id": mid}) + "\n")
+        index, _ = self.make_index(["A", "B", "C"])
+        line_bytes = len(index.read_bytes().splitlines(keepends=True)[0])
+        with self.forbid_raw():
+            self.assertEqual(self.discover(index_manifest_paths=[manifest], max_index_bootstrap_bytes=line_bytes), ["A", "B"])
+            self.assertEqual(self.discover(index_manifest_paths=[manifest], max_index_bootstrap_bytes=line_bytes), ["A", "B", "C"])
+
 
 if __name__ == "__main__":
     unittest.main()
