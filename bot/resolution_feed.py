@@ -8,17 +8,20 @@ wallets, decision ledgers, or accounting state.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from glob import glob
 from pathlib import Path
 from typing import Any, Mapping
 
-from bot.file_ops import atomic_write_json
+from bot.file_ops import atomic_write_json, locked_file, rewrite_jsonl
 from bot.scoreboard_resolution_backfill import MarketFetcher, backfill_scoreboard_resolutions
 
 DEFAULT_OUTPUT_DIR = "data/beta_shadow/resolution_feed"
 DEFAULT_INTERVAL_SECONDS = 1800
+DEFAULT_MAX_DISCOVERY_BYTES = 32 * 1024 * 1024
+DEFAULT_MAX_INDEX_BOOTSTRAP_BYTES = 512 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +115,9 @@ def run_resolution_feed_once(
         existing_latest_path=central_latest_resolution,
         mode=str(feed_cfg["mode"]),
         max_incremental_markets=feed_cfg["max_incremental_markets"],
+        max_discovery_bytes=int(feed_cfg["max_discovery_bytes"]),
+        max_index_bootstrap_bytes=int(feed_cfg["max_index_bootstrap_bytes"]),
+        index_manifest_paths=[Path(path) for path in feed_cfg["market_ref_index_manifest_paths"]],
     )
     stamp = now_dt.strftime("%Y%m%dT%H%M%SZ")
     output_path = output_dir / f"resolutions_{stamp}.jsonl"
@@ -140,6 +146,7 @@ def run_resolution_feed_once(
         "schema_version": 1,
         "status": "refreshed",
         "mode": feed_cfg["mode"],
+        "discovery": _load_state(output_dir / "resolution_market_refs.discovery.json").get("progress", {}),
         "last_refresh_at": _iso(now_dt),
         "decision_ledger_path": str(existing_market_ref_paths[0]) if existing_market_ref_paths else "",
         "decision_ledger_paths": [str(path) for path in existing_market_ref_paths],
@@ -188,6 +195,12 @@ def normalize_resolution_feed_config(config: Mapping[str, Any]) -> dict[str, Any
     market_ref_paths = [str(path) for path in configured_market_refs if path not in (None, "")] or decision_ledger_paths
     output_dir = raw.get("output_dir") or DEFAULT_OUTPUT_DIR
     central_output_dir = raw.get("central_output_dir") or raw.get("canonical_output_dir") or output_dir
+    index_cfg = lab.get("replay_index") if isinstance(lab.get("replay_index"), Mapping) else {}
+    index_manifests = [
+        str((Path(str(index_cfg["root_dir"])) if index_cfg.get("root_dir") else Path(path).parent / "replay_index")
+            / "collector_replay_index.manifest.json")
+        for path in market_ref_paths
+    ]
     return {
         "enabled": bool(raw.get("enabled", False)),
         "decision_ledger_path": str(decision_ledger_paths[0]) if decision_ledger_paths else "",
@@ -202,6 +215,9 @@ def normalize_resolution_feed_config(config: Mapping[str, Any]) -> dict[str, Any
         "retry_delay_seconds": max(0.0, float(raw.get("retry_delay_seconds", 3.0) or 0.0)),
         "max_markets": _optional_int(raw.get("max_markets")),
         "max_incremental_markets": _optional_int(raw.get("max_incremental_markets")),
+        "max_discovery_bytes": max(1, int(raw.get("max_discovery_bytes", DEFAULT_MAX_DISCOVERY_BYTES))),
+        "max_index_bootstrap_bytes": max(1, int(raw.get("max_index_bootstrap_bytes", DEFAULT_MAX_INDEX_BOOTSTRAP_BYTES))),
+        "market_ref_index_manifest_paths": list(dict.fromkeys(index_manifests)),
     }
 
 
@@ -304,6 +320,141 @@ def row_market_id(row: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _read_discovery_suffix(
+    path: Path, *, offset: int, extent: int, budget: int, market_ids: set[str], index: bool = False,
+) -> tuple[int, int]:
+    """Read at most budget bytes, committing only newline-terminated records."""
+    consumed = 0
+    if offset >= extent or budget <= 0:
+        return offset, consumed
+    with path.open("rb") as handle:
+        handle.seek(offset)
+        while handle.tell() < extent and consumed < budget:
+            payload = handle.readline(min(extent - handle.tell(), budget - consumed))
+            consumed += len(payload)
+            if not payload or not payload.endswith(b"\n"):
+                if len(payload) == budget and offset == handle.tell() - len(payload):
+                    raise ValueError(f"market discovery row exceeds byte budget: {path}")
+                break
+            offset = handle.tell()
+            try:
+                row = json.loads(payload)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                if index:
+                    raise ValueError(f"invalid committed market discovery index row: {path}")
+                continue
+            if index and (not isinstance(row, Mapping) or row.get("schema_name") != "collector_replay_index"
+                          or row.get("schema_version") != 1):
+                raise ValueError(f"invalid committed market discovery index row: {path}")
+            market_id = row_market_id(row) if isinstance(row, Mapping) else None
+            if market_id:
+                market_ids.add(market_id)
+    return offset, consumed
+
+
+def _discovery_index_seed(source: Path, stat: os.stat_result, manifests: list[Path]) -> dict[str, Any] | None:
+    """Use only a collector checkpoint covering every raw row in its prefix.
+
+    Compact rows discover IDs, never provide settlement authority. A replay
+    index with skipped rows cannot replace raw discovery, even if its checksum
+    is valid: those rows may still carry market IDs.
+    """
+    for manifest_path in manifests:
+        manifest = _load_state(manifest_path)
+        if (manifest.get("schema_name") != "collector_replay_index_manifest"
+                or manifest.get("schema_version") != 2
+                or manifest.get("index_schema_name") != "collector_replay_index"
+                or manifest.get("index_schema_version") != 1
+                or manifest.get("invalid_rows") != 0
+                or manifest.get("source_path") != str(source)
+                or manifest.get("archive_identity") != {"device": stat.st_dev, "inode": stat.st_ino}):
+            continue
+        extent = manifest.get("committed_index_bytes")
+        prefix = manifest.get("indexed_source_bytes")
+        index_path = Path(str(manifest.get("index_path") or ""))
+        if (type(extent) is not int or extent < 0 or type(prefix) is not int or not 0 <= prefix <= stat.st_size
+                or not index_path.is_file() or index_path.stat().st_size < extent):
+            continue
+        index_stat = index_path.stat()
+        return {
+            "path": str(index_path), "device": index_stat.st_dev, "inode": index_stat.st_ino,
+            "extent": extent, "prefix_bytes": prefix, "offset": 0,
+        }
+    return None
+
+
+def write_incremental_market_refs(
+    input_paths: list[Path], *, output_dir: Path,
+    max_read_bytes: int = DEFAULT_MAX_DISCOVERY_BYTES,
+    max_index_bootstrap_bytes: int = DEFAULT_MAX_INDEX_BOOTSTRAP_BYTES,
+    index_manifest_paths: list[Path] | None = None,
+) -> Path:
+    """Persist market discovery separately from bounded unresolved polling.
+
+    The atomic document owns both IDs and complete-line source offsets, so a
+    failed publication cannot advance past an ID that was not saved. Historical
+    IDs remain eligible for unresolved retries when a source rotates/disappears.
+    """
+    checkpoint_path = output_dir / "resolution_market_refs.discovery.json"
+    refs_path = output_dir / "resolution_market_refs.jsonl"
+    with locked_file(output_dir / "resolution_market_refs.discovery.lock", "a+"):
+        checkpoint = _load_state(checkpoint_path)
+        market_ids = set(checkpoint.get("market_ids", []))
+        if not checkpoint:
+            # Keep the existing compact queue available during bounded migration.
+            market_ids.update(mid for row in _load_resolution_rows(refs_path) if (mid := row_market_id(row)))
+        sources = checkpoint.get("sources", {})
+        raw_budget, index_budget = max_read_bytes, max_index_bootstrap_bytes
+        raw_read = index_read = remaining_raw = remaining_index = 0
+        for input_path in dict.fromkeys(input_paths):
+            source = input_path.resolve()
+            stat = source.stat()
+            identity = {"device": stat.st_dev, "inode": stat.st_ino}
+            previous = sources.get(str(source), {})
+            seed = previous.get("seed_index")
+            coverage = seed["prefix_bytes"] if seed else int(previous.get("offset", 0))
+            if previous.get("identity") != identity or stat.st_size < coverage:
+                previous = {"identity": identity, "offset": 0}
+                seed = _discovery_index_seed(source, stat, index_manifest_paths or [])
+                if seed:
+                    previous["seed_index"] = seed
+            if seed:
+                index_path = Path(seed["path"])
+                index_stat = index_path.stat()
+                if ((index_stat.st_dev, index_stat.st_ino) != (seed["device"], seed["inode"])
+                        or index_stat.st_size < seed["extent"]):
+                    raise ValueError("market discovery bootstrap index rotated or truncated")
+                seed["offset"], read = _read_discovery_suffix(
+                    index_path, offset=seed["offset"], extent=seed["extent"], budget=index_budget,
+                    market_ids=market_ids, index=True,
+                )
+                index_budget -= read
+                index_read += read
+                remaining_index += seed["extent"] - seed["offset"]
+                if seed["offset"] == seed["extent"]:
+                    previous["offset"] = seed["prefix_bytes"]
+                    del previous["seed_index"]
+                else:
+                    sources[str(source)] = previous
+                    remaining_raw += stat.st_size
+                    continue
+            previous["offset"], read = _read_discovery_suffix(
+                input_path, offset=previous["offset"], extent=stat.st_size, budget=raw_budget, market_ids=market_ids,
+            )
+            raw_budget -= read
+            raw_read += read
+            remaining_raw += stat.st_size - previous["offset"]
+            sources[str(source)] = previous
+        atomic_write_json(checkpoint_path, {
+            "schema_name": "resolution_market_discovery", "schema_version": 1,
+            "market_ids": sorted(market_ids), "sources": sources,
+            "progress": {"raw_bytes_read": raw_read, "index_bytes_read": index_read,
+                         "remaining_raw_bytes": remaining_raw, "remaining_index_bootstrap_bytes": remaining_index},
+        })
+        rewrite_jsonl(refs_path, ({"market_id": mid} for mid in sorted(market_ids)))
+    return refs_path
+
+
 def _market_ref_path_for_refresh(
     decision_ledger_paths: list[Path],
     *,
@@ -311,11 +462,17 @@ def _market_ref_path_for_refresh(
     existing_latest_path: Path,
     mode: str,
     max_incremental_markets: int | None,
+    max_discovery_bytes: int = DEFAULT_MAX_DISCOVERY_BYTES,
+    max_index_bootstrap_bytes: int = DEFAULT_MAX_INDEX_BOOTSTRAP_BYTES,
+    index_manifest_paths: list[Path] | None = None,
 ) -> Path:
     if mode != "incremental_unresolved":
         return write_unique_market_refs(decision_ledger_paths, output_dir=output_dir)
 
-    all_refs_path = write_unique_market_refs(decision_ledger_paths, output_dir=output_dir)
+    all_refs_path = write_incremental_market_refs(
+        decision_ledger_paths, output_dir=output_dir, max_read_bytes=max_discovery_bytes,
+        max_index_bootstrap_bytes=max_index_bootstrap_bytes, index_manifest_paths=index_manifest_paths,
+    )
     resolved_market_ids = {
         market_id
         for row in _load_resolution_rows(existing_latest_path)
