@@ -17,12 +17,12 @@ Discovery persists IDs and per-source complete-line offsets in one atomic JSON d
 
 Bootstrap may use the collector's schema-v2 compact index only with matching source/device/inode and zero skipped rows. It reads only the committed index prefix, sharing a separate 512 MiB default budget (`resolution_feed.max_index_bootstrap_bytes`), enough for the observed 449,314,688-byte index. Index discovery persists progress if capped, keeps existing compact queue IDs eligible, and never claims raw-prefix coverage until the seed is complete. A collector's configured `prediction_lab.replay_index.root_dir` selects its manifest; otherwise the normal sibling replay_index directory is checked. Compact rows discover IDs only; authoritative network responses continue to own settlement.
 
-State.json includes discovery byte counts and remaining raw/index backlog. Persisted resolver cadence is unchanged; discovery only runs when the existing refresh gate allows it. Full mode retains its historical full-scan behavior.
+After bootstrap, the compact cursor follows newly committed index suffixes on every refresh. Only after consuming each committed compact prefix may raw coverage advance to its indexed-source extent. This keeps normal discovery proportional to compact metadata rather than raw append bandwidth; any unindexed raw tail remains subject to its separate budget. If the index later skips rows or becomes unavailable, discovery resumes from its saved raw coverage. State.json includes discovery byte counts and remaining raw/index backlog. Persisted resolver cadence is unchanged; discovery only runs when the existing refresh gate allows it. Full mode retains its historical full-scan behavior.
 
 ## Evidence and review
 
 - Initial red: discovery test module failed to import the absent incremental helper before implementation.
-- Green: `PYTHONPATH=. python3 -m unittest discover -s tests -p test_resolution_feed_discovery.py`: 12 passed. Fixtures cover unchanged/restart no raw open, appended suffix only, bounded reads, partial lines, rotation/truncation, separate sources, compact committed bootstrap, migration progress, skipped-index-row fallback, atomic publication failure recovery, actual runtime retries/resolved filtering, and custom index root configuration.
+- Green: `PYTHONPATH=. python3 -m unittest discover -s tests -p test_resolution_feed_discovery.py`: 14 passed. Fixtures cover unchanged/restart no raw open, appended suffix only, bounded reads, partial lines, rotation/truncation, separate sources, compact committed bootstrap, migration progress, skipped-index-row fallback, atomic publication failure recovery, actual runtime retries/resolved filtering, custom index root configuration, ongoing compact index appends without raw reads, and fallback when later index coverage omits rows.
 - `PYTHONPATH=. python3 -m unittest discover -s tests -p test_resolution_feed.py`: 12 run, 6 skipped, passed on owning main.
 - `git diff --check`, compilation: passed.
 - Initial full suite with system Python 3.12: 989 tests, 5 environment errors (missing kalshi_python_sync requiring Python >=3.13; absent ignored data/summaries directory), 8 skipped. This is not a release receipt.
@@ -45,3 +45,4 @@ All implementation and focused receipts are in the branch checkpoint. Prepare Py
 ## Decision record
 
 - 2026-10-08: created emergency defect patch from lowest owning local main; targeted beta activation only authorized by root/user.
+- 2026-10-08: retained compact cursor for ongoing commits to avoid raw append bandwidth exceeding the routine raw budget; synthetic steady-state regression passed. Recovery checkpoint 7221f66 contains initial implementation; later tip owns this adjustment.

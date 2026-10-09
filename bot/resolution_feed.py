@@ -419,6 +419,22 @@ def write_incremental_market_refs(
                 if seed:
                     previous["seed_index"] = seed
             if seed:
+                if seed["offset"] == seed["extent"]:
+                    # Keep following the collector's compact append stream.
+                    # Routine discovery should scale with index rows rather
+                    # than the much larger raw payloads they describe.
+                    current = _discovery_index_seed(source, stat, index_manifest_paths or [])
+                    if (current and current["path"] == seed["path"]
+                            and (current["device"], current["inode"]) == (seed["device"], seed["inode"])
+                            and current["extent"] >= seed["extent"]
+                            and current["prefix_bytes"] >= seed["prefix_bytes"]):
+                        seed.update(extent=current["extent"], prefix_bytes=current["prefix_bytes"])
+                    else:
+                        # An unavailable/incomplete replacement index cannot
+                        # cover new raw rows. Resume from saved raw coverage.
+                        del previous["seed_index"]
+                        seed = None
+            if seed:
                 index_path = Path(seed["path"])
                 index_stat = index_path.stat()
                 if ((index_stat.st_dev, index_stat.st_ino) != (seed["device"], seed["inode"])
@@ -432,9 +448,8 @@ def write_incremental_market_refs(
                 index_read += read
                 remaining_index += seed["extent"] - seed["offset"]
                 if seed["offset"] == seed["extent"]:
-                    previous["offset"] = seed["prefix_bytes"]
-                    del previous["seed_index"]
-                else:
+                    previous["offset"] = max(previous["offset"], seed["prefix_bytes"])
+                elif previous["offset"] == 0:
                     sources[str(source)] = previous
                     remaining_raw += stat.st_size
                     continue

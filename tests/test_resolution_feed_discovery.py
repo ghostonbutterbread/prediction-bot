@@ -202,6 +202,29 @@ class ResolutionFeedDiscoveryTests(unittest.TestCase):
         self.write(self.raw, ["NEW"])
         self.assertEqual(self.discover(index_manifest_paths=[manifest]), ["NEW"])
 
+    def test_ongoing_committed_index_appends_avoid_raw_payload_reads(self):
+        self.write(self.raw, ["A"])
+        _, manifest = self.make_index(["A"])
+        self.discover(index_manifest_paths=[manifest])
+        with self.raw.open("a") as handle:
+            handle.write(json.dumps({"market_id": "B"}) + "\n")
+        self.make_index(["A", "B"])
+        with self.forbid_raw():
+            self.assertEqual(self.discover(index_manifest_paths=[manifest]), ["A", "B"])
+            self.assertEqual(self.discover(index_manifest_paths=[manifest]), ["A", "B"])
+        state = self.checkpoint()
+        self.assertEqual(state["progress"]["raw_bytes_read"], 0)
+        self.assertEqual(state["progress"]["index_bytes_read"], 0)
+
+    def test_index_later_skips_rows_falls_back_to_saved_raw_offset(self):
+        self.write(self.raw, ["A"])
+        _, manifest = self.make_index(["A"])
+        self.discover(index_manifest_paths=[manifest])
+        with self.raw.open("a") as handle:
+            handle.write(json.dumps({"market_id": "OMITTED"}) + "\n")
+        self.make_index(["A"], invalid_rows=1)
+        self.assertEqual(self.discover(index_manifest_paths=[manifest]), ["A", "OMITTED"])
+
 
 if __name__ == "__main__":
     unittest.main()
