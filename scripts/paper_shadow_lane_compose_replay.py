@@ -454,22 +454,34 @@ def validate_saved_combination(config: Mapping[str, Any]) -> dict[str, Any]:
     unknown = set(raw) - allowed
     if unknown:
         raise ValueError(f"unknown combination key: {sorted(unknown)[0]}")
+    if "fallback_to_base" in raw and not isinstance(raw["fallback_to_base"], bool):
+        raise ValueError("combination fallback_to_base must be a boolean")
+    if raw.get("fixed_notional_usd") is not None:
+        value = raw["fixed_notional_usd"]
+        try:
+            fixed = float(value) if not isinstance(value, bool) else float("nan")
+        except (TypeError, ValueError, OverflowError):
+            fixed = float("nan")
+        if not math.isfinite(fixed) or fixed <= 0:
+            raise ValueError("combination fixed_notional_usd must be a positive finite number")
     for kind, keys in (("vetoes", {"lane", "mode", "required"}),
                        ("gates", {"name", "field", "op", "value"})):
-        entries = raw.get(kind) or []
+        entries = raw.get(kind, [])
         if not isinstance(entries, list):
             raise ValueError(f"combination {kind} must be a list")
         for entry in entries:
             if not isinstance(entry, Mapping) or set(entry) - keys:
                 raise ValueError(f"unknown combination key in {kind}")
-    for veto in raw.get("vetoes") or []:
+    for veto in raw.get("vetoes", []):
+        if "required" in veto and not isinstance(veto["required"], bool):
+            raise ValueError("combination veto required must be a boolean")
         if not veto.get("lane") or veto.get("mode", "skip_on_conflict") not in {
             "skip_on_conflict", "require_not_skip", "require_buy", "require_agreement"
         }:
             raise ValueError("unknown combination veto lane or mode")
     gate_fields = _gate_context(base_row={}, action_row={}, sizing_row={}, price_row={},
                                 future_inputs={}, action="SKIP", side=None).keys()
-    for gate in raw.get("gates") or []:
+    for gate in raw.get("gates", []):
         if gate.get("field") not in gate_fields:
             raise ValueError(f"unknown composition gate field: {gate.get('field')}")
         if gate.get("op", "eq") not in {
@@ -477,7 +489,7 @@ def validate_saved_combination(config: Mapping[str, Any]) -> dict[str, Any]:
             "lte", "<=", "lt", "<", "truthy", "falsey"
         }:
             raise ValueError(f"unknown composition gate op: {gate['op']}")
-    exposure = raw.get("exposure") or {}
+    exposure = raw.get("exposure", {})
     if not isinstance(exposure, Mapping) or set(exposure) - {"max_rows_per_market", "per_side", "selector"}:
         raise ValueError("unknown combination key in exposure")
     if exposure.get("selector", "latest") not in {"earliest", "latest", "highest_edge"}:
@@ -802,16 +814,34 @@ def _first_text(*values: Any) -> str | None:
     return None
 
 
+def _unique_config_pairs(pairs: Iterable[tuple[Any, Any]]) -> dict[Any, Any]:
+    result: dict[Any, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate composition config key: {key}")
+        result[key] = value
+    return result
+
+
 def _load_config(path: Path, *, content: bytes | None = None) -> dict[str, Any]:
     text = (content if content is not None else path.read_bytes()).decode("utf-8")
     if path.suffix.lower() == ".json":
-        payload = json.loads(text)
+        payload = json.loads(text, object_pairs_hook=_unique_config_pairs)
     else:
         try:
             import yaml
         except ImportError as exc:  # pragma: no cover - yaml is expected in runtime.
             raise RuntimeError("YAML composition configs require PyYAML; use JSON instead") from exc
-        payload = yaml.safe_load(text)
+
+        class UniqueConfigLoader(yaml.SafeLoader):
+            def construct_mapping(self, node: Any, deep: bool = False) -> dict[Any, Any]:
+                self.flatten_mapping(node)
+                return _unique_config_pairs(
+                    (self.construct_object(key, deep=deep), self.construct_object(value, deep=deep))
+                    for key, value in node.value
+                )
+
+        payload = yaml.load(text, Loader=UniqueConfigLoader)
     if not isinstance(payload, Mapping):
         raise ValueError("Composition config must be a mapping")
     return dict(payload)

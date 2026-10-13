@@ -102,6 +102,16 @@ def _source_router_row(
 
 
 class PaperShadowLaneComposeReplayTests(unittest.TestCase):
+    def test_saved_explicit_empty_sections_and_boolean_fallback_remain_supported(self):
+        from scripts.paper_shadow_lane_compose_replay import validate_saved_combination
+        normalized = validate_saved_combination({"composition": {
+            "base_lane": "control_stable", "fallback_to_base": False,
+            "gates": [], "vetoes": [], "exposure": {}}})
+        self.assertFalse(normalized["fallback_to_base"])
+        self.assertEqual(normalized["gates"], [])
+        self.assertEqual(normalized["vetoes"], [])
+        self.assertEqual(normalized["exposure"], {})
+
     def test_saved_numeric_string_exposure_cap_still_limits_one_market(self):
         from scripts.paper_shadow_lane_compose_replay import validate_saved_combination
         config = {"composition": {"base_lane": "control_stable", "exposure": {

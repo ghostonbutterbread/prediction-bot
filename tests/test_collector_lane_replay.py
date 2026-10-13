@@ -154,6 +154,74 @@ class CollectorLaneReplayTests(unittest.TestCase):
                                                 enabled_lanes=[], composition_config=config)
                 self.assertFalse(output.exists())
 
+    def test_falsey_saved_sections_cannot_silently_disable_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshots = root / "collector.jsonl"
+            config = root / "combination.yaml"
+            _write_jsonl(snapshots, [{"run_id": "c1", "shared_candidate_id": "one", "market_id": "KXONE",
+                                      "observed_at": "2026-07-01T12:00:00+00:00"}])
+            for index, (section, value) in enumerate((
+                ("exposure", "false"), ("exposure", "[]"), ("exposure", "''"),
+                ("exposure", "null"), ("gates", "false"), ("gates", "''"),
+                ("gates", "null"), ("vetoes", "false"), ("vetoes", "''"),
+                ("vetoes", "null"),
+            )):
+                with self.subTest(section=section, value=value):
+                    config.write_text(f"composition:\n  base_lane: control_stable\n  {section}: {value}\n",
+                                      encoding="utf-8")
+                    output = root / "data" / "derived_reports" / f"bad_section_{index}"
+                    with self.assertRaisesRegex(ValueError, section):
+                        build_collector_lane_replay(snapshot_path=snapshots, output_dir=output,
+                                                    enabled_lanes=[], composition_config=config)
+                    self.assertFalse(output.exists())
+
+    def test_saved_quoted_booleans_and_invalid_notional_fail_before_outputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshots = root / "collector.jsonl"
+            config = root / "combination.yaml"
+            _write_jsonl(snapshots, [{"run_id": "c1", "shared_candidate_id": "one", "market_id": "KXONE",
+                                      "observed_at": "2026-07-01T12:00:00+00:00"}])
+            for index, (detail, field) in enumerate((
+                ("fallback_to_base: 'false'", "fallback_to_base"),
+                ("vetoes:\n    - lane: shadow_source_router\n      required: 'false'", "required"),
+                ("fixed_notional_usd: bogus", "fixed_notional_usd"),
+                ("fixed_notional_usd: .nan", "fixed_notional_usd"),
+            )):
+                with self.subTest(detail=detail):
+                    config.write_text("composition:\n  base_lane: control_stable\n  " + detail + "\n",
+                                      encoding="utf-8")
+                    output = root / "data" / "derived_reports" / f"bad_scalar_{index}"
+                    with self.assertRaisesRegex(ValueError, field):
+                        build_collector_lane_replay(snapshot_path=snapshots, output_dir=output,
+                                                    enabled_lanes=[], composition_config=config)
+                    self.assertFalse(output.exists())
+
+    def test_duplicate_saved_mapping_keys_fail_before_outputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshots = root / "collector.jsonl"
+            _write_jsonl(snapshots, [{"run_id": "c1", "shared_candidate_id": "one", "market_id": "KXONE",
+                                      "observed_at": "2026-07-01T12:00:00+00:00"}])
+            examples = (
+                ("yaml", "composition:\n  base_lane: control_stable\n"
+                 "  exposure:\n    max_rows_per_market: 1\n  exposure: {}\n"),
+                ("yaml", "composition:\n  base_lane: control_stable\n"
+                 "  exposure:\n    max_rows_per_market: 1\n    max_rows_per_market: 2\n"),
+                ("json", '{"composition":{"base_lane":"control_stable",'
+                 '"exposure":{"max_rows_per_market":1,"max_rows_per_market":2}}}'),
+            )
+            for index, (extension, text) in enumerate(examples):
+                with self.subTest(index=index):
+                    config = root / f"idea.{extension}"
+                    config.write_text(text, encoding="utf-8")
+                    output = root / "data" / "derived_reports" / f"duplicate_{index}"
+                    with self.assertRaisesRegex(ValueError, "duplicate.*key"):
+                        build_collector_lane_replay(snapshot_path=snapshots, output_dir=output,
+                                                    enabled_lanes=[], composition_config=config)
+                    self.assertFalse(output.exists())
+
     def test_invalid_saved_exposure_cap_rejects_before_replay_outputs(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
