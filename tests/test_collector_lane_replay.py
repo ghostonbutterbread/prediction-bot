@@ -2,10 +2,11 @@ import hashlib
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from bot.collector_replay_index import build_collector_replay_index
-from scripts.collector_lane_replay import auto_resolve_collector_lane_replay, build_collector_lane_replay
+from scripts.collector_lane_replay import _prepare_snapshot, auto_resolve_collector_lane_replay, build_collector_lane_replay
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -14,6 +15,52 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
 
 
 class CollectorLaneReplayTests(unittest.TestCase):
+    def test_replay_config_identity_hashes_the_bytes_that_were_parsed(self):
+        from scripts import collector_lane_replay as replay
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshots = root / "collector.jsonl"
+            config = root / "idea.yaml"
+            output = root / "data" / "derived_reports" / "identity"
+            original = b"composition:\n  name: before\n  base_lane: control_stable\n"
+            config.write_bytes(original)
+            _write_jsonl(snapshots, [{"run_id": "c1", "shared_candidate_id": "one", "market_id": "KXONE",
+                                      "observed_at": "2026-07-01T12:00:00+00:00"}])
+            load = replay._load_config
+            def concurrent_edit(path, **kwargs):
+                parsed = load(path, **kwargs)
+                path.write_text("composition:\n  name: after\n  base_lane: control_stable\n", encoding="utf-8")
+                return parsed
+            with patch.object(replay, "_load_config", side_effect=concurrent_edit):
+                result = replay.build_collector_lane_replay(snapshot_path=snapshots, output_dir=output,
+                                                             enabled_lanes=[], composition_config=config)
+            self.assertEqual(result.summary["composition"]["composition"]["name"], "before")
+            self.assertEqual(result.summary["composition"]["configuration_sha256"], hashlib.sha256(original).hexdigest())
+
+    def test_composed_replay_input_does_not_carry_nested_resolution_or_market_result(self):
+        raw = {
+            "run_id": "collector-1", "shared_candidate_id": "c1", "market_id": "KXONE",
+            "observed_at": "2026-07-01T12:00:00+00:00",
+            "shared_candidate": {"market": {"id": "KXONE", "result": "YES", "question": "Will it?"},
+                                 "evidence": {"source": {"result": "NO"}, "resolution": {"outcome": "YES"}}},
+            "decision_artifact": {"strategy_signal": {"resolution": {"result": "YES"}},
+                                  "source_context": {"outcome": "YES"},
+                                  "source_snapshots": [{"result": "NO"}]},
+        }
+        prepared = _prepare_snapshot(raw, candidate_dataset_path="collector.jsonl",
+                                     replay_run_id="replay", default_notional_usd=5.0)
+        assert prepared is not None
+        _, wallet_input, _, _ = prepared
+        def keys(value):
+            if isinstance(value, dict):
+                return set(value) | set().union(*(keys(v) for v in value.values()))
+            if isinstance(value, list):
+                return set().union(*(keys(v) for v in value))
+            return set()
+        self.assertFalse({"outcome", "resolution", "result"} & keys(wallet_input.signal))
+        self.assertFalse({"outcome", "resolution", "result"} & keys(wallet_input.shared_candidate))
+        self.assertEqual(wallet_input.shared_candidate["market"]["question"], "Will it?")
+
     def test_saved_router_guard_combination_names_existing_replay_components(self):
         from scripts.paper_shadow_lane_compose_replay import _load_config, _normalize_composition
         config = _normalize_composition(_load_config(
@@ -56,6 +103,8 @@ class CollectorLaneReplayTests(unittest.TestCase):
             self.assertEqual(result.summary["composition"]["configuration_sha256"], hashlib.sha256(config.read_bytes()).hexdigest())
             self.assertEqual(len(composed), 1)
             self.assertEqual(composed[0]["shared_candidate_id"], "candidate-1")
+            self.assertEqual(result.summary["composition"]["wallet_intents_written"], 0)
+            self.assertEqual(result.summary["composition"]["buy_without_wallet_intent"], 1)
             self.assertFalse(result.summary["promotion_eligible"])
 
     def test_combination_rejects_unknown_lane_before_creating_outputs(self):
@@ -70,6 +119,76 @@ class CollectorLaneReplayTests(unittest.TestCase):
                 build_collector_lane_replay(snapshot_path=snapshots, output_dir=output,
                                             enabled_lanes=[], composition_config=config)
             self.assertFalse(output.exists())
+
+    def test_misspelled_combination_or_veto_is_not_a_silent_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshots = root / "collector.jsonl"
+            _write_jsonl(snapshots, [{"run_id": "c1", "shared_candidate_id": "one", "market_id": "KXONE", "observed_at": "2026-07-01T12:00:00+00:00"}])
+            for text in ("compositon:\n  base_lane: control_stable\n",
+                         "composition:\n  base_lane: control_stable\n  vetos: []\n"):
+                config = root / "combination.yaml"
+                config.write_text(text, encoding="utf-8")
+                output = root / "data" / "derived_reports" / str(len(text))
+                with self.assertRaisesRegex(ValueError, "unknown combination key"):
+                    build_collector_lane_replay(snapshot_path=snapshots, output_dir=output,
+                                                enabled_lanes=[], composition_config=config)
+                self.assertFalse(output.exists())
+
+    def test_invalid_gate_or_exposure_rejects_before_writing_replay_outputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshots = root / "collector.jsonl"
+            _write_jsonl(snapshots, [{"run_id": "c1", "shared_candidate_id": "one", "market_id": "KXONE", "observed_at": "2026-07-01T12:00:00+00:00",
+                                      "main_decision": {"action": "BUY_YES", "size": 5.0}}])
+            for index, detail in enumerate(("  gates:\n    - field: edge\n      op: does_not_exist\n      value: 0.5\n",
+                                            "  exposure:\n    max_rows_per_market: 1\n    selector: does_not_exist\n")):
+                config = root / "combination.yaml"
+                config.write_text("composition:\n  base_lane: control_stable\n" + detail, encoding="utf-8")
+                output = root / "data" / "derived_reports" / str(index)
+                with self.assertRaisesRegex(ValueError, "unknown composition (gate op|exposure selector)"):
+                    build_collector_lane_replay(snapshot_path=snapshots, output_dir=output,
+                                                enabled_lanes=[], composition_config=config)
+                self.assertFalse(output.exists())
+
+    def test_saved_combination_can_emit_a_sealed_wallet_intent_when_inputs_exist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshots = root / "collector.jsonl"
+            output = root / "data" / "derived_reports" / "qualified"
+            stamp = "2026-07-01T12:00:00+00:00"
+            _write_jsonl(snapshots, [{
+                "run_id": "collector-1", "shared_candidate_id": "candidate-1",
+                "market_id": "KXQUALIFIED", "observed_at": stamp,
+                "main_decision": {"action": "BUY_YES", "size": 5.0},
+                "decision_artifact": {"strategy_signal": {
+                    "direction": "BUY_YES", "market_id": "KXQUALIFIED",
+                    "question": "Will it happen?", "exchange": "kalshi",
+                    "market_route": {"allowed": True, "handler_id": "weather"},
+                    "model_probability": 0.8, "confidence": 0.9,
+                    "best_yes_ask": 0.4}},
+                "shared_candidate": {
+                    "candidate_id": "candidate-1", "market_id": "KXQUALIFIED",
+                    "observed_at": stamp, "market": {"question": "Will it happen?"},
+                    "prices": {"order_book_snapshot": {"source": "book", "market_id": "KXQUALIFIED",
+                        "observed_at": stamp, "data": {"best_yes_ask": 0.4}}},
+                },
+            }])
+            config = root / "idea.yaml"
+            config.write_text("composition:\n  name: qualified\n  base_lane: control_stable\n"
+                              "  action_lane: control_stable\n  price_lane: control_stable\n"
+                              "  sizing_lane: control_stable\n", encoding="utf-8")
+            result = build_collector_lane_replay(snapshot_path=snapshots, output_dir=output,
+                                                 enabled_lanes=[], composition_config=config)
+            intents = [json.loads(line) for line in (output / "wallet_intents.jsonl").read_text().splitlines()]
+            self.assertEqual(len(intents), 1)
+            self.assertEqual(intents[0]["action"], "BUY_YES")
+            self.assertEqual(intents[0]["model_probability"], 0.8)
+            self.assertEqual(intents[0]["entry_price"], 0.4)
+            self.assertEqual(intents[0]["source_context"]["market_route"]["handler_id"], "weather")
+            self.assertEqual(result.summary["composition"]["wallet_intents_written"], 1)
+            self.assertEqual(result.summary["composition"]["buy_without_wallet_intent"], 0)
+            self.assertFalse(result.summary["promotion_eligible"])
 
     def test_replays_selected_index_rows_with_index_and_manifest_provenance(self):
         with tempfile.TemporaryDirectory() as tmp:

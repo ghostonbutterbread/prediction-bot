@@ -8,6 +8,7 @@ Redirect stdout into a derived report location if a durable receipt is needed.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -16,9 +17,10 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from bot.forward_composed_paper import observe_fresh_forward_snapshot  # noqa: E402
+from bot.forward_composed_paper import observe_fresh_forward_snapshot, validate_forward_combination  # noqa: E402
 from bot.risk import RiskManager  # noqa: E402
 from bot.strategies.enhanced import KellySizer  # noqa: E402
+from scripts.paper_shadow_lane_compose_replay import _load_config, validate_saved_combination  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -26,6 +28,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--lane-decision-path", required=True)
     parser.add_argument("--shared-market-state-path", required=True)
     parser.add_argument("--resolution-path", help="Optional separate exact-authority resolution JSONL")
+    parser.add_argument("--composition-config", help="Saved replay composition file (supported forward pattern only)")
     parser.add_argument("--enable-paper-observer", action="store_true", default=False)
     parser.add_argument("--max-snapshot-age-seconds", type=int, default=120)
     parser.add_argument("--starting-balance-usd", type=float, default=100.0)
@@ -37,6 +40,14 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.max_snapshot_age_seconds <= 0:
         parser.error("max snapshot age must be positive")
+    combination = None
+    composition_sha256 = None
+    if args.composition_config:
+        path = Path(args.composition_config)
+        content = path.read_bytes()
+        combination = validate_saved_combination(_load_config(path, content=content))
+        validate_forward_combination(combination)
+        composition_sha256 = hashlib.sha256(content).hexdigest()
     rows = _jsonl(Path(args.lane_decision_path))
     resolutions = _jsonl(Path(args.resolution_path)) if args.resolution_path else []
     state = json.loads(Path(args.shared_market_state_path).read_text(encoding="utf-8"))
@@ -49,7 +60,10 @@ def main(argv: list[str] | None = None) -> int:
         starting_balance_usd=args.starting_balance_usd, kelly_sizer=kelly,
         risk_policy=risk, min_edge=0.01, min_confidence=0.50, max_entry_price=0.70,
         fee_rate=args.fee_rate, event_cap_pct=args.event_cap_pct,
+        combination=combination,
     )
+    if composition_sha256 and result.get("status") != "skipped":
+        result["composition_sha256"] = composition_sha256
     print(json.dumps(result, sort_keys=True, default=str))
     return 0
 

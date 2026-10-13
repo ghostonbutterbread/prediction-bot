@@ -21,6 +21,21 @@ GUARD = "shadow_fee_aware_loss_guard"
 _BUYS = {"BUY_YES", "BUY_NO"}
 _IDENTITY = ("shared_candidate_id", "shared_snapshot_id", "run_id", "market_id", "observed_at")
 
+def validate_forward_combination(combination: Mapping[str, Any]) -> None:
+    """Accept only the saved pattern this observer actually implements."""
+    if (combination.get("base_lane") != CONTROL
+            or combination.get("action_lane") != CONTROL
+            or combination.get("sizing_lane") != CONTROL
+            or combination.get("price_lane") != GUARD
+            or combination.get("fallback_to_base") is not False
+            or combination.get("vetoes") != [
+                {"lane": ROUTER, "mode": "require_agreement", "required": True},
+                {"lane": GUARD, "mode": "require_agreement", "required": True}]
+            or combination.get("gates")
+            or combination.get("exposure")
+            or combination.get("fixed_notional_usd") is not None):
+        raise ValueError("unsupported forward combination: replay may test this idea, but the paper observer does not implement it")
+
 
 def compose_forward_rows(rows: list[Mapping[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Pair stable BUY intent with strict Router confirmation and same-side guard.
@@ -126,8 +141,11 @@ def evaluate_forward_composition(
     starting_balance_usd: float, kelly_sizer: Any, risk_policy: Any,
     min_edge: float, min_confidence: float, max_entry_price: float,
     fee_rate: float = 0.07, event_cap_pct: float = 0.10,
+    combination: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Rebuild both in-memory wallets from the complete forward cohort."""
+    if combination is not None:
+        validate_forward_combination(combination)
     pairs, intents = compose_forward_rows(rows)
     kwargs = dict(resolutions=resolutions, starting_balance_usd=starting_balance_usd,
                   kelly_sizer=kelly_sizer, risk_policy=risk_policy, min_edge=min_edge,
@@ -138,6 +156,7 @@ def evaluate_forward_composition(
         valid = [row for row in intents if row["lane_id"] == lane]
         wallets[name] = evaluate_composed_intents(intents=valid, **kwargs)
     return {"schema_name": "forward_composed_paper_observer", "non_mutating": True,
+            "composition_name": combination.get("name") if combination is not None else None,
             "paper_only": True, "promotion_eligible": False,
             "candidate_universe": "recorded_control_stable_rows_not_all_pre_risk_picker_intents",
             "pairs": pairs, "reason_counts": dict(Counter(row["reason_code"] for row in pairs)),

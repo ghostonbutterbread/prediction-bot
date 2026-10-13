@@ -434,6 +434,43 @@ def _normalize_composition(config: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def validate_saved_combination(config: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate file-driven policy before replay or observer writes derived state."""
+    if set(config) != {"composition"} or not isinstance(config.get("composition"), Mapping):
+        raise ValueError("unknown combination key or missing composition mapping")
+    raw = config["composition"]
+    allowed = {"name", "base_lane", "action_lane", "sizing_lane", "price_lane",
+               "fallback_to_base", "fixed_notional_usd", "vetoes", "gates", "exposure"}
+    unknown = set(raw) - allowed
+    if unknown:
+        raise ValueError(f"unknown combination key: {sorted(unknown)[0]}")
+    for kind, keys in (("vetoes", {"lane", "mode", "required"}),
+                       ("gates", {"name", "field", "op", "value"})):
+        entries = raw.get(kind) or []
+        if not isinstance(entries, list):
+            raise ValueError(f"combination {kind} must be a list")
+        for entry in entries:
+            if not isinstance(entry, Mapping) or set(entry) - keys:
+                raise ValueError(f"unknown combination key in {kind}")
+    for veto in raw.get("vetoes") or []:
+        if not veto.get("lane") or veto.get("mode", "skip_on_conflict") not in {
+            "skip_on_conflict", "require_not_skip", "require_buy", "require_agreement"
+        }:
+            raise ValueError("unknown combination veto lane or mode")
+    for gate in raw.get("gates") or []:
+        if gate.get("op", "eq") not in {
+            "eq", "==", "ne", "!=", "in", "not_in", "gte", ">=", "gt", ">",
+            "lte", "<=", "lt", "<", "truthy", "falsey"
+        }:
+            raise ValueError(f"unknown composition gate op: {gate['op']}")
+    exposure = raw.get("exposure") or {}
+    if not isinstance(exposure, Mapping) or set(exposure) - {"max_rows_per_market", "per_side", "selector"}:
+        raise ValueError("unknown combination key in exposure")
+    if exposure.get("selector", "latest") not in {"earliest", "latest", "highest_edge"}:
+        raise ValueError(f"unknown composition exposure selector: {exposure['selector']}")
+    return _normalize_composition(config)
+
+
 def _group_lane_rows(rows: Iterable[Mapping[str, Any]]) -> dict[str, dict[str, list[Mapping[str, Any]]]]:
     grouped: dict[str, dict[str, list[Mapping[str, Any]]]] = defaultdict(lambda: defaultdict(list))
     for row in rows:
@@ -738,8 +775,8 @@ def _first_text(*values: Any) -> str | None:
     return None
 
 
-def _load_config(path: Path) -> dict[str, Any]:
-    text = path.read_text(encoding="utf-8")
+def _load_config(path: Path, *, content: bytes | None = None) -> dict[str, Any]:
+    text = (content if content is not None else path.read_bytes()).decode("utf-8")
     if path.suffix.lower() == ".json":
         payload = json.loads(text)
     else:

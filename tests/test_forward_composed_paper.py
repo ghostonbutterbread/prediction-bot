@@ -2,6 +2,7 @@
 import unittest
 import tempfile
 import json
+import hashlib
 from pathlib import Path
 from io import StringIO
 from contextlib import redirect_stdout
@@ -38,6 +39,45 @@ def cohort(candidate="c1", market="M1", event="E1", side="BUY_YES", price=0.4):
 
 
 class ForwardCompositionTests(unittest.TestCase):
+    def test_manual_observer_reads_saved_combination_and_reports_same_file_identity(self):
+        from datetime import datetime, timezone
+        from scripts.forward_composed_paper import main
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            now = datetime.now(timezone.utc).isoformat()
+            ledger = root / "lane_rows.jsonl"
+            state = root / "state.json"
+            saved = Path(__file__).resolve().parent.parent / "lane_compositions" / "stable_router_guard_kelly.yaml"
+            ledger.write_text("".join(json.dumps({**row, "observed_at": now}) + "\n" for row in cohort()), encoding="utf-8")
+            state.write_text(json.dumps({"publisher": {"runtime_kind": "collector", "instance_id": "primary"},
+                "latest_snapshot": {"snapshot_id": "snapshot-1", "publisher_runtime": "collector",
+                                    "publisher_instance_id": "primary", "published_at": now}}), encoding="utf-8")
+            output = StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(["--lane-decision-path", str(ledger),
+                    "--shared-market-state-path", str(state),
+                    "--composition-config", str(saved), "--enable-paper-observer"]), 0)
+            report = json.loads(output.getvalue())
+            self.assertEqual(report["composition_name"], "stable_router_guard_kelly")
+            self.assertEqual(report["composition_sha256"], hashlib.sha256(saved.read_bytes()).hexdigest())
+            self.assertEqual(report["combined_wallet"]["summary"]["opened_positions"], 1)
+
+    def test_saved_replay_combination_routes_to_same_forward_wallet_seam(self):
+        from scripts.paper_shadow_lane_compose_replay import _load_config, validate_saved_combination
+        combination = validate_saved_combination(_load_config(
+            Path(__file__).resolve().parent.parent / "lane_compositions" / "stable_router_guard_kelly.yaml"))
+        result = evaluate_forward_composition(list(cohort()), [], starting_balance_usd=100,
+            kelly_sizer=FixedKelly(), risk_policy=ApprovingRisk(), min_edge=0.01,
+            min_confidence=0.5, max_entry_price=0.99, combination=combination)
+        self.assertEqual(result["composition_name"], "stable_router_guard_kelly")
+        self.assertEqual(result["combined_wallet"]["summary"]["opened_positions"], 1)
+        self.assertEqual(result["combined_wallet"]["decision_rows"][0]["approved_stake_usd"], 10)
+        unsupported = {**combination, "action_lane": "shadow_source_router"}
+        with self.assertRaisesRegex(ValueError, "unsupported forward combination"):
+            evaluate_forward_composition(list(cohort()), [], starting_balance_usd=100,
+                kelly_sizer=FixedKelly(), risk_policy=ApprovingRisk(), min_edge=0.01,
+                min_confidence=0.5, max_entry_price=0.99, combination=unsupported)
+
     def test_manual_cli_reads_forward_lane_ledger_without_writing_input_or_wallet(self):
         from datetime import datetime, timezone
         from scripts.forward_composed_paper import main

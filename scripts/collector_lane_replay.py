@@ -32,7 +32,7 @@ from bot.paper_shadow_lanes import (
 )
 from bot.paper_wallets import BETA_PAPER_WALLET_ID, STABLE_PAPER_WALLET_ID
 from bot.resolution_feed import run_resolution_feed_once
-from scripts.paper_shadow_lane_compose_replay import _load_config, _normalize_composition, compose_lane_replay
+from scripts.paper_shadow_lane_compose_replay import _load_config, compose_lane_replay, validate_saved_combination
 
 DEFAULT_NOTIONAL_USD = 10.0
 OUTCOME_LIKE_KEYS = frozenset(
@@ -43,8 +43,11 @@ OUTCOME_LIKE_KEYS = frozenset(
         "actual_temp_used",
         "known_after",
         "label_target",
+        "outcome",
+        "resolution",
         "resolved_at",
         "resolved_outcome",
+        "result",
         "settled_side",
         "settlement_source",
     }
@@ -145,10 +148,11 @@ def build_collector_lane_replay(
         raise ValueError("max_rows must be positive")
     if snapshot_path is not None and not snapshot_path.exists():
         raise FileNotFoundError(snapshot_path)
-    composition = _load_config(composition_config) if composition_config else None
+    composition_bytes = composition_config.read_bytes() if composition_config else None
+    composition = _load_config(composition_config, content=composition_bytes) if composition_config else None
     required = []
     if composition is not None:
-        normalized = _normalize_composition(composition)
+        normalized = validate_saved_combination(composition)
         required = [normalized[key] for key in ("base_lane", "action_lane", "sizing_lane", "price_lane")]
         required += [str(veto["lane"]) for veto in normalized["vetoes"]]
     lane_ids = _normalized_lanes([*enabled_lanes, *required])
@@ -304,11 +308,16 @@ def build_collector_lane_replay(
             "max_rows": max_rows,
         }
     if combined is not None:
-        assert composition_config is not None
+        assert composition_config is not None and composition_bytes is not None
         summary["composition"] = {
             **combined["summary"],
+            "wallet_intents_written": len(combined["wallet_intents"]),
+            "buy_without_wallet_intent": sum(
+                row.get("action") in {"BUY_YES", "BUY_NO"} and not row.get("wallet_intent")
+                for row in combined["composition_rows"]
+            ),
             "configuration_path": str(composition_config),
-            "configuration_sha256": _file_sha256(composition_config),
+            "configuration_sha256": hashlib.sha256(composition_bytes).hexdigest(),
             "composition_row_path": str(extra_paths[0]),
             "wallet_intent_path": str(extra_paths[1]),
             "methodology": "derived_decision_row_diagnostic_not_wallet_parity",
