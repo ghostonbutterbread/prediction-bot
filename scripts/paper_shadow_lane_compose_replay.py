@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import sys
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
@@ -172,13 +173,16 @@ def _compose_candidate(
 
     notional = 0.0 if action == "SKIP" else _composition_notional(composition, sizing_row)
     price = None if action == "SKIP" else _side_price(price_row, side)
+    guard_provenance = _field(price_row, "provenance")
+    payout_aware = guard_provenance.get("payout_aware") if isinstance(guard_provenance, Mapping) else None
+    quote_not_fill = isinstance(payout_aware, Mapping) and payout_aware.get("quote_not_fill") is True
     future_inputs = _merged_future_inputs(base_row=base_row, action_row=action_row, sizing_row=sizing_row, price_row=price_row)
     future_inputs.update(
         {
             "recommended_action": action,
             "side": side,
             "entry_price": price,
-            "estimated_fill_price": price,
+            "estimated_fill_price": None if quote_not_fill else price,
             "requested_position_size_usd": notional,
             "approved_position_size_usd": notional,
             "composition_name": composition["name"],
@@ -208,6 +212,11 @@ def _compose_candidate(
         "policy": f"composition:{composition['name']}",
         "selected_lane": f"composition:{composition['name']}",
         "decision_role": "derived_composition_replay",
+        "decision_id": "composition:" + hashlib.sha256(json.dumps({"composition": composition, "candidate_key": candidate_key,
+            "source_decision_id": _field(action_row, "decision_id"), "action": action, "entry_price": price},
+            sort_keys=True, default=str).encode()).hexdigest(),
+        "run_id": _first_text(_field(action_row, "run_id"), _field(base_row, "run_id")),
+        "shared_snapshot_id": _first_text(_field(action_row, "shared_snapshot_id"), _field(base_row, "shared_snapshot_id")),
         "shared_candidate_id": _candidate_id(base_row) or candidate_key,
         "market_id": _first_text(_field(base_row, "market_id"), future_inputs.get("market_id")),
         "observed_at": _first_text(_field(action_row, "observed_at"), _field(base_row, "observed_at"), future_inputs.get("observed_at")),
@@ -215,6 +224,7 @@ def _compose_candidate(
         "side": side,
         "entry_price": price,
         "price": price,
+        "quote_not_fill": quote_not_fill,
         "requested_position_size_usd": notional,
         "approved_position_size_usd": notional,
         "reason_code": veto_reason or "composition_selected",
@@ -434,6 +444,69 @@ def _normalize_composition(config: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def validate_saved_combination(config: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate file-driven policy before replay or observer writes derived state."""
+    if set(config) != {"composition"} or not isinstance(config.get("composition"), Mapping):
+        raise ValueError("unknown combination key or missing composition mapping")
+    raw = config["composition"]
+    allowed = {"name", "base_lane", "action_lane", "sizing_lane", "price_lane",
+               "fallback_to_base", "fixed_notional_usd", "vetoes", "gates", "exposure"}
+    unknown = set(raw) - allowed
+    if unknown:
+        raise ValueError(f"unknown combination key: {sorted(unknown)[0]}")
+    if "fallback_to_base" in raw and not isinstance(raw["fallback_to_base"], bool):
+        raise ValueError("combination fallback_to_base must be a boolean")
+    if raw.get("fixed_notional_usd") is not None:
+        value = raw["fixed_notional_usd"]
+        try:
+            fixed = float(value) if not isinstance(value, bool) else float("nan")
+        except (TypeError, ValueError, OverflowError):
+            fixed = float("nan")
+        if not math.isfinite(fixed) or fixed <= 0:
+            raise ValueError("combination fixed_notional_usd must be a positive finite number")
+    for kind, keys in (("vetoes", {"lane", "mode", "required"}),
+                       ("gates", {"name", "field", "op", "value"})):
+        entries = raw.get(kind, [])
+        if not isinstance(entries, list):
+            raise ValueError(f"combination {kind} must be a list")
+        for entry in entries:
+            if not isinstance(entry, Mapping) or set(entry) - keys:
+                raise ValueError(f"unknown combination key in {kind}")
+    for veto in raw.get("vetoes", []):
+        if "required" in veto and not isinstance(veto["required"], bool):
+            raise ValueError("combination veto required must be a boolean")
+        if not veto.get("lane") or veto.get("mode", "skip_on_conflict") not in {
+            "skip_on_conflict", "require_not_skip", "require_buy", "require_agreement"
+        }:
+            raise ValueError("unknown combination veto lane or mode")
+    gate_fields = _gate_context(base_row={}, action_row={}, sizing_row={}, price_row={},
+                                future_inputs={}, action="SKIP", side=None).keys()
+    for gate in raw.get("gates", []):
+        if gate.get("field") not in gate_fields:
+            raise ValueError(f"unknown composition gate field: {gate.get('field')}")
+        if gate.get("op", "eq") not in {
+            "eq", "==", "ne", "!=", "in", "not_in", "gte", ">=", "gt", ">",
+            "lte", "<=", "lt", "<", "truthy", "falsey"
+        }:
+            raise ValueError(f"unknown composition gate op: {gate['op']}")
+    exposure = raw.get("exposure", {})
+    if not isinstance(exposure, Mapping) or set(exposure) - {"max_rows_per_market", "per_side", "selector"}:
+        raise ValueError("unknown combination key in exposure")
+    if exposure.get("selector", "latest") not in {"earliest", "latest", "highest_edge"}:
+        raise ValueError(f"unknown composition exposure selector: {exposure['selector']}")
+    if "max_rows_per_market" in exposure:
+        cap = exposure["max_rows_per_market"]
+        try:
+            count = float(cap) if not isinstance(cap, bool) else float("nan")
+        except (TypeError, ValueError, OverflowError):
+            count = float("nan")
+        if not math.isfinite(count) or count < 0 or not count.is_integer():
+            raise ValueError("composition exposure max_rows_per_market must be a nonnegative integer")
+    if "per_side" in exposure and not isinstance(exposure["per_side"], bool):
+        raise ValueError("composition exposure per_side must be a boolean")
+    return _normalize_composition(config)
+
+
 def _group_lane_rows(rows: Iterable[Mapping[str, Any]]) -> dict[str, dict[str, list[Mapping[str, Any]]]]:
     grouped: dict[str, dict[str, list[Mapping[str, Any]]]] = defaultdict(lambda: defaultdict(list))
     for row in rows:
@@ -560,6 +633,8 @@ def _gate_context(
             if isinstance(source, Mapping) and str(source.get("tier") or "").strip()
         }
     )
+    entry_price = _number(future_inputs.get("estimated_fill_price"), future_inputs.get("entry_price"),
+                          _field(action_row, "entry_price"), _field(action_row, "price"))
     return {
         "action": action,
         "side": side,
@@ -583,7 +658,8 @@ def _gate_context(
         "max_source_sample_count": max(sample_counts) if sample_counts else None,
         "source_tiers": "+".join(source_tiers) if source_tiers else None,
         "edge": _number(_field(action_row, "edge"), future_inputs.get("edge")),
-        "entry_price": _number(future_inputs.get("estimated_fill_price"), future_inputs.get("entry_price"), _field(action_row, "entry_price"), _field(action_row, "price")),
+        "entry_price": entry_price,
+        "price": entry_price,  # existing saved price-floor/cap configurations
     }
 
 
@@ -738,16 +814,36 @@ def _first_text(*values: Any) -> str | None:
     return None
 
 
-def _load_config(path: Path) -> dict[str, Any]:
-    text = path.read_text(encoding="utf-8")
+def _unique_config_pairs(pairs: Iterable[tuple[Any, Any]]) -> dict[Any, Any]:
+    result: dict[Any, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate composition config key: {key}")
+        result[key] = value
+    return result
+
+
+def _load_config(path: Path, *, content: bytes | None = None) -> dict[str, Any]:
+    text = (content if content is not None else path.read_bytes()).decode("utf-8")
     if path.suffix.lower() == ".json":
-        payload = json.loads(text)
+        payload = json.loads(text, object_pairs_hook=_unique_config_pairs)
     else:
         try:
             import yaml
         except ImportError as exc:  # pragma: no cover - yaml is expected in runtime.
             raise RuntimeError("YAML composition configs require PyYAML; use JSON instead") from exc
-        payload = yaml.safe_load(text)
+
+        class UniqueConfigLoader(yaml.SafeLoader):
+            def construct_mapping(self, node: Any, deep: bool = False) -> dict[Any, Any]:
+                # Check only keys written in this mapping; YAML merges may be
+                # intentionally overridden by explicit fields below the << key.
+                _unique_config_pairs(
+                    (self.construct_object(key, deep=deep), None)
+                    for key, _ in node.value if key.tag != "tag:yaml.org,2002:merge"
+                )
+                return super().construct_mapping(node, deep=deep)
+
+        payload = yaml.load(text, Loader=UniqueConfigLoader)
     if not isinstance(payload, Mapping):
         raise ValueError("Composition config must be a mapping")
     return dict(payload)

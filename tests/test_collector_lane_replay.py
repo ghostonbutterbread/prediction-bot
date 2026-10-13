@@ -2,10 +2,11 @@ import hashlib
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from bot.collector_replay_index import build_collector_replay_index
-from scripts.collector_lane_replay import auto_resolve_collector_lane_replay, build_collector_lane_replay
+from scripts.collector_lane_replay import _prepare_snapshot, auto_resolve_collector_lane_replay, build_collector_lane_replay
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -14,6 +15,350 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
 
 
 class CollectorLaneReplayTests(unittest.TestCase):
+    def test_replay_config_identity_hashes_the_bytes_that_were_parsed(self):
+        from scripts import collector_lane_replay as replay
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshots = root / "collector.jsonl"
+            config = root / "idea.yaml"
+            output = root / "data" / "derived_reports" / "identity"
+            original = b"composition:\n  name: before\n  base_lane: control_stable\n"
+            config.write_bytes(original)
+            _write_jsonl(snapshots, [{"run_id": "c1", "shared_candidate_id": "one", "market_id": "KXONE",
+                                      "observed_at": "2026-07-01T12:00:00+00:00"}])
+            load = replay._load_config
+            def concurrent_edit(path, **kwargs):
+                parsed = load(path, **kwargs)
+                path.write_text("composition:\n  name: after\n  base_lane: control_stable\n", encoding="utf-8")
+                return parsed
+            with patch.object(replay, "_load_config", side_effect=concurrent_edit):
+                result = replay.build_collector_lane_replay(snapshot_path=snapshots, output_dir=output,
+                                                             enabled_lanes=[], composition_config=config)
+            self.assertEqual(result.summary["composition"]["composition"]["name"], "before")
+            self.assertEqual(result.summary["composition"]["configuration_sha256"], hashlib.sha256(original).hexdigest())
+
+    def test_composed_replay_input_does_not_carry_nested_resolution_or_market_result(self):
+        raw = {
+            "run_id": "collector-1", "shared_candidate_id": "c1", "market_id": "KXONE",
+            "observed_at": "2026-07-01T12:00:00+00:00",
+            "shared_candidate": {"market": {"id": "KXONE", "result": "YES", "official_outcome": "NO", "official_result": "YES", "winner": "YES", "resolved": "YES", "question": "Will it?"},
+                                 "evidence": {"source": {"result": "NO", "market_outcome": "YES", "settlement_ts": "2026-07-02T00:00:00+00:00", "settlement_value_dollars": "1.00", "winning_side": "YES", "outcome_known_at": "2026-07-02T01:00:00+00:00", "payout": 1.0, "void": False}, "resolution": {"outcome": "YES"}}},
+            "decision_artifact": {"strategy_signal": {"resolution": {"result": "YES"}, "winner": "YES"},
+                                  "source_context": {"outcome": "YES"},
+                                  "source_snapshots": [{"result": "NO"}]},
+        }
+        prepared = _prepare_snapshot(raw, candidate_dataset_path="collector.jsonl",
+                                     replay_run_id="replay", default_notional_usd=5.0)
+        assert prepared is not None
+        _, wallet_input, _, _ = prepared
+        def keys(value):
+            if isinstance(value, dict):
+                return set(value) | set().union(*(keys(v) for v in value.values()))
+            if isinstance(value, list):
+                return set().union(*(keys(v) for v in value))
+            return set()
+        forbidden = {"outcome", "resolution", "result", "official_outcome", "market_outcome", "settlement_ts",
+                     "official_result", "settlement_value_dollars", "winning_side", "outcome_known_at",
+                     "winner", "payout", "resolved", "void"}
+        self.assertFalse(forbidden & keys(wallet_input.signal))
+        self.assertFalse(forbidden & keys(wallet_input.shared_candidate))
+        self.assertEqual(wallet_input.shared_candidate["market"]["question"], "Will it?")
+
+    def test_saved_router_guard_combination_names_existing_replay_components(self):
+        from scripts.paper_shadow_lane_compose_replay import _load_config, _normalize_composition
+        config = _normalize_composition(_load_config(
+            Path(__file__).resolve().parent.parent / "lane_compositions" / "stable_router_guard_kelly.yaml"))
+        self.assertEqual(config["base_lane"], "control_stable")
+        self.assertEqual(config["action_lane"], "control_stable")
+        self.assertEqual(config["price_lane"], "shadow_fee_aware_loss_guard")
+        self.assertEqual(config["vetoes"], [
+            {"lane": "shadow_source_router", "mode": "require_agreement", "required": True},
+            {"lane": "shadow_fee_aware_loss_guard", "mode": "require_agreement", "required": True},
+        ])
+
+    def test_saved_combination_runs_its_existing_lanes_on_one_collector_candidate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshots = root / "collector.jsonl"
+            config = root / "combination.yaml"
+            output = root / "data" / "derived_reports" / "combination"
+            _write_jsonl(snapshots, [{
+                "run_id": "collector-1", "shared_candidate_id": "candidate-1",
+                "market_id": "KXCOMBO", "observed_at": "2026-07-01T12:00:00+00:00",
+                "yes_price": 0.30, "no_price": 0.70, "confidence": 0.91,
+                "main_decision": {"action": "BUY_NO", "size": 5.0},
+            }])
+            config.write_text("\n".join([
+                "composition:", "  name: stable_with_confidence_veto",
+                "  base_lane: control_stable", "  action_lane: control_stable",
+                "  sizing_lane: control_stable", "  price_lane: control_stable",
+                "  vetoes:", "    - lane: shadow_confidence_floor",
+                "      mode: require_agreement", "      required: true", "",
+            ]), encoding="utf-8")
+            result = build_collector_lane_replay(
+                snapshot_path=snapshots, output_dir=output,
+                enabled_lanes=[], composition_config=config,
+            )
+            rows = [json.loads(line) for line in result.lane_decision_path.read_text().splitlines()]
+            composed = [json.loads(line) for line in (output / "composition_rows.jsonl").read_text().splitlines()]
+            self.assertEqual({row["policy"] for row in rows}, {"control_stable", "shadow_confidence_floor"})
+            self.assertEqual(result.summary["composition"]["candidate_groups"], 1)
+            self.assertEqual(result.summary["composition"]["configuration_sha256"], hashlib.sha256(config.read_bytes()).hexdigest())
+            self.assertEqual(len(composed), 1)
+            self.assertEqual(composed[0]["shared_candidate_id"], "candidate-1")
+            self.assertEqual(result.summary["composition"]["wallet_intents_written"], 0)
+            self.assertEqual(result.summary["composition"]["buy_without_wallet_intent"], 1)
+            self.assertFalse(result.summary["promotion_eligible"])
+
+    def test_combination_rejects_unknown_lane_before_creating_outputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshots = root / "collector.jsonl"
+            config = root / "combination.yaml"
+            output = root / "data" / "derived_reports" / "invalid"
+            _write_jsonl(snapshots, [{"run_id": "c1", "shared_candidate_id": "one", "market_id": "KXONE", "observed_at": "2026-07-01T12:00:00+00:00"}])
+            config.write_text("composition:\n  base_lane: typo_not_a_lane\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "unknown combination lane"):
+                build_collector_lane_replay(snapshot_path=snapshots, output_dir=output,
+                                            enabled_lanes=[], composition_config=config)
+            self.assertFalse(output.exists())
+
+    def test_misspelled_combination_or_veto_is_not_a_silent_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshots = root / "collector.jsonl"
+            _write_jsonl(snapshots, [{"run_id": "c1", "shared_candidate_id": "one", "market_id": "KXONE", "observed_at": "2026-07-01T12:00:00+00:00"}])
+            for text in ("compositon:\n  base_lane: control_stable\n",
+                         "composition:\n  base_lane: control_stable\n  vetos: []\n"):
+                config = root / "combination.yaml"
+                config.write_text(text, encoding="utf-8")
+                output = root / "data" / "derived_reports" / str(len(text))
+                with self.assertRaisesRegex(ValueError, "unknown combination key"):
+                    build_collector_lane_replay(snapshot_path=snapshots, output_dir=output,
+                                                enabled_lanes=[], composition_config=config)
+                self.assertFalse(output.exists())
+
+    def test_invalid_gate_or_exposure_rejects_before_writing_replay_outputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshots = root / "collector.jsonl"
+            _write_jsonl(snapshots, [{"run_id": "c1", "shared_candidate_id": "one", "market_id": "KXONE", "observed_at": "2026-07-01T12:00:00+00:00",
+                                      "main_decision": {"action": "BUY_YES", "size": 5.0}}])
+            for index, detail in enumerate(("  gates:\n    - field: edge\n      op: does_not_exist\n      value: 0.5\n",
+                                            "  exposure:\n    max_rows_per_market: 1\n    selector: does_not_exist\n")):
+                config = root / "combination.yaml"
+                config.write_text("composition:\n  base_lane: control_stable\n" + detail, encoding="utf-8")
+                output = root / "data" / "derived_reports" / str(index)
+                with self.assertRaisesRegex(ValueError, "unknown composition (gate op|exposure selector)"):
+                    build_collector_lane_replay(snapshot_path=snapshots, output_dir=output,
+                                                enabled_lanes=[], composition_config=config)
+                self.assertFalse(output.exists())
+
+    def test_falsey_saved_sections_cannot_silently_disable_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshots = root / "collector.jsonl"
+            config = root / "combination.yaml"
+            _write_jsonl(snapshots, [{"run_id": "c1", "shared_candidate_id": "one", "market_id": "KXONE",
+                                      "observed_at": "2026-07-01T12:00:00+00:00"}])
+            for index, (section, value) in enumerate((
+                ("exposure", "false"), ("exposure", "[]"), ("exposure", "''"),
+                ("exposure", "null"), ("gates", "false"), ("gates", "''"),
+                ("gates", "null"), ("vetoes", "false"), ("vetoes", "''"),
+                ("vetoes", "null"),
+            )):
+                with self.subTest(section=section, value=value):
+                    config.write_text(f"composition:\n  base_lane: control_stable\n  {section}: {value}\n",
+                                      encoding="utf-8")
+                    output = root / "data" / "derived_reports" / f"bad_section_{index}"
+                    with self.assertRaisesRegex(ValueError, section):
+                        build_collector_lane_replay(snapshot_path=snapshots, output_dir=output,
+                                                    enabled_lanes=[], composition_config=config)
+                    self.assertFalse(output.exists())
+
+    def test_saved_quoted_booleans_and_invalid_notional_fail_before_outputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshots = root / "collector.jsonl"
+            config = root / "combination.yaml"
+            _write_jsonl(snapshots, [{"run_id": "c1", "shared_candidate_id": "one", "market_id": "KXONE",
+                                      "observed_at": "2026-07-01T12:00:00+00:00"}])
+            for index, (detail, field) in enumerate((
+                ("fallback_to_base: 'false'", "fallback_to_base"),
+                ("vetoes:\n    - lane: shadow_source_router\n      required: 'false'", "required"),
+                ("fixed_notional_usd: bogus", "fixed_notional_usd"),
+                ("fixed_notional_usd: .nan", "fixed_notional_usd"),
+            )):
+                with self.subTest(detail=detail):
+                    config.write_text("composition:\n  base_lane: control_stable\n  " + detail + "\n",
+                                      encoding="utf-8")
+                    output = root / "data" / "derived_reports" / f"bad_scalar_{index}"
+                    with self.assertRaisesRegex(ValueError, field):
+                        build_collector_lane_replay(snapshot_path=snapshots, output_dir=output,
+                                                    enabled_lanes=[], composition_config=config)
+                    self.assertFalse(output.exists())
+
+    def test_duplicate_saved_mapping_keys_fail_before_outputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshots = root / "collector.jsonl"
+            _write_jsonl(snapshots, [{"run_id": "c1", "shared_candidate_id": "one", "market_id": "KXONE",
+                                      "observed_at": "2026-07-01T12:00:00+00:00"}])
+            examples = (
+                ("yaml", "composition:\n  base_lane: control_stable\n"
+                 "  exposure:\n    max_rows_per_market: 1\n  exposure: {}\n"),
+                ("yaml", "composition:\n  base_lane: control_stable\n"
+                 "  exposure:\n    max_rows_per_market: 1\n    max_rows_per_market: 2\n"),
+                ("json", '{"composition":{"base_lane":"control_stable",'
+                 '"exposure":{"max_rows_per_market":1,"max_rows_per_market":2}}}'),
+                ("yaml", "composition:\n  base_lane: control_stable\n  gates:\n"
+                 "    - &floor {name: floor, field: price, op: gte, value: 0.2}\n"
+                 "    - <<: *floor\n      value: 0.3\n      value: 0.4\n"),
+            )
+            for index, (extension, text) in enumerate(examples):
+                with self.subTest(index=index):
+                    config = root / f"idea.{extension}"
+                    config.write_text(text, encoding="utf-8")
+                    output = root / "data" / "derived_reports" / f"duplicate_{index}"
+                    with self.assertRaisesRegex(ValueError, "duplicate.*key"):
+                        build_collector_lane_replay(snapshot_path=snapshots, output_dir=output,
+                                                    enabled_lanes=[], composition_config=config)
+                    self.assertFalse(output.exists())
+
+    def test_invalid_saved_exposure_cap_rejects_before_replay_outputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshots = root / "collector.jsonl"
+            config = root / "combination.yaml"
+            _write_jsonl(snapshots, [{"run_id": "c1", "shared_candidate_id": "one", "market_id": "KXONE",
+                                      "observed_at": "2026-07-01T12:00:00+00:00"}])
+            for index, value in enumerate(("bogus", ".nan", ".inf", "1.5", "null", "true", "-1")):
+                with self.subTest(value=value):
+                    config.write_text("composition:\n  base_lane: control_stable\n  exposure:\n"
+                                      f"    max_rows_per_market: {value}\n", encoding="utf-8")
+                    output = root / "data" / "derived_reports" / f"invalid_cap_{index}"
+                    with self.assertRaisesRegex(ValueError, "max_rows_per_market"):
+                        build_collector_lane_replay(snapshot_path=snapshots, output_dir=output,
+                                                    enabled_lanes=[], composition_config=config)
+                    self.assertFalse(output.exists())
+
+    def test_saved_exposure_rejects_non_boolean_per_side_before_outputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshots = root / "collector.jsonl"
+            config = root / "combination.yaml"
+            output = root / "data" / "derived_reports" / "bad_per_side"
+            _write_jsonl(snapshots, [{"run_id": "c1", "shared_candidate_id": "one", "market_id": "KXONE",
+                                      "observed_at": "2026-07-01T12:00:00+00:00"}])
+            config.write_text("composition:\n  base_lane: control_stable\n  exposure:\n"
+                              "    max_rows_per_market: 1\n    per_side: 'false'\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "exposure per_side"):
+                build_collector_lane_replay(snapshot_path=snapshots, output_dir=output,
+                                            enabled_lanes=[], composition_config=config)
+            self.assertFalse(output.exists())
+
+    def test_unknown_gate_field_rejects_before_writing_replay_outputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshots = root / "collector.jsonl"
+            config = root / "idea.yaml"
+            output = root / "data" / "derived_reports" / "bad_gate"
+            _write_jsonl(snapshots, [{"run_id": "collector-1", "shared_candidate_id": "c1", "market_id": "KXONE",
+                                      "observed_at": "2026-07-01T12:00:00+00:00"}])
+            config.write_text("composition:\n  base_lane: control_stable\n  gates:\n"
+                              "    - field: source_sampl_count\n      op: gte\n      value: 5\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "unknown composition gate field: source_sampl_count"):
+                build_collector_lane_replay(snapshot_path=snapshots, output_dir=output,
+                                            enabled_lanes=[], composition_config=config)
+            self.assertFalse(output.exists())
+
+    def test_saved_combination_can_emit_a_sealed_wallet_intent_when_inputs_exist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshots = root / "collector.jsonl"
+            output = root / "data" / "derived_reports" / "qualified"
+            stamp = "2026-07-01T12:00:00+00:00"
+            _write_jsonl(snapshots, [{
+                "run_id": "collector-1", "shared_candidate_id": "candidate-1",
+                "market_id": "KXQUALIFIED", "observed_at": stamp,
+                "main_decision": {"action": "BUY_YES", "size": 5.0},
+                "decision_artifact": {"strategy_signal": {
+                    "direction": "BUY_YES", "market_id": "KXQUALIFIED",
+                    "question": "Will it happen?", "exchange": "kalshi",
+                    "market_route": {"allowed": True, "handler_id": "weather"},
+                    "model_probability": 0.8, "confidence": 0.9,
+                    "best_yes_ask": 0.4}},
+                "shared_candidate": {
+                    "candidate_id": "candidate-1", "market_id": "KXQUALIFIED",
+                    "observed_at": stamp, "market": {"question": "Will it happen?"},
+                    "prices": {"order_book_snapshot": {"source": "book", "market_id": "KXQUALIFIED",
+                        "observed_at": stamp, "data": {"best_yes_ask": 0.4}}},
+                },
+            }])
+            config = root / "idea.yaml"
+            config.write_text("composition:\n  name: qualified\n  base_lane: control_stable\n"
+                              "  action_lane: control_stable\n  price_lane: control_stable\n"
+                              "  sizing_lane: control_stable\n", encoding="utf-8")
+            result = build_collector_lane_replay(snapshot_path=snapshots, output_dir=output,
+                                                 enabled_lanes=[], composition_config=config)
+            intents = [json.loads(line) for line in (output / "wallet_intents.jsonl").read_text().splitlines()]
+            self.assertEqual(len(intents), 1)
+            self.assertEqual(intents[0]["action"], "BUY_YES")
+            self.assertEqual(intents[0]["model_probability"], 0.8)
+            self.assertEqual(intents[0]["entry_price"], 0.4)
+            self.assertEqual(intents[0]["source_context"]["market_route"]["handler_id"], "weather")
+            self.assertEqual(result.summary["composition"]["wallet_intents_written"], 1)
+            self.assertEqual(result.summary["composition"]["buy_without_wallet_intent"], 0)
+            self.assertFalse(result.summary["promotion_eligible"])
+
+    def test_saved_stable_forward_rule_rejects_explicit_pre_risk_lanes_before_outputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshots = root / "collector.jsonl"
+            output = root / "data" / "derived_reports" / "mismatched_cohort"
+            _write_jsonl(snapshots, [{"run_id": "collector-1", "shared_candidate_id": "c1",
+                                      "market_id": "KXONE", "observed_at": "2026-07-01T12:00:00+00:00"}])
+            saved = Path(__file__).resolve().parent.parent / "lane_compositions" / "stable_router_guard_kelly.yaml"
+            with self.assertRaisesRegex(ValueError, "stable lanes cannot select a pre-risk picker cohort"):
+                build_collector_lane_replay(snapshot_path=snapshots, output_dir=output,
+                    enabled_lanes=["shadow_pre_risk_picker", "shadow_pre_risk_fee_aware_loss_guard"],
+                    composition_config=saved)
+            self.assertFalse(output.exists())
+
+    def test_saved_forward_rule_replay_uses_same_strict_veto_on_identical_lane_rows(self):
+        from bot.forward_composed_paper import compose_forward_rows
+        from scripts.paper_shadow_lane_compose_replay import _load_config, validate_saved_combination
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshots = root / "collector.jsonl"
+            output = root / "data" / "derived_reports" / "paired"
+            stamp = "2026-07-01T12:00:00+00:00"
+            _write_jsonl(snapshots, [{
+                "run_id": "collector-1", "shared_candidate_id": "candidate-1", "market_id": "KXPAIRED",
+                "observed_at": stamp, "main_decision": {"action": "BUY_YES", "size": 10.0},
+                "decision_artifact": {"strategy_signal": {"direction": "BUY_YES", "market_id": "KXPAIRED",
+                    "question": "Will it happen?", "exchange": "kalshi", "market_route": {"allowed": True, "handler_id": "weather"},
+                    "model_probability": 0.8, "confidence": 0.9, "best_yes_ask": 0.4}},
+                "shared_candidate": {"candidate_id": "candidate-1", "market_id": "KXPAIRED", "observed_at": stamp,
+                    "market": {"question": "Will it happen?"},
+                    "prices": {"order_book_snapshot": {"source": "book", "market_id": "KXPAIRED",
+                        "observed_at": stamp, "data": {"best_yes_ask": 0.4}}}},
+            }])
+            config_path = Path(__file__).resolve().parent.parent / "lane_compositions" / "stable_router_guard_kelly.yaml"
+            config = validate_saved_combination(_load_config(config_path))
+            result = build_collector_lane_replay(snapshot_path=snapshots, output_dir=output,
+                enabled_lanes=[], composition_config=config_path)
+            lane_rows = [json.loads(line) for line in result.lane_decision_path.read_text().splitlines()]
+            expected_pairs, expected_intents = compose_forward_rows(lane_rows, combination=config)
+            actual = [json.loads(line) for line in (output / "composition_rows.jsonl").read_text().splitlines()]
+            actual_intents = [json.loads(line) for line in (output / "wallet_intents.jsonl").read_text().splitlines()]
+            self.assertEqual(len(actual), len(expected_pairs))
+            self.assertEqual([(row["action"], row["reason_code"]) for row in actual],
+                             [(row["combined_action"], row["reason_code"]) for row in expected_pairs])
+            self.assertEqual(actual_intents, [row for row in expected_intents if row["lane_id"] == "forward_composed_paper"])
+            self.assertEqual(actual[0]["action"], "SKIP")
+            self.assertEqual(result.summary["composition"]["pnl"]["pnl_calculable_rows"], 0)
+
     def test_replays_selected_index_rows_with_index_and_manifest_provenance(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -6,7 +6,7 @@ one append-only forward decision cohort; resolutions enter only the later wallet
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 import hashlib
 import json
@@ -23,9 +23,25 @@ PRE_RISK_GUARD = "shadow_pre_risk_fee_aware_loss_guard"
 _BUYS = {"BUY_YES", "BUY_NO"}
 _IDENTITY = ("shared_candidate_id", "shared_snapshot_id", "run_id", "market_id", "observed_at")
 
+def validate_forward_combination(combination: Mapping[str, Any]) -> None:
+    """Accept only the saved pattern this observer actually implements."""
+    supported_vetoes = [
+        {"lane": ROUTER, "mode": "require_agreement", "required": True},
+        {"lane": GUARD, "mode": "require_agreement", "required": True},
+    ]
+    if (combination.get("base_lane") != CONTROL
+            or combination.get("action_lane") != CONTROL
+            or combination.get("sizing_lane") != CONTROL
+            or combination.get("price_lane") != GUARD
+            or combination.get("fallback_to_base") is not False
+            or combination.get("vetoes") not in (supported_vetoes, supported_vetoes[1:])
+            or combination.get("gates")
+            or combination.get("exposure")
+            or combination.get("fixed_notional_usd") is not None):
+        raise ValueError("unsupported forward combination: replay may test this idea, but the paper observer does not implement it")
 
-def compose_forward_rows(rows: list[Mapping[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Pair a recorded picker BUY (or explicitly legacy stable row) with Router/guard.
+def compose_forward_rows(rows: Sequence[Mapping[str, Any]], *, combination: Mapping[str, Any] | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Pair recorded pre-risk picker (or legacy stable) intent with selected vetoes/guard.
 
     New cohorts use the captured pre-risk picker lane; accepted-wallet rows are
     retained as separate audit evidence. Historical cohorts without that lane
@@ -34,6 +50,11 @@ def compose_forward_rows(rows: list[Mapping[str, Any]]) -> tuple[list[dict[str, 
     pre_risk = any(row.get("policy") == PICKER for row in rows)
     baseline_policy = PICKER if pre_risk else CONTROL
     guard_policy = PRE_RISK_GUARD if pre_risk else GUARD
+    if combination is not None:
+        validate_forward_combination(combination)
+        if pre_risk:
+            raise ValueError("unsupported forward combination: stable lanes cannot select a pre-risk picker cohort")
+    require_router = combination is None or any(veto["lane"] == ROUTER for veto in combination["vetoes"])
     indexed: dict[tuple[str, ...], dict[str, list[Mapping[str, Any]]]] = {}
     for row in rows:
         policy = row.get("policy")
@@ -69,16 +90,18 @@ def compose_forward_rows(rows: list[Mapping[str, Any]]) -> tuple[list[dict[str, 
                 reason = "picker_intent_not_recorded"
             elif action not in _BUYS:
                 reason = "picker_intent_not_recorded" if pre_risk else "baseline_skip"
-            elif len(group.get(ROUTER, [])) != 1:
-                reason = "missing_router" if not group.get(ROUTER) else "duplicate_router"
-            else:
-                router = group[ROUTER][0]
-                history = (router.get("provenance") or {}).get("source_router") or {}
-                if (history.get("direct_history") or {}).get("mode") != "committed_index_direct_read":
-                    reason = "router_history_unverified"
-                elif router.get("action") != action:
-                    reason = str(router.get("reason_code") or "router_disagrees") if router.get("action") == "SKIP" else "router_disagrees"
-                elif len(group.get(guard_policy, [])) != 1:
+            if reason is None and require_router:
+                if len(group.get(ROUTER, [])) != 1:
+                    reason = "missing_router" if not group.get(ROUTER) else "duplicate_router"
+                else:
+                    router = group[ROUTER][0]
+                    history = (router.get("provenance") or {}).get("source_router") or {}
+                    if (history.get("direct_history") or {}).get("mode") != "committed_index_direct_read":
+                        reason = "router_history_unverified"
+                    elif router.get("action") != action:
+                        reason = str(router.get("reason_code") or "router_disagrees") if router.get("action") == "SKIP" else "router_disagrees"
+            if reason is None:
+                if len(group.get(guard_policy, [])) != 1:
                     reason = "missing_guard" if not group.get(guard_policy) else "duplicate_guard"
                 elif group[guard_policy][0].get("action") != action:
                     reason = str(group[guard_policy][0].get("reason_code") or "guard_disagrees") if group[guard_policy][0].get("action") == "SKIP" else "guard_disagrees"
@@ -116,7 +139,7 @@ def compose_forward_rows(rows: list[Mapping[str, Any]]) -> tuple[list[dict[str, 
                     "control_action": action, "combined_action": combined,
                     "control_economics_status": "quote_proxy" if control_quoted else "control_quote_unavailable",
                     "wallet_input_status": "available" if wallet_ready else "wallet_inputs_unavailable",
-                    "reason_code": reason or "router_confirmed_guard_passed",
+                    "reason_code": reason or ("router_confirmed_guard_passed" if require_router else "guard_passed_without_router"),
                     "non_mutating": True, "quote_not_fill": True}
             pairs.append(pair)
             if (action in _BUYS and all(key) and _valid_time(key[-1]) and wallet_ready
@@ -145,9 +168,12 @@ def evaluate_forward_composition(
     starting_balance_usd: float, kelly_sizer: Any, risk_policy: Any,
     min_edge: float, min_confidence: float, max_entry_price: float,
     fee_rate: float = 0.07, event_cap_pct: float = 0.10,
+    combination: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Rebuild both in-memory wallets from the complete forward cohort."""
-    pairs, intents = compose_forward_rows(rows)
+    if combination is not None:
+        validate_forward_combination(combination)
+    pairs, intents = compose_forward_rows(rows, combination=combination)
     kwargs = dict(resolutions=resolutions, starting_balance_usd=starting_balance_usd,
                   kelly_sizer=kelly_sizer, risk_policy=risk_policy, min_edge=min_edge,
                   min_confidence=min_confidence, max_entry_price=max_entry_price,
@@ -157,6 +183,7 @@ def evaluate_forward_composition(
         valid = [row for row in intents if row["lane_id"] == lane]
         wallets[name] = evaluate_composed_intents(intents=valid, **kwargs)
     return {"schema_name": "forward_composed_paper_observer", "non_mutating": True,
+            "composition_name": combination.get("name") if combination is not None else None,
             "paper_only": True, "promotion_eligible": False,
             "candidate_universe": ("recorded_pre_risk_picker_intents" if any(row.get("policy") == PICKER for row in rows)
                                    else "recorded_control_stable_rows_not_all_pre_risk_picker_intents"),

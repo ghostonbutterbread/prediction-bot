@@ -2,6 +2,7 @@
 import unittest
 import tempfile
 import json
+import hashlib
 from pathlib import Path
 from io import StringIO
 from contextlib import redirect_stdout
@@ -40,6 +41,78 @@ def cohort(candidate="c1", market="M1", event="E1", side="BUY_YES", price=0.4):
 
 
 class ForwardCompositionTests(unittest.TestCase):
+    def test_stable_named_combination_cannot_silently_select_new_pre_risk_cohort(self):
+        from scripts.paper_shadow_lane_compose_replay import _load_config, validate_saved_combination
+        saved = validate_saved_combination(_load_config(Path(__file__).resolve().parent.parent /
+            "lane_compositions" / "stable_router_guard_kelly.yaml"))
+        control, router, guard = cohort()
+        picker = {**control, "policy": "shadow_pre_risk_picker",
+                  "provenance": {"picker_intent_source": "decision_artifact.strategy_signal"}}
+        pre_guard = {**guard, "policy": "shadow_pre_risk_fee_aware_loss_guard"}
+        rows = [control, picker, router, guard, pre_guard]
+        default_pairs, default_intents = compose_forward_rows(rows)
+        self.assertEqual(default_pairs[0]["combined_action"], "BUY_YES")
+        self.assertTrue(any(row["lane_id"] == "forward_composed_paper" for row in default_intents))
+        with self.assertRaisesRegex(ValueError, "stable lanes cannot select a pre-risk picker cohort"):
+            compose_forward_rows(rows, combination=saved)
+
+    def test_saved_guard_only_variant_changes_selection_without_rewriting_lanes(self):
+        from bot.forward_composed_paper import validate_forward_combination
+        from scripts.paper_shadow_lane_compose_replay import _load_config, validate_saved_combination
+        base = validate_saved_combination(_load_config(Path(__file__).resolve().parent.parent /
+            "lane_compositions" / "stable_router_guard_kelly.yaml"))
+        guard_only = {**base, "name": "guard_only", "vetoes": [base["vetoes"][1]]}
+        validate_forward_combination(guard_only)
+        control, router, guard = cohort()
+        router["provenance"] = {"source_router": {}}
+        strict_pairs, strict_intents = compose_forward_rows([control, router, guard], combination=base)
+        loose_pairs, loose_intents = compose_forward_rows([control, router, guard], combination=guard_only)
+        self.assertEqual((strict_pairs[0]["combined_action"], strict_pairs[0]["reason_code"]),
+                         ("SKIP", "router_history_unverified"))
+        self.assertEqual(loose_pairs[0]["combined_action"], "BUY_YES")
+        self.assertEqual(loose_pairs[0]["reason_code"], "guard_passed_without_router")
+        self.assertFalse(any(row["lane_id"] == "forward_composed_paper" for row in strict_intents))
+        self.assertTrue(any(row["lane_id"] == "forward_composed_paper" for row in loose_intents))
+
+    def test_manual_observer_reads_saved_combination_and_reports_same_file_identity(self):
+        from datetime import datetime, timezone
+        from scripts.forward_composed_paper import main
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            now = datetime.now(timezone.utc).isoformat()
+            ledger = root / "lane_rows.jsonl"
+            state = root / "state.json"
+            saved = Path(__file__).resolve().parent.parent / "lane_compositions" / "stable_router_guard_kelly.yaml"
+            ledger.write_text("".join(json.dumps({**row, "observed_at": now}) + "\n" for row in cohort()), encoding="utf-8")
+            state.write_text(json.dumps({"publisher": {"runtime_kind": "collector", "instance_id": "primary"},
+                "latest_snapshot": {"snapshot_id": "snapshot-1", "publisher_runtime": "collector",
+                                    "publisher_instance_id": "primary", "published_at": now}}), encoding="utf-8")
+            output = StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(["--lane-decision-path", str(ledger),
+                    "--shared-market-state-path", str(state),
+                    "--composition-config", str(saved), "--enable-paper-observer"]), 0)
+            report = json.loads(output.getvalue())
+            self.assertEqual(report["composition_name"], "stable_router_guard_kelly")
+            self.assertEqual(report["composition_sha256"], hashlib.sha256(saved.read_bytes()).hexdigest())
+            self.assertEqual(report["combined_wallet"]["summary"]["opened_positions"], 1)
+
+    def test_saved_replay_combination_routes_to_same_forward_wallet_seam(self):
+        from scripts.paper_shadow_lane_compose_replay import _load_config, validate_saved_combination
+        combination = validate_saved_combination(_load_config(
+            Path(__file__).resolve().parent.parent / "lane_compositions" / "stable_router_guard_kelly.yaml"))
+        result = evaluate_forward_composition(list(cohort()), [], starting_balance_usd=100,
+            kelly_sizer=FixedKelly(), risk_policy=ApprovingRisk(), min_edge=0.01,
+            min_confidence=0.5, max_entry_price=0.99, combination=combination)
+        self.assertEqual(result["composition_name"], "stable_router_guard_kelly")
+        self.assertEqual(result["combined_wallet"]["summary"]["opened_positions"], 1)
+        self.assertEqual(result["combined_wallet"]["decision_rows"][0]["approved_stake_usd"], 10)
+        unsupported = {**combination, "action_lane": "shadow_source_router"}
+        with self.assertRaisesRegex(ValueError, "unsupported forward combination"):
+            evaluate_forward_composition(list(cohort()), [], starting_balance_usd=100,
+                kelly_sizer=FixedKelly(), risk_policy=ApprovingRisk(), min_edge=0.01,
+                min_confidence=0.5, max_entry_price=0.99, combination=unsupported)
+
     def test_manual_cli_reads_forward_lane_ledger_without_writing_input_or_wallet(self):
         from datetime import datetime, timezone
         from scripts.forward_composed_paper import main

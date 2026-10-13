@@ -1,3 +1,4 @@
+import tempfile
 import unittest
 from copy import deepcopy
 from pathlib import Path
@@ -102,6 +103,77 @@ def _source_router_row(
 
 
 class PaperShadowLaneComposeReplayTests(unittest.TestCase):
+    def test_saved_yaml_merge_can_override_inherited_gate_fields(self):
+        from scripts.paper_shadow_lane_compose_replay import _load_config, validate_saved_combination
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "combination.yaml"
+            path.write_text("composition:\n  base_lane: control_stable\n  gates:\n"
+                            "    - &floor\n      name: price_floor\n      field: price\n"
+                            "      op: gte\n      value: 0.2\n"
+                            "    - <<: *floor\n      name: price_cap\n      op: lte\n"
+                            "      value: 0.8\n", encoding="utf-8")
+            normalized = validate_saved_combination(_load_config(path))
+            self.assertEqual([(gate["name"], gate["op"], gate["value"])
+                              for gate in normalized["gates"]],
+                             [("price_floor", "gte", 0.2), ("price_cap", "lte", 0.8)])
+            row = _lane_row(policy="control_stable", candidate_id="priced", market_id="KXPRICED",
+                            action="BUY_YES", size=10.0, yes_price=0.35)
+            result = compose_lane_replay(lane_rows=[row], config=normalized)
+            self.assertEqual(result["composition_rows"][0]["action"], "BUY_YES")
+
+    def test_saved_explicit_empty_sections_and_boolean_fallback_remain_supported(self):
+        from scripts.paper_shadow_lane_compose_replay import validate_saved_combination
+        normalized = validate_saved_combination({"composition": {
+            "base_lane": "control_stable", "fallback_to_base": False,
+            "gates": [], "vetoes": [], "exposure": {}}})
+        self.assertFalse(normalized["fallback_to_base"])
+        self.assertEqual(normalized["gates"], [])
+        self.assertEqual(normalized["vetoes"], [])
+        self.assertEqual(normalized["exposure"], {})
+
+    def test_saved_numeric_string_exposure_cap_still_limits_one_market(self):
+        from scripts.paper_shadow_lane_compose_replay import validate_saved_combination
+        config = {"composition": {"base_lane": "control_stable", "exposure": {
+            "max_rows_per_market": "1", "selector": "latest", "per_side": False}}}
+        normalized = validate_saved_combination(config)
+        rows = [_lane_row(policy="control_stable", candidate_id=candidate, market_id="KXCAPPED",
+                          action="BUY_YES", size=10.0, yes_price=0.4)
+                for candidate in ("older", "newer")]
+        rows[1]["observed_at"] = "2026-09-01T13:00:00+00:00"
+        result = compose_lane_replay(lane_rows=rows, config=normalized)
+        self.assertEqual([row["shared_candidate_id"] for row in result["composition_rows"]], ["newer"])
+        self.assertEqual(result["summary"]["diagnostics"]["exposure_dropped_rows"], 1)
+
+    def test_saved_price_gate_uses_recorded_entry_price_instead_of_missing_field(self):
+        stable = _lane_row(policy="control_stable", candidate_id="priced", market_id="KXPRICED",
+                           action="BUY_YES", size=10.0, yes_price=0.35)
+        router = _source_router_row(candidate_id="priced", market_id="KXPRICED", action="BUY_YES",
+                                    observed_at="2026-09-01T12:00:00+00:00", sample_count=5, yes_price=0.35)
+        result = compose_lane_replay(lane_rows=[stable, router],
+            config=_load_composition("source_router_sample_ge5_price_20_80_cap1"))
+        self.assertEqual(result["composition_rows"][0]["action"], "BUY_YES")
+        self.assertNotIn("gate_failed:price_floor_020", result["summary"]["diagnostics"])
+
+    def test_guarded_composition_keeps_quote_separate_from_fill_pnl(self):
+        stable = _lane_row(policy="control_stable", candidate_id="q1", market_id="KXQ", action="BUY_YES", size=10.0, yes_price=0.4)
+        router = _lane_row(policy="shadow_source_router", candidate_id="q1", market_id="KXQ", action="BUY_YES", size=10.0, yes_price=0.4)
+        guard = _lane_row(policy="shadow_fee_aware_loss_guard", candidate_id="q1", market_id="KXQ", action="BUY_YES", size=10.0, yes_price=0.4)
+        guard["entry_price"] = 0.4
+        guard["provenance"]["payout_aware"] = {"selected_side_ask": 0.4, "entry_price": 0.4, "quote_not_fill": True}
+        result = compose_lane_replay(lane_rows=[stable, router, guard],
+            resolution_rows=[{"shared_candidate_id": "q1", "run_id": "test-run", "market_id": "KXQ", "outcome": "YES", "settlement_ts": "2026-09-02T12:00:00+00:00"}],
+            config=_load_composition("stable_router_guard_kelly"))
+        row = result["composition_rows"][0]
+        self.assertEqual(row["entry_price"], 0.4)
+        self.assertTrue(row["quote_not_fill"])
+        self.assertEqual((row["run_id"], row["shared_snapshot_id"]), ("test-run", "test-snapshot"))
+        self.assertIsNotNone(row["decision_id"])
+        resolved = result["resolved_rows"][0]
+        self.assertEqual(resolved["blocker"], "quote_not_fill")
+        self.assertIsNone(resolved["fill_price"])
+        self.assertIsNone(resolved["pnl"])
+        self.assertEqual(result["summary"]["pnl"]["pnl_calculable_rows"], 0)
+
     def test_composes_router_side_with_stable_sizing_and_prices(self):
         lane_rows = [
             {
