@@ -1,6 +1,6 @@
 # Pre-risk picker paper observer integration dossier
 
-- **Status:** feature corrected after blocking review (fresh independent review pending)
+- **Status:** corrected feature and exact combined-beta tree independently accepted for disabled code-only integration; not activated
 - **Owner:** t_c6d04b67 builder
 - **Branch / owning ref:** `feat/pre-risk-picker-paper-observer`
 - **Base commit:** `3fdf4efc665357d83c0a2124b7ae31e7ec169bdb`
@@ -29,7 +29,8 @@ Replace accepted-wallet-only observer denominator with genuinely captured pre-ri
 - Full isolated: `-m unittest discover -s tests -q` → 1,394 tests, OK (7 skipped), 60.257 s; log in task scratch `pre-risk-picker-full-suite.log` (not a repository artifact). `git diff --check` passed.
 - Original fixture: seven collector-shaped rows loaded, 28 lane rows; control opened 3, combined opened 2, with zero settlements. Corrected fixture adds an eighth BUY with ask 0.40, artifact estimate 0.55, and YES probability 0.51: 32 lane rows, control opens 4 at the genuine ask, combined opens 2 because the fee-aware guard vetoes that estimated entry. Trace-only/spoofed markers, wrong-market/future books, and a verified ask below guard floor remain explicit SKIPs or control-only openings. Removing a picker row reports `missing_picker_intent` in the diagnostic; opt-in required-pre-risk mode skips the latest snapshot rather than silently falling back.
 - Source Router strict-history reader and source confidence builder were patched in the fixture to return deterministic prior evidence; no live strict-history consumer smoke or forward cohort is claimed.
-- Independent review of tip `1f014f429c7eed25bffc5966bcc5d943a931f834` blocked code-only beta integration: normal candidate loading dropped `decision_artifact.execution_snapshot.estimated_fill_price`, allowing the guard to approve at an ask even when the higher recorded estimate would veto. RED loader→writer→observer regression reproduced a false BUY; GREEN after the narrow fix in `6fd1d92db351ab1ea7827aeaa831170dfbba3980`. A separate RED→GREEN check added the optional latest-snapshot picker coverage gate, including the manual CLI flag. Parent reran 123 focused tests (1 skipped), full isolated suite 1,394 tests (7 skipped, 79.776s), and `git diff --check`; all passed. The corrected commit needs **fresh independent review**; the prior no-go cannot approve it.
+- Independent review of tip `1f014f429c7eed25bffc5966bcc5d943a931f834` blocked code-only beta integration: normal candidate loading dropped `decision_artifact.execution_snapshot.estimated_fill_price`, allowing the guard to approve at an ask even when the higher recorded estimate would veto. RED loader→writer→observer regression reproduced a false BUY; GREEN after the narrow fix in `6fd1d92db351ab1ea7827aeaa831170dfbba3980`. A separate RED→GREEN check added the optional latest-snapshot picker coverage gate, including the manual CLI flag. Parent reran 123 focused tests (1 skipped), full isolated suite 1,394 tests (7 skipped, 79.776s), and `git diff --check`; all passed. The prior no-go could not approve the corrected commit; its fresh review is recorded below.
+- Fresh independent read-only review of corrected feature tip `12eea9634f0f42d30028b755f2c1cd1f99a77f38` accepted it for code-only beta preflight, not activation; focused 123/1 skipped and isolated full 1,394/7 skipped passed again. Parent staged a non-committing merge from clean beta `3fdf4efc665357d83c0a2124b7ae31e7ec169bdb`, removed this dossier from the index, and recorded exact combined tree `c8a9fabce3e7619ad428fc5100e282a466bcf6b4`. Focused 123/1 skipped and full combined suite 1,394/7 skipped (64.486s) passed; staged diff check passed. A separate independent read-only reviewer accepted **that exact tree** for disabled code-only integration. Its mixed-ledger probe confirmed the fresh-isolated-cohort requirement: a single picker row switches the whole supplied ledger to pre-risk mode, and legacy-only rows become explicit missing-picker coverage rather than wallet intents. Neither review approves a recurring paper lane or live trading.
 - Merge/ancestry: branch from clean beta SHA above; no merge or push.
 
 ## Blockers and deferred work
@@ -43,7 +44,7 @@ Replace accepted-wallet-only observer denominator with genuinely captured pre-ri
 - **Owning feature branch/ref:** `feat/pre-risk-picker-paper-observer`
 - **Latest immutable recovery checkpoint:** `6fd1d92db351ab1ea7827aeaa831170dfbba3980`
 - **Feature implementation commit(s):** `4af3b2fac8430ef4ab3f68387cd1fbfef08d12a7`, `6fd1d92db351ab1ea7827aeaa831170dfbba3980`
-- **Exact resume point:** fresh independent read-only review of corrected `6fd1d92db351ab1ea7827aeaa831170dfbba3980` plus this dossier-only tip; if accepted, non-committing combined-beta preflight and exact-tree review. Do not activate.
+- **Exact resume point:** combined-beta preflight and exact-tree review passed on `c8a9fabce3e7619ad428fc5100e282a466bcf6b4`. Abort preflight, restage feature excluding this dossier, require the same tree hash, rerun focused/full tests, and commit/push the code-only beta merge if unchanged. Do not activate; fresh isolated cohort and strict-history consumer smoke remain separate gates.
 - **Working-tree state:** clean after dossier-only handoff commit; tip contains that later metadata commit.
 
 ## Decision gates
@@ -56,3 +57,4 @@ Replace accepted-wallet-only observer denominator with genuinely captured pre-ri
 
 - 2026-10-13 — opened branch-local dossier before material code.
 - 2026-10-13 — independent reviewer blocked beta integration over dropped pre-risk estimated entry; RED/GREEN correction and opt-in pre-risk cohort gate committed, awaiting fresh review. No runtime change.
+- 2026-10-13 — corrected feature and exact staged beta tree independently accepted for disabled code-only integration after full combined-tree tests; recurring activation explicitly deferred.
