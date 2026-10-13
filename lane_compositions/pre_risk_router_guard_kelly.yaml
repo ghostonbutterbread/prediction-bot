@@ -1,0 +1,16 @@
+# Saved paper-only selection; loading never enables an observer or a wallet.
+# Omit the Router veto for guard-only comparison; keep the pre-risk guard.
+composition:
+  name: pre_risk_router_guard_kelly
+  base_lane: shadow_pre_risk_picker
+  action_lane: shadow_pre_risk_picker
+  sizing_lane: shadow_pre_risk_picker  # diagnostic only; paper wallet recalculates Kelly
+  price_lane: shadow_pre_risk_fee_aware_loss_guard
+  fallback_to_base: false
+  vetoes:
+    - lane: shadow_source_router
+      mode: require_agreement
+      required: true
+    - lane: shadow_pre_risk_fee_aware_loss_guard
+      mode: require_agreement
+      required: true

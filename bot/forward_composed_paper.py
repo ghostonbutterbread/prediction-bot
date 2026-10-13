@@ -25,14 +25,16 @@ _IDENTITY = ("shared_candidate_id", "shared_snapshot_id", "run_id", "market_id",
 
 def validate_forward_combination(combination: Mapping[str, Any]) -> None:
     """Accept only the saved pattern this observer actually implements."""
+    baseline = combination.get("base_lane")
+    guard = GUARD if baseline == CONTROL else PRE_RISK_GUARD if baseline == PICKER else None
     supported_vetoes = [
         {"lane": ROUTER, "mode": "require_agreement", "required": True},
-        {"lane": GUARD, "mode": "require_agreement", "required": True},
+        {"lane": guard, "mode": "require_agreement", "required": True},
     ]
-    if (combination.get("base_lane") != CONTROL
-            or combination.get("action_lane") != CONTROL
-            or combination.get("sizing_lane") != CONTROL
-            or combination.get("price_lane") != GUARD
+    if (guard is None
+            or combination.get("action_lane") != baseline
+            or combination.get("sizing_lane") != baseline
+            or combination.get("price_lane") != guard
             or combination.get("fallback_to_base") is not False
             or combination.get("vetoes") not in (supported_vetoes, supported_vetoes[1:])
             or combination.get("gates")
@@ -52,8 +54,10 @@ def compose_forward_rows(rows: Sequence[Mapping[str, Any]], *, combination: Mapp
     guard_policy = PRE_RISK_GUARD if pre_risk else GUARD
     if combination is not None:
         validate_forward_combination(combination)
-        if pre_risk:
-            raise ValueError("unsupported forward combination: stable lanes cannot select a pre-risk picker cohort")
+        if pre_risk != (combination["base_lane"] == PICKER):
+            if pre_risk:
+                raise ValueError("unsupported forward combination: stable lanes cannot select a pre-risk picker cohort")
+            raise ValueError("unsupported forward combination: pre-risk lanes cannot select a stable cohort")
     require_router = combination is None or any(veto["lane"] == ROUTER for veto in combination["vetoes"])
     indexed: dict[tuple[str, ...], dict[str, list[Mapping[str, Any]]]] = {}
     for row in rows:
