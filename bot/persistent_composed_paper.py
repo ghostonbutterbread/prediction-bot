@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 import fcntl
@@ -18,6 +18,7 @@ import os
 
 from bot.file_ops import atomic_write_json
 from bot.forward_composed_paper import PICKER, CONTROL, _IDENTITY, _digest as forward_digest, compose_forward_rows, validate_forward_combination
+from bot.composed_lane_wallet import _timestamp
 from bot.market_router import route_market
 from bot.shared_market_runtime import shared_snapshot_is_fresh
 from bot.simulator import Simulator
@@ -69,12 +70,23 @@ def consume_persistent_composed_paper(
                                             max_snapshot_age_seconds=max_snapshot_age_seconds)):
         raise ValueError("shared snapshot stale or publisher mismatched")
     latest = [row for row in lane_rows if row.get("shared_snapshot_id") == snapshot["snapshot_id"]]
+    reference = _timestamp(snapshot.get("observed_at") or snapshot["published_at"])
+    current = now or datetime.now(timezone.utc)
+    for row in latest:
+        if row.get("policy") in {CONTROL, PICKER}:
+            observed = _timestamp(row.get("observed_at"))
+            if (observed > current or
+                    abs((observed - reference).total_seconds()) > max_snapshot_age_seconds):
+                raise ValueError("latest snapshot observation is stale or future-dated")
     controls = Counter(tuple(str(row.get(k) or "") for k in _IDENTITY)
                        for row in latest if row.get("policy") == CONTROL)
     pickers = Counter(tuple(str(row.get(k) or "") for k in _IDENTITY)
                       for row in latest if row.get("policy") == PICKER)
     if not controls or any(pickers[key] != 1 or not all(key) for key in controls):
         raise ValueError("pre-risk picker incomplete for latest control snapshot")
+    if any(row.get("policy") == PICKER and str(row.get("action") or "").upper() in {"BUY_YES", "BUY_NO"}
+           and tuple(str(row.get(k) or "") for k in _IDENTITY) not in controls for row in latest):
+        raise ValueError("pre-risk picker BUY lacks matching control identity")
     # The caller may supply an append-only ledger; only the fresh publisher
     # snapshot is eligible for new persistent entries.
     pairs, intents = compose_forward_rows(latest, combination=combination)

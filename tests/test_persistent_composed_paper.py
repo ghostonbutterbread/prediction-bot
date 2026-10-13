@@ -2,7 +2,7 @@
 import json
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -102,6 +102,26 @@ class PersistentComposedPaperTests(unittest.TestCase):
         session = json.loads(next(self.paper_root.glob("sim_*.json")).read_text())
         self.assertEqual([trade["market_id"] for trade in session["trades"]],
                          ["KXHIGHNY-26OCT13-T80"])
+
+    def test_orphan_picker_buy_cannot_open_without_matching_control(self):
+        control = self.rows(candidate="control", action="SKIP")
+        orphan = [row for row in self.rows(candidate="orphan", market="KXHIGHNY-26OCT13-T81")
+                  if row["policy"] != "control_stable"]
+        with self.assertRaisesRegex(ValueError, "picker.*control"):
+            self.consume(control + orphan)
+        self.assertFalse(self.paper_root.exists())
+
+    def test_current_snapshot_id_cannot_enroll_stale_observation(self):
+        stale = [{**row, "shared_candidate_id": "stale", "observed_at": "2020-01-01T00:00:00+00:00"}
+                 for row in self.rows(candidate="stale", market="KXHIGHNY-26OCT13-T81")]
+        with self.assertRaisesRegex(ValueError, "observation.*stale"):
+            self.consume(stale + self.rows(candidate="current"))
+        self.assertFalse(self.paper_root.exists())
+
+    def test_latest_snapshot_accepts_normal_observation_to_publication_lag(self):
+        observed = (self.now - timedelta(seconds=30)).isoformat()
+        rows = [{**row, "observed_at": observed} for row in self.rows()]
+        self.assertEqual(self.consume(rows)["decisions"][0]["status"], "opened")
 
     def test_no_side_uses_one_minus_yes_probability_and_only_no_ask(self):
         result = self.consume(self.rows(action="BUY_NO", ask=0.35, estimate=0.4))
