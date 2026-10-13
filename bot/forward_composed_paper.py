@@ -121,7 +121,7 @@ def compose_forward_rows(rows: Sequence[Mapping[str, Any]], *, combination: Mapp
                     "control_action": action, "combined_action": combined,
                     "control_economics_status": "quote_proxy" if control_quoted else "control_quote_unavailable",
                     "wallet_input_status": "available" if wallet_ready else "wallet_inputs_unavailable",
-                    "reason_code": reason or "router_confirmed_guard_passed",
+                    "reason_code": reason or ("router_confirmed_guard_passed" if require_router else "guard_passed_without_router"),
                     "non_mutating": True, "quote_not_fill": True}
             pairs.append(pair)
             if action in _BUYS and all(key) and _valid_time(key[-1]) and wallet_ready:

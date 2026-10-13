@@ -32,6 +32,7 @@ from bot.paper_shadow_lanes import (
     write_paper_shadow_lane_decisions,
 )
 from bot.paper_wallets import BETA_PAPER_WALLET_ID, STABLE_PAPER_WALLET_ID
+from bot.replay_decision_input import _field_name_is_forbidden
 from bot.forward_composed_paper import compose_forward_rows, validate_forward_combination
 from bot.resolution_feed import run_resolution_feed_once
 from scripts.paper_shadow_lane_compose_replay import _load_config, compose_lane_replay, validate_saved_combination
@@ -542,7 +543,7 @@ def _scrub_outcome_like_fields(value: Any) -> Any:
             str(key): _scrub_outcome_like_fields(item)
             for key, item in value.items()
             if str(key).lower() not in OUTCOME_LIKE_KEYS
-            and not str(key).lower().endswith(("_outcome", "_result"))
+            and not _field_name_is_forbidden(str(key))
             and not str(key).lower().startswith(("settlement_", "resolved_", "settled_", "actual_"))
         }
     if isinstance(value, list):

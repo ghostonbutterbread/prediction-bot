@@ -53,6 +53,7 @@ class ForwardCompositionTests(unittest.TestCase):
         self.assertEqual((strict_pairs[0]["combined_action"], strict_pairs[0]["reason_code"]),
                          ("SKIP", "router_history_unverified"))
         self.assertEqual(loose_pairs[0]["combined_action"], "BUY_YES")
+        self.assertEqual(loose_pairs[0]["reason_code"], "guard_passed_without_router")
         self.assertFalse(any(row["lane_id"] == "forward_composed_paper" for row in strict_intents))
         self.assertTrue(any(row["lane_id"] == "forward_composed_paper" for row in loose_intents))
 

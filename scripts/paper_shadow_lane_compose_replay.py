@@ -466,7 +466,11 @@ def validate_saved_combination(config: Mapping[str, Any]) -> dict[str, Any]:
             "skip_on_conflict", "require_not_skip", "require_buy", "require_agreement"
         }:
             raise ValueError("unknown combination veto lane or mode")
+    gate_fields = _gate_context(base_row={}, action_row={}, sizing_row={}, price_row={},
+                                future_inputs={}, action="SKIP", side=None).keys()
     for gate in raw.get("gates") or []:
+        if gate.get("field") not in gate_fields:
+            raise ValueError(f"unknown composition gate field: {gate.get('field')}")
         if gate.get("op", "eq") not in {
             "eq", "==", "ne", "!=", "in", "not_in", "gte", ">=", "gt", ">",
             "lte", "<=", "lt", "<", "truthy", "falsey"
@@ -606,6 +610,8 @@ def _gate_context(
             if isinstance(source, Mapping) and str(source.get("tier") or "").strip()
         }
     )
+    entry_price = _number(future_inputs.get("estimated_fill_price"), future_inputs.get("entry_price"),
+                          _field(action_row, "entry_price"), _field(action_row, "price"))
     return {
         "action": action,
         "side": side,
@@ -629,7 +635,8 @@ def _gate_context(
         "max_source_sample_count": max(sample_counts) if sample_counts else None,
         "source_tiers": "+".join(source_tiers) if source_tiers else None,
         "edge": _number(_field(action_row, "edge"), future_inputs.get("edge")),
-        "entry_price": _number(future_inputs.get("estimated_fill_price"), future_inputs.get("entry_price"), _field(action_row, "entry_price"), _field(action_row, "price")),
+        "entry_price": entry_price,
+        "price": entry_price,  # existing saved price-floor/cap configurations
     }
 
 

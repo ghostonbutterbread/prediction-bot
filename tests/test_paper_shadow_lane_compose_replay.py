@@ -102,6 +102,16 @@ def _source_router_row(
 
 
 class PaperShadowLaneComposeReplayTests(unittest.TestCase):
+    def test_saved_price_gate_uses_recorded_entry_price_instead_of_missing_field(self):
+        stable = _lane_row(policy="control_stable", candidate_id="priced", market_id="KXPRICED",
+                           action="BUY_YES", size=10.0, yes_price=0.35)
+        router = _source_router_row(candidate_id="priced", market_id="KXPRICED", action="BUY_YES",
+                                    observed_at="2026-09-01T12:00:00+00:00", sample_count=5, yes_price=0.35)
+        result = compose_lane_replay(lane_rows=[stable, router],
+            config=_load_composition("source_router_sample_ge5_price_20_80_cap1"))
+        self.assertEqual(result["composition_rows"][0]["action"], "BUY_YES")
+        self.assertNotIn("gate_failed:price_floor_020", result["summary"]["diagnostics"])
+
     def test_guarded_composition_keeps_quote_separate_from_fill_pnl(self):
         stable = _lane_row(policy="control_stable", candidate_id="q1", market_id="KXQ", action="BUY_YES", size=10.0, yes_price=0.4)
         router = _lane_row(policy="shadow_source_router", candidate_id="q1", market_id="KXQ", action="BUY_YES", size=10.0, yes_price=0.4)

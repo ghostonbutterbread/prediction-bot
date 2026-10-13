@@ -41,9 +41,9 @@ class CollectorLaneReplayTests(unittest.TestCase):
         raw = {
             "run_id": "collector-1", "shared_candidate_id": "c1", "market_id": "KXONE",
             "observed_at": "2026-07-01T12:00:00+00:00",
-            "shared_candidate": {"market": {"id": "KXONE", "result": "YES", "official_outcome": "NO", "official_result": "YES", "question": "Will it?"},
-                                 "evidence": {"source": {"result": "NO", "market_outcome": "YES", "settlement_ts": "2026-07-02T00:00:00+00:00", "settlement_value_dollars": "1.00", "winning_side": "YES", "outcome_known_at": "2026-07-02T01:00:00+00:00"}, "resolution": {"outcome": "YES"}}},
-            "decision_artifact": {"strategy_signal": {"resolution": {"result": "YES"}},
+            "shared_candidate": {"market": {"id": "KXONE", "result": "YES", "official_outcome": "NO", "official_result": "YES", "winner": "YES", "resolved": "YES", "question": "Will it?"},
+                                 "evidence": {"source": {"result": "NO", "market_outcome": "YES", "settlement_ts": "2026-07-02T00:00:00+00:00", "settlement_value_dollars": "1.00", "winning_side": "YES", "outcome_known_at": "2026-07-02T01:00:00+00:00", "payout": 1.0, "void": False}, "resolution": {"outcome": "YES"}}},
+            "decision_artifact": {"strategy_signal": {"resolution": {"result": "YES"}, "winner": "YES"},
                                   "source_context": {"outcome": "YES"},
                                   "source_snapshots": [{"result": "NO"}]},
         }
@@ -58,7 +58,8 @@ class CollectorLaneReplayTests(unittest.TestCase):
                 return set().union(*(keys(v) for v in value))
             return set()
         forbidden = {"outcome", "resolution", "result", "official_outcome", "market_outcome", "settlement_ts",
-                     "official_result", "settlement_value_dollars", "winning_side", "outcome_known_at"}
+                     "official_result", "settlement_value_dollars", "winning_side", "outcome_known_at",
+                     "winner", "payout", "resolved", "void"}
         self.assertFalse(forbidden & keys(wallet_input.signal))
         self.assertFalse(forbidden & keys(wallet_input.shared_candidate))
         self.assertEqual(wallet_input.shared_candidate["market"]["question"], "Will it?")
@@ -152,6 +153,21 @@ class CollectorLaneReplayTests(unittest.TestCase):
                     build_collector_lane_replay(snapshot_path=snapshots, output_dir=output,
                                                 enabled_lanes=[], composition_config=config)
                 self.assertFalse(output.exists())
+
+    def test_unknown_gate_field_rejects_before_writing_replay_outputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshots = root / "collector.jsonl"
+            config = root / "idea.yaml"
+            output = root / "data" / "derived_reports" / "bad_gate"
+            _write_jsonl(snapshots, [{"run_id": "collector-1", "shared_candidate_id": "c1", "market_id": "KXONE",
+                                      "observed_at": "2026-07-01T12:00:00+00:00"}])
+            config.write_text("composition:\n  base_lane: control_stable\n  gates:\n"
+                              "    - field: source_sampl_count\n      op: gte\n      value: 5\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "unknown composition gate field: source_sampl_count"):
+                build_collector_lane_replay(snapshot_path=snapshots, output_dir=output,
+                                            enabled_lanes=[], composition_config=config)
+            self.assertFalse(output.exists())
 
     def test_saved_combination_can_emit_a_sealed_wallet_intent_when_inputs_exist(self):
         with tempfile.TemporaryDirectory() as tmp:
