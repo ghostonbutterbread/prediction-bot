@@ -154,6 +154,38 @@ class CollectorLaneReplayTests(unittest.TestCase):
                                                 enabled_lanes=[], composition_config=config)
                 self.assertFalse(output.exists())
 
+    def test_invalid_saved_exposure_cap_rejects_before_replay_outputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshots = root / "collector.jsonl"
+            config = root / "combination.yaml"
+            _write_jsonl(snapshots, [{"run_id": "c1", "shared_candidate_id": "one", "market_id": "KXONE",
+                                      "observed_at": "2026-07-01T12:00:00+00:00"}])
+            for index, value in enumerate(("bogus", ".nan", ".inf", "1.5", "null", "true", "-1")):
+                with self.subTest(value=value):
+                    config.write_text("composition:\n  base_lane: control_stable\n  exposure:\n"
+                                      f"    max_rows_per_market: {value}\n", encoding="utf-8")
+                    output = root / "data" / "derived_reports" / f"invalid_cap_{index}"
+                    with self.assertRaisesRegex(ValueError, "max_rows_per_market"):
+                        build_collector_lane_replay(snapshot_path=snapshots, output_dir=output,
+                                                    enabled_lanes=[], composition_config=config)
+                    self.assertFalse(output.exists())
+
+    def test_saved_exposure_rejects_non_boolean_per_side_before_outputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshots = root / "collector.jsonl"
+            config = root / "combination.yaml"
+            output = root / "data" / "derived_reports" / "bad_per_side"
+            _write_jsonl(snapshots, [{"run_id": "c1", "shared_candidate_id": "one", "market_id": "KXONE",
+                                      "observed_at": "2026-07-01T12:00:00+00:00"}])
+            config.write_text("composition:\n  base_lane: control_stable\n  exposure:\n"
+                              "    max_rows_per_market: 1\n    per_side: 'false'\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "exposure per_side"):
+                build_collector_lane_replay(snapshot_path=snapshots, output_dir=output,
+                                            enabled_lanes=[], composition_config=config)
+            self.assertFalse(output.exists())
+
     def test_unknown_gate_field_rejects_before_writing_replay_outputs(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

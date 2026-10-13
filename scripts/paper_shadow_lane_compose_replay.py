@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import sys
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
@@ -481,6 +482,16 @@ def validate_saved_combination(config: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("unknown combination key in exposure")
     if exposure.get("selector", "latest") not in {"earliest", "latest", "highest_edge"}:
         raise ValueError(f"unknown composition exposure selector: {exposure['selector']}")
+    if "max_rows_per_market" in exposure:
+        cap = exposure["max_rows_per_market"]
+        try:
+            count = float(cap) if not isinstance(cap, bool) else float("nan")
+        except (TypeError, ValueError, OverflowError):
+            count = float("nan")
+        if not math.isfinite(count) or count < 0 or not count.is_integer():
+            raise ValueError("composition exposure max_rows_per_market must be a nonnegative integer")
+    if "per_side" in exposure and not isinstance(exposure["per_side"], bool):
+        raise ValueError("composition exposure per_side must be a boolean")
     return _normalize_composition(config)
 
 

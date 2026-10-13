@@ -102,6 +102,19 @@ def _source_router_row(
 
 
 class PaperShadowLaneComposeReplayTests(unittest.TestCase):
+    def test_saved_numeric_string_exposure_cap_still_limits_one_market(self):
+        from scripts.paper_shadow_lane_compose_replay import validate_saved_combination
+        config = {"composition": {"base_lane": "control_stable", "exposure": {
+            "max_rows_per_market": "1", "selector": "latest", "per_side": False}}}
+        normalized = validate_saved_combination(config)
+        rows = [_lane_row(policy="control_stable", candidate_id=candidate, market_id="KXCAPPED",
+                          action="BUY_YES", size=10.0, yes_price=0.4)
+                for candidate in ("older", "newer")]
+        rows[1]["observed_at"] = "2026-09-01T13:00:00+00:00"
+        result = compose_lane_replay(lane_rows=rows, config=normalized)
+        self.assertEqual([row["shared_candidate_id"] for row in result["composition_rows"]], ["newer"])
+        self.assertEqual(result["summary"]["diagnostics"]["exposure_dropped_rows"], 1)
+
     def test_saved_price_gate_uses_recorded_entry_price_instead_of_missing_field(self):
         stable = _lane_row(policy="control_stable", candidate_id="priced", market_id="KXPRICED",
                            action="BUY_YES", size=10.0, yes_price=0.35)
