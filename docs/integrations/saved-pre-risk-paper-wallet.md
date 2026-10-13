@@ -1,6 +1,6 @@
 # Saved pre-risk paper wallet integration dossier
 
-- **Status:** saved pre-risk selector implemented in isolation; persistent account not implemented or enrolled
+- **Status:** saved pre-risk selector accepted for code-only beta preflight; persistent account is a separate successor, not implemented or enrolled
 - **Owner:** Hermes, prediction-bot Kanban `t_ab52708b`
 - **Branch / owning ref:** `feat/saved-pre-risk-paper-wallet`
 - **Base commit:** `1e227a51e8582a8637903858588ed6a638dd8f42`
@@ -21,14 +21,14 @@ The new `pre_risk_router_guard_kelly.yaml` explicitly selects existing pre-risk 
 ## Evidence and review
 
 - Baseline: local beta merge `1e227a5`, full suite 1,419 passed, 7 skipped. Scoped builder `deleg_3ed78128` reports RED/GREEN; parent independently ran 67 focused and 1,422 full tests OK (7 skipped) at initial checkpoint; after correction, 68 focused and 1,423 full tests OK (7 skipped), plus `git diff --check`.
-- Independent review: read-only seam audit `deleg_81fa2e8d` identified pre-risk saved variant. Skeptical feature review `deleg_109bf643` BLOCKED old clean tip `17e6a7553bee44431c5f9b70a986a549de1962cc`: extra stable guard was incorrectly treated as cohort mismatch, and no-config stable guard consumed newly forwarded execution estimate. Both reproduced RED and locally corrected; fresh exact-tip review is pending.
+- Independent review: read-only seam audit `deleg_81fa2e8d` identified pre-risk saved variant. Skeptical feature review `deleg_109bf643` BLOCKED old tip `17e6a7553bee44431c5f9b70a986a549de1962cc` for extra stable-guard rejection and no-config price regression; RED/GREEN corrected both. Fresh reviewer `deleg_08859211` ACCEPTED exact clean tip `9726264a78b21d97fb5a0f330c9f80ab6509c7f3` for **code-only saved pre-risk selection**; independent 41 focused and full 1,423 OK/7 skipped. Not a persistent-wallet verdict.
 - Replay/cohort: synthetic tests only; no fresh active cohort or actual wallet state inspected.
 - Merge ancestry: branch starts at current local beta `1e227a5`, ahead of fetched `origin/beta` `a52b127`.
 
 ## Blockers and deferred work
 
-- **Saved pre-risk contract:** initial review blockers corrected locally with tests; obtain fresh independent verdict on a clean corrected tip. Later fresh exact-cohort verification is an activation prerequisite, not code-merge proof. This does not enroll paper.
-- **Persistent account:** use a new explicitly isolated paper root and Simulator, with processed-decision identity and persisted cohort/config binding; tests must cover restart/replay idempotency (BUY and SKIP), safe account-root preflight, and actual shared-core sizing/risk. Do not use the existing stable/beta wallet namespace.
+- **Saved pre-risk contract:** exact tip accepted for code-only beta preflight. A fresh exact-cohort verification remains an activation prerequisite, not code-merge proof. This does not enroll paper.
+- **Persistent account (successor to this reviewed slice, still owned by Kanban `t_ab52708b`):** from integrated beta create a separate feature branch. Use a new explicitly isolated paper root and Simulator, with processed-decision identity and persisted cohort/config binding; tests must cover restart/replay idempotency (BUY and SKIP), safe account-root preflight, and actual shared-core sizing/risk. Do not use the existing stable/beta wallet namespace.
 - **Settlement:** market-only Simulator resolver is not an exact authoritative composed-decision join; hold pending until a later nonconflicting exact decision/candidate/run/market receipt is adapted into paper lifecycle. VOID releases capital without P&L. Test before any P&L claim.
 - **Activation:** require independent feature-tip and exact combined beta tree review plus fresh, complete collector-owned cohort, verified strict Router history and forward consumer smoke (`t_8215b7e1`, `t_547c1d89`, `t_c6d04b67`); no activation authorized here.
 
@@ -37,8 +37,8 @@ The new `pre_risk_router_guard_kelly.yaml` explicitly selects existing pre-risk 
 - **Owning ref:** `feat/saved-pre-risk-paper-wallet`
 - **Latest immutable recovery checkpoint:** `6eeca18c589cbec02f91854db1c222740e908a86` (dossier-only follow-up tip)
 - **Feature implementation commits:** `9017660a3e140754adb23bc0f9e4635bd4c1e9bb`, `6eeca18c589cbec02f91854db1c222740e908a86`
-- **Exact resume point:** review the saved-selector code checkpoint, then TDD the isolated persistent paper consumer (root, restart/idempotency, Simulator sizing) and exact-authority settlement; do not activate a real wallet or runtime.
-- **Working-tree state at handoff:** clean after this dossier-only handoff commit; subsequent account changes start from this feature tip, not beta.
+- **Exact resume point:** stage a non-committing beta merge of accepted saved-selector tip, exclude this dossier, compare exact tree, run focused/full tests, obtain independent combined-tree verdict, then merge locally if accepted. Only then continue TDD persistent paper consumer on a separate beta-based feature branch; do not activate a real wallet or runtime.
+- **Working-tree state at handoff:** clean after this dossier-only handoff commit; do not add account changes to this accepted slice. The successor account branch starts from reviewed integrated beta.
 
 ## Decision gates
 
@@ -51,3 +51,4 @@ The new `pre_risk_router_guard_kelly.yaml` explicitly selects existing pre-risk 
 - 2026-10-12 — created branch from reviewed local beta after read-only seam audit; no active paper enrollment or live authorization.
 - 2026-10-12 — saved pre-risk pattern added with paired synthetic replay/forward tests; parent focused 67 passed; no persistent account or activation.
 - 2026-10-12 — independent review BLOCKED old tip for overbroad diagnostic-lane rejection and altered no-config guard estimate. RED/GREEN corrected both; parent focused 68 and full 1,423 OK/7 skipped. Re-review corrected commit, not the blocked tip.
+- 2026-10-12 — `deleg_08859211` ACCEPTED exact corrected tip `9726264a78b21d97fb5a0f330c9f80ab6509c7f3` for code-only selection. Persistent account and authoritative settlement move to successor work after reviewed beta merge; no paper activation.
