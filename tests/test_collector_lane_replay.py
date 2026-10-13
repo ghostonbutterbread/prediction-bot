@@ -14,6 +14,18 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
 
 
 class CollectorLaneReplayTests(unittest.TestCase):
+    def test_saved_router_guard_combination_names_existing_replay_components(self):
+        from scripts.paper_shadow_lane_compose_replay import _load_config, _normalize_composition
+        config = _normalize_composition(_load_config(
+            Path(__file__).resolve().parent.parent / "lane_compositions" / "stable_router_guard_kelly.yaml"))
+        self.assertEqual(config["base_lane"], "control_stable")
+        self.assertEqual(config["action_lane"], "control_stable")
+        self.assertEqual(config["price_lane"], "shadow_fee_aware_loss_guard")
+        self.assertEqual(config["vetoes"], [
+            {"lane": "shadow_source_router", "mode": "require_agreement", "required": True},
+            {"lane": "shadow_fee_aware_loss_guard", "mode": "require_agreement", "required": True},
+        ])
+
     def test_saved_combination_runs_its_existing_lanes_on_one_collector_candidate(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

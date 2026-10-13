@@ -16,12 +16,12 @@ Ingest an existing composition YAML directly into collector-lane replay, run its
 
 ## Implemented contract
 
-`scripts/collector_lane_replay.py --composition-config lane_compositions/<idea>.yaml` now selects all referenced component/veto lanes for the same collector snapshots, runs the existing decision-row composer, and writes `composition_rows.jsonl` plus outcome-free `wallet_intents.jsonl` into the derived replay directory. Its summary records the config path/raw SHA-256, candidate and SKIP diagnostics, and the diagnostic-only methodology. Unknown lane references fail before creating outputs. Existing `--lane` behavior remains unchanged. This is a diagnostic replay, not a Kelly wallet run or paper/live promotion claim; the forward observer remains disabled and independently gated.
+`scripts/collector_lane_replay.py --composition-config lane_compositions/<idea>.yaml` now selects all referenced component/veto lanes for the same collector snapshots, runs the existing decision-row composer, and writes `composition_rows.jsonl` plus outcome-free `wallet_intents.jsonl` into the derived replay directory. Its summary records the config path/raw SHA-256, candidate and SKIP diagnostics, and the diagnostic-only methodology. Unknown lane references fail before creating outputs. `lane_compositions/stable_router_guard_kelly.yaml` is a small saved combination referencing existing stable, Router, and selected-side guard lanes; the paper wallet will recalculate Kelly rather than reuse its diagnostic sizing row. Existing `--lane` behavior remains unchanged. This is a diagnostic replay, not a Kelly wallet run or paper/live promotion claim; the forward observer remains disabled and independently gated.
 
 ## Evidence and review
 
-- Tests and commands: RED `TypeError` for absent `composition_config`, GREEN single candidate test; RED unknown lane was rejected only *after* output creation, GREEN validates before creation. Focused `PYTHONPATH=<worktree> python3 -m unittest tests.test_collector_lane_replay -v` — 5 passed. Isolated full `PYTHONPATH=<worktree> python3 -m unittest discover -s tests -q` — 1,382 passed, 7 skipped, 70.644 s. `git diff --check` passed.
-- Independent review: pending.
+- Tests and commands: RED `TypeError` for absent `composition_config`, GREEN single candidate test; RED unknown lane was rejected only *after* output creation, GREEN validates before creation. RED missing saved sample config, GREEN YAML parsed with expected role/veto lanes. Focused `PYTHONPATH=<worktree> python3 -m unittest tests.test_collector_lane_replay -v` — 6 passed. Isolated full suite rerun on sample YAML/test — exit 0 (captured subprocess output omitted the count); earlier full receipt before sample was 1,382 passed, 7 skipped, 70.644 s. `git diff --check` passed.
+- Independent review: read-only replay checkpoint reviewer `deleg_f7e2fd90` running on commit `2e63eef` (before sample YAML/test). Review the eventual combined tip separately.
 - Ancestry/merge evidence: current beta base above; no merge yet.
 
 ## Blockers and deferred work

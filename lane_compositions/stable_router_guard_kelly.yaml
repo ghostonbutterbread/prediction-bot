@@ -1,0 +1,17 @@
+# Saved decision combination; loading it never activates paper or live trading.
+# Replay emits diagnostic composed rows. The forward paper observer separately
+# passes qualified BUY intents through its simulated Kelly/risk wallet.
+composition:
+  name: stable_router_guard_kelly
+  base_lane: control_stable
+  action_lane: control_stable
+  sizing_lane: control_stable  # diagnostic row notional; wallet recalculates Kelly
+  price_lane: shadow_fee_aware_loss_guard
+  fallback_to_base: false
+  vetoes:
+    - lane: shadow_source_router
+      mode: require_agreement
+      required: true
+    - lane: shadow_fee_aware_loss_guard
+      mode: require_agreement
+      required: true
