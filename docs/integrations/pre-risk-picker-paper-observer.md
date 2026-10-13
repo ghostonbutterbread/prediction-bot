@@ -6,8 +6,8 @@
 - **Base commit:** `3fdf4efc665357d83c0a2124b7ae31e7ec169bdb`
 - **Intended integration target:** `beta`
 - **Last updated:** 2026-10-13
-- **Latest immutable recovery checkpoint:** none yet
-- **Feature implementation commits:** none yet
+- **Latest immutable recovery checkpoint:** `4af3b2fac8430ef4ab3f68387cd1fbfef08d12a7`
+- **Feature implementation commits:** `4af3b2fac8430ef4ab3f68387cd1fbfef08d12a7`
 - **Inspiration:** existing disabled `bot/forward_composed_paper.py`, collector-owned shared candidate loader and lane writer.
 
 ## Intent
@@ -40,10 +40,10 @@ Replace accepted-wallet-only observer denominator with genuinely captured pre-ri
 ## Interruption / resume handoff
 
 - **Owning feature branch/ref:** `feat/pre-risk-picker-paper-observer`
-- **Latest immutable recovery checkpoint:** none yet
-- **Feature implementation commit(s):** none yet
-- **Exact resume point:** add failing producer-to-observer fixture, then minimal feature implementation.
-- **Working-tree state:** dossier only before test/code.
+- **Latest immutable recovery checkpoint:** `4af3b2fac8430ef4ab3f68387cd1fbfef08d12a7`
+- **Feature implementation commit(s):** `4af3b2fac8430ef4ab3f68387cd1fbfef08d12a7`
+- **Exact resume point:** parent-owned independent review on this feature tip against beta, then separate non-committing combined-tree preflight; do not activate.
+- **Working-tree state:** clean after dossier-only handoff commit; tip contains that later metadata commit.
 
 ## Decision gates
 
