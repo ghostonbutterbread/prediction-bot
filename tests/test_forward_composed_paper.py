@@ -63,6 +63,10 @@ class ForwardCompositionTests(unittest.TestCase):
                 self.assertEqual(main([*args, "--enable-paper-observer"]), 0)
             report = json.loads(output.getvalue())
             self.assertEqual(report["combined_wallet"]["summary"]["opened_positions"], 1)
+            output = StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main([*args, "--enable-paper-observer", "--require-pre-risk-picker"]), 0)
+            self.assertEqual(json.loads(output.getvalue())["reason_code"], "pre_risk_picker_lane_missing")
             self.assertEqual(len(list(root.iterdir())), 2)
             self.assertEqual(len(ledger.read_text().splitlines()), 3)
 
@@ -85,6 +89,9 @@ class ForwardCompositionTests(unittest.TestCase):
         result = observe_fresh_forward_snapshot(rows, [], state, enabled=True,
                          now=now, max_snapshot_age_seconds=60, **settings)
         self.assertEqual(result["combined_wallet"]["summary"]["opened_positions"], 1)
+        required = observe_fresh_forward_snapshot(rows, [], state, enabled=True,
+                         require_pre_risk_picker=True, now=now, max_snapshot_age_seconds=60, **settings)
+        self.assertEqual(required["reason_code"], "pre_risk_picker_lane_missing")
 
     def test_paired_buy_connects_veto_guard_and_wallet_without_using_router_score_as_probability(self):
         rows = cohort()
@@ -247,7 +254,7 @@ class ForwardCompositionTests(unittest.TestCase):
             for candidate_id, market_id, final_action in (("c1", "M1", "BUY_YES"), ("c2", "M2", "SKIP"),
                                                           ("c3", "M3", "SKIP"), ("c4", "M4", "SKIP"),
                                                           ("c5", "M5", "SKIP"), ("c6", "M6", "SKIP"),
-                                                          ("c7", "M7", "SKIP")):
+                                                          ("c7", "M7", "SKIP"), ("c8", "M8", "SKIP")):
                 book_market = "OTHER" if candidate_id == "c4" else market_id
                 book_time = "2026-09-01T12:01:00+00:00" if candidate_id == "c5" else stamp
                 ask = 0.1 if candidate_id == "c7" else 0.4
@@ -264,6 +271,7 @@ class ForwardCompositionTests(unittest.TestCase):
                     "direction": final_action, "confidence": 0.9, "model_probability": 0.8,
                     "shared_candidate": candidate,
                     "decision_artifact": {"final_action": final_action,
+                    "execution_snapshot": {"estimated_fill_price": 0.55} if candidate_id == "c8" else {},
                     "strategy_trace": {"direction": "BUY_YES"},
                     "strategy_signal": None if candidate_id == "c3" else (
                         {"direction": "SKIP", "market_id": market_id,
@@ -271,13 +279,14 @@ class ForwardCompositionTests(unittest.TestCase):
                              "source": "decision_artifact.strategy_signal", "confidence": 0.9,
                              "model_probability": 0.8}}
                         if candidate_id == "c6" else {"direction": "BUY_YES", "market_id": market_id,
-                        "model_probability": 0.8, "confidence": 0.9, "question": "Will it happen?",
+                        "model_probability": 0.51 if candidate_id == "c8" else 0.8,
+                        "confidence": 0.9, "question": "Will it happen?",
                         "exchange": "kalshi", "market_route": {"allowed": True, "handler_id": "weather"}})}}
                 with dataset.open("a") as handle:
                     handle.write(json.dumps(row) + "\n")
             loaded = load_shared_candidate_paper_inputs(dataset, config={}, data_dir=Path(tmpdir) / "wallets",
                 wallet_ids=["stable_paper"])
-            self.assertEqual(loaded.accepted_candidate_count, 7)
+            self.assertEqual(loaded.accepted_candidate_count, 8)
             stable_rows = [{"shared_candidate_id": cid, "wallet_id": "stable_paper",
                 "run_id": "stable-run", "candidate_dataset_path": str(dataset),
                 "decision_role": "paper_shadow", "decision_id": "stable-" + cid,
@@ -286,7 +295,8 @@ class ForwardCompositionTests(unittest.TestCase):
                 "reason_code": "approved" if action == "BUY_YES" else "risk_rejected"}
                 for cid, mid, action in (("c1", "M1", "BUY_YES"), ("c2", "M2", "SKIP"),
                                          ("c3", "M3", "SKIP"), ("c4", "M4", "SKIP"),
-                                         ("c5", "M5", "SKIP"), ("c6", "M6", "SKIP"), ("c7", "M7", "SKIP"))]
+                                         ("c5", "M5", "SKIP"), ("c6", "M6", "SKIP"), ("c7", "M7", "SKIP"),
+                                         ("c8", "M8", "SKIP"))]
             config = {"paper_shadow_lanes": {"enabled": True,
                 "definitions_dir": str(Path(__file__).resolve().parents[1] / "lanes"),
                 "enabled_lanes": ["control_stable", "shadow_pre_risk_picker",
@@ -304,11 +314,16 @@ class ForwardCompositionTests(unittest.TestCase):
                     wallet_runs={"stable_paper": SimpleNamespace(session_id="stable-run")}, ledger_root=tmpdir)
             rows = load_jsonl(Path(written.decision_path))
             by_candidate = {(r["shared_candidate_id"], r["policy"]): r for r in rows}
-            self.assertEqual(len(rows), 28)
+            self.assertEqual(len(rows), 32)
             self.assertEqual(by_candidate["c2", "control_stable"]["action"], "SKIP")
             self.assertEqual(by_candidate["c2", "shadow_pre_risk_picker"]["action"], "BUY_YES")
             self.assertEqual(by_candidate["c2", "shadow_source_router"]["action"], "BUY_YES")
             self.assertEqual(by_candidate["c2", "shadow_pre_risk_fee_aware_loss_guard"]["action"], "BUY_YES")
+            self.assertEqual(by_candidate["c8", "shadow_pre_risk_picker"]["action"], "BUY_YES")
+            self.assertEqual(by_candidate["c8", "shadow_pre_risk_fee_aware_loss_guard"]["action"], "SKIP")
+            self.assertEqual(by_candidate["c8", "shadow_pre_risk_fee_aware_loss_guard"]["reason_code"],
+                             "fee_aware_edge_below_floor")
+            self.assertEqual(by_candidate["c8", "shadow_pre_risk_fee_aware_loss_guard"]["provenance"]["payout_aware"]["entry_price"], 0.55)
             self.assertEqual(by_candidate["c3", "shadow_pre_risk_picker"]["action"], "SKIP")
             self.assertEqual(by_candidate["c6", "shadow_pre_risk_picker"]["action"], "SKIP")
             for cid in ("c4", "c5"):
@@ -329,10 +344,12 @@ class ForwardCompositionTests(unittest.TestCase):
             result = observe_fresh_forward_snapshot(rows, [], state, enabled=True, now=now, **settings)
             pairs = {r["shared_candidate_id"]: r for r in result["pairs"]}
             self.assertEqual({cid: p["combined_action"] for cid, p in pairs.items()},
-                {"c1": "BUY_YES", "c2": "BUY_YES", "c3": "SKIP", "c4": "SKIP", "c5": "SKIP", "c6": "SKIP", "c7": "SKIP"})
+                {"c1": "BUY_YES", "c2": "BUY_YES", "c3": "SKIP", "c4": "SKIP", "c5": "SKIP", "c6": "SKIP", "c7": "SKIP", "c8": "SKIP"})
             self.assertEqual(pairs["c2"]["stable_wallet_action"], "SKIP")
             self.assertEqual(pairs["c3"]["reason_code"], "picker_intent_not_recorded")
-            self.assertEqual(result["control_wallet"]["summary"]["opened_positions"], 3)
+            self.assertEqual(result["control_wallet"]["summary"]["opened_positions"], 4,
+                             result["control_wallet"]["decision_rows"])
+            self.assertEqual(next(p for p in result["control_wallet"]["open_positions"] if p["market_id"] == "M8")["entry_price"], 0.4)
             self.assertEqual(next(p for p in result["control_wallet"]["open_positions"] if p["market_id"] == "M7")["entry_price"], 0.1)
             self.assertEqual(result["combined_wallet"]["summary"]["opened_positions"], 2)
             self.assertEqual(result["candidate_universe"], "recorded_pre_risk_picker_intents")
@@ -342,7 +359,11 @@ class ForwardCompositionTests(unittest.TestCase):
                 min_edge=0.01, min_confidence=0.5, max_entry_price=0.99)
             self.assertEqual(next(p for p in incomplete["pairs"] if p["shared_candidate_id"] == "c2")["reason_code"],
                 "missing_picker_intent")
-            self.assertEqual(incomplete["control_wallet"]["summary"]["opened_positions"], 2)
+            self.assertEqual(incomplete["control_wallet"]["summary"]["opened_positions"], 3)
+            required = observe_fresh_forward_snapshot(
+                [row for row in rows if not (row["shared_candidate_id"] == "c2" and row["policy"] == "shadow_pre_risk_picker")],
+                [], state, enabled=True, require_pre_risk_picker=True, now=now, **settings)
+            self.assertEqual(required["reason_code"], "pre_risk_picker_lane_incomplete")
 
     def test_outcome_like_input_is_rejected_before_decisions(self):
         control, router, guard = cohort()

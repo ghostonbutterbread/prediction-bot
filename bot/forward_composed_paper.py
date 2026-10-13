@@ -167,7 +167,8 @@ def evaluate_forward_composition(
 def observe_fresh_forward_snapshot(
     rows: list[Mapping[str, Any]], resolutions: list[Mapping[str, Any]],
     state: Mapping[str, Any], *, enabled: bool = False, now: Any = None,
-    max_snapshot_age_seconds: int = 120, **wallet_policy: Any,
+    max_snapshot_age_seconds: int = 120, require_pre_risk_picker: bool = False,
+    **wallet_policy: Any,
 ) -> dict[str, Any]:
     """Explicit disabled observer gate for a collector-owned forward snapshot.
 
@@ -187,6 +188,16 @@ def observe_fresh_forward_snapshot(
             or not any(row.get("shared_snapshot_id") == snapshot["snapshot_id"]
                        and row.get("policy") == CONTROL for row in rows)):
         return {"status": "skipped", "reason_code": "shared_snapshot_stale_or_mismatched"}
+    if require_pre_risk_picker:
+        latest = [row for row in rows if row.get("shared_snapshot_id") == snapshot["snapshot_id"]]
+        controls = {tuple(str(row.get(k) or "") for k in _IDENTITY)
+                    for row in latest if row.get("policy") == CONTROL}
+        pickers = Counter(tuple(str(row.get(k) or "") for k in _IDENTITY)
+                          for row in latest if row.get("policy") == PICKER)
+        if not pickers:
+            return {"status": "skipped", "reason_code": "pre_risk_picker_lane_missing"}
+        if any(pickers[key] != 1 for key in controls):
+            return {"status": "skipped", "reason_code": "pre_risk_picker_lane_incomplete"}
     result = evaluate_forward_composition(rows, resolutions, **wallet_policy)
     result["latest_shared_snapshot_id"] = snapshot["snapshot_id"]
     return result

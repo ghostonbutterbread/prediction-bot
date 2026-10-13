@@ -612,6 +612,8 @@ def _fee_aware_loss_guard_decision(
         _number(value)
         for value in (
             signal.get("estimated_fill_price"), snapshot.get("estimated_fill_price"),
+            (_mapping(signal.get("recorded_pre_risk_picker")).get("estimated_fill_price")
+             if lane.lane_id == PRE_RISK_GUARD_LANE_ID else None),
             (source_row or {}).get("estimated_fill_price"),
             _mapping((source_row or {}).get("execution_snapshot")).get("estimated_fill_price"),
         )

@@ -280,6 +280,7 @@ def _build_signal_from_normalized_candidate(
             "market_id": artifact_signal["market_id"],
             "model_probability": artifact_signal.get("model_probability"),
             "confidence": artifact_signal.get("confidence"),
+            "estimated_fill_price": _mapping(artifact.get("execution_snapshot")).get("estimated_fill_price"),
             "source": "decision_artifact.strategy_signal",
         }
     signal.update(
