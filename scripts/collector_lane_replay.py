@@ -7,6 +7,7 @@ artifacts; no wallet, accounting, live order, or collector state is mutated.
 
 from __future__ import annotations
 
+from collections import Counter
 import argparse
 import copy
 import hashlib
@@ -31,6 +32,7 @@ from bot.paper_shadow_lanes import (
     write_paper_shadow_lane_decisions,
 )
 from bot.paper_wallets import BETA_PAPER_WALLET_ID, STABLE_PAPER_WALLET_ID
+from bot.forward_composed_paper import compose_forward_rows, validate_forward_combination
 from bot.resolution_feed import run_resolution_feed_once
 from scripts.paper_shadow_lane_compose_replay import _load_config, compose_lane_replay, validate_saved_combination
 
@@ -43,6 +45,10 @@ OUTCOME_LIKE_KEYS = frozenset(
         "actual_temp_used",
         "known_after",
         "label_target",
+        "winning_side",
+        "outcome_known_at",
+        "market_outcome",
+        "official_outcome",
         "outcome",
         "resolution",
         "resolved_at",
@@ -50,6 +56,7 @@ OUTCOME_LIKE_KEYS = frozenset(
         "result",
         "settled_side",
         "settlement_source",
+        "settlement_ts",
     }
 )
 
@@ -151,8 +158,16 @@ def build_collector_lane_replay(
     composition_bytes = composition_config.read_bytes() if composition_config else None
     composition = _load_config(composition_config, content=composition_bytes) if composition_config else None
     required = []
+    normalized: dict[str, Any] = {}
+    forward_supported = False
     if composition is not None:
         normalized = validate_saved_combination(composition)
+        try:
+            validate_forward_combination(normalized)
+        except ValueError:
+            pass  # Other combinations remain replay-only diagnostics.
+        else:
+            forward_supported = True
         required = [normalized[key] for key in ("base_lane", "action_lane", "sizing_lane", "price_lane")]
         required += [str(veto["lane"]) for veto in normalized["vetoes"]]
     lane_ids = _normalized_lanes([*enabled_lanes, *required])
@@ -270,7 +285,10 @@ def build_collector_lane_replay(
     resolved_rows = build_paper_shadow_lane_resolution_rows(lane_rows=lane_rows, resolution_rows=resolution_rows)
     _write_jsonl(resolved_row_path, resolved_rows)
     pnl = summarize_paper_shadow_lane_resolution_rows(resolved_rows)
-    combined = compose_lane_replay(lane_rows=lane_rows, resolution_rows=resolution_rows, config=composition) if composition is not None else None
+    if forward_supported:
+        combined = _compose_forward_replay(lane_rows=lane_rows, resolution_rows=resolution_rows, combination=normalized)
+    else:
+        combined = compose_lane_replay(lane_rows=lane_rows, resolution_rows=resolution_rows, config=composition) if composition is not None else None
     if combined is not None:
         assert composition_config is not None
         _write_jsonl(extra_paths[0], combined["composition_rows"])
@@ -320,11 +338,44 @@ def build_collector_lane_replay(
             "configuration_sha256": hashlib.sha256(composition_bytes).hexdigest(),
             "composition_row_path": str(extra_paths[0]),
             "wallet_intent_path": str(extra_paths[1]),
-            "methodology": "derived_decision_row_diagnostic_not_wallet_parity",
+            "methodology": "derived_forward_rule_decision_diagnostic_not_wallet_parity" if forward_supported else "derived_decision_row_diagnostic_not_wallet_parity",
+            "forward_rule_supported": forward_supported,
             "promotion_eligible": False,
         }
     summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return CollectorLaneReplayResult(lane_decision_path, buy_decision_path, resolved_row_path, summary_path, summary)
+
+
+def _compose_forward_replay(*, lane_rows: list[dict[str, Any]], resolution_rows: list[dict[str, Any]],
+                            combination: Mapping[str, Any]) -> dict[str, Any]:
+    """Share the supported forward selector; leave sizing and fills to a wallet."""
+    pairs, intents = compose_forward_rows(lane_rows, combination=combination)
+    combined_intents = [row for row in intents if row["lane_id"] == "forward_composed_paper"]
+    identity_fields = ("shared_candidate_id", "shared_snapshot_id", "run_id", "market_id", "observed_at")
+    intent_by_identity = {tuple(row[key] for key in identity_fields): row for row in combined_intents}
+    composed_rows = []
+    for pair in pairs:
+        identity = tuple(pair[key] for key in identity_fields)
+        intent = intent_by_identity.get(identity)
+        action = pair["combined_action"]
+        decision_id = intent["decision_id"] if intent else "forward-skipped:" + hashlib.sha256(
+            json.dumps({"identity": identity, "combination": combination, "reason": pair["reason_code"]},
+                       sort_keys=True, default=str).encode()).hexdigest()
+        composed_rows.append({**pair, "schema_name": "derived_forward_composition_decision",
+            "non_mutating": True, "decision_role": "derived_composition_replay",
+            "policy": f"composition:{combination['name']}", "decision_id": decision_id,
+            "action": action, "side": action.removeprefix("BUY_") if action.startswith("BUY_") else None,
+            "entry_price": intent["entry_price"] if intent else None,
+            "quote_not_fill": True, "wallet_intent": intent})
+    resolved = build_paper_shadow_lane_resolution_rows(lane_rows=composed_rows, resolution_rows=resolution_rows)
+    summary = {"schema_name": "paper_shadow_lane_composition_summary", "non_mutating": True,
+        "composition": dict(combination), "candidate_groups": len(pairs), "composed_rows": len(composed_rows),
+        "diagnostics": dict(Counter(pair["reason_code"] for pair in pairs)), "duplicate_lane_rows": {},
+        "pnl": summarize_paper_shadow_lane_resolution_rows(resolved),
+        "selection_semantics": "same_supported_forward_rule_recorded_stable_universe",
+        "pnl_basis": "quote_not_fill_no_composed_fill_pnl"}
+    return {"composition_rows": composed_rows, "wallet_intents": combined_intents,
+            "resolved_rows": resolved, "summary": summary}
 
 
 def auto_resolve_collector_lane_replay(*, output_dir: Path, fetch_market=None, force: bool = False) -> dict[str, Any]:
@@ -491,6 +542,8 @@ def _scrub_outcome_like_fields(value: Any) -> Any:
             str(key): _scrub_outcome_like_fields(item)
             for key, item in value.items()
             if str(key).lower() not in OUTCOME_LIKE_KEYS
+            and not str(key).lower().endswith(("_outcome", "_result"))
+            and not str(key).lower().startswith(("settlement_", "resolved_", "settled_", "actual_"))
         }
     if isinstance(value, list):
         return [_scrub_outcome_like_fields(item) for item in value]

@@ -39,6 +39,23 @@ def cohort(candidate="c1", market="M1", event="E1", side="BUY_YES", price=0.4):
 
 
 class ForwardCompositionTests(unittest.TestCase):
+    def test_saved_guard_only_variant_changes_selection_without_rewriting_lanes(self):
+        from bot.forward_composed_paper import validate_forward_combination
+        from scripts.paper_shadow_lane_compose_replay import _load_config, validate_saved_combination
+        base = validate_saved_combination(_load_config(Path(__file__).resolve().parent.parent /
+            "lane_compositions" / "stable_router_guard_kelly.yaml"))
+        guard_only = {**base, "name": "guard_only", "vetoes": [base["vetoes"][1]]}
+        validate_forward_combination(guard_only)
+        control, router, guard = cohort()
+        router["provenance"] = {"source_router": {}}
+        strict_pairs, strict_intents = compose_forward_rows([control, router, guard], combination=base)
+        loose_pairs, loose_intents = compose_forward_rows([control, router, guard], combination=guard_only)
+        self.assertEqual((strict_pairs[0]["combined_action"], strict_pairs[0]["reason_code"]),
+                         ("SKIP", "router_history_unverified"))
+        self.assertEqual(loose_pairs[0]["combined_action"], "BUY_YES")
+        self.assertFalse(any(row["lane_id"] == "forward_composed_paper" for row in strict_intents))
+        self.assertTrue(any(row["lane_id"] == "forward_composed_paper" for row in loose_intents))
+
     def test_manual_observer_reads_saved_combination_and_reports_same_file_identity(self):
         from datetime import datetime, timezone
         from scripts.forward_composed_paper import main

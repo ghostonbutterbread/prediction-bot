@@ -41,8 +41,8 @@ class CollectorLaneReplayTests(unittest.TestCase):
         raw = {
             "run_id": "collector-1", "shared_candidate_id": "c1", "market_id": "KXONE",
             "observed_at": "2026-07-01T12:00:00+00:00",
-            "shared_candidate": {"market": {"id": "KXONE", "result": "YES", "question": "Will it?"},
-                                 "evidence": {"source": {"result": "NO"}, "resolution": {"outcome": "YES"}}},
+            "shared_candidate": {"market": {"id": "KXONE", "result": "YES", "official_outcome": "NO", "official_result": "YES", "question": "Will it?"},
+                                 "evidence": {"source": {"result": "NO", "market_outcome": "YES", "settlement_ts": "2026-07-02T00:00:00+00:00", "settlement_value_dollars": "1.00", "winning_side": "YES", "outcome_known_at": "2026-07-02T01:00:00+00:00"}, "resolution": {"outcome": "YES"}}},
             "decision_artifact": {"strategy_signal": {"resolution": {"result": "YES"}},
                                   "source_context": {"outcome": "YES"},
                                   "source_snapshots": [{"result": "NO"}]},
@@ -57,8 +57,10 @@ class CollectorLaneReplayTests(unittest.TestCase):
             if isinstance(value, list):
                 return set().union(*(keys(v) for v in value))
             return set()
-        self.assertFalse({"outcome", "resolution", "result"} & keys(wallet_input.signal))
-        self.assertFalse({"outcome", "resolution", "result"} & keys(wallet_input.shared_candidate))
+        forbidden = {"outcome", "resolution", "result", "official_outcome", "market_outcome", "settlement_ts",
+                     "official_result", "settlement_value_dollars", "winning_side", "outcome_known_at"}
+        self.assertFalse(forbidden & keys(wallet_input.signal))
+        self.assertFalse(forbidden & keys(wallet_input.shared_candidate))
         self.assertEqual(wallet_input.shared_candidate["market"]["question"], "Will it?")
 
     def test_saved_router_guard_combination_names_existing_replay_components(self):
@@ -189,6 +191,40 @@ class CollectorLaneReplayTests(unittest.TestCase):
             self.assertEqual(result.summary["composition"]["wallet_intents_written"], 1)
             self.assertEqual(result.summary["composition"]["buy_without_wallet_intent"], 0)
             self.assertFalse(result.summary["promotion_eligible"])
+
+    def test_saved_forward_rule_replay_uses_same_strict_veto_on_identical_lane_rows(self):
+        from bot.forward_composed_paper import compose_forward_rows
+        from scripts.paper_shadow_lane_compose_replay import _load_config, validate_saved_combination
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshots = root / "collector.jsonl"
+            output = root / "data" / "derived_reports" / "paired"
+            stamp = "2026-07-01T12:00:00+00:00"
+            _write_jsonl(snapshots, [{
+                "run_id": "collector-1", "shared_candidate_id": "candidate-1", "market_id": "KXPAIRED",
+                "observed_at": stamp, "main_decision": {"action": "BUY_YES", "size": 10.0},
+                "decision_artifact": {"strategy_signal": {"direction": "BUY_YES", "market_id": "KXPAIRED",
+                    "question": "Will it happen?", "exchange": "kalshi", "market_route": {"allowed": True, "handler_id": "weather"},
+                    "model_probability": 0.8, "confidence": 0.9, "best_yes_ask": 0.4}},
+                "shared_candidate": {"candidate_id": "candidate-1", "market_id": "KXPAIRED", "observed_at": stamp,
+                    "market": {"question": "Will it happen?"},
+                    "prices": {"order_book_snapshot": {"source": "book", "market_id": "KXPAIRED",
+                        "observed_at": stamp, "data": {"best_yes_ask": 0.4}}}},
+            }])
+            config_path = Path(__file__).resolve().parent.parent / "lane_compositions" / "stable_router_guard_kelly.yaml"
+            config = validate_saved_combination(_load_config(config_path))
+            result = build_collector_lane_replay(snapshot_path=snapshots, output_dir=output,
+                enabled_lanes=[], composition_config=config_path)
+            lane_rows = [json.loads(line) for line in result.lane_decision_path.read_text().splitlines()]
+            expected_pairs, expected_intents = compose_forward_rows(lane_rows, combination=config)
+            actual = [json.loads(line) for line in (output / "composition_rows.jsonl").read_text().splitlines()]
+            actual_intents = [json.loads(line) for line in (output / "wallet_intents.jsonl").read_text().splitlines()]
+            self.assertEqual(len(actual), len(expected_pairs))
+            self.assertEqual([(row["action"], row["reason_code"]) for row in actual],
+                             [(row["combined_action"], row["reason_code"]) for row in expected_pairs])
+            self.assertEqual(actual_intents, [row for row in expected_intents if row["lane_id"] == "forward_composed_paper"])
+            self.assertEqual(actual[0]["action"], "SKIP")
+            self.assertEqual(result.summary["composition"]["pnl"]["pnl_calculable_rows"], 0)
 
     def test_replays_selected_index_rows_with_index_and_manifest_provenance(self):
         with tempfile.TemporaryDirectory() as tmp:

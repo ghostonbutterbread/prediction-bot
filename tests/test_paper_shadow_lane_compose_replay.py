@@ -102,6 +102,26 @@ def _source_router_row(
 
 
 class PaperShadowLaneComposeReplayTests(unittest.TestCase):
+    def test_guarded_composition_keeps_quote_separate_from_fill_pnl(self):
+        stable = _lane_row(policy="control_stable", candidate_id="q1", market_id="KXQ", action="BUY_YES", size=10.0, yes_price=0.4)
+        router = _lane_row(policy="shadow_source_router", candidate_id="q1", market_id="KXQ", action="BUY_YES", size=10.0, yes_price=0.4)
+        guard = _lane_row(policy="shadow_fee_aware_loss_guard", candidate_id="q1", market_id="KXQ", action="BUY_YES", size=10.0, yes_price=0.4)
+        guard["entry_price"] = 0.4
+        guard["provenance"]["payout_aware"] = {"selected_side_ask": 0.4, "entry_price": 0.4, "quote_not_fill": True}
+        result = compose_lane_replay(lane_rows=[stable, router, guard],
+            resolution_rows=[{"shared_candidate_id": "q1", "run_id": "test-run", "market_id": "KXQ", "outcome": "YES", "settlement_ts": "2026-09-02T12:00:00+00:00"}],
+            config=_load_composition("stable_router_guard_kelly"))
+        row = result["composition_rows"][0]
+        self.assertEqual(row["entry_price"], 0.4)
+        self.assertTrue(row["quote_not_fill"])
+        self.assertEqual((row["run_id"], row["shared_snapshot_id"]), ("test-run", "test-snapshot"))
+        self.assertIsNotNone(row["decision_id"])
+        resolved = result["resolved_rows"][0]
+        self.assertEqual(resolved["blocker"], "quote_not_fill")
+        self.assertIsNone(resolved["fill_price"])
+        self.assertIsNone(resolved["pnl"])
+        self.assertEqual(result["summary"]["pnl"]["pnl_calculable_rows"], 0)
+
     def test_composes_router_side_with_stable_sizing_and_prices(self):
         lane_rows = [
             {

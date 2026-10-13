@@ -172,13 +172,16 @@ def _compose_candidate(
 
     notional = 0.0 if action == "SKIP" else _composition_notional(composition, sizing_row)
     price = None if action == "SKIP" else _side_price(price_row, side)
+    guard_provenance = _field(price_row, "provenance")
+    payout_aware = guard_provenance.get("payout_aware") if isinstance(guard_provenance, Mapping) else None
+    quote_not_fill = isinstance(payout_aware, Mapping) and payout_aware.get("quote_not_fill") is True
     future_inputs = _merged_future_inputs(base_row=base_row, action_row=action_row, sizing_row=sizing_row, price_row=price_row)
     future_inputs.update(
         {
             "recommended_action": action,
             "side": side,
             "entry_price": price,
-            "estimated_fill_price": price,
+            "estimated_fill_price": None if quote_not_fill else price,
             "requested_position_size_usd": notional,
             "approved_position_size_usd": notional,
             "composition_name": composition["name"],
@@ -208,6 +211,11 @@ def _compose_candidate(
         "policy": f"composition:{composition['name']}",
         "selected_lane": f"composition:{composition['name']}",
         "decision_role": "derived_composition_replay",
+        "decision_id": "composition:" + hashlib.sha256(json.dumps({"composition": composition, "candidate_key": candidate_key,
+            "source_decision_id": _field(action_row, "decision_id"), "action": action, "entry_price": price},
+            sort_keys=True, default=str).encode()).hexdigest(),
+        "run_id": _first_text(_field(action_row, "run_id"), _field(base_row, "run_id")),
+        "shared_snapshot_id": _first_text(_field(action_row, "shared_snapshot_id"), _field(base_row, "shared_snapshot_id")),
         "shared_candidate_id": _candidate_id(base_row) or candidate_key,
         "market_id": _first_text(_field(base_row, "market_id"), future_inputs.get("market_id")),
         "observed_at": _first_text(_field(action_row, "observed_at"), _field(base_row, "observed_at"), future_inputs.get("observed_at")),
@@ -215,6 +223,7 @@ def _compose_candidate(
         "side": side,
         "entry_price": price,
         "price": price,
+        "quote_not_fill": quote_not_fill,
         "requested_position_size_usd": notional,
         "approved_position_size_usd": notional,
         "reason_code": veto_reason or "composition_selected",

@@ -2145,7 +2145,7 @@ def _build_lane_resolution_row(
     action = _action_label(_optional_text(future_inputs.get("recommended_action"), row.get("action"), row.get("side")))
     side = _side_from_action(action) or _optional_text(future_inputs.get("side"))
     lane_id = _lane_id_for_row(row)
-    quote_only_buy = lane_id == FEE_AWARE_LOSS_GUARD_LANE_ID and _is_buy_action(action)
+    quote_only_buy = (lane_id == FEE_AWARE_LOSS_GUARD_LANE_ID or row.get("quote_not_fill") is True) and _is_buy_action(action)
     if lane_id in {"shadow_source_router", "shadow_source_scoreboard"} and _is_buy_action(action):
         # A source shadow is not an executed fill. Generic estimates and
         # snapshot-complemented asks are diagnostic, not executable quotes.
