@@ -6,8 +6,8 @@
 - **Base commit:** `b653de4c40f3b61f8f2265681d5a8fdd6bdb661e`
 - **Intended integration target:** `beta`
 - **Last updated:** 2026-10-12 PDT
-- **Latest immutable recovery checkpoint:** `634eae0f4867278aed8d328052b4f440676528c6` (a later dossier-only handoff may follow)
-- **Feature implementation commits:** `2e63eef2e53dcf91e82e33a43fc21238e897b1b2`, `fef01b926a156b118e6c64fbb840eb2ad17431ac`, `1745334b9839bb7e6ceadcdf0f9b98e199c2589d`, `69551f28b58073e62aa9bf6e075d202cc714a190`, `3db0a2d7831cb805d5bccf26815153436d9261bb`, `634eae0f4867278aed8d328052b4f440676528c6`
+- **Latest immutable recovery checkpoint:** `0fcc493422603e4d3f806b8c1bf370b31b453fe9` (a later dossier-only handoff may follow)
+- **Feature implementation commits:** `2e63eef2e53dcf91e82e33a43fc21238e897b1b2`, `fef01b926a156b118e6c64fbb840eb2ad17431ac`, `1745334b9839bb7e6ceadcdf0f9b98e199c2589d`, `69551f28b58073e62aa9bf6e075d202cc714a190`, `3db0a2d7831cb805d5bccf26815153436d9261bb`, `634eae0f4867278aed8d328052b4f440676528c6`, `0fcc493422603e4d3f806b8c1bf370b31b453fe9`
 - **Inspiration:** Ryu's Discord thread `1553496349343752358` asked for one easy saved lane combination, tested in replay, reused in forward paper, with Kelly/risk sizing after choosing what to buy. Existing `lane_compositions/*.yaml`, `scripts/paper_shadow_lane_compose_replay.py`, and concurrently owned `feat/forward-composed-paper` are the implementation seams.
 
 ## Intent and boundaries
@@ -33,8 +33,8 @@ Ingest an existing composition YAML directly into collector-lane replay, run its
 ## Interruption / resume handoff
 
 - **Owning feature branch/ref:** `feat/lane-combination-promotion`
-- **Latest immutable recovery checkpoint:** `634eae0f4867278aed8d328052b4f440676528c6`; a later dossier-only tip does not alter implementation.
-- **Exact resume point:** commit this feature's saved-policy validation correction, then request fresh skeptical review of the corrected feature tip; stage noncommitting beta merge again only after acceptance. Reproduce and test pre-risk/stable resolution plus invalid/valid saved policy on the exact staged tree, obtain new independent tree verdict. Integrate code only after acceptance. Never enable the observer or live path from this branch.
+- **Latest immutable recovery checkpoint:** `0fcc493422603e4d3f806b8c1bf370b31b453fe9`; a later dossier-only tip does not alter implementation.
+- **Exact resume point:** request fresh skeptical review of the corrected feature tip; stage noncommitting beta merge again only after acceptance. Reproduce and test pre-risk/stable resolution plus invalid/valid saved policy on the exact staged tree, obtain new independent tree verdict. Integrate code only after acceptance. Never enable the observer or live path from this branch.
 - **Working-tree state:** isolated branch; verify before handoff.
 
 ## Decision gates
