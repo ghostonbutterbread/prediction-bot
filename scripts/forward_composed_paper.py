@@ -27,6 +27,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--shared-market-state-path", required=True)
     parser.add_argument("--resolution-path", help="Optional separate exact-authority resolution JSONL")
     parser.add_argument("--enable-paper-observer", action="store_true", default=False)
+    parser.add_argument("--require-pre-risk-picker", action="store_true", default=False,
+                        help="Fail closed if the latest snapshot lacks a complete pre-risk picker lane")
     parser.add_argument("--max-snapshot-age-seconds", type=int, default=120)
     parser.add_argument("--starting-balance-usd", type=float, default=100.0)
     parser.add_argument("--fee-rate", type=float, default=0.07)
@@ -45,6 +47,7 @@ def main(argv: list[str] | None = None) -> int:
                         fee_rate=args.fee_rate)
     result = observe_fresh_forward_snapshot(
         rows, resolutions, state, enabled=True,
+        require_pre_risk_picker=args.require_pre_risk_picker,
         max_snapshot_age_seconds=args.max_snapshot_age_seconds,
         starting_balance_usd=args.starting_balance_usd, kelly_sizer=kelly,
         risk_policy=risk, min_edge=0.01, min_confidence=0.50, max_entry_price=0.70,

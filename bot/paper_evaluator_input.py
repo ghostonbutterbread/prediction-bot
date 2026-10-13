@@ -269,6 +269,20 @@ def _build_signal_from_normalized_candidate(
     )
 
     signal = dict(artifact_signal)
+    signal.pop("recorded_pre_risk_picker", None)
+    # The flattened row/candidate direction may have been rewritten after risk,
+    # or synthesized from a trace; neither is evidence of a picker BUY.
+    picker_action = str(artifact_signal.get("direction") or "").upper()
+    if (picker_action in {"BUY_YES", "BUY_NO"}
+            and str(artifact_signal.get("market_id") or "") == str(shared_candidate.get("market_id") or "")):
+        signal["recorded_pre_risk_picker"] = {
+            "action": picker_action,
+            "market_id": artifact_signal["market_id"],
+            "model_probability": artifact_signal.get("model_probability"),
+            "confidence": artifact_signal.get("confidence"),
+            "estimated_fill_price": _mapping(artifact.get("execution_snapshot")).get("estimated_fill_price"),
+            "source": "decision_artifact.strategy_signal",
+        }
     signal.update(
         {
             "shared_candidate_id": shared_candidate_id,

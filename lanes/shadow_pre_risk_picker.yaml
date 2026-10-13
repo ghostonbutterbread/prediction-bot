@@ -1,0 +1,10 @@
+id: shadow_pre_risk_picker
+type: pre_risk_picker
+source_wallet: stable_paper
+source_role: recorded_pre_risk_picker
+input_source: shared_candidate_dataset
+input_market_source: shared_market
+enabled: false
+description: >-
+  Paper-only captured decision_artifact.strategy_signal BUY before wallet risk.
+  Missing or trace-only signals stay SKIP; no accounting mutation.
