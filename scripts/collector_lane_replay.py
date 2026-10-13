@@ -33,7 +33,7 @@ from bot.paper_shadow_lanes import (
 )
 from bot.paper_wallets import BETA_PAPER_WALLET_ID, STABLE_PAPER_WALLET_ID
 from bot.replay_decision_input import _field_name_is_forbidden
-from bot.forward_composed_paper import PICKER, compose_forward_rows, validate_forward_combination
+from bot.forward_composed_paper import CONTROL, GUARD, PICKER, compose_forward_rows, validate_forward_combination
 from bot.resolution_feed import run_resolution_feed_once
 from scripts.paper_shadow_lane_compose_replay import _load_config, compose_lane_replay, validate_saved_combination
 
@@ -171,9 +171,12 @@ def build_collector_lane_replay(
             forward_supported = True
         required = [normalized[key] for key in ("base_lane", "action_lane", "sizing_lane", "price_lane")]
         required += [str(veto["lane"]) for veto in normalized["vetoes"]]
-    lane_ids = _normalized_lanes([*enabled_lanes, *required])
-    if forward_supported and PICKER in lane_ids:
+    requested_lanes = list(enabled_lanes)
+    lane_ids = _normalized_lanes([*requested_lanes, *required])
+    if forward_supported and normalized["base_lane"] == CONTROL and PICKER in lane_ids:
         raise ValueError("unsupported forward combination: stable lanes cannot select a pre-risk picker cohort")
+    if forward_supported and normalized["base_lane"] == PICKER and GUARD in requested_lanes:
+        raise ValueError("unsupported forward combination: pre-risk lanes cannot select a stable cohort")
     if composition is not None:
         unknown = [lane for lane in required if lane not in KNOWN_LANE_IDS]
         if unknown:
@@ -375,7 +378,9 @@ def _compose_forward_replay(*, lane_rows: list[dict[str, Any]], resolution_rows:
         "composition": dict(combination), "candidate_groups": len(pairs), "composed_rows": len(composed_rows),
         "diagnostics": dict(Counter(pair["reason_code"] for pair in pairs)), "duplicate_lane_rows": {},
         "pnl": summarize_paper_shadow_lane_resolution_rows(resolved),
-        "selection_semantics": "same_supported_forward_rule_recorded_stable_universe",
+        "selection_semantics": ("same_supported_forward_rule_recorded_pre_risk_picker_universe"
+                                if combination["base_lane"] == PICKER else
+                                "same_supported_forward_rule_recorded_stable_universe"),
         "pnl_basis": "quote_not_fill_no_composed_fill_pnl"}
     return {"composition_rows": composed_rows, "wallet_intents": combined_intents,
             "resolved_rows": resolved, "summary": summary}
@@ -459,6 +464,14 @@ def _prepare_snapshot(
         }
     )
     execution_snapshot = _mapping(artifact.get("execution_snapshot"))
+    picker_action = str(artifact_signal.get("direction") or "").upper()
+    recorded_picker = ({"action": picker_action, "market_id": market_id,
+                        "model_probability": artifact_signal.get("model_probability"),
+                        "confidence": artifact_signal.get("confidence"),
+                        "estimated_fill_price": execution_snapshot.get("estimated_fill_price"),
+                        "source": "decision_artifact.strategy_signal"}
+                       if picker_action in {"BUY_YES", "BUY_NO"}
+                       and str(artifact_signal.get("market_id") or "") == market_id else None)
     yes_price = raw_row.get("yes_price", execution_snapshot.get("yes_price"))
     no_price = raw_row.get("no_price", execution_snapshot.get("no_price"))
     shared_decision = _mapping(shared_candidate.get("decision"))
@@ -480,6 +493,8 @@ def _prepare_snapshot(
             "market_price": yes_price,
             "price_assumption": "collector_recorded_reference_price",
             "source_details": evidence.get("source_details", []),
+            "recorded_pre_risk_picker": recorded_picker,
+            "execution_snapshot": execution_snapshot,
         }
     )
     artifact_decision = {

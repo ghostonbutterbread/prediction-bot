@@ -41,6 +41,47 @@ def cohort(candidate="c1", market="M1", event="E1", side="BUY_YES", price=0.4):
 
 
 class ForwardCompositionTests(unittest.TestCase):
+    def test_saved_pre_risk_strict_and_guard_only_select_recorded_picker(self):
+        from bot.forward_composed_paper import validate_forward_combination
+        from scripts.paper_shadow_lane_compose_replay import _load_config, validate_saved_combination
+        strict = validate_saved_combination(_load_config(Path(__file__).resolve().parents[1] /
+            "lane_compositions" / "pre_risk_router_guard_kelly.yaml"))
+        validate_forward_combination(strict)
+        control, router, guard = cohort(price=0.4)
+        control = {**control, "action": "SKIP"}  # Risk rejected after picker BUY.
+        picker = {**control, "policy": "shadow_pre_risk_picker", "action": "BUY_YES",
+                  "provenance": {"picker_intent_source": "decision_artifact.strategy_signal"}}
+        guard = {**guard, "policy": "shadow_pre_risk_fee_aware_loss_guard", "entry_price": 0.45,
+                 "provenance": {"payout_aware": {"selected_side_ask": 0.4,
+                     "entry_price": 0.45, "quote_not_fill": True}}}
+        rows = [control, picker, router, guard]
+        self.assertEqual(compose_forward_rows(rows, combination=strict), compose_forward_rows(rows))
+        guard_only = {**strict, "vetoes": strict["vetoes"][1:]}
+        validate_forward_combination(guard_only)
+        unverified = {**router, "provenance": {"source_router": {}}}
+        strict_pairs, _ = compose_forward_rows([control, picker, unverified, guard], combination=strict)
+        loose_pairs, loose_intents = compose_forward_rows([control, picker, unverified, guard], combination=guard_only)
+        self.assertEqual(strict_pairs[0]["reason_code"], "router_history_unverified")
+        self.assertEqual(loose_pairs[0]["combined_action"], "BUY_YES")
+        self.assertEqual(next(i for i in loose_intents if i["lane_id"] == "forward_composed_paper")["entry_price"], 0.45)
+        for changed, reason in (({**router, "action": "BUY_NO"}, "router_disagrees"),
+                                ({**guard, "action": "SKIP", "entry_price": None,
+                                  "reason_code": "executable_side_ask_unavailable", "provenance": {}},
+                                 "executable_side_ask_unavailable")):
+            varied = [control, picker, changed, guard] if changed.get("policy") == router["policy"] else [control, picker, router, changed]
+            expected = compose_forward_rows(varied)
+            self.assertEqual(compose_forward_rows(varied, combination=strict), expected)
+            self.assertEqual(expected[0][0]["reason_code"], reason)
+        wrong_side = {**picker, "action": "BUY_NO", "model_probability": 0.2}
+        self.assertEqual(compose_forward_rows([control, wrong_side, router, guard], combination=strict)[0][0]["combined_action"], "SKIP")
+        report = evaluate_forward_composition(list(rows), [], combination=strict,
+            starting_balance_usd=100, kelly_sizer=FixedKelly(), risk_policy=ApprovingRisk(),
+            min_edge=0.01, min_confidence=0.5, max_entry_price=0.99)
+        self.assertEqual(report["control_wallet"]["open_positions"][0]["entry_price"], 0.4)
+        self.assertEqual(report["combined_wallet"]["open_positions"][0]["entry_price"], 0.45)
+        with self.assertRaisesRegex(ValueError, "pre-risk lanes cannot select a stable cohort"):
+            compose_forward_rows([control, router], combination=strict)
+
     def test_stable_named_combination_cannot_silently_select_new_pre_risk_cohort(self):
         from scripts.paper_shadow_lane_compose_replay import _load_config, validate_saved_combination
         saved = validate_saved_combination(_load_config(Path(__file__).resolve().parent.parent /
