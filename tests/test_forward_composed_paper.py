@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 from io import StringIO
 from contextlib import redirect_stdout
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from bot.risk import RiskDecision
 from bot.composed_lane_wallet import evaluate_composed_intents
@@ -232,6 +234,115 @@ class ForwardCompositionTests(unittest.TestCase):
         result = evaluate_composed_intents(**{**kwargs, "intents": [first, later]})
         self.assertEqual(result["decision_rows"][1]["reason_code"], "market_already_settled")
         self.assertEqual(result["decision_rows"][1]["available_cash_before_usd"], 113.95)
+
+    def test_recorded_pre_risk_buys_survive_wallet_risk_rejection_through_loader_lanes_and_observer(self):
+        from bot.file_ops import load_jsonl
+        from bot.paper_evaluator_input import load_shared_candidate_paper_inputs
+        from bot.paper_shadow_lanes import write_paper_shadow_lane_decisions
+        from bot.shared_market_feed import SCHEMA_NAME
+
+        stamp = "2026-09-01T12:00:00+00:00"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dataset = Path(tmpdir) / "collector_candidates.jsonl"
+            for candidate_id, market_id, final_action in (("c1", "M1", "BUY_YES"), ("c2", "M2", "SKIP"),
+                                                          ("c3", "M3", "SKIP"), ("c4", "M4", "SKIP"),
+                                                          ("c5", "M5", "SKIP"), ("c6", "M6", "SKIP"),
+                                                          ("c7", "M7", "SKIP")):
+                book_market = "OTHER" if candidate_id == "c4" else market_id
+                book_time = "2026-09-01T12:01:00+00:00" if candidate_id == "c5" else stamp
+                ask = 0.1 if candidate_id == "c7" else 0.4
+                candidate = {"schema_name": SCHEMA_NAME, "candidate_id": candidate_id,
+                    "shared_snapshot_id": "snapshot-1", "run_id": "run-1", "market_id": market_id,
+                    "observed_at": stamp, "market": {"id": market_id, "question": "Will it happen?",
+                    "exchange": "kalshi", "event_ticker": market_id,
+                    "route": {"allowed": True, "handler_id": "weather"}},
+                    "prices": {"order_book_snapshot": {"source": "book", "market_id": book_market,
+                    "observed_at": book_time, "data": {"best_yes_ask": ask}}, "best_yes_ask": ask},
+                    "decision": {"direction": final_action}}
+                row = {"shared_candidate_id": candidate_id, "shared_snapshot_id": "snapshot-1",
+                    "run_id": "run-1", "market_id": market_id, "observed_at": stamp,
+                    "direction": final_action, "confidence": 0.9, "model_probability": 0.8,
+                    "shared_candidate": candidate,
+                    "decision_artifact": {"final_action": final_action,
+                    "strategy_trace": {"direction": "BUY_YES"},
+                    "strategy_signal": None if candidate_id == "c3" else (
+                        {"direction": "SKIP", "market_id": market_id,
+                         "recorded_pre_risk_picker": {"action": "BUY_YES", "market_id": market_id,
+                             "source": "decision_artifact.strategy_signal", "confidence": 0.9,
+                             "model_probability": 0.8}}
+                        if candidate_id == "c6" else {"direction": "BUY_YES", "market_id": market_id,
+                        "model_probability": 0.8, "confidence": 0.9, "question": "Will it happen?",
+                        "exchange": "kalshi", "market_route": {"allowed": True, "handler_id": "weather"}})}}
+                with dataset.open("a") as handle:
+                    handle.write(json.dumps(row) + "\n")
+            loaded = load_shared_candidate_paper_inputs(dataset, config={}, data_dir=Path(tmpdir) / "wallets",
+                wallet_ids=["stable_paper"])
+            self.assertEqual(loaded.accepted_candidate_count, 7)
+            stable_rows = [{"shared_candidate_id": cid, "wallet_id": "stable_paper",
+                "run_id": "stable-run", "candidate_dataset_path": str(dataset),
+                "decision_role": "paper_shadow", "decision_id": "stable-" + cid,
+                "market_id": mid, "observed_at": stamp, "action": action,
+                "entry_price": 0.4 if action == "BUY_YES" else None,
+                "reason_code": "approved" if action == "BUY_YES" else "risk_rejected"}
+                for cid, mid, action in (("c1", "M1", "BUY_YES"), ("c2", "M2", "SKIP"),
+                                         ("c3", "M3", "SKIP"), ("c4", "M4", "SKIP"),
+                                         ("c5", "M5", "SKIP"), ("c6", "M6", "SKIP"), ("c7", "M7", "SKIP"))]
+            config = {"paper_shadow_lanes": {"enabled": True,
+                "definitions_dir": str(Path(__file__).resolve().parents[1] / "lanes"),
+                "enabled_lanes": ["control_stable", "shadow_pre_risk_picker",
+                    "shadow_source_router", "shadow_pre_risk_fee_aware_loss_guard"],
+                "shadow_source_router": {"parameters": {"collector_replay_index_path": "fixture-index",
+                    "collector_replay_manifest_path": "fixture-manifest",
+                    "strict_resolutions_path": "fixture-resolutions"}}}}
+            direct = SimpleNamespace(scorecard_rows=[], bucket_coverage={}, counts={},
+                index_manifest_sha256="index", resolution_sha256="resolution", archive_receipts=[])
+            with patch("bot.weather.source_router_direct_history.load_direct_strict_source_history", return_value=direct), \
+                 patch("bot.weather.source_confidence.build_source_confidence_row", return_value={"source_direction": "YES"}):
+                written = write_paper_shadow_lane_decisions(config=config, candidate_dataset_path=dataset,
+                    inputs_by_shared_candidate_id=loaded.inputs_by_shared_candidate_id,
+                    wallet_decision_rows={"stable_paper": stable_rows},
+                    wallet_runs={"stable_paper": SimpleNamespace(session_id="stable-run")}, ledger_root=tmpdir)
+            rows = load_jsonl(Path(written.decision_path))
+            by_candidate = {(r["shared_candidate_id"], r["policy"]): r for r in rows}
+            self.assertEqual(len(rows), 28)
+            self.assertEqual(by_candidate["c2", "control_stable"]["action"], "SKIP")
+            self.assertEqual(by_candidate["c2", "shadow_pre_risk_picker"]["action"], "BUY_YES")
+            self.assertEqual(by_candidate["c2", "shadow_source_router"]["action"], "BUY_YES")
+            self.assertEqual(by_candidate["c2", "shadow_pre_risk_fee_aware_loss_guard"]["action"], "BUY_YES")
+            self.assertEqual(by_candidate["c3", "shadow_pre_risk_picker"]["action"], "SKIP")
+            self.assertEqual(by_candidate["c6", "shadow_pre_risk_picker"]["action"], "SKIP")
+            for cid in ("c4", "c5"):
+                self.assertEqual(by_candidate[cid, "shadow_pre_risk_fee_aware_loss_guard"]["reason_code"],
+                    "executable_side_ask_unavailable")
+                self.assertIsNone(by_candidate[cid, "shadow_pre_risk_fee_aware_loss_guard"].get("entry_price"))
+            from datetime import datetime, timezone
+            state = {"publisher": {"runtime_kind": "collector", "instance_id": "primary"},
+                     "latest_snapshot": {"snapshot_id": "snapshot-1", "publisher_runtime": "collector",
+                         "publisher_instance_id": "primary", "published_at": stamp}}
+            settings = dict(starting_balance_usd=100, kelly_sizer=FixedKelly(), risk_policy=ApprovingRisk(),
+                min_edge=0.01, min_confidence=0.5, max_entry_price=0.99)
+            now = datetime(2026, 9, 1, 12, 0, 30, tzinfo=timezone.utc)
+            self.assertEqual(observe_fresh_forward_snapshot(rows, [], state, now=now, **settings)["reason_code"],
+                "observer_disabled")
+            self.assertEqual(by_candidate["c7", "shadow_pre_risk_fee_aware_loss_guard"]["reason_code"],
+                "executable_side_ask_below_floor")
+            result = observe_fresh_forward_snapshot(rows, [], state, enabled=True, now=now, **settings)
+            pairs = {r["shared_candidate_id"]: r for r in result["pairs"]}
+            self.assertEqual({cid: p["combined_action"] for cid, p in pairs.items()},
+                {"c1": "BUY_YES", "c2": "BUY_YES", "c3": "SKIP", "c4": "SKIP", "c5": "SKIP", "c6": "SKIP", "c7": "SKIP"})
+            self.assertEqual(pairs["c2"]["stable_wallet_action"], "SKIP")
+            self.assertEqual(pairs["c3"]["reason_code"], "picker_intent_not_recorded")
+            self.assertEqual(result["control_wallet"]["summary"]["opened_positions"], 3)
+            self.assertEqual(next(p for p in result["control_wallet"]["open_positions"] if p["market_id"] == "M7")["entry_price"], 0.1)
+            self.assertEqual(result["combined_wallet"]["summary"]["opened_positions"], 2)
+            self.assertEqual(result["candidate_universe"], "recorded_pre_risk_picker_intents")
+            incomplete = evaluate_forward_composition(
+                [row for row in rows if not (row["shared_candidate_id"] == "c2" and row["policy"] == "shadow_pre_risk_picker")],
+                [], starting_balance_usd=100, kelly_sizer=FixedKelly(), risk_policy=ApprovingRisk(),
+                min_edge=0.01, min_confidence=0.5, max_entry_price=0.99)
+            self.assertEqual(next(p for p in incomplete["pairs"] if p["shared_candidate_id"] == "c2")["reason_code"],
+                "missing_picker_intent")
+            self.assertEqual(incomplete["control_wallet"]["summary"]["opened_positions"], 2)
 
     def test_outcome_like_input_is_rejected_before_decisions(self):
         control, router, guard = cohort()

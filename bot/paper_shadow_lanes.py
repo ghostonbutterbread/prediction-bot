@@ -34,6 +34,8 @@ SOURCE_ROUTER_LANE_ID = "shadow_source_router"
 SOURCE_ROUTER_NO_PRICE_GUARD_LANE_ID = "shadow_source_router_no_price_guard"
 FEE_AWARE_EDGE_FLOOR_LANE_ID = "shadow_fee_aware_edge_floor"
 FEE_AWARE_LOSS_GUARD_LANE_ID = "shadow_fee_aware_loss_guard"
+PRE_RISK_PICKER_LANE_ID = "shadow_pre_risk_picker"
+PRE_RISK_GUARD_LANE_ID = "shadow_pre_risk_fee_aware_loss_guard"
 SOURCE_RELIABILITY_EVALUATOR_LANE_IDS = frozenset({SOURCE_RELIABILITY_LANE_ID, SOURCE_SCOREBOARD_LANE_ID})
 SOURCE_SCOREBOARD_LANE_IDS = frozenset({SOURCE_SCOREBOARD_LANE_ID})
 SOURCE_COLLECTION_LANE_IDS = frozenset(
@@ -56,6 +58,8 @@ KNOWN_LANE_IDS = (
     SOURCE_ROUTER_NO_PRICE_GUARD_LANE_ID,
     FEE_AWARE_EDGE_FLOOR_LANE_ID,
     FEE_AWARE_LOSS_GUARD_LANE_ID,
+    PRE_RISK_PICKER_LANE_ID,
+    PRE_RISK_GUARD_LANE_ID,
 )
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MAX_COMPACT_FUTURE_PNL_QUESTION_CHARS = 200
@@ -165,6 +169,10 @@ def _build_lane_row(
     source_rows: Mapping[str, dict[str, Any] | None],
     decision_path: Path,
 ) -> dict[str, Any]:
+    if lane.lane_id in {PRE_RISK_PICKER_LANE_ID, PRE_RISK_GUARD_LANE_ID}:
+        picker = _mapping(signal.get("recorded_pre_risk_picker"))
+        signal = {**signal, "model_probability": picker.get("model_probability"),
+                  "confidence": picker.get("confidence")}
     decision = _evaluate_lane_decision(lane, signal, shared_candidate, source_rows)
 
     observed_at = _observed_at(decision.get("source_row"), signal)
@@ -298,9 +306,12 @@ def _build_lane_row(
             "decision_only": True,
         },
     }
+    if lane.lane_id == PRE_RISK_PICKER_LANE_ID:
+        row["provenance"]["picker_intent_source"] = (
+            "decision_artifact.strategy_signal" if _is_buy_action(action) else None)
     if isinstance(decision.get("payout_aware"), Mapping):
         row["provenance"]["payout_aware"] = dict(decision["payout_aware"])
-    if lane.lane_id == FEE_AWARE_LOSS_GUARD_LANE_ID:
+    if lane.lane_id in {FEE_AWARE_LOSS_GUARD_LANE_ID, PRE_RISK_GUARD_LANE_ID}:
         # The generic helper can fall back to a reference market price.
         # This lane records only its selected-side quote/estimate basis on BUYs.
         price = decision.get("economic_entry_price") if _is_buy_action(action) else None
@@ -349,9 +360,8 @@ def _build_lane_row(
     if shared_snapshot_id:
         row["shared_snapshot_id"] = shared_snapshot_id
         row["provenance"]["shared_snapshot_id"] = shared_snapshot_id
-    if lane.lane_id == "control_stable":
-        # The compact stable lane row previously omitted the decision-time
-        # wallet inputs. Project only the recorded signal (never later outcomes).
+    if lane.lane_id in {"control_stable", PRE_RISK_PICKER_LANE_ID}:
+        # Control and pre-risk rows retain only decision-time wallet inputs.
         row["question"] = _optional_text(signal.get("question"))
         row["exchange"] = _optional_text(signal.get("exchange"))
         row["event_ticker"] = _optional_text(signal.get("event_ticker"))
@@ -367,7 +377,33 @@ def _evaluate_lane_decision(
 ) -> dict[str, Any]:
     source_wallet_id = lane.source_wallet_id or STABLE_PAPER_WALLET_ID
     evaluator = _lane_evaluator(lane)
-    return evaluator(lane, signal, source_rows.get(source_wallet_id), shared_candidate)
+    source_row = source_rows.get(source_wallet_id)
+    if lane.lane_id in {PRE_RISK_PICKER_LANE_ID, PRE_RISK_GUARD_LANE_ID}:
+        source_row = _recorded_picker_source_row(signal, shared_candidate)
+    return evaluator(lane, signal, source_row, shared_candidate)
+
+
+def _recorded_picker_source_row(signal: Mapping[str, Any], shared_candidate: Mapping[str, Any]) -> dict[str, Any] | None:
+    picker = _mapping(signal.get("recorded_pre_risk_picker"))
+    action = str(picker.get("action") or "").upper()
+    if (picker.get("source") != "decision_artifact.strategy_signal"
+            or action not in {"BUY_YES", "BUY_NO"}
+            or str(picker.get("market_id") or "") != str(shared_candidate.get("market_id") or "")):
+        return None
+    return {"action": action, "market_id": picker["market_id"],
+            "observed_at": shared_candidate.get("observed_at"),
+            "confidence": picker.get("confidence"),
+            "model_probability": picker.get("model_probability")}
+
+
+def _picker_decision(lane: _LaneDefinition, signal: Mapping[str, Any],
+                     source_row: dict[str, Any] | None, shared_candidate: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    if source_row is None:
+        return {"action": "SKIP", "reason_code": "picker_intent_not_recorded",
+                "approved_position_size_usd": 0.0}
+    return {"source_row": source_row, "action": source_row["action"],
+            "reason_code": "recorded_pre_risk_picker_buy",
+            "approved_position_size_usd": 0.0}
 
 
 def _lane_evaluator(lane: _LaneDefinition):
@@ -378,6 +414,8 @@ def _lane_evaluator(lane: _LaneDefinition):
         lane_type = "premium_city"
     elif lane.lane_id == SOURCE_ROUTER_LANE_ID:
         lane_type = "source_router"
+    elif lane.lane_id == PRE_RISK_PICKER_LANE_ID:
+        lane_type = "pre_risk_picker"
     elif lane.lane_id in SOURCE_RELIABILITY_EVALUATOR_LANE_IDS:
         lane_type = "source_reliability"
     elif lane_type == "source_scoreboard":
@@ -561,6 +599,11 @@ def _fee_aware_loss_guard_decision(
             "reason": f"Stable buy requires selected-side executable ask >= {min_ask:.2f}",
             "approved_position_size_usd": 0.0,
         })
+        if lane.lane_id == PRE_RISK_GUARD_LANE_ID and quote is not None and 0.0 < quote < 1.0:
+            # The guard vetoes this quote, but the paired picker control still
+            # has a genuine same-side ask; do not silently shrink its universe.
+            baseline["payout_aware"] = {"selected_side_ask": quote, "entry_price": quote,
+                                        "quote_not_fill": True, "price_basis": "selected_side_ask_quote"}
         return baseline
 
     assert quote is not None  # The missing-quote branch returned above.
@@ -965,6 +1008,7 @@ def _strict_scorecard_as_of(rows: list[dict[str, Any]] | None, decision_time: An
 
 LANE_EVALUATORS = {
     "passthrough": _passthrough_decision,
+    "pre_risk_picker": _picker_decision,
     "confidence_floor": _confidence_floor_decision,
     "premium_city": _premium_city_decision,
     "fee_aware_edge_floor": _fee_aware_edge_floor_decision,
