@@ -835,11 +835,13 @@ def _load_config(path: Path, *, content: bytes | None = None) -> dict[str, Any]:
 
         class UniqueConfigLoader(yaml.SafeLoader):
             def construct_mapping(self, node: Any, deep: bool = False) -> dict[Any, Any]:
-                self.flatten_mapping(node)
-                return _unique_config_pairs(
-                    (self.construct_object(key, deep=deep), self.construct_object(value, deep=deep))
-                    for key, value in node.value
+                # Check only keys written in this mapping; YAML merges may be
+                # intentionally overridden by explicit fields below the << key.
+                _unique_config_pairs(
+                    (self.construct_object(key, deep=deep), None)
+                    for key, _ in node.value if key.tag != "tag:yaml.org,2002:merge"
                 )
+                return super().construct_mapping(node, deep=deep)
 
         payload = yaml.load(text, Loader=UniqueConfigLoader)
     if not isinstance(payload, Mapping):

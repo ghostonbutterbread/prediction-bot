@@ -211,6 +211,9 @@ class CollectorLaneReplayTests(unittest.TestCase):
                  "  exposure:\n    max_rows_per_market: 1\n    max_rows_per_market: 2\n"),
                 ("json", '{"composition":{"base_lane":"control_stable",'
                  '"exposure":{"max_rows_per_market":1,"max_rows_per_market":2}}}'),
+                ("yaml", "composition:\n  base_lane: control_stable\n  gates:\n"
+                 "    - &floor {name: floor, field: price, op: gte, value: 0.2}\n"
+                 "    - <<: *floor\n      value: 0.3\n      value: 0.4\n"),
             )
             for index, (extension, text) in enumerate(examples):
                 with self.subTest(index=index):

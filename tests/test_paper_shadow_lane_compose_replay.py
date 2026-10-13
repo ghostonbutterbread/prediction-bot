@@ -1,3 +1,4 @@
+import tempfile
 import unittest
 from copy import deepcopy
 from pathlib import Path
@@ -102,6 +103,24 @@ def _source_router_row(
 
 
 class PaperShadowLaneComposeReplayTests(unittest.TestCase):
+    def test_saved_yaml_merge_can_override_inherited_gate_fields(self):
+        from scripts.paper_shadow_lane_compose_replay import _load_config, validate_saved_combination
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "combination.yaml"
+            path.write_text("composition:\n  base_lane: control_stable\n  gates:\n"
+                            "    - &floor\n      name: price_floor\n      field: price\n"
+                            "      op: gte\n      value: 0.2\n"
+                            "    - <<: *floor\n      name: price_cap\n      op: lte\n"
+                            "      value: 0.8\n", encoding="utf-8")
+            normalized = validate_saved_combination(_load_config(path))
+            self.assertEqual([(gate["name"], gate["op"], gate["value"])
+                              for gate in normalized["gates"]],
+                             [("price_floor", "gte", 0.2), ("price_cap", "lte", 0.8)])
+            row = _lane_row(policy="control_stable", candidate_id="priced", market_id="KXPRICED",
+                            action="BUY_YES", size=10.0, yes_price=0.35)
+            result = compose_lane_replay(lane_rows=[row], config=normalized)
+            self.assertEqual(result["composition_rows"][0]["action"], "BUY_YES")
+
     def test_saved_explicit_empty_sections_and_boolean_fallback_remain_supported(self):
         from scripts.paper_shadow_lane_compose_replay import validate_saved_combination
         normalized = validate_saved_combination({"composition": {
