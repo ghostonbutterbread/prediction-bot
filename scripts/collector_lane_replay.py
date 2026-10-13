@@ -25,12 +25,14 @@ if str(ROOT) not in sys.path:
 from bot.file_ops import load_jsonl
 from bot.collector_replay_index import load_indexed_collector_rows
 from bot.paper_shadow_lanes import (
+    KNOWN_LANE_IDS,
     build_paper_shadow_lane_resolution_rows,
     summarize_paper_shadow_lane_resolution_rows,
     write_paper_shadow_lane_decisions,
 )
 from bot.paper_wallets import BETA_PAPER_WALLET_ID, STABLE_PAPER_WALLET_ID
 from bot.resolution_feed import run_resolution_feed_once
+from scripts.paper_shadow_lane_compose_replay import _load_config, _normalize_composition, compose_lane_replay
 
 DEFAULT_NOTIONAL_USD = 10.0
 OUTCOME_LIKE_KEYS = frozenset(
@@ -68,7 +70,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--row-number", action="append", dest="row_numbers", type=int, default=[])
     parser.add_argument("--max-rows", type=int)
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--lane", action="append", dest="lanes", required=True)
+    parser.add_argument("--lane", action="append", dest="lanes", default=[])
+    parser.add_argument("--composition-config", help="Existing lane_compositions YAML/JSON; selects its component lanes")
     parser.add_argument("--resolution-path", action="append", default=[])
     parser.add_argument("--default-notional-usd", type=float, default=DEFAULT_NOTIONAL_USD)
     parser.add_argument("--format", choices=("text", "json"), default="text")
@@ -89,6 +92,7 @@ def main(argv: list[str] | None = None) -> int:
         manifest_path=_root_path(args.manifest_path) if args.manifest_path else None,
         output_dir=_safe_output_dir(_root_path(args.output_dir)),
         enabled_lanes=args.lanes,
+        composition_config=_root_path(args.composition_config) if args.composition_config else None,
         resolution_paths=[_root_path(path) for path in args.resolution_path],
         default_notional_usd=args.default_notional_usd,
         market_ids=args.market_ids,
@@ -126,6 +130,7 @@ def build_collector_lane_replay(
     row_numbers: Iterable[int] = (),
     max_rows: int | None = None,
     definitions_dir: Path | None = None,
+    composition_config: Path | None = None,
 ) -> CollectorLaneReplayResult:
     """Evaluate configured lanes over stored snapshots and optionally score known resolutions."""
     if default_notional_usd <= 0:
@@ -140,13 +145,24 @@ def build_collector_lane_replay(
         raise ValueError("max_rows must be positive")
     if snapshot_path is not None and not snapshot_path.exists():
         raise FileNotFoundError(snapshot_path)
-    lane_ids = _normalized_lanes(enabled_lanes)
+    composition = _load_config(composition_config) if composition_config else None
+    required = []
+    if composition is not None:
+        normalized = _normalize_composition(composition)
+        required = [normalized[key] for key in ("base_lane", "action_lane", "sizing_lane", "price_lane")]
+        required += [str(veto["lane"]) for veto in normalized["vetoes"]]
+    lane_ids = _normalized_lanes([*enabled_lanes, *required])
+    if composition is not None:
+        unknown = [lane for lane in required if lane not in KNOWN_LANE_IDS]
+        if unknown:
+            raise ValueError(f"unknown combination lane: {unknown[0]}")
     output_dir.mkdir(parents=True, exist_ok=True)
     lane_decision_path = output_dir / "lane_decisions.jsonl"
     buy_decision_path = output_dir / "buy_decisions.jsonl"
     resolved_row_path = output_dir / "resolved_rows.jsonl"
     summary_path = output_dir / "summary.json"
-    for path in (lane_decision_path, buy_decision_path, resolved_row_path, summary_path):
+    extra_paths: list[Path] = [output_dir / "composition_rows.jsonl", output_dir / "wallet_intents.jsonl"] if composition is not None else []
+    for path in (lane_decision_path, buy_decision_path, resolved_row_path, summary_path, *extra_paths):
         if path.exists():
             raise FileExistsError(f"derived replay output already exists: {path}")
 
@@ -250,6 +266,11 @@ def build_collector_lane_replay(
     resolved_rows = build_paper_shadow_lane_resolution_rows(lane_rows=lane_rows, resolution_rows=resolution_rows)
     _write_jsonl(resolved_row_path, resolved_rows)
     pnl = summarize_paper_shadow_lane_resolution_rows(resolved_rows)
+    combined = compose_lane_replay(lane_rows=lane_rows, resolution_rows=resolution_rows, config=composition) if composition is not None else None
+    if combined is not None:
+        assert composition_config is not None
+        _write_jsonl(extra_paths[0], combined["composition_rows"])
+        _write_jsonl(extra_paths[1], combined["wallet_intents"])
     summary = {
         "schema_name": "collector_lane_replay_summary",
         "schema_version": 1,
@@ -281,6 +302,17 @@ def build_collector_lane_replay(
             "market_ids": normalized_market_ids,
             "row_numbers": sorted({int(value) for value in row_numbers if int(value) > 0}),
             "max_rows": max_rows,
+        }
+    if combined is not None:
+        assert composition_config is not None
+        summary["composition"] = {
+            **combined["summary"],
+            "configuration_path": str(composition_config),
+            "configuration_sha256": _file_sha256(composition_config),
+            "composition_row_path": str(extra_paths[0]),
+            "wallet_intent_path": str(extra_paths[1]),
+            "methodology": "derived_decision_row_diagnostic_not_wallet_parity",
+            "promotion_eligible": False,
         }
     summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return CollectorLaneReplayResult(lane_decision_path, buy_decision_path, resolved_row_path, summary_path, summary)

@@ -14,6 +14,51 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
 
 
 class CollectorLaneReplayTests(unittest.TestCase):
+    def test_saved_combination_runs_its_existing_lanes_on_one_collector_candidate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshots = root / "collector.jsonl"
+            config = root / "combination.yaml"
+            output = root / "data" / "derived_reports" / "combination"
+            _write_jsonl(snapshots, [{
+                "run_id": "collector-1", "shared_candidate_id": "candidate-1",
+                "market_id": "KXCOMBO", "observed_at": "2026-07-01T12:00:00+00:00",
+                "yes_price": 0.30, "no_price": 0.70, "confidence": 0.91,
+                "main_decision": {"action": "BUY_NO", "size": 5.0},
+            }])
+            config.write_text("\n".join([
+                "composition:", "  name: stable_with_confidence_veto",
+                "  base_lane: control_stable", "  action_lane: control_stable",
+                "  sizing_lane: control_stable", "  price_lane: control_stable",
+                "  vetoes:", "    - lane: shadow_confidence_floor",
+                "      mode: require_agreement", "      required: true", "",
+            ]), encoding="utf-8")
+            result = build_collector_lane_replay(
+                snapshot_path=snapshots, output_dir=output,
+                enabled_lanes=[], composition_config=config,
+            )
+            rows = [json.loads(line) for line in result.lane_decision_path.read_text().splitlines()]
+            composed = [json.loads(line) for line in (output / "composition_rows.jsonl").read_text().splitlines()]
+            self.assertEqual({row["policy"] for row in rows}, {"control_stable", "shadow_confidence_floor"})
+            self.assertEqual(result.summary["composition"]["candidate_groups"], 1)
+            self.assertEqual(result.summary["composition"]["configuration_sha256"], hashlib.sha256(config.read_bytes()).hexdigest())
+            self.assertEqual(len(composed), 1)
+            self.assertEqual(composed[0]["shared_candidate_id"], "candidate-1")
+            self.assertFalse(result.summary["promotion_eligible"])
+
+    def test_combination_rejects_unknown_lane_before_creating_outputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshots = root / "collector.jsonl"
+            config = root / "combination.yaml"
+            output = root / "data" / "derived_reports" / "invalid"
+            _write_jsonl(snapshots, [{"run_id": "c1", "shared_candidate_id": "one", "market_id": "KXONE", "observed_at": "2026-07-01T12:00:00+00:00"}])
+            config.write_text("composition:\n  base_lane: typo_not_a_lane\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "unknown combination lane"):
+                build_collector_lane_replay(snapshot_path=snapshots, output_dir=output,
+                                            enabled_lanes=[], composition_config=config)
+            self.assertFalse(output.exists())
+
     def test_replays_selected_index_rows_with_index_and_manifest_provenance(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
