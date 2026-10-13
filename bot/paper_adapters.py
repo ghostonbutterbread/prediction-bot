@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import fcntl
+import hashlib
+import os
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from math import isfinite
@@ -22,6 +25,7 @@ from bot.shared_core import (
 )
 from bot.market_router import route_market
 from bot.trade_audit import calculate_contracts, enrich_trade_audit_fields, is_trade_effective_row, trade_event_key
+from bot.trade_audit import calculate_realized_accounting
 
 logger = logging.getLogger(__name__)
 
@@ -759,6 +763,8 @@ class SimulatorPaperResolutionAdapter:
         self.last_summary: dict[str, Any] = {}
 
     def resolve_open_positions(self, settlement_source: Any | None = None) -> list[ResolutionEvent]:
+        if (self.host.data_dir / "composed_binding.json").exists():
+            raise ValueError("composed paper positions require exact resolution; generic market resolver is unsafe")
         open_positions = {
             getattr(trade, "id", ""): trade
             for trade in self.state_adapter.effective_trades()
@@ -820,3 +826,250 @@ class SimulatorPaperResolutionAdapter:
                 )
             )
         return events
+
+    def resolve_exact_positions(
+        self, *, binding_path: str | Path, strict_resolutions_path: str | Path, as_of: str | datetime,
+    ) -> list[ResolutionEvent]:
+        """Settle only exact composed positions backed by verified strict source bytes.
+
+        This is an explicit paper-only call; no market API or generic resolver is used.
+        An interrupted dual-file commit leaves a durable unsafe marker, which
+        fences subsequent paper entries until an operator reconciles both files.
+        """
+        if getattr(self.host, "runtime_mode", None) != "paper" or not (self.host.data_dir / "composed_binding.json").is_file():
+            raise ValueError("exact settlement requires a bound composed paper account")
+        cutoff = _exact_timestamp(as_of)
+        unsafe = self.host.data_dir / "composed_settlement_unsafe.json"
+        with (self.host.data_dir / "composed.lock").open("a+b") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if unsafe.exists():
+                raise ValueError("composed settlement unsafe: reconcile session and risk state manually")
+            source_path = Path(strict_resolutions_path).resolve(strict=True)
+            bindings = Path(binding_path).resolve(strict=True)
+            if source_path == bindings or self.host.data_dir in source_path.parents or self.host.data_dir in bindings.parents:
+                raise ValueError("resolution evidence must be separate from the paper account")
+            receipt_rows = []
+            with bindings.open("rb") as stream:
+                for line in stream:
+                    try:
+                        receipt = json.loads(line)
+                    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                        raise ValueError("invalid exact binding row") from exc
+                    if not isinstance(receipt, dict):
+                        raise ValueError("invalid exact binding row")
+                    receipt_rows.append(receipt)
+
+            needed_lines = {receipt.get("strict_resolution_source_line_number") for receipt in receipt_rows
+                            if type(receipt.get("strict_resolution_source_line_number")) is int}
+            open_markets = {trade.market_id for trade in self.state_adapter.effective_trades() if not trade.resolved}
+            source_rows: dict[int, tuple[dict[str, Any], str]] = {}
+            market_counts: dict[str, int] = {}
+            digest = hashlib.sha256()
+            source_length = 0
+            with source_path.open("rb") as stream:
+                source_stat = os.fstat(stream.fileno())
+                for line_number, line in enumerate(stream, start=1):
+                    source_length = line_number
+                    digest.update(line)
+                    try:
+                        row = json.loads(line)
+                    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                        raise ValueError("invalid full strict resolution source") from exc
+                    if not isinstance(row, dict):
+                        raise ValueError("invalid strict resolution source row")
+                    market = row.get("market_id")
+                    if isinstance(market, str) and market in open_markets:
+                        market_counts[market] = market_counts.get(market, 0) + 1
+                    if line_number in needed_lines:
+                        source_rows[line_number] = (row, hashlib.sha256(line.rstrip(b"\r\n")).hexdigest())
+                if not _same_source_stat(source_stat, os.fstat(stream.fileno())):
+                    raise ValueError("strict resolution source changed during read")
+            if not _same_source_stat(source_stat, source_path.stat()):
+                raise ValueError("strict resolution source changed during read")
+            source_hash = digest.hexdigest()
+
+            by_identity: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
+            for receipt in receipt_rows:
+                key = tuple(receipt.get(field) for field in _EXACT_IDENTITY_FIELDS)
+                if any(not isinstance(value, str) or not value for value in key):
+                    raise ValueError("incomplete exact resolution identity")
+                by_identity.setdefault(key, []).append(receipt)
+
+            pending: list[tuple[Any, dict[str, Any], str, datetime, datetime]] = []
+            for trade in self.state_adapter.effective_trades():
+                if trade.resolved:
+                    continue
+                signals = trade.signals if isinstance(trade.signals, dict) else {}
+                key = (signals.get("composed_decision_id"), signals.get("shared_candidate_id"),
+                       signals.get("run_id"), trade.market_id)
+                matches = by_identity.get(key, [])
+                if not matches or len(matches) != 1 or market_counts.get(trade.market_id) != 1:
+                    continue
+                receipt = matches[0]
+                try:
+                    line_number = receipt["strict_resolution_source_line_number"]
+                    if type(line_number) is not int or not 1 <= line_number <= source_length:
+                        continue
+                    row, raw_hash = source_rows[line_number]
+                    if receipt.get("strict_resolution_source_sha256") != source_hash or receipt.get("raw_resolution_row_sha256") != raw_hash:
+                        continue
+                    if any(prior.resolved and prior.market_id == trade.market_id
+                           and (prior.resolution_row_sha256 != raw_hash or prior.outcome != receipt.get("outcome"))
+                           for prior in self.host.trades):
+                        continue
+                    if (row.get("market_id") != trade.market_id or row.get("requested_market_id") != trade.market_id
+                            or row.get("returned_market_id") != trade.market_id or not row.get("resolution_id")):
+                        continue
+                    outcome = _exact_outcome(row, receipt)
+                    settled = _exact_clock(row, receipt, "settlement_ts", required=True)
+                    known = _exact_clock(row, receipt, "outcome_known_at", required=False) or settled
+                    if settled <= _exact_timestamp(trade.timestamp) or max(settled, known) > cutoff:
+                        continue
+                    price = self.state_adapter.coerce_float_or_none(trade.market_price)
+                    size = self.state_adapter.coerce_float_or_none(trade.position_size)
+                    reserved = self.state_adapter.trade_reserved_amount(trade)
+                    if (trade.direction not in {"BUY_YES", "BUY_NO"} or price is None or not 0 < price < 1
+                            or size is None or size <= 0 or reserved <= 0 or not isfinite(size / price)
+                            or self.host.risk._find_trade_record(trade.id) is None
+                            or self.host.risk._find_trade_record(trade.id).get("resolved")):
+                        continue
+                    pending.append((trade, receipt, outcome, settled, known))
+                except (KeyError, TypeError, ValueError, OverflowError):
+                    continue
+
+            if not pending:
+                return []
+            with unsafe.open("x", encoding="utf-8") as handle:
+                json.dump({"status": "unsafe_until_dual_write_verified", "trade_ids": [t.id for t, *_ in pending]}, handle)
+                handle.flush()
+                os.fsync(handle.fileno())
+            _fsync_directory(self.host.data_dir)
+            events: list[ResolutionEvent] = []
+            # Do not remove the unsafe marker on any failure: even a partial
+            # write or an exception in risk's swallowed save must remain fenced.
+            for trade, receipt, outcome, settled, known in pending:
+                reserved = self.state_adapter.trade_reserved_amount(trade)
+                accounting = calculate_realized_accounting(
+                    trade.direction, trade.market_price, trade.position_size, outcome,
+                    fee_rate=trade.fee_rate if trade.fee_rate is not None else self.host.kelly.fee_rate,
+                )
+                pnl = round(accounting["net_pnl"], 4)
+                self.host.risk.record_outcome(trade.id, pnl, void=outcome == "VOID", suppress_alert=True)
+                trade.resolved = True
+                trade.outcome = outcome
+                trade.pnl = None if outcome == "VOID" else pnl
+                trade.resolution_type = "void_resolution" if outcome == "VOID" else "settled"
+                trade.resolved_at = datetime.now(timezone.utc).isoformat()
+                trade.settlement_ts = settled.isoformat()
+                trade.outcome_known_at = known.isoformat() if known != settled else None
+                trade.resolution_identity = dict(zip(_EXACT_IDENTITY_FIELDS, (
+                    trade.signals["composed_decision_id"], trade.signals["shared_candidate_id"],
+                    trade.signals["run_id"], trade.market_id,
+                )))
+                trade.resolution_row_sha256 = receipt["raw_resolution_row_sha256"]
+                trade.resolution_source_sha256 = source_hash
+                trade.resolution_source_path = str(source_path)
+                trade.resolution_source_line_number = receipt["strict_resolution_source_line_number"]
+                trade.exit_price = None if outcome == "VOID" else (1.0 if outcome == "YES" else 0.0)
+                trade.settlement_value = round(reserved + pnl, 4)
+                self.host.balance = round(self.host.balance + pnl, 2)
+                events.append(ResolutionEvent(
+                    position_id=trade.id, market_id=trade.market_id, outcome=outcome,
+                    status=trade.resolution_type, resolved_at=trade.resolved_at,
+                    pnl=None if outcome == "VOID" else pnl,
+                    settlement_value=trade.settlement_value,
+                    metadata={"settlement_ts": trade.settlement_ts, "outcome_known_at": trade.outcome_known_at,
+                              "resolution_row_sha256": trade.resolution_row_sha256},
+                ))
+            self.session_store.save_session()
+            saved = json.loads((self.host.data_dir / f"sim_{self.host.session_id}.json").read_text())
+            risk_saved = json.loads(self.host.risk.data_path.read_text())
+            if (source_hash != _stream_sha256(source_path)
+                    or {row["id"] for row in saved.get("trades", []) if row.get("resolved")} < {t.id for t, *_ in pending}
+                    or saved.get("balance") != self.host.balance
+                    or saved.get("reserved_capital") != self.host.reserved_capital
+                    or risk_saved != asdict(self.host.risk.state)):
+                raise RuntimeError("composed settlement dual-write verification failed; account is unsafe")
+            for path in (self.host.risk.data_path, self.host.data_dir / f"sim_{self.host.session_id}.json"):
+                with path.open("rb") as handle:
+                    os.fsync(handle.fileno())
+            _fsync_directory(self.host.data_dir)
+            unsafe.unlink()
+            _fsync_directory(self.host.data_dir)
+            return events
+
+
+_EXACT_IDENTITY_FIELDS = ("composed_decision_id", "shared_candidate_id", "run_id", "market_id")
+
+
+def _same_source_stat(first: os.stat_result, second: os.stat_result) -> bool:
+    return all(getattr(first, name) == getattr(second, name)
+               for name in ("st_dev", "st_ino", "st_size", "st_mtime_ns"))
+
+
+def _stream_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _exact_timestamp(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str) and value:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    else:
+        raise ValueError("exact settlement requires timezone-aware timestamps")
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("exact settlement requires timezone-aware timestamps")
+    return parsed.astimezone(timezone.utc)
+
+
+def _exact_assertions(row: dict[str, Any], field: str) -> list[Any]:
+    values = []
+    for container in (row, row.get("resolution"), row.get("market_outcome"), row.get("metadata")):
+        if isinstance(container, dict):
+            for alias in ({"outcome": ("outcome", "official_outcome", "kalshi_result", "result", "settlement_value", "market_result", "winning_side"),
+                           "status": ("market_status", "status", "resolution_status"),
+                           "settlement_ts": ("settlement_ts",),
+                           "outcome_known_at": ("outcome_known_at",)}[field]):
+                if alias in container and container[alias] not in (None, ""):
+                    values.append(container[alias])
+    return values
+
+
+def _exact_outcome(source: dict[str, Any], binding: dict[str, Any]) -> str:
+    source_outcomes = _exact_assertions(source, "outcome")
+    binding_outcomes = _exact_assertions(binding, "outcome")
+    statuses = _exact_assertions(source, "status") + _exact_assertions(binding, "status")
+    if (not source_outcomes or not binding_outcomes
+            or any(str(value).lower() != "finalized" for value in statuses)
+            or not statuses or str(source.get("market_status") or "").lower() != "finalized"):
+        raise ValueError("nonfinal or missing authoritative outcome")
+    normalized = {str(value).upper() for value in source_outcomes + binding_outcomes}
+    if len(normalized) != 1 or not normalized <= {"YES", "NO", "VOID"}:
+        raise ValueError("contradictory resolution outcome")
+    return normalized.pop()
+
+
+def _exact_clock(source: dict[str, Any], binding: dict[str, Any], field: str, *, required: bool) -> datetime | None:
+    source_values = _exact_assertions(source, field)
+    binding_values = _exact_assertions(binding, field)
+    if required and (not source_values or not binding_values):
+        raise ValueError("missing authoritative settlement clock")
+    if binding_values and not source_values:
+        raise ValueError("binding supplied unverified outcome clock")
+    values = [_exact_timestamp(value) for value in source_values + binding_values]
+    if len(set(values)) > 1:
+        raise ValueError("contradictory resolution clock")
+    return values[0] if values else None

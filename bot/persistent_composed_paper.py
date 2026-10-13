@@ -14,6 +14,7 @@ from typing import Any
 import fcntl
 import hashlib
 import json
+import math
 import os
 
 from bot.file_ops import atomic_write_json
@@ -131,15 +132,16 @@ def consume_persistent_composed_paper(
         if len(sessions) > 1:
             raise ValueError("ambiguous composed Simulator sessions")
         saved_trades = []
+        if (root / "composed_settlement_unsafe.json").exists():
+            raise ValueError("composed settlement unsafe; reconcile session and risk state before entry")
         if sessions:
             session = json.loads(sessions[0].read_text())
             if (not isinstance(session.get("trades"), list) or not isinstance(session.get("session_id"), str)
                     or sessions[0].name != f"sim_{session['session_id']}.json"):
                 raise ValueError("invalid composed Simulator session")
             saved_trades = session["trades"]
-            if any(trade.get("resolved") or trade.get("outcome") is not None or trade.get("pnl") is not None
-                   for trade in saved_trades):
-                raise ValueError("external settlement detected; composed positions must remain open")
+            if any(not _valid_composed_trade_resolution(trade) for trade in saved_trades):
+                raise ValueError("external settlement detected; exact composed resolution required")
         marked = {}
         for trade in saved_trades:
             marker = (trade.get("signals") or {}).get("composed_decision_id")
@@ -244,6 +246,40 @@ def _preflight_root(raw: str | Path, protected: Mapping[str, str | Path]) -> Pat
         if root == other or root in other.parents or other in root.parents:
             raise ValueError(f"dedicated paper root overlaps {name} root")
     return root
+
+
+def _valid_composed_trade_resolution(trade: Mapping[str, Any]) -> bool:
+    if not trade.get("resolved"):
+        return trade.get("outcome") is None and trade.get("pnl") is None
+    signals = trade.get("signals") or {}
+    if not isinstance(signals, Mapping):
+        return False
+    identity = trade.get("resolution_identity")
+    expected = {"composed_decision_id": signals.get("composed_decision_id"),
+                "shared_candidate_id": signals.get("shared_candidate_id"),
+                "run_id": signals.get("run_id"), "market_id": trade.get("market_id")}
+    if (any(not isinstance(v, str) or not v for v in expected.values())
+            or identity != expected or trade.get("resolution_type") not in {"settled", "void_resolution"}
+            or not isinstance(trade.get("resolution_source_path"), str) or not trade["resolution_source_path"]
+            or type(trade.get("resolution_source_line_number")) is not int
+            or trade["resolution_source_line_number"] < 1):
+        return False
+    for key in ("resolution_source_sha256", "resolution_row_sha256"):
+        value = trade.get(key)
+        if not isinstance(value, str) or len(value) != 64 or any(c not in "0123456789abcdef" for c in value.lower()):
+            return False
+    try:
+        if _timestamp(trade.get("settlement_ts")) <= _timestamp(trade.get("timestamp")):
+            return False
+        if trade.get("outcome_known_at"):
+            _timestamp(trade["outcome_known_at"])
+    except ValueError:
+        return False
+    if trade.get("outcome") == "VOID":
+        return trade["resolution_type"] == "void_resolution" and trade.get("pnl") is None
+    return (trade.get("outcome") in {"YES", "NO"} and trade["resolution_type"] == "settled"
+            and isinstance(trade.get("pnl"), (int, float)) and not isinstance(trade["pnl"], bool)
+            and math.isfinite(trade["pnl"]))
 
 
 def _account_settings(config: Mapping[str, Any], root: Path) -> dict[str, Any]:

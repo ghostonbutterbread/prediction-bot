@@ -116,6 +116,11 @@ class SimTrade:
     outcome_known_at: Optional[str] = None
     resolution_blocker: Optional[str] = None
     resolution_type: Optional[str] = None
+    resolution_row_sha256: Optional[str] = None
+    resolution_source_sha256: Optional[str] = None
+    resolution_source_path: Optional[str] = None
+    resolution_source_line_number: Optional[int] = None
+    resolution_identity: Optional[dict] = None
     current_price: Optional[float] = None
     unrealized_pnl: Optional[float] = None
     price_delta: Optional[float] = None
@@ -346,6 +351,11 @@ class Simulator:
             outcome_known_at=t_data.get("outcome_known_at"),
             resolution_blocker=t_data.get("resolution_blocker"),
             resolution_type=t_data.get("resolution_type"),
+            resolution_row_sha256=t_data.get("resolution_row_sha256"),
+            resolution_source_sha256=t_data.get("resolution_source_sha256"),
+            resolution_source_path=t_data.get("resolution_source_path"),
+            resolution_source_line_number=t_data.get("resolution_source_line_number"),
+            resolution_identity=t_data.get("resolution_identity"),
             current_price=self._coerce_float_or_none(t_data.get("current_price")),
             unrealized_pnl=self._coerce_float_or_none(t_data.get("unrealized_pnl")),
             price_delta=self._coerce_float_or_none(t_data.get("price_delta")),

@@ -1,5 +1,6 @@
 """Isolated, outcome-free persistent paper entry tests."""
 import json
+import hashlib
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -257,3 +258,56 @@ class PersistentComposedPaperTests(unittest.TestCase):
         with patch("bot.persistent_composed_paper.Simulator", side_effect=AssertionError("constructed")):
             with self.assertRaisesRegex(ValueError, "external settlement"):
                 self.consume(rows + self.rows("two", "KXHIGHNY-26OCT13-T81"))
+
+    def test_verified_exact_settlement_allows_next_fresh_paper_entry(self):
+        first = self.rows()
+        self.consume(first)
+        session = json.loads(next(self.paper_root.glob("sim_*.json")).read_text())
+        trade = session["trades"][0]
+        market = trade["market_id"]
+        settled = (datetime.fromisoformat(trade["timestamp"]) + timedelta(minutes=1)).isoformat()
+        source = self.base / "strict_resolutions.jsonl"
+        binding = self.base / "exact_bindings.jsonl"
+        raw = (json.dumps({"market_id": market, "requested_market_id": market,
+                           "returned_market_id": market, "market_status": "finalized",
+                           "resolution_id": "test-settlement-1", "kalshi_result": "yes",
+                           "settlement_ts": settled}) + "\n").encode()
+        source.write_bytes(raw)
+        binding.write_text(json.dumps({"composed_decision_id": trade["signals"]["composed_decision_id"],
+                                       "shared_candidate_id": trade["signals"]["shared_candidate_id"],
+                                       "run_id": trade["signals"]["run_id"], "market_id": market,
+                                       "outcome": "YES", "settlement_ts": settled,
+                                       "strict_resolution_source_sha256": hashlib.sha256(raw).hexdigest(),
+                                       "strict_resolution_source_line_number": 1,
+                                       "raw_resolution_row_sha256": hashlib.sha256(raw.rstrip(b"\r\n")).hexdigest()}) + "\n")
+        simulator = Simulator({**self.account, "data_dir": str(self.paper_root), "trading": {"mode": "paper"},
+                               "paper_wallets": {"allow_legacy_parent_session_lookup": False}})
+        events = simulator.resolution_adapter.resolve_exact_positions(
+            binding_path=binding, strict_resolutions_path=source,
+            as_of=(datetime.fromisoformat(settled) + timedelta(minutes=1)).isoformat())
+        self.assertEqual(len(events), 1)
+        later = self.consume(first + self.rows("two", "KXHIGHNY-26OCT13-T81"))
+        self.assertEqual([r["status"] for r in later["decisions"]], ["already_processed", "opened"])
+        self.assertEqual(len(json.loads(next(self.paper_root.glob("sim_*.json")).read_text())["trades"]), 2)
+
+    def test_corrupt_nonfinite_settlement_cannot_seed_next_paper_entry(self):
+        rows = self.rows()
+        self.consume(rows)
+        session_path = next(self.paper_root.glob("sim_*.json"))
+        session = json.loads(session_path.read_text())
+        trade = session["trades"][0]
+        trade["resolved"] = True
+        trade["outcome"] = "YES"
+        trade["resolution_type"] = "settled"
+        trade["settlement_ts"] = (datetime.fromisoformat(trade["timestamp"]) + timedelta(minutes=1)).isoformat()
+        trade["resolution_identity"] = {"composed_decision_id": trade["signals"]["composed_decision_id"],
+                                        "shared_candidate_id": trade["signals"]["shared_candidate_id"],
+                                        "run_id": trade["signals"]["run_id"], "market_id": trade["market_id"]}
+        trade["resolution_source_path"] = str(self.base / "strict_resolutions.jsonl")
+        trade["resolution_source_line_number"] = 1
+        trade["resolution_row_sha256"] = "a" * 64
+        trade["resolution_source_sha256"] = "b" * 64
+        trade["pnl"] = float("nan")
+        session_path.write_text(json.dumps(session))
+        with self.assertRaisesRegex(ValueError, "exact composed resolution"):
+            self.consume(rows + self.rows("two", "KXHIGHNY-26OCT13-T81"))

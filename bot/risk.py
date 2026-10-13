@@ -360,6 +360,13 @@ class RiskManager:
         warnings = []
         original_size = position_size
 
+        if self._composed_settlement_unsafe():
+            return RiskDecision(
+                approved=False, reason="Composed paper settlement unsafe; manual reconciliation required",
+                original_size=original_size, risk_score=1.0,
+                metadata={"reason_code": "composed_settlement_unsafe"},
+            )
+
         try:
             position_size = float(position_size)
         except (TypeError, ValueError):
@@ -614,6 +621,8 @@ class RiskManager:
 
     def record_trade(self, trade: dict):
         """Record a trade for risk tracking."""
+        if self._composed_settlement_unsafe():
+            raise RuntimeError("composed settlement unsafe: refusing new paper reservation")
         size = self._coerce_float(trade.get("position_size", trade.get("size")))
         if size <= 0:
             return
@@ -636,6 +645,10 @@ class RiskManager:
         self.state.reserved_capital = round(self.state.reserved_capital + reserved_capital, 2)
         self.state.daily_trades += 1
         self._save_state()
+
+    def _composed_settlement_unsafe(self) -> bool:
+        root = self.data_path.parent
+        return (root / "composed_binding.json").is_file() and (root / "composed_settlement_unsafe.json").exists()
 
     def sync_account_state(
         self,
@@ -746,7 +759,7 @@ class RiskManager:
         """Backward-compatible alias for older runner calls."""
         self.record_outcome(trade_ref, pnl)
 
-    def record_outcome(self, trade_ref, pnl: float, *, void: bool = False):
+    def record_outcome(self, trade_ref, pnl: float, *, void: bool = False, suppress_alert: bool = False):
         """Settle a trade, or refund a VOID without affecting economic metrics."""
         if not void:
             self.reset_daily()
@@ -788,7 +801,7 @@ class RiskManager:
                 self.state.session_peak_balance = self.state.current_balance
 
             # Check session-level max drawdown kill-switch
-            self._check_session_drawdown()
+            self._check_session_drawdown(suppress_alert=suppress_alert)
 
             # Update streaks
             if trade["pnl"] > 0:
@@ -812,7 +825,7 @@ class RiskManager:
 
             self._save_state()
 
-    def _check_session_drawdown(self):
+    def _check_session_drawdown(self, *, suppress_alert: bool = False):
         """Check session-level max drawdown and trigger kill-switch if breached."""
         if self.state.max_drawdown_halt:
             return  # Already halted
@@ -835,7 +848,8 @@ class RiskManager:
                 f"To resume: delete data/risk_state.json or set FORCE_RESUME=true"
             )
             # Send alert via Telegram
-            self._send_drawdown_alert(drawdown, high_water)
+            if not suppress_alert:
+                self._send_drawdown_alert(drawdown, high_water)
             self._save_state()
 
     def _send_drawdown_alert(self, drawdown: float, high_water: float):
