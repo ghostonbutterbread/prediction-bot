@@ -6,8 +6,8 @@
 - **Base commit:** `b653de4c40f3b61f8f2265681d5a8fdd6bdb661e`
 - **Intended integration target:** `beta`
 - **Last updated:** 2026-10-12 PDT
-- **Latest immutable recovery checkpoint:** `1745334b9839bb7e6ceadcdf0f9b98e199c2589d` (latest corrections being committed)
-- **Feature implementation commits:** `2e63eef2e53dcf91e82e33a43fc21238e897b1b2`, `fef01b926a156b118e6c64fbb840eb2ad17431ac`, `1745334b9839bb7e6ceadcdf0f9b98e199c2589d`
+- **Latest immutable recovery checkpoint:** `69551f28b58073e62aa9bf6e075d202cc714a190` (a later dossier-only handoff may follow)
+- **Feature implementation commits:** `2e63eef2e53dcf91e82e33a43fc21238e897b1b2`, `fef01b926a156b118e6c64fbb840eb2ad17431ac`, `1745334b9839bb7e6ceadcdf0f9b98e199c2589d`, `69551f28b58073e62aa9bf6e075d202cc714a190`
 - **Inspiration:** Ryu's Discord thread `1553496349343752358` asked for one easy saved lane combination, tested in replay, reused in forward paper, with Kelly/risk sizing after choosing what to buy. Existing `lane_compositions/*.yaml`, `scripts/paper_shadow_lane_compose_replay.py`, and concurrently owned `feat/forward-composed-paper` are the implementation seams.
 
 ## Intent and boundaries
@@ -22,7 +22,7 @@ Ingest an existing composition YAML directly into collector-lane replay, run its
 
 - Tests and commands: RED `TypeError` for absent `composition_config`, GREEN single candidate test; RED unknown lane was rejected only *after* output creation, GREEN validates before creation. RED missing saved sample config, GREEN YAML parsed with expected role/veto lanes. Focused `PYTHONPATH=<worktree> python3 -m unittest tests.test_collector_lane_replay -v` — 6 passed. Isolated full suite rerun on sample YAML/test — exit 0 (captured subprocess output omitted the count); earlier full receipt before sample was 1,382 passed, 7 skipped, 70.644 s. `git diff --check` passed.
 - Independent reviews: `deleg_f7e2fd90` BLOCKED `2e63eef` (intent/typo/partial-output/outcome); `deleg_3e6476b1` BLOCKED `1745334` (further nested aliases, quote treated as fill P&L, and replay/forward differing rules). Both verdicts applied only to their exact checkpoints. RED/GREEN regressions address each second-review repro; request fresh read-only exact-tip verdict before integration.
-- Current verification: focused `tests.test_collector_lane_replay tests.test_forward_composed_paper tests.test_paper_shadow_lane_compose_replay` — 51 passed at first correction (rerun after aliases pending); isolated full `PYTHONPATH=<worktree> python3 -m unittest discover -s tests -q` — 1,406 tests, 7 skipped, 77.975 s, exit 0 after the alias correction. `git diff --check` passed at intermediate correction; final staged check pending.
+- Current verification: focused `tests.test_collector_lane_replay tests.test_forward_composed_paper tests.test_paper_shadow_lane_compose_replay` — 51 passed after aliases; isolated full `PYTHONPATH=<worktree> python3 -m unittest discover -s tests -q` — 1,406 tests, 7 skipped, 77.975 s, exit 0 after the alias correction. `git diff --cached --check` passed on correction checkpoint.
 - Ancestry/merge evidence: sibling forward observer reviewed, locally merged and pushed to beta `3fdf4efc665357d83c0a2124b7ae31e7ec169bdb`; this feature merged that beta as `9c049ed9a61bf7e688e92ca96dc63fcde0252cf7`. No feature merge or push yet.
 
 ## Blockers and deferred work
@@ -33,8 +33,8 @@ Ingest an existing composition YAML directly into collector-lane replay, run its
 ## Interruption / resume handoff
 
 - **Owning feature branch/ref:** `feat/lane-combination-promotion`
-- **Latest immutable recovery checkpoint:** `1745334b9839bb7e6ceadcdf0f9b98e199c2589d`; new correction commit pending.
-- **Exact resume point:** commit reviewed-blocker corrections and ask a fresh skeptical reviewer to reproduce alias scrub, quote-only resolution, and strict replay/forward reason+intent parity for Router/guard on the same lane rows; confirm guard-only config changes behavior. If accepted, stage a noncommitting merge on clean beta, rerun focused/full suite on that exact tree, obtain exact-tree review and integrate code only. Never enable the observer or live path from this branch.
+- **Latest immutable recovery checkpoint:** `69551f28b58073e62aa9bf6e075d202cc714a190`; any later tip is handoff-only unless verified otherwise.
+- **Exact resume point:** obtain a fresh skeptical reviewer verdict on correction checkpoint and any later handoff tip; reproduce alias scrub, quote-only resolution, and strict replay/forward reason+intent parity for Router/guard on the same lane rows; confirm guard-only config changes behavior. If accepted, stage a noncommitting merge on clean beta, rerun focused/full suite on that exact tree, obtain exact-tree review and integrate code only. Never enable the observer or live path from this branch.
 - **Working-tree state:** isolated branch; verify before handoff.
 
 ## Decision gates
