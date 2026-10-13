@@ -6,8 +6,8 @@
 - **Base commit:** `b653de4c40f3b61f8f2265681d5a8fdd6bdb661e`
 - **Intended integration target:** `beta`
 - **Last updated:** 2026-10-12 PDT
-- **Latest immutable recovery checkpoint:** `69551f28b58073e62aa9bf6e075d202cc714a190` (a later dossier-only handoff may follow)
-- **Feature implementation commits:** `2e63eef2e53dcf91e82e33a43fc21238e897b1b2`, `fef01b926a156b118e6c64fbb840eb2ad17431ac`, `1745334b9839bb7e6ceadcdf0f9b98e199c2589d`, `69551f28b58073e62aa9bf6e075d202cc714a190`
+- **Latest immutable recovery checkpoint:** `3db0a2d7831cb805d5bccf26815153436d9261bb` (a later dossier-only handoff may follow)
+- **Feature implementation commits:** `2e63eef2e53dcf91e82e33a43fc21238e897b1b2`, `fef01b926a156b118e6c64fbb840eb2ad17431ac`, `1745334b9839bb7e6ceadcdf0f9b98e199c2589d`, `69551f28b58073e62aa9bf6e075d202cc714a190`, `3db0a2d7831cb805d5bccf26815153436d9261bb`
 - **Inspiration:** Ryu's Discord thread `1553496349343752358` asked for one easy saved lane combination, tested in replay, reused in forward paper, with Kelly/risk sizing after choosing what to buy. Existing `lane_compositions/*.yaml`, `scripts/paper_shadow_lane_compose_replay.py`, and concurrently owned `feat/forward-composed-paper` are the implementation seams.
 
 ## Intent and boundaries
@@ -33,8 +33,8 @@ Ingest an existing composition YAML directly into collector-lane replay, run its
 ## Interruption / resume handoff
 
 - **Owning feature branch/ref:** `feat/lane-combination-promotion`
-- **Latest immutable recovery checkpoint:** `69551f28b58073e62aa9bf6e075d202cc714a190`; any later tip is handoff-only unless verified otherwise.
-- **Exact resume point:** commit third-review corrections; ask fresh skeptical reviewer to reproduce forbidden aliases, unknown gate-field preflight and valid saved `price` alias, and verify prior quote-only and strict-selection fixes. If accepted, stage a noncommitting merge on clean beta, rerun focused/full suite on that exact tree, obtain exact-tree review and integrate code only. Never enable the observer or live path from this branch.
+- **Latest immutable recovery checkpoint:** `3db0a2d7831cb805d5bccf26815153436d9261bb`; any later tip is handoff-only unless verified otherwise.
+- **Exact resume point:** ask fresh skeptical reviewer to reproduce forbidden aliases, unknown gate-field preflight and valid saved `price` alias, and verify prior quote-only and strict-selection fixes on this exact tip. If accepted, stage a noncommitting merge on clean beta, rerun focused/full suite on that exact tree, obtain exact-tree review and integrate code only. Never enable the observer or live path from this branch.
 - **Working-tree state:** isolated branch; verify before handoff.
 
 ## Decision gates
