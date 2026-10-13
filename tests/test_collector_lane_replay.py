@@ -325,7 +325,7 @@ class CollectorLaneReplayTests(unittest.TestCase):
                     composition_config=saved)
             self.assertFalse(output.exists())
 
-    def test_saved_pre_risk_forward_rule_rejects_stable_lanes_before_outputs(self):
+    def test_saved_pre_risk_forward_rule_allows_extra_stable_diagnostic_lanes(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             snapshots = root / "collector.jsonl"
@@ -338,11 +338,40 @@ class CollectorLaneReplayTests(unittest.TestCase):
                 "  price_lane: shadow_pre_risk_fee_aware_loss_guard\n  fallback_to_base: false\n"
                 "  vetoes:\n    - {lane: shadow_source_router, mode: require_agreement, required: true}\n"
                 "    - {lane: shadow_pre_risk_fee_aware_loss_guard, mode: require_agreement, required: true}\n")
-            with self.assertRaisesRegex(ValueError, "pre-risk lanes cannot select a stable cohort"):
-                build_collector_lane_replay(snapshot_path=snapshots, output_dir=output,
-                    enabled_lanes=["control_stable", "shadow_fee_aware_loss_guard"],
-                    composition_config=config)
-            self.assertFalse(output.exists())
+            result = build_collector_lane_replay(snapshot_path=snapshots, output_dir=output,
+                enabled_lanes=["control_stable", "shadow_fee_aware_loss_guard"],
+                composition_config=config)
+            self.assertTrue(result.summary["composition"]["forward_rule_supported"])
+            self.assertTrue((output / "composition_rows.jsonl").exists())
+
+    def test_no_config_stable_guard_does_not_consume_pre_risk_execution_estimate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stamp = "2026-07-01T12:00:00+00:00"
+            snapshots = root / "collector.jsonl"
+            rows = []
+            for candidate, estimate in (("with-estimate", 0.8), ("without-estimate", None)):
+                market = "KX" + candidate.upper()
+                artifact = {"final_action": "BUY_YES", "strategy_signal": {
+                    "direction": "BUY_YES", "market_id": market, "model_probability": 0.6,
+                    "confidence": 0.9}}
+                if estimate is not None:
+                    artifact["execution_snapshot"] = {"estimated_fill_price": estimate}
+                rows.append({"run_id": "collector-1", "shared_candidate_id": candidate,
+                    "market_id": market, "observed_at": stamp, "confidence": 0.9,
+                    "main_decision": {"action": "BUY_YES", "size": 5.0},
+                    "decision_artifact": artifact,
+                    "shared_candidate": {"candidate_id": candidate, "market_id": market,
+                        "observed_at": stamp, "market": {"id": market, "question": "Will it happen?"},
+                        "prices": {"order_book_snapshot": {"source": "book", "market_id": market,
+                            "observed_at": stamp, "data": {"best_yes_ask": 0.4}}}}})
+            _write_jsonl(snapshots, rows)
+            result = build_collector_lane_replay(snapshot_path=snapshots, output_dir=root / "derived",
+                enabled_lanes=["control_stable", "shadow_fee_aware_loss_guard"])
+            guards = [json.loads(line) for line in result.lane_decision_path.read_text().splitlines()
+                      if json.loads(line)["policy"] == "shadow_fee_aware_loss_guard"]
+            self.assertEqual({row["shared_candidate_id"]: row["action"] for row in guards},
+                             {"with-estimate": "BUY_YES", "without-estimate": "BUY_YES"})
 
     def test_saved_forward_rule_replay_uses_same_strict_veto_on_identical_lane_rows(self):
         from bot.forward_composed_paper import compose_forward_rows

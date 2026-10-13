@@ -33,7 +33,7 @@ from bot.paper_shadow_lanes import (
 )
 from bot.paper_wallets import BETA_PAPER_WALLET_ID, STABLE_PAPER_WALLET_ID
 from bot.replay_decision_input import _field_name_is_forbidden
-from bot.forward_composed_paper import CONTROL, GUARD, PICKER, compose_forward_rows, validate_forward_combination
+from bot.forward_composed_paper import CONTROL, PICKER, compose_forward_rows, validate_forward_combination
 from bot.resolution_feed import run_resolution_feed_once
 from scripts.paper_shadow_lane_compose_replay import _load_config, compose_lane_replay, validate_saved_combination
 
@@ -171,12 +171,9 @@ def build_collector_lane_replay(
             forward_supported = True
         required = [normalized[key] for key in ("base_lane", "action_lane", "sizing_lane", "price_lane")]
         required += [str(veto["lane"]) for veto in normalized["vetoes"]]
-    requested_lanes = list(enabled_lanes)
-    lane_ids = _normalized_lanes([*requested_lanes, *required])
+    lane_ids = _normalized_lanes([*enabled_lanes, *required])
     if forward_supported and normalized["base_lane"] == CONTROL and PICKER in lane_ids:
         raise ValueError("unsupported forward combination: stable lanes cannot select a pre-risk picker cohort")
-    if forward_supported and normalized["base_lane"] == PICKER and GUARD in requested_lanes:
-        raise ValueError("unsupported forward combination: pre-risk lanes cannot select a stable cohort")
     if composition is not None:
         unknown = [lane for lane in required if lane not in KNOWN_LANE_IDS]
         if unknown:
@@ -494,7 +491,6 @@ def _prepare_snapshot(
             "price_assumption": "collector_recorded_reference_price",
             "source_details": evidence.get("source_details", []),
             "recorded_pre_risk_picker": recorded_picker,
-            "execution_snapshot": execution_snapshot,
         }
     )
     artifact_decision = {
