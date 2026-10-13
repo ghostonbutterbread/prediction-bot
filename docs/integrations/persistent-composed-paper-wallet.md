@@ -5,7 +5,7 @@
 - **Branch / owning ref:** `feat/persistent-composed-paper-wallet`
 - **Base commit / intended target:** `3911f1808828261d8cfe712144e881c5b0882351` / local `beta`
 - **Last updated:** 2026-10-13 PDT
-- **Latest accepted checkpoint:** entry implementation `b8fa1c7c6b2d4893890e3df21f9dc1c1766e22f4`; settlement code is an unreviewed feature-branch experiment, not an accepted integration.
+- **Latest independent ACCEPT:** entry implementation `b8fa1c7c6b2d4893890e3df21f9dc1c1766e22f4`. **Latest experimental recovery checkpoint:** `423932474e0ec00ffd27196596421ba4bd7a9543` (settlement code and tests; not independently reviewed or integrated); this dossier-only handoff follows it.
 - **Canonical context:** code-only reviewed saved pre-risk selector at beta `3911f18`; read-only seam audit `deleg_81fa2e8d`; `bot/forward_composed_paper.py`, `bot/composed_lane_wallet.py`, `bot/simulator.py`, `bot/paper_adapters.py`, `bot/resolver.py`.
 
 ## Intent
@@ -33,10 +33,10 @@ Disabled-by-default callable `consume_persistent_composed_paper` accepts the sav
 ## Interruption / resume handoff
 
 - **Owning feature branch/ref:** `feat/persistent-composed-paper-wallet`
-- **Latest independently accepted checkpoint:** `b8fa1c7c6b2d4893890e3df21f9dc1c1766e22f4` (entry code); the current branch tip will include a later experimental settlement checkpoint and a dossier-only handoff naming its commit.
-- **Feature entry commits:** `f3e5ec8eeabc54641d5e842042fb7ce311813c66`, `b8fa1c7c6b2d4893890e3df21f9dc1c1766e22f4`.
+- **Latest independently accepted checkpoint:** `b8fa1c7c6b2d4893890e3df21f9dc1c1766e22f4` (entry code). **Latest unreviewed implementation checkpoint:** `423932474e0ec00ffd27196596421ba4bd7a9543` (experimental settlement). Current tip includes this later dossier-only handoff; reviewers must inspect the full diff from beta, not reuse the earlier entry verdict.
+- **Feature implementation commits:** `f3e5ec8eeabc54641d5e842042fb7ce311813c66`, `b8fa1c7c6b2d4893890e3df21f9dc1c1766e22f4`, `423932474e0ec00ffd27196596421ba4bd7a9543`.
 - **Exact resume point:** establish a verifiable forward strict-source and exact-binding producer, test unsafe-marker recovery across crash boundaries, then independently review settlement and the exact combined beta tree. Keep code-only and no activation until accepted.
-- **Working-tree state:** the experimental settlement code and this dossier are being checkpointed on the isolated branch; no beta merge, push, or runtime account change.
+- **Working-tree state:** experimental settlement code and tests are committed at `4239324`; this dossier-only handoff follows. No beta merge, push, or runtime account change.
 
 ## Decision gates
 
