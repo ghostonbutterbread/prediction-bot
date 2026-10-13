@@ -6,8 +6,8 @@
 - **Base commit:** `b653de4c40f3b61f8f2265681d5a8fdd6bdb661e`
 - **Intended integration target:** `beta`
 - **Last updated:** 2026-10-12 PDT
-- **Latest immutable recovery checkpoint:** `3db0a2d7831cb805d5bccf26815153436d9261bb` (a later dossier-only handoff may follow)
-- **Feature implementation commits:** `2e63eef2e53dcf91e82e33a43fc21238e897b1b2`, `fef01b926a156b118e6c64fbb840eb2ad17431ac`, `1745334b9839bb7e6ceadcdf0f9b98e199c2589d`, `69551f28b58073e62aa9bf6e075d202cc714a190`, `3db0a2d7831cb805d5bccf26815153436d9261bb`
+- **Latest immutable recovery checkpoint:** `634eae0f4867278aed8d328052b4f440676528c6` (a later dossier-only handoff may follow)
+- **Feature implementation commits:** `2e63eef2e53dcf91e82e33a43fc21238e897b1b2`, `fef01b926a156b118e6c64fbb840eb2ad17431ac`, `1745334b9839bb7e6ceadcdf0f9b98e199c2589d`, `69551f28b58073e62aa9bf6e075d202cc714a190`, `3db0a2d7831cb805d5bccf26815153436d9261bb`, `634eae0f4867278aed8d328052b4f440676528c6`
 - **Inspiration:** Ryu's Discord thread `1553496349343752358` asked for one easy saved lane combination, tested in replay, reused in forward paper, with Kelly/risk sizing after choosing what to buy. Existing `lane_compositions/*.yaml`, `scripts/paper_shadow_lane_compose_replay.py`, and concurrently owned `feat/forward-composed-paper` are the implementation seams.
 
 ## Intent and boundaries
@@ -23,7 +23,7 @@ Ingest an existing composition YAML directly into collector-lane replay, run its
 - Tests and commands: RED `TypeError` for absent `composition_config`, GREEN single candidate test; RED unknown lane was rejected only *after* output creation, GREEN validates before creation. RED missing saved sample config, GREEN YAML parsed with expected role/veto lanes. Focused `PYTHONPATH=<worktree> python3 -m unittest tests.test_collector_lane_replay -v` — 6 passed. Isolated full suite rerun on sample YAML/test — exit 0 (captured subprocess output omitted the count); earlier full receipt before sample was 1,382 passed, 7 skipped, 70.644 s. `git diff --check` passed.
 - Independent reviews: `deleg_f7e2fd90` BLOCKED `2e63eef` (intent/typo/partial-output/outcome); `deleg_3e6476b1` BLOCKED `1745334` (further aliases, quote as fill P&L, replay/forward divergence); `deleg_5ee9c214` BLOCKED `c1b3436` (remaining `winner`/`payout`/`resolved`/`void` aliases and unvalidated gate fields). `deleg_08d477ef` ACCEPTED clean feature tip `6489761a69b4df50065da4acf58b4bd537e7d139` for code-only integration against its older base. The subsequent staged beta preflight at tree `eee5402aa5e9246400640cd8ad554b54d807fa97` was BLOCKED by `deleg_cf05b17b`: `max_rows_per_market: bogus` silently disables the cap, while `.nan` leaves partial replay output. Aborted the blocked preflight; no beta merge. RED/GREEN synthetic replay now rejects unparseable, nonfinite, nonintegral, negative, null, and boolean caps before output creation; also rejects non-boolean `per_side`. Numeric string `"1"` remains valid and is verified to cap one market.
 - Current verification on isolated feature: focused `PYTHONPATH=<worktree> python3 -m unittest tests.test_collector_lane_replay tests.test_forward_composed_paper tests.test_paper_shadow_lane_compose_replay -q` — 56 OK. Full `python3 -m unittest discover -s tests -q` from the isolated worktree — 1,411 OK, 7 skipped, 68.774 s. `git diff --check` passed. No raw artifact/realtime cohort inspected.
-- Ancestry/merge evidence: sibling forward observer merged/pushed beta `3fdf4efc665357d83c0a2124b7ae31e7ec169bdb`; this feature merged that beta as `9c049ed9a61bf7e688e92ca96dc63fcde0252cf7`. Beta then advanced to `a52b127d3dc26cef8439a550972d277f3472c6d0` with a separate reviewed pre-risk picker. The staged tree before the exposure fix retained beta's default pre-risk picker, rejected saved-stable/pre-risk mismatch before outputs, and passed focused/full tests, but failed independent exposure validation review. No feature merge or push yet.
+- Ancestry/merge evidence: sibling forward observer merged/pushed beta `3fdf4efc665357d83c0a2124b7ae31e7ec169bdb`; this feature merged that beta as `9c049ed9a61bf7e688e92ca96dc63fcde0252cf7`. Beta then advanced independently to `a52b127d3dc26cef8439a550972d277f3472c6d0` (a distinct beta ref, **not** an ancestor of this feature branch) with a separate reviewed pre-risk picker. The staged tree before the exposure fix retained beta's default pre-risk picker, rejected saved-stable/pre-risk mismatch before outputs, and passed focused/full tests, but failed independent exposure validation review. No feature merge or push yet.
 
 ## Blockers and deferred work
 
@@ -33,8 +33,8 @@ Ingest an existing composition YAML directly into collector-lane replay, run its
 ## Interruption / resume handoff
 
 - **Owning feature branch/ref:** `feat/lane-combination-promotion`
-- **Latest immutable recovery checkpoint:** `3db0a2d7831cb805d5bccf26815153436d9261bb`; any later tip is handoff-only unless verified otherwise.
-- **Exact resume point:** commit this feature's exposure-cap fix and updated dossier as an immutable checkpoint, request fresh skeptical review of the corrected feature tip, then stage noncommitting beta merge again. Reproduce and test pre-risk/stable resolution plus the exposure cap against that exact staged tree; obtain new independent tree verdict. Integrate code only after acceptance. Never enable the observer or live path from this branch.
+- **Latest immutable recovery checkpoint:** `634eae0f4867278aed8d328052b4f440676528c6`; a later dossier-only tip does not alter implementation.
+- **Exact resume point:** request fresh skeptical review of the corrected feature tip, then stage noncommitting beta merge again. Reproduce and test pre-risk/stable resolution plus the exposure cap against that exact staged tree; obtain new independent tree verdict. Integrate code only after acceptance. Never enable the observer or live path from this branch.
 - **Working-tree state:** isolated branch; verify before handoff.
 
 ## Decision gates
