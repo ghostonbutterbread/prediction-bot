@@ -44,8 +44,9 @@ This is shared infrastructure so pull, resolve, and live/paper-adjacent Kalshi f
 This repo uses a project-local virtual environment at `.venv`.
 
 ```bash
-# 1. Create/update the virtual environment and install dependencies
-./setup.sh
+# 1. In each fresh worktree, create its own Python 3.13 virtual environment
+#    (use the full path to python3.13 if it is not on PATH)
+PYTHON=python3.13 ./setup.sh
 
 # 2. Activate the virtual environment
 source .venv/bin/activate
