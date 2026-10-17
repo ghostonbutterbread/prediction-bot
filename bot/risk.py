@@ -1135,18 +1135,27 @@ class RiskManager:
             with open(self.data_path, "w") as f:
                 json.dump(asdict(self.state), f, indent=2)
         except Exception as e:
+            if (self.data_path.parent / "composed_binding.json").is_file():
+                raise
             logger.debug(f"Failed to save risk state: {e}")
 
     def _load_state(self):
         """Load risk state from disk."""
+        composed = (self.data_path.parent / "composed_binding.json").is_file()
         try:
             if self.data_path.exists():
                 with open(self.data_path) as f:
                     data = json.load(f)
+                if composed and (not isinstance(data, dict) or set(data) != set(asdict(RiskState()))):
+                    raise ValueError("incomplete composed risk state")
                 self.state = RiskState(**data)
                 logger.info(f"Risk state loaded: ${self.state.current_balance:.2f}, "
                            f"{self.state.open_positions} open positions")
+            elif composed and any(self.data_path.parent.glob("sim_*.json")):
+                raise ValueError("missing composed risk state for existing session")
         except Exception as e:
+            if composed:
+                raise ValueError("composed risk state unavailable; account requires reconciliation") from e
             logger.debug(f"Failed to load risk state: {e}")
 
     def _coerce_float(self, value, default: float = 0.0) -> float:

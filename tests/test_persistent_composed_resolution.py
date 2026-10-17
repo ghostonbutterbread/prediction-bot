@@ -91,6 +91,53 @@ class PersistentComposedResolutionTests(unittest.TestCase):
         with patch.object(Path, "read_bytes", bounded_read):
             self.assertEqual(len(self.resolve()), 1)
 
+    def test_source_change_during_preflight_does_not_book_settlement(self):
+        self.source_and_binding()
+        original = self.sim.risk._find_trade_record
+        def change_source_before_accounting(trade_id):
+            self.source.write_text("{changed evidence}\n")
+            return original(trade_id)
+        with patch.object(self.sim.risk, "_find_trade_record", side_effect=change_source_before_accounting):
+            with self.assertRaisesRegex(ValueError, "source changed"):
+                self.resolve()
+        self.assertEqual(self.sim.balance, 100.0)
+        self.assertFalse(self.sim.trades[0].resolved)
+        self.assertFalse((self.paper / "composed_settlement_unsafe.json").exists())
+
+    def test_duplicate_saved_position_id_refuses_settlement_before_accounting(self):
+        self.sim.trades[1].id = self.sim.trades[0].id
+        self.sim._save_session()
+        self.source_and_binding()
+        with self.assertRaisesRegex(ValueError, "duplicate.*trade id"):
+            self.resolve()
+        self.assertFalse(any(trade.resolved for trade in self.sim.trades))
+        self.assertEqual(self.sim.balance, 100.0)
+        self.assertFalse((self.paper / "composed_settlement_unsafe.json").exists())
+
+    def test_composed_binding_excludes_conflicting_source_and_untrusted_intent_outcome(self):
+        from bot.composed_resolution_binding import bind_composed_finalized_outcomes
+        from bot.forward_composed_paper import _digest
+        identity = {"shared_candidate_id": "candidate-one", "shared_snapshot_id": "snapshot-one",
+                    "run_id": "run-1", "market_id": "KXTEST-26OCT13-T80",
+                    "observed_at": "2026-10-13T10:00:00+00:00"}
+        intent = {**identity, "decision_id": "forward-combined:" + _digest(identity),
+                  "lane_id": "forward_composed_paper", "action": "BUY_YES"}
+        self.source_and_binding(source_changes={"resolution": {"outcome": "NO"}})
+        result = bind_composed_finalized_outcomes(intents=[intent], strict_resolutions_path=self.source,
+                                                  output_dir=self.root / "invalid-source")
+        self.assertEqual(result.bindings_path.read_text(), "")
+        self.assertEqual(json.loads(result.unbound_path.read_text())["reason_code"], "invalid_authoritative_resolution")
+        with self.assertRaises(ValueError):
+            bind_composed_finalized_outcomes(intents=[{**intent, "outcome": "YES"}],
+                                             strict_resolutions_path=self.source,
+                                             output_dir=self.root / "untrusted-intent")
+        self.assertFalse((self.root / "untrusted-intent").exists())
+        self.source_and_binding()
+        self.source.write_bytes(self.source.read_bytes() * 2)
+        duplicate = bind_composed_finalized_outcomes(intents=[intent], strict_resolutions_path=self.source,
+                                                     output_dir=self.root / "duplicate-source")
+        self.assertEqual(json.loads(duplicate.unbound_path.read_text())["reason_code"], "ambiguous_market_resolution")
+
     def test_missing_wrong_or_nonfinal_evidence_leaves_both_reservations(self):
         cases = ({"strict_resolution_source_sha256": "a" * 64},
                  {"strict_resolution_source_line_number": 2},
@@ -193,6 +240,27 @@ class PersistentComposedResolutionTests(unittest.TestCase):
         decision = self.sim.risk.check_trade({"question": "Synthetic?"}, 1.0, available_cash=80.0)
         self.assertFalse(decision.approved)
         self.assertEqual(decision.metadata.get("reason_code"), "composed_settlement_unsafe")
+
+    def test_corrupt_risk_file_after_settlement_cannot_be_rebuilt_as_fresh_account(self):
+        self.source_and_binding()
+        self.assertEqual(len(self.resolve()), 1)
+        risk_path = self.sim.risk.data_path
+        risk_path.write_text("{corrupt")
+        with self.assertRaisesRegex(ValueError, "composed.*risk"):
+            self.reload()
+        self.assertEqual(risk_path.read_text(), "{corrupt")
+
+    def test_composed_risk_save_failure_is_not_silently_reported_as_success(self):
+        with patch("bot.risk.json.dump", side_effect=OSError("synthetic risk write failure")):
+            with self.assertRaisesRegex(OSError, "synthetic risk write failure"):
+                self.sim.risk._save_state()
+
+    def test_corrupt_bound_session_cannot_start_new_paper_account(self):
+        path = self.paper / f"sim_{self.sim.session_id}.json"
+        path.write_text("{corrupt")
+        with self.assertRaisesRegex(Exception, "composed.*session"):
+            self.reload()
+        self.assertEqual(path.read_text(), "{corrupt")
 
     def test_crash_after_session_write_fences_reloaded_account(self):
         self.source_and_binding(outcome="NO")

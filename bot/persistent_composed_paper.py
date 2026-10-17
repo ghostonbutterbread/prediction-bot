@@ -142,6 +142,9 @@ def consume_persistent_composed_paper(
             saved_trades = session["trades"]
             if any(not _valid_composed_trade_resolution(trade) for trade in saved_trades):
                 raise ValueError("external settlement detected; exact composed resolution required")
+            ids = [trade.get("id") for trade in saved_trades]
+            if any(not isinstance(value, str) or not value for value in ids) or len(ids) != len(set(ids)):
+                raise ValueError("duplicate or missing composed trade id")
         marked = {}
         for trade in saved_trades:
             marker = (trade.get("signals") or {}).get("composed_decision_id")

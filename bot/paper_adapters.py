@@ -844,6 +844,17 @@ class SimulatorPaperResolutionAdapter:
             fcntl.flock(lock, fcntl.LOCK_EX)
             if unsafe.exists():
                 raise ValueError("composed settlement unsafe: reconcile session and risk state manually")
+            trades = self.state_adapter.effective_trades()
+            ids = [trade.id for trade in trades]
+            if any(not isinstance(trade_id, str) or not trade_id for trade_id in ids) or len(ids) != len(set(ids)):
+                raise ValueError("duplicate or missing composed trade id")
+            risk_rows = self.host.risk.state.trade_history
+            if not all(isinstance(row, dict) for row in risk_rows):
+                raise ValueError("composed risk trade records disagree with session")
+            risk_by_id = {row.get("trade_id"): row for row in risk_rows}
+            if (len(risk_by_id) != len(risk_rows) or set(risk_by_id) != set(ids)
+                    or any(risk_by_id[trade.id].get("resolved") is not trade.resolved for trade in trades)):
+                raise ValueError("composed risk trade records disagree with session")
             source_path = Path(strict_resolutions_path).resolve(strict=True)
             bindings = Path(binding_path).resolve(strict=True)
             if source_path == bindings or self.host.data_dir in source_path.parents or self.host.data_dir in bindings.parents:
@@ -939,6 +950,10 @@ class SimulatorPaperResolutionAdapter:
 
             if not pending:
                 return []
+            # Mutable latest-feed paths must not be booked if they changed
+            # between the streamed evidence read and the accounting preflight.
+            if source_hash != _stream_sha256(source_path):
+                raise ValueError("strict resolution source changed before accounting")
             with unsafe.open("x", encoding="utf-8") as handle:
                 json.dump({"status": "unsafe_until_dual_write_verified", "trade_ids": [t.id for t, *_ in pending]}, handle)
                 handle.flush()

@@ -252,6 +252,9 @@ class Simulator:
                 max_entry_price_default=self.max_entry_price,
             )
             if loaded is None:
+                if ((self.data_dir / "composed_binding.json").is_file()
+                        and any(self.data_dir.glob("sim_*.json"))):
+                    raise ValueError("composed session missing or unreadable")
                 return False
 
             self._apply_loaded_session(loaded)
@@ -268,6 +271,8 @@ class Simulator:
             return True
 
         except Exception as e:
+            if (self.data_dir / "composed_binding.json").is_file():
+                raise ValueError("composed session unavailable; account requires reconciliation") from e
             logger.error(f"Failed to load session {session_id or 'latest'}: {e}")
             return False
 

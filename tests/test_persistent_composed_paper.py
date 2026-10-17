@@ -311,3 +311,54 @@ class PersistentComposedPaperTests(unittest.TestCase):
         session_path.write_text(json.dumps(session))
         with self.assertRaisesRegex(ValueError, "exact composed resolution"):
             self.consume(rows + self.rows("two", "KXHIGHNY-26OCT13-T81"))
+
+    def test_duplicate_saved_trade_ids_block_new_entry_before_simulator(self):
+        second = self.rows("two", "KXHIGHLAX-26OCT13-T81")
+        second[1] = {**second[1], "event_ticker": "KXHIGHLAX-26OCT13"}
+        existing = self.rows() + second
+        self.consume(existing)
+        session_path = next(self.paper_root.glob("sim_*.json"))
+        session = json.loads(session_path.read_text())
+        self.assertEqual(len(session["trades"]), 2)
+        session["trades"][1]["id"] = session["trades"][0]["id"]
+        session_path.write_text(json.dumps(session))
+        with patch("bot.persistent_composed_paper.Simulator", side_effect=AssertionError("constructed")):
+            with self.assertRaisesRegex(ValueError, "duplicate.*trade id"):
+                self.consume(existing + self.rows("three", "KXHIGHNY-26OCT13-T82"))
+
+    def test_feed_to_frozen_exact_binding_to_persistent_account_settlement(self):
+        from bot.composed_resolution_binding import bind_composed_finalized_outcomes
+        from bot.forward_composed_paper import compose_forward_rows
+        from bot.resolution_feed import run_resolution_feed_once
+
+        rows = self.rows()
+        self.assertEqual(self.consume(rows)["decisions"][0]["status"], "opened")
+        _, intents = compose_forward_rows(rows)
+        intent = next(row for row in intents if row["lane_id"] == "forward_composed_paper")
+        market = intent["market_id"]
+        trade = json.loads(next(self.paper_root.glob("sim_*.json")).read_text())["trades"][0]
+        settled = (datetime.fromisoformat(trade["timestamp"]) + timedelta(minutes=1)).isoformat()
+        refs = self.base / "market_refs.jsonl"
+        refs.write_text(json.dumps({"market_id": market}) + "\n")
+        config = {"resolution_feed": {"enabled": True, "mode": "incremental_unresolved",
+                  "market_ref_paths": [str(refs)], "output_dir": str(self.base / "feed"),
+                  "central_output_dir": str(self.base / "central"), "interval_seconds": 1,
+                  "max_fetch_attempts": 1, "retry_delay_seconds": 0}}
+        feed = run_resolution_feed_once(config, now=datetime.fromisoformat(settled) + timedelta(minutes=1),
+            fetch_market=lambda ticker: {"ticker": ticker, "status": "finalized",
+                                         "result": "yes", "settlement_ts": settled})
+        self.assertEqual(feed.status, "refreshed")
+        binding = bind_composed_finalized_outcomes(intents=[intent], strict_resolutions_path=feed.output_path,
+                                                    output_dir=self.base / "bound")
+        self.assertEqual(json.loads(binding.bindings_path.read_text())["outcome"], "YES")
+        feed.output_path.write_text("{new later source}\n")
+        sim = Simulator({**self.account, "data_dir": str(self.paper_root), "trading": {"mode": "paper"},
+                         "paper_wallets": {"allow_legacy_parent_session_lookup": False}})
+        events = sim.resolution_adapter.resolve_exact_positions(binding_path=binding.bindings_path,
+            strict_resolutions_path=binding.frozen_resolutions_path,
+            as_of=(datetime.fromisoformat(settled) + timedelta(minutes=2)).isoformat())
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].position_id, trade["id"])
+        self.assertEqual(sim.resolution_adapter.resolve_exact_positions(binding_path=binding.bindings_path,
+            strict_resolutions_path=binding.frozen_resolutions_path,
+            as_of=(datetime.fromisoformat(settled) + timedelta(minutes=2)).isoformat()), [])
