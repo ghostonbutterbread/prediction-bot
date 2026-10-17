@@ -16,6 +16,8 @@ from bot.weather.collector_source_router_replay import (
     run_collector_source_router_replay,
 )
 from bot.weather.source_history_manifest import SourceHistoryManifestError
+from bot.weather.collector_source_router_replay import _source_history_edge_rows, _strict_history_resolution_index
+from bot.weather.source_router import select_source_for_candidate
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -103,6 +105,7 @@ def source_history_row(*, market_id: str, settlement_ts: str, outcome: str = "YE
         "question_side": "above",
         "forecast_temp_f": 82.0,
         "threshold": 80.0,
+        "observed_at": "2026-01-01T12:00:00+00:00",
         "predicted_outcome": "YES",
         "actual_outcome": outcome,
         "yes_price": 0.40,
@@ -319,6 +322,144 @@ class CollectorSourceRouterReplayTests(unittest.TestCase):
         self.assertEqual(with_history["prior_sample_count"], 5)
         self.assertEqual(with_history["action"], "BUY_YES")
 
+    def test_unpriced_strict_settled_history_routes_without_creating_edge_or_pnl(self):
+        record = replay_input(market_id="KXUNPRICED", observed_at="2026-01-03T12:00:00+00:00", raw_hash="9" * 64,
+                              contract_shape="tail")
+        history = [source_history_row(market_id=f"HIST-{n}", settlement_ts="2026-01-02T00:00:00+00:00") for n in range(2)]
+        for row in history:
+            row.pop("yes_price")
+            row.pop("no_price")
+            row["source_implied_outcome"] = row.pop("predicted_outcome")
+            row["event_ticker"] = row["market_id"]
+        edges, edge_stats = _source_history_edge_rows(history)
+        self.assertEqual(edge_stats["selector_edges_accepted"], 2)
+        self.assertTrue(all(edge["eligible_for_edge_validation"] is False for edge in edges))
+        self.assertTrue(all(edge["exclusion_reason"] == "missing_source_side_price" for edge in edges))
+        self.assertTrue(all(edge["binary_edge_realized"] is None and edge["flat_1usd_pnl"] is None for edge in edges))
+        selection = select_source_for_candidate(
+            {"city_id": "miami_fl", "market_kind": "high", "contract_shape": "tail", "question_side": "above",
+             "observed_at": record["observed_at"]}, edges, min_sample_count=2,
+        )
+        self.assertTrue(selection["routeable"])
+        self.assertEqual(selection["prior_sample_count"], 2)
+        self.assertIsNone(selection["prior_avg_binary_edge_realized"])
+        _, candidates, stats = build_sealed_source_probability_decisions(
+            [record], [], history_ledger=history, min_sample_count=2,
+        )
+        self.assertEqual(stats["selector_history"]["selector_edges_accepted"], 2)
+        self.assertEqual(candidates[0]["selected_source_id"], "nws")
+        self.assertEqual(candidates[0]["action"], "BUY_YES")
+        self.assertEqual(candidates[0]["entry_price"], 0.4)  # current market's ask, never historical price
+
+        no_ask = replay_input(market_id="KXNOASK", observed_at=record["observed_at"], raw_hash="a" * 64,
+                              contract_shape="tail")
+        no_ask["market"].pop("best_yes_ask")
+        _, candidates, _ = build_sealed_source_probability_decisions(
+            [no_ask], [], history_ledger=history, min_sample_count=2,
+        )
+        self.assertEqual(candidates[0]["selected_source_id"], "nws")
+        self.assertEqual(candidates[0]["action"], "SKIP")
+        self.assertIsNone(candidates[0]["entry_price"])
+        self.assertEqual(candidates[0]["skip_reason"], "missing_decision_price")
+
+    def test_unpriced_history_rejects_missing_proof_conflicts_and_nonprior_settlements(self):
+        record = replay_input(market_id="KXSAFETY", observed_at="2026-01-03T12:00:00+00:00", raw_hash="9" * 64,
+                              contract_shape="tail")
+        valid = source_history_row(market_id="HIST-VALID", settlement_ts="2026-01-02T00:00:00+00:00")
+        invalid = []
+        for n, mutation in enumerate((
+            {"source_provenance": {}},
+            {"strict_source_proof": {"status": "ineligible", "reasons": ["missing_source_as_of"]}},
+            {"eligible_for_source_history": False},
+            {"official_outcome": "NO"},  # conflicts with actual_outcome
+            {"predicted_outcome": "NO", "source_implied_outcome": "YES"},
+            {"settlement_ts": record["observed_at"]},
+            {"settlement_ts": "2026-01-04T00:00:00+00:00"},
+        )):
+            row = {**valid, "market_id": f"HIST-INVALID-{n}", "event_ticker": f"EVENT-{n}", **mutation}
+            row.pop("yes_price")
+            row.pop("no_price")
+            invalid.append(row)
+        valid.pop("yes_price")
+        valid.pop("no_price")
+        valid["event_ticker"] = "EVENT-VALID"
+        _, candidates, stats = build_sealed_source_probability_decisions(
+            [record], [], history_ledger=[valid, *invalid], min_sample_count=2,
+        )
+        self.assertEqual(candidates[0]["action"], "SKIP")
+        self.assertEqual(candidates[0]["prior_sample_count"], 1)
+        self.assertEqual(stats["selector_history"]["selector_edges_accepted"], 3)
+
+    def test_unpriced_history_rejects_conflicting_market_outcome_envelope(self):
+        record = replay_input(market_id="KXENVELOPE", observed_at="2026-01-03T12:00:00+00:00", raw_hash="9" * 64,
+                              contract_shape="tail")
+        prior = source_history_row(market_id="HIST-ENVELOPE", settlement_ts="2026-01-02T00:00:00+00:00")
+        prior.pop("yes_price")
+        prior.pop("no_price")
+        prior["market_outcome"] = {"official_outcome": "NO"}
+        _, candidates, stats = build_sealed_source_probability_decisions(
+            [record], [], history_ledger=[prior], min_sample_count=1,
+        )
+        self.assertIsNone(candidates[0]["selected_source_id"])
+        self.assertEqual(candidates[0]["skip_reason"], "insufficient_prior_history")
+        self.assertEqual(stats["selector_history"]["conflicting_authoritative_outcome"], 1)
+
+    def test_unpriced_history_rejects_conflicting_exchange_outcome_aliases(self):
+        record = replay_input(market_id="KXEXCHANGE", observed_at="2026-01-03T12:00:00+00:00", raw_hash="9" * 64,
+                              contract_shape="tail")
+        for key in ("kalshi_result", "settlement_value"):
+            with self.subTest(key=key):
+                prior = source_history_row(market_id="HIST-EXCHANGE", settlement_ts="2026-01-02T00:00:00+00:00")
+                prior.pop("yes_price")
+                prior.pop("no_price")
+                prior["market_outcome"] = {key: "NO"}
+                _, candidates, stats = build_sealed_source_probability_decisions(
+                    [record], [], history_ledger=[prior], min_sample_count=1,
+                )
+                self.assertIsNone(candidates[0]["selected_source_id"])
+                self.assertEqual(stats["selector_history"]["conflicting_authoritative_outcome"], 1)
+
+    def test_unpriced_history_rejects_root_and_resolution_outcome_aliases(self):
+        record = replay_input(market_id="KXALIAS", observed_at="2026-01-03T12:00:00+00:00", raw_hash="9" * 64,
+                              contract_shape="tail")
+        for claim in ({"kalshi_result": "NO"}, {"market_outcome": {"resolution": {"settlement_value": "VOID"}}}):
+            with self.subTest(claim=claim):
+                prior = source_history_row(market_id="HIST-ALIAS", settlement_ts="2026-01-02T00:00:00+00:00")
+                prior.pop("yes_price")
+                prior.pop("no_price")
+                prior.update(claim)
+                _, candidates, stats = build_sealed_source_probability_decisions(
+                    [record], [], history_ledger=[prior], min_sample_count=1,
+                )
+                self.assertIsNone(candidates[0]["selected_source_id"])
+                self.assertEqual(stats["selector_history"]["conflicting_authoritative_outcome"], 1)
+
+    def test_later_event_identity_collapses_earlier_unlabeled_market_history(self):
+        record = replay_input(market_id="KXCURRENT-EVENT", observed_at="2026-01-03T12:00:00+00:00",
+                              raw_hash="9" * 64, contract_shape="tail")
+        for earliest_event in (None, "EVENT-OTHER"):
+            with self.subTest(earliest_event=earliest_event):
+                history = []
+                for market, observed, event in (
+                    ("KXOLD-A", "2026-01-01T08:00:00+00:00", earliest_event),
+                    ("KXOLD-A", "2026-01-01T09:00:00+00:00", "EVENT-X"),
+                    ("KXOLD-B", "2026-01-01T10:00:00+00:00", "EVENT-X"),
+                ):
+                    prior = source_history_row(market_id=market, settlement_ts="2026-01-02T00:00:00+00:00")
+                    prior["observed_at"] = observed
+                    prior.pop("yes_price")
+                    prior.pop("no_price")
+                    if event:
+                        prior["event_ticker"] = event
+                    history.append(prior)
+                _, candidates, stats = build_sealed_source_probability_decisions(
+                    [record], [], history_ledger=history, min_sample_count=2,
+                )
+                self.assertIsNone(candidates[0]["selected_source_id"])
+                self.assertEqual(candidates[0]["action"], "SKIP")
+                self.assertEqual(candidates[0]["prior_sample_count"], 1)
+                self.assertEqual(stats["selector_history"]["selector_edges_accepted"], 3)
+
     def test_history_settlement_at_or_after_decision_is_excluded(self):
         record = replay_input(market_id="KXCUTOFF", observed_at="2026-01-03T12:00:00+00:00", raw_hash="8" * 64)
         history = [
@@ -508,6 +649,57 @@ class CollectorSourceRouterReplayTests(unittest.TestCase):
         self.assertEqual(provenance["verification"], "manifest_sha256_verified")
         self.assertEqual(provenance["strict_resolution_join_counts"]["source_history_rows_with_exact_authoritative_resolution"], 1)
 
+    def test_manifest_resolution_rejects_contradictory_outcome_aliases(self):
+        rows = [{
+            "market_id": "HIST-X", "market_status": "finalized", "official_outcome": "YES",
+            "kalshi_result": "NO", "settlement_ts": "2026-01-02T00:00:00+00:00",
+        }]
+        index, stats = _strict_history_resolution_index(rows)
+        self.assertEqual(index, {})
+        self.assertEqual(stats["invalid_rows"], 1)
+
+    def test_manifest_join_rejects_recorded_outcome_disagreeing_with_verified_resolution(self):
+        record = replay_input(market_id="KXJOIN-CURRENT", observed_at="2026-01-03T12:00:00+00:00", raw_hash="6" * 64)
+        root = Path(self.tempdir.name)
+        inputs = root / "inputs.jsonl"
+        outcomes = root / "outcomes.jsonl"
+        inputs.write_text(json.dumps(record) + "\n", encoding="utf-8")
+        outcomes.write_text("", encoding="utf-8")
+        ledger = source_history_row(market_id="HIST-JOIN", settlement_ts="")
+        ledger.pop("actual_outcome")
+        ledger["official_outcome"] = "YES"
+        ledger["predicted_outcome"] = "NO"
+        ledger.pop("settlement_ts")
+        paths = {key: root / (key + ".jsonl") for key in (
+            "source_ledger", "strict_resolution", "raw_archive", "replay_index", "replay_manifest",
+        )}
+        paths["source_ledger"].write_text(json.dumps(ledger) + "\n", encoding="utf-8")
+        paths["strict_resolution"].write_text(json.dumps({
+            "market_id": "HIST-JOIN", "market_status": "finalized", "official_outcome": "NO",
+            "settlement_ts": "2026-01-02T00:00:00+00:00", "resolution_id": "strict-join",
+        }) + "\n", encoding="utf-8")
+        for key in ("raw_archive", "replay_index", "replay_manifest"):
+            paths[key].write_text("{}\n", encoding="utf-8")
+        manifest = root / "source_history_manifest.json"
+        manifest.write_text(json.dumps({
+            "schema_name": "source_history_manifest", "schema_version": 1,
+            "historical_counterfactual_only": True, "non_mutating": True,
+            "join_key": "market_id", "eligibility_filter": "eligible_for_reliability == true",
+            "availability_field": "settlement_ts",
+            **{f"{key}_path": str(path) for key, path in paths.items()},
+            "sha256": {key: hashlib.sha256(path.read_bytes()).hexdigest() for key, path in paths.items()},
+        }), encoding="utf-8")
+
+        result = run_collector_source_router_replay(
+            replay_inputs_path=inputs, finalized_outcomes_path=outcomes,
+            output_dir=self.output_dir, min_sample_count=1, history_manifest_path=manifest,
+        )
+        candidate = json.loads(result.candidate_decisions_path.read_text().strip())
+        self.assertEqual(candidate["action"], "SKIP")
+        join_counts = result.metadata["inputs"]["selector_history"]["strict_resolution_join_counts"]
+        self.assertEqual(join_counts["source_history_rows_conflicting_authoritative_outcome"], 1)
+        self.assertEqual(join_counts.get("source_history_rows_with_exact_authoritative_resolution", 0), 0)
+
     def test_resolution_requires_exact_identity_join_and_keeps_pnl_separate(self):
         records, outcomes = self._records_and_outcomes()
         control, candidate, _ = build_sealed_source_probability_decisions(records, outcomes, min_sample_count=1)
@@ -523,6 +715,53 @@ class CollectorSourceRouterReplayTests(unittest.TestCase):
         blocked = resolve_sealed_source_probability_decisions(control + candidate, mismatched)
         self.assertEqual(blocked["summary"]["exactly_resolved_decisions"], len(control) + len(candidate) - 2)
         self.assertEqual(blocked["summary"]["unresolved_decisions"], 2)
+
+    def test_conflicting_final_outcome_cannot_create_correctness_or_pnl(self):
+        record = replay_input(market_id="KXCONFLICTFINAL", observed_at="2026-01-03T12:00:00+00:00",
+                              raw_hash="9" * 64, contract_shape="tail")
+        prior = source_history_row(market_id="HIST-FINAL", settlement_ts="2026-01-02T00:00:00+00:00")
+        prior.pop("yes_price")
+        prior.pop("no_price")
+        control, candidate, _ = build_sealed_source_probability_decisions(
+            [record], [], history_ledger=[prior], min_sample_count=1,
+        )
+        self.assertEqual(candidate[0]["action"], "BUY_YES")
+        for claim in ({"kalshi_result": "NO"}, {"resolution": {"outcome": "VOID"}}):
+            with self.subTest(claim=claim):
+                outcome = {**finalized_outcome(record, outcome="YES", settlement_ts="2026-01-04T00:00:00+00:00"),
+                           **claim}
+                report = resolve_sealed_source_probability_decisions(control + candidate, [outcome])
+                self.assertEqual(report["summary"]["outcome_ledger"].get("invalid_rows", 0), 1)
+                self.assertEqual(report["summary"]["exactly_resolved_decisions"], 0)
+                self.assertEqual(report["summary"]["executable_pnl_decisions"], 0)
+                self.assertEqual(report["source_correctness"]["total_routeable_resolved_selected_source_observations"], 0)
+
+    def test_final_outcome_must_settle_after_decision_before_correctness_or_pnl(self):
+        record = replay_input(market_id="KXEARLYFINAL", observed_at="2026-01-03T12:00:00+00:00",
+                              raw_hash="8" * 64, contract_shape="tail")
+        prior = source_history_row(market_id="HIST-EARLYFINAL", settlement_ts="2026-01-02T00:00:00+00:00")
+        prior.pop("yes_price")
+        prior.pop("no_price")
+        control, candidate, _ = build_sealed_source_probability_decisions(
+            [record], [], history_ledger=[prior], min_sample_count=1,
+        )
+        self.assertEqual(candidate[0]["action"], "BUY_YES")
+        self.assertEqual(control[0]["action"], "BUY_YES")
+        for settlement in ("2026-01-03T00:00:00+00:00", "2026-01-03T12:00:00+00:00"):
+            with self.subTest(settlement=settlement):
+                outcome = finalized_outcome(record, outcome="YES", settlement_ts=settlement)
+                report = resolve_sealed_source_probability_decisions(control + candidate, [outcome])
+                self.assertEqual(report["summary"]["exactly_resolved_decisions"], 0)
+                self.assertEqual(report["summary"]["executable_pnl_decisions"], 0)
+                self.assertEqual(report["source_correctness"]["total_routeable_resolved_selected_source_observations"], 0)
+                self.assertEqual(report["summary"]["unresolved_decisions"], 2)
+                self.assertTrue(all(row["resolution_status"] == "unresolved_settlement_not_after_decision"
+                                    for row in report["unresolved_decisions"]))
+        valid = finalized_outcome(record, outcome="YES", settlement_ts="2026-01-04T00:00:00+00:00")
+        report = resolve_sealed_source_probability_decisions(control + candidate, [valid])
+        self.assertEqual(report["summary"]["exactly_resolved_decisions"], 2)
+        self.assertEqual(report["summary"]["executable_pnl_decisions"], 2)
+        self.assertEqual(report["source_correctness"]["correct"], 1)
 
     def test_source_selection_correctness_counts_edge_skips_but_not_unroutable_candidates(self):
         edge_skipped = replay_input(

@@ -28,7 +28,8 @@ from bot.weather.source_observation_ledger import source_correctness_target_proo
 from bot.weather.source_history_manifest import load_source_history_manifest
 from bot.weather.source_correctness_cohorts import DEFAULT_PER_SHAPE_TARGET, select_source_correctness_cohort
 from bot.weather.source_router import (
-    BUY_NO, BUY_YES, SKIP, source_history_target_proof_rejection_key, select_source_for_candidate,
+    BUY_NO, BUY_YES, SKIP, source_history_correctness_eligible, source_history_outcomes_conflict,
+    source_history_target_proof_rejection_key, select_source_for_candidate,
 )
 
 
@@ -131,6 +132,14 @@ def resolve_sealed_source_probability_decisions(
         }
         if outcome is None:
             unresolved.append({**base, "resolution_status": "unresolved_exact_identity_required"})
+            continue
+        # The exact decision key carries the observation clock sealed before
+        # outcome binding. A final receipt cannot resolve an already-settled
+        # market as a retrospective decision.
+        decision_clock = _parse_datetime(_mapping(decision.get("decision_key")).get("observed_at_utc"))
+        settlement_clock = _parse_datetime(outcome["settlement_ts"])
+        if decision_clock is None or settlement_clock is None or settlement_clock <= decision_clock:
+            unresolved.append({**base, "resolution_status": "unresolved_settlement_not_after_decision"})
             continue
         official_outcome = outcome["official_outcome"]
         source_correctness_observation = _source_selection_correctness_observation(
@@ -563,6 +572,14 @@ def _source_history_edge_rows(rows: Iterable[Mapping[str, Any]]) -> tuple[list[d
         if outcome not in {"YES", "NO"}:
             stats["missing_authoritative_outcome"] += 1
             continue
+        if source_history_outcomes_conflict(row):
+            stats["conflicting_authoritative_outcome"] += 1
+            continue
+        implied = {str(row.get(key) or "").upper() for key in ("predicted_outcome", "source_implied_outcome", "source_implied_side")
+                   if row.get(key) is not None}
+        if len(implied) > 1:
+            stats["conflicting_source_implied_side"] += 1
+            continue
         historical = dict(row)
         historical["official_outcome"] = outcome
         historical["settlement_ts"] = _timestamp(settlement)
@@ -574,7 +591,7 @@ def _source_history_edge_rows(rows: Iterable[Mapping[str, Any]]) -> tuple[list[d
         # availability time for this selector-only history.
         edge["settlement_ts"] = historical["settlement_ts"]
         edge["outcome_known_at"] = historical["settlement_ts"]
-        if edge.get("eligible_for_edge_validation") is not True:
+        if not source_history_correctness_eligible(edge):
             stats["ineligible_for_selector"] += 1
             continue
         edges.append(edge)
@@ -630,6 +647,9 @@ def _load_selector_history(
             if resolution is None:
                 resolution_stats["source_history_rows_without_exact_authoritative_resolution"] += 1
                 continue
+            if source_history_outcomes_conflict(row, official_outcome=resolution["official_outcome"]):
+                resolution_stats["source_history_rows_conflicting_authoritative_outcome"] += 1
+                continue
             # The historical source row supplies the forecast observation only.
             # Its resolved outcome and availability are independently supplied
             # by the manifest's verified strict-resolution artifact.
@@ -667,7 +687,7 @@ def _strict_history_resolution_index(rows: Iterable[Mapping[str, Any]]) -> tuple
         resolution = row.get("resolution") if isinstance(row.get("resolution"), Mapping) else {}
         outcome = str(row.get("official_outcome") or resolution.get("official_outcome") or resolution.get("outcome") or row.get("kalshi_result") or "").upper()
         settlement = _parse_datetime(row.get("settlement_ts"))
-        if not isinstance(market_id, str) or not market_id or str(row.get("market_status") or "").lower() != "finalized" or outcome not in {"YES", "NO"} or settlement is None:
+        if not isinstance(market_id, str) or not market_id or str(row.get("market_status") or "").lower() != "finalized" or outcome not in {"YES", "NO"} or settlement is None or source_history_outcomes_conflict(row):
             stats["invalid_rows"] += 1
             continue
         if market_id in index:
@@ -800,7 +820,7 @@ def _strict_outcome_index(rows: Iterable[Mapping[str, Any]]) -> tuple[dict[tuple
         identity = _identity(row)
         outcome = str(row.get("official_outcome") or "").upper()
         settled = _parse_datetime(row.get("settlement_ts"))
-        if identity is None or outcome not in {"YES", "NO"} or settled is None or str(row.get("market_status") or "").lower() != "finalized":
+        if identity is None or outcome not in {"YES", "NO"} or settled is None or str(row.get("market_status") or "").lower() != "finalized" or source_history_outcomes_conflict(row):
             stats["invalid_rows"] += 1
             continue
         if identity in index:

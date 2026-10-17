@@ -44,8 +44,9 @@ This is shared infrastructure so pull, resolve, and live/paper-adjacent Kalshi f
 This repo uses a project-local virtual environment at `.venv`.
 
 ```bash
-# 1. Create/update the virtual environment and install dependencies
-./setup.sh
+# 1. In each fresh worktree, create its own Python 3.13 virtual environment
+#    (use the full path to python3.13 if it is not on PATH)
+PYTHON=python3.13 ./setup.sh
 
 # 2. Activate the virtual environment
 source .venv/bin/activate
@@ -220,7 +221,15 @@ Current parity status:
 - Dependency source of truth: `requirements.txt`
 - Config loader now supports `config.yaml`, and PyYAML is installed through the setup script
 
-For future agents and contributors: start with `./setup.sh`, then `source .venv/bin/activate` before running tests or the bot.
+For each new worktree, bootstrap its own ignored `.venv`; it is not shared or copied from another checkout. The pinned Kalshi SDK requires Python 3.13, so pass a Python 3.13 executable to the existing installer if `python3` points to an older version:
+
+```bash
+PYTHON=/path/to/python3.13 ./setup.sh
+.venv/bin/python --version
+PYTHONPATH=. .venv/bin/python -m unittest discover -s tests -p 'test_collector_replay_inputs.py' -v
+```
+
+Run these from the worktree root. `PYTHONPATH=.` plus `python -m` keeps focused imports bound to that checkout. `pytest` is not in `requirements.txt`; do not assume a globally installed `pytest` command uses this environment. Tests need neither `.env` nor API keys, and setup/testing does not activate any runtime lane or service.
 
 ## Project Structure
 
