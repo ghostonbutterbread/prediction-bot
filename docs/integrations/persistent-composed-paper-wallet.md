@@ -5,7 +5,7 @@
 - **Branch / owning ref:** `feat/persistent-composed-paper-wallet`
 - **Base commit / intended target:** `3911f1808828261d8cfe712144e881c5b0882351` / local `beta`
 - **Last updated:** 2026-10-17 PDT
-- **Latest independent ACCEPT:** entry implementation `b8fa1c7c6b2d4893890e3df21f9dc1c1766e22f4`. **Latest experimental recovery checkpoint:** `9203f47a49ff8bb689ca0c492141bab7862db816` (includes unreviewed settlement at `423932474e0ec00ffd27196596421ba4bd7a9543` and producer→persistent entry E2E); this dossier-only handoff follows it.
+- **Latest independent ACCEPT:** entry implementation `b8fa1c7c6b2d4893890e3df21f9dc1c1766e22f4`. **Latest unreviewed implementation checkpoint:** `671e599243ad59eef8c8b5c103272dde0d7f4aea` (settlement at `423932474e0ec00ffd27196596421ba4bd7a9543`, producer→entry at `9203f47a49ff8bb689ca0c492141bab7862db816`, and derived feed binder/hardening); this dossier-only handoff follows it.
 - **Canonical context:** code-only reviewed saved pre-risk selector at beta `3911f18`; read-only seam audit `deleg_81fa2e8d`; `bot/forward_composed_paper.py`, `bot/composed_lane_wallet.py`, `bot/simulator.py`, `bot/paper_adapters.py`, `bot/resolver.py`.
 
 ## Intent
@@ -36,10 +36,10 @@ Disabled-by-default callable `consume_persistent_composed_paper` accepts the sav
 ## Interruption / resume handoff
 
 - **Owning feature branch/ref:** `feat/persistent-composed-paper-wallet`
-- **Latest independently accepted checkpoint:** `b8fa1c7c6b2d4893890e3df21f9dc1c1766e22f4` (entry code). **Latest unreviewed implementation checkpoint:** `9203f47a49ff8bb689ca0c492141bab7862db816` (producer→persistent entry E2E after experimental settlement `423932474e0ec00ffd27196596421ba4bd7a9543`). Current tip includes this later dossier-only handoff; reviewers must inspect the full diff from beta, not reuse the earlier entry verdict.
-- **Feature implementation commits:** `f3e5ec8eeabc54641d5e842042fb7ce311813c66`, `b8fa1c7c6b2d4893890e3df21f9dc1c1766e22f4`, `423932474e0ec00ffd27196596421ba4bd7a9543`, `9203f47a49ff8bb689ca0c492141bab7862db816`.
+- **Latest independently accepted checkpoint:** `b8fa1c7c6b2d4893890e3df21f9dc1c1766e22f4` (entry code). **Latest unreviewed implementation checkpoint:** `671e599243ad59eef8c8b5c103272dde0d7f4aea` (derived binder/hardening after experimental settlement `423932474e0ec00ffd27196596421ba4bd7a9543`). Current tip includes this later dossier-only handoff; reviewers must inspect the full diff from beta, not reuse the earlier entry verdict. Independent feature-tip gate `deleg_2338830c` is in progress.
+- **Feature implementation commits:** `f3e5ec8eeabc54641d5e842042fb7ce311813c66`, `b8fa1c7c6b2d4893890e3df21f9dc1c1766e22f4`, `423932474e0ec00ffd27196596421ba4bd7a9543`, `9203f47a49ff8bb689ca0c492141bab7862db816`, `671e599243ad59eef8c8b5c103272dde0d7f4aea`.
 - **Exact resume point:** independently attest producer source-path trust; prove risk/session counter integrity and recovery under unsafe marker without manual deletion; assess mutation during accounting; then obtain fresh independent review and exact combined beta-tree review. The synthetic candidate→entry and feed→settlement fixtures do not form a fresh active cohort. Keep code-only and no activation until accepted.
-- **Working-tree state:** experimental settlement and producer→persistent entry E2E are committed through `9203f47`; this dossier-only handoff follows. No beta merge, push, or runtime account change.
+- **Working-tree state:** experimental settlement, producer→persistent entry, frozen feed binder and fail-closed guards committed through `671e599`; this dossier-only handoff follows. No beta merge, push, or runtime account change.
 
 ## Decision gates
 
