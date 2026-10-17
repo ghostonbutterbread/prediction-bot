@@ -133,6 +133,14 @@ def resolve_sealed_source_probability_decisions(
         if outcome is None:
             unresolved.append({**base, "resolution_status": "unresolved_exact_identity_required"})
             continue
+        # The exact decision key carries the observation clock sealed before
+        # outcome binding. A final receipt cannot resolve an already-settled
+        # market as a retrospective decision.
+        decision_clock = _parse_datetime(_mapping(decision.get("decision_key")).get("observed_at_utc"))
+        settlement_clock = _parse_datetime(outcome["settlement_ts"])
+        if decision_clock is None or settlement_clock is None or settlement_clock <= decision_clock:
+            unresolved.append({**base, "resolution_status": "unresolved_settlement_not_after_decision"})
+            continue
         official_outcome = outcome["official_outcome"]
         source_correctness_observation = _source_selection_correctness_observation(
             decision, official_outcome,
@@ -638,6 +646,9 @@ def _load_selector_history(
             resolution = resolution_index.get(str(market_id)) if isinstance(market_id, str) and market_id else None
             if resolution is None:
                 resolution_stats["source_history_rows_without_exact_authoritative_resolution"] += 1
+                continue
+            if source_history_outcomes_conflict(row, official_outcome=resolution["official_outcome"]):
+                resolution_stats["source_history_rows_conflicting_authoritative_outcome"] += 1
                 continue
             # The historical source row supplies the forecast observation only.
             # Its resolved outcome and availability are independently supplied

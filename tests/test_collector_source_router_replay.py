@@ -658,6 +658,48 @@ class CollectorSourceRouterReplayTests(unittest.TestCase):
         self.assertEqual(index, {})
         self.assertEqual(stats["invalid_rows"], 1)
 
+    def test_manifest_join_rejects_recorded_outcome_disagreeing_with_verified_resolution(self):
+        record = replay_input(market_id="KXJOIN-CURRENT", observed_at="2026-01-03T12:00:00+00:00", raw_hash="6" * 64)
+        root = Path(self.tempdir.name)
+        inputs = root / "inputs.jsonl"
+        outcomes = root / "outcomes.jsonl"
+        inputs.write_text(json.dumps(record) + "\n", encoding="utf-8")
+        outcomes.write_text("", encoding="utf-8")
+        ledger = source_history_row(market_id="HIST-JOIN", settlement_ts="")
+        ledger.pop("actual_outcome")
+        ledger["official_outcome"] = "YES"
+        ledger["predicted_outcome"] = "NO"
+        ledger.pop("settlement_ts")
+        paths = {key: root / (key + ".jsonl") for key in (
+            "source_ledger", "strict_resolution", "raw_archive", "replay_index", "replay_manifest",
+        )}
+        paths["source_ledger"].write_text(json.dumps(ledger) + "\n", encoding="utf-8")
+        paths["strict_resolution"].write_text(json.dumps({
+            "market_id": "HIST-JOIN", "market_status": "finalized", "official_outcome": "NO",
+            "settlement_ts": "2026-01-02T00:00:00+00:00", "resolution_id": "strict-join",
+        }) + "\n", encoding="utf-8")
+        for key in ("raw_archive", "replay_index", "replay_manifest"):
+            paths[key].write_text("{}\n", encoding="utf-8")
+        manifest = root / "source_history_manifest.json"
+        manifest.write_text(json.dumps({
+            "schema_name": "source_history_manifest", "schema_version": 1,
+            "historical_counterfactual_only": True, "non_mutating": True,
+            "join_key": "market_id", "eligibility_filter": "eligible_for_reliability == true",
+            "availability_field": "settlement_ts",
+            **{f"{key}_path": str(path) for key, path in paths.items()},
+            "sha256": {key: hashlib.sha256(path.read_bytes()).hexdigest() for key, path in paths.items()},
+        }), encoding="utf-8")
+
+        result = run_collector_source_router_replay(
+            replay_inputs_path=inputs, finalized_outcomes_path=outcomes,
+            output_dir=self.output_dir, min_sample_count=1, history_manifest_path=manifest,
+        )
+        candidate = json.loads(result.candidate_decisions_path.read_text().strip())
+        self.assertEqual(candidate["action"], "SKIP")
+        join_counts = result.metadata["inputs"]["selector_history"]["strict_resolution_join_counts"]
+        self.assertEqual(join_counts["source_history_rows_conflicting_authoritative_outcome"], 1)
+        self.assertEqual(join_counts.get("source_history_rows_with_exact_authoritative_resolution", 0), 0)
+
     def test_resolution_requires_exact_identity_join_and_keeps_pnl_separate(self):
         records, outcomes = self._records_and_outcomes()
         control, candidate, _ = build_sealed_source_probability_decisions(records, outcomes, min_sample_count=1)
@@ -693,6 +735,33 @@ class CollectorSourceRouterReplayTests(unittest.TestCase):
                 self.assertEqual(report["summary"]["exactly_resolved_decisions"], 0)
                 self.assertEqual(report["summary"]["executable_pnl_decisions"], 0)
                 self.assertEqual(report["source_correctness"]["total_routeable_resolved_selected_source_observations"], 0)
+
+    def test_final_outcome_must_settle_after_decision_before_correctness_or_pnl(self):
+        record = replay_input(market_id="KXEARLYFINAL", observed_at="2026-01-03T12:00:00+00:00",
+                              raw_hash="8" * 64, contract_shape="tail")
+        prior = source_history_row(market_id="HIST-EARLYFINAL", settlement_ts="2026-01-02T00:00:00+00:00")
+        prior.pop("yes_price")
+        prior.pop("no_price")
+        control, candidate, _ = build_sealed_source_probability_decisions(
+            [record], [], history_ledger=[prior], min_sample_count=1,
+        )
+        self.assertEqual(candidate[0]["action"], "BUY_YES")
+        self.assertEqual(control[0]["action"], "BUY_YES")
+        for settlement in ("2026-01-03T00:00:00+00:00", "2026-01-03T12:00:00+00:00"):
+            with self.subTest(settlement=settlement):
+                outcome = finalized_outcome(record, outcome="YES", settlement_ts=settlement)
+                report = resolve_sealed_source_probability_decisions(control + candidate, [outcome])
+                self.assertEqual(report["summary"]["exactly_resolved_decisions"], 0)
+                self.assertEqual(report["summary"]["executable_pnl_decisions"], 0)
+                self.assertEqual(report["source_correctness"]["total_routeable_resolved_selected_source_observations"], 0)
+                self.assertEqual(report["summary"]["unresolved_decisions"], 2)
+                self.assertTrue(all(row["resolution_status"] == "unresolved_settlement_not_after_decision"
+                                    for row in report["unresolved_decisions"]))
+        valid = finalized_outcome(record, outcome="YES", settlement_ts="2026-01-04T00:00:00+00:00")
+        report = resolve_sealed_source_probability_decisions(control + candidate, [valid])
+        self.assertEqual(report["summary"]["exactly_resolved_decisions"], 2)
+        self.assertEqual(report["summary"]["executable_pnl_decisions"], 2)
+        self.assertEqual(report["source_correctness"]["correct"], 1)
 
     def test_source_selection_correctness_counts_edge_skips_but_not_unroutable_candidates(self):
         edge_skipped = replay_input(

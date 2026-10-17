@@ -1,12 +1,12 @@
 # Source Router unpriced correctness admission
 
-- **Status:** feature — isolated fix; feature-tree read-only review passed, beta integration not authorized
+- **Status:** feature — beta integration authorized; first combined-tree review blocked, isolated repair awaiting fresh integration review
 - **Owner:** Hermes
 - **Branch / owning ref:** `fix/source-router-unpriced-correctness`
 - **Worktree:** `/home/ryushe/worktrees/prediction-bot-source-router-unpriced-correctness`
 - **Base commit:** `14982f867bc324aae21bb1c2c8e396fb176b4dfe`
-- **Intended integration target:** `beta` (handoff only; no merge/push/runtime authorized)
-- **Last updated:** 2026-10-05
+- **Intended integration target:** `beta` (local merge after exact-tree review; no push/runtime authorized by this task)
+- **Last updated:** 2026-10-17
 - **Latest immutable recovery checkpoint:** `d3bd34590e92ebfcfb5b11f0704750640ec16ffe`
 - **Feature implementation commits:** `28e99bc2d18f5981ec5a614726cf752d48a648c9`, `9b6d1880d16c3239f91c79297a2e5942a0dfe1e7`, `efb4a02ec5884572aa1aa9128b972cdc53b24616`, `03d24ab8727805434d66aeeccf190b741e4cd8ac`, `73918f499e7fa89b7eb060c0df1e1f2681f8b2e9`, `d3bd34590e92ebfcfb5b11f0704750640ec16ffe`
 
@@ -14,7 +14,7 @@
 
 Repair the existing strict settled forecast-correctness admission at the Source Router selector, not the edge evaluator or trade gate. A hash/proof-qualified forecast with an authoritative independent YES/NO outcome, matching directional correctness, and settlement strictly before a decision may rank a source even if its historical selected-side price is absent. Edge/PnL fields stay null and `eligible_for_edge_validation` stays false. Neither historical price nor realized outcome is available to the sealed decision. The candidate's own selected-side decision price and edge threshold remain unchanged. Collapse repeated observations by source + physical event ticker + contract shape before sample thresholds; market-only identities remain contract-only fallbacks.
 
-No collector, raw archive, configuration, wallet, service, or runtime changes. Historical replay remains a diagnostic, not forward promotion evidence.
+The manifest join now rejects contradictory recorded-versus-strict outcomes before projecting strict authority. Exact final resolution requires settlement strictly after the sealed decision observation before awarding correctness or PnL. No collector, raw archive, configuration, wallet, service, or runtime changes. Historical replay remains a diagnostic, not forward promotion evidence.
 
 ## Evidence and review
 
@@ -24,13 +24,15 @@ No collector, raw archive, configuration, wallet, service, or runtime changes. H
 - Full suite: initial interpreter lacked `rich` and `kalshi_python_sync` (1256 tests, 22 import errors). Latest source tree with provisioned project interpreter and this worktree first on `PYTHONPATH`: `PYTHONPATH="$PWD" /home/ryushe/projects/prediction-bot/.venv/bin/python -m unittest discover -s tests -q` — 1383 tests OK, 7 skipped (349.007s). Initial 300s run timed out amid concurrent filesystem I/O; 600s isolated retry completed. Go `GOROOT` warning from a subprocess was nonfatal.
 - `git diff --check` and `git diff --cached --check` passed before committing implementation.
 - First six independent read-only reviews identified and drove RED→GREEN repairs of outcome conflicts, settlement/observation chronology, implied-side conflicts, manifest and final exact-resolution claims, and market/event independence. Seventh read-only review of `d3bd34590e92ebfcfb5b11f0704750640ec16ffe` found **no blockers** in targeted pure-function probes of transitive late/conflicting event links, earliest valid forecast, proof/chronology, unpriced edge/PnL separation, and current price/edge gates. This is feature-tree acceptance only, not a beta staged-tree review or activation decision.
+- First beta preflight from `de978fcf1ae2dcc85dfd9a4f66f47eb3f206f929` yielded code-only tree `c87b31bce0a3053d9b28e67594661fee64f8ead8` (dossier excluded), focused 31+30 OK and full beta Python 3.13 suite 1443 OK/7 skipped. Independent exact-tree review **blocked** on manifest join overwriting contradictory recorded outcomes and pre-decision/equal final settlement awarding correctness/PnL. Aborted preflight without merging.
+- Review-blocker repair on this isolated feature: RED manifest conflict fixture emitted BUY_YES instead of SKIP; RED early/equal final-outcome fixture resolved two decisions instead of none. GREEN both targeted tests, 63 focused tests, and full isolated Python 3.14 suite 1385 OK/7 skipped. Fresh combined-tree tests/review still required.
 - Ancestry: branch started at local `beta` commit `14982f867bc324aae21bb1c2c8e396fb176b4dfe`.
 - Published 168/168 strict source rows remain a frozen diagnostic with at most two independent samples per source/slice; production 100-sample threshold unchanged. No published generation was rewritten or used to claim a BUY/PnL improvement.
 
 ## Blockers / deferred work
 
 - **Verification:** full isolated suite and independent feature-tree read-only review passed; `GOROOT` emitted a nonfatal subprocess warning. Synthetic fixtures do not prove published-generation hash/readback or forward readiness.
-- **Review/merge:** beta staged-tree reconciliation, integrated tests, and independent review belong to a separately authorized integration task; no merge or push here.
+- **Review/merge:** local beta integration is authorized; repeat code-only staged-tree reconciliation, integrated tests, and independent review on the corrected tree before merging. No push or runtime activation here.
 - **Forward evidence:** event-disjoint, independently resolved paper cohort required before activating/promoting any trading behavior.
 
 ## Interruption / resume handoff
@@ -38,8 +40,8 @@ No collector, raw archive, configuration, wallet, service, or runtime changes. H
 - **Owning feature branch/ref:** `fix/source-router-unpriced-correctness`
 - **Latest immutable recovery checkpoint:** `d3bd34590e92ebfcfb5b11f0704750640ec16ffe` (sixth implementation); branch tip may also contain a later dossier-only handoff commit.
 - **Feature implementation commits:** `28e99bc2d18f5981ec5a614726cf752d48a648c9`, `9b6d1880d16c3239f91c79297a2e5942a0dfe1e7`, `efb4a02ec5884572aa1aa9128b972cdc53b24616`, `03d24ab8727805434d66aeeccf190b741e4cd8ac`, `73918f499e7fa89b7eb060c0df1e1f2681f8b2e9`, `d3bd34590e92ebfcfb5b11f0704750640ec16ffe`.
-- **Exact resume point:** separately authorized beta staged-tree reconciliation and integrated-tree review of `d3bd34590e92ebfcfb5b11f0704750640ec16ffe`, excluding this branch-local dossier; then separately authorized runtime/cohort validation.
-- **Working-tree state:** clean after this dossier handoff commit.
+- **Exact resume point:** commit the two RED→GREEN beta-review blocker repairs; redo code-only preflight from beta `de978fcf1ae2dcc85dfd9a4f66f47eb3f206f929`, integrated tests and independent exact-tree review, then local beta merge only if accepted. Runtime/cohort validation remains separate.
+- **Working-tree state:** repair changes pending isolated feature commit; update after committing.
 
 ## Decision gates
 
@@ -56,3 +58,4 @@ No collector, raw archive, configuration, wallet, service, or runtime changes. H
 - 2026-10-05 — fifth review found contradictory final outcomes could yield fabricated correctness/PnL; exact resolver now rejects such receipts. Full isolated suite passes; no merge/push/runtime.
 - 2026-10-05 — sixth review found a later event label lost at market collapse; connected valid market/event identities before earliest-forecast selection. Full isolated suite passes; no merge/push/runtime.
 - 2026-10-05 — seventh independent feature-tree read-only review found no blockers; retained isolated committed handoff, with beta integration and runtime explicitly deferred.
+- 2026-10-17 — first beta preflight passed tests but exact-tree review blocked two outcome-integrity gaps; returned repairs to the isolated feature with RED→GREEN regressions and full suite. No beta merge/push/runtime.
