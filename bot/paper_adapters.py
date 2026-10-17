@@ -877,6 +877,24 @@ class SimulatorPaperResolutionAdapter:
             fcntl.flock(lock, fcntl.LOCK_EX)
             if unsafe.exists():
                 raise ValueError("composed settlement unsafe: reconcile session and risk state manually")
+            # The lock serializes writers, but does not refresh an already
+            # constructed Simulator. Refuse a stale instance before reading
+            # evidence or creating a recovery marker; otherwise a second
+            # writer can erase the first writer's settled P&L and latched halt.
+            try:
+                disk_risk = json.loads(self.host.risk.data_path.read_text())
+                disk_session = json.loads((self.host.data_dir / f"sim_{self.host.session_id}.json").read_text())
+                expected_session = self.session_store.build_session_payload(
+                    max_entry_price=self.host.max_entry_price,
+                    consecutive_daily_losses=self.host.consecutive_daily_losses,
+                    last_loss_date=self.host.last_loss_date, report={},
+                )
+                disk_session.pop("report", None)
+                expected_session.pop("report", None)
+                if disk_risk != asdict(self.host.risk.state) or disk_session != expected_session:
+                    raise ValueError("stale composed account state; reload before settlement")
+            except (OSError, TypeError, json.JSONDecodeError) as exc:
+                raise ValueError("stale composed account state; reload before settlement") from exc
             trades = self.state_adapter.effective_trades()
             ids = [trade.id for trade in trades]
             if any(not isinstance(trade_id, str) or not trade_id for trade_id in ids) or len(ids) != len(set(ids)):

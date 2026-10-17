@@ -421,6 +421,50 @@ class PersistentComposedResolutionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "composed risk/session accounting"):
                 self.reload()
 
+    def test_two_instances_cannot_overwrite_other_settlement_under_account_lock(self):
+        second_market = "KXTEST-26OCT13-T81"
+        self.sim.trades[1].market_id = second_market
+        self.sim.risk.state.trade_history[1]["market_id"] = second_market
+        self.sim.risk._save_state()
+        self.sim._save_session()
+        with patch.dict("os.environ", {"MAX_DRAWDOWN_PCT": "0.01"}):
+            first = self.reload()
+            stale = self.reload()
+            self.sim = first
+            self.source_and_binding(outcome="NO")
+            self.assertEqual([event.position_id for event in self.resolve()], ["sim-one"])
+            self.assertTrue(first.risk.state.max_drawdown_halt)
+            self.sim = stale
+            self.source_and_binding(outcome="YES", composed_decision_id="decision-two",
+                                    shared_candidate_id="candidate-two", market_id=second_market,
+                                    source_changes={"market_id": second_market,
+                                                    "requested_market_id": second_market,
+                                                    "returned_market_id": second_market})
+            with self.assertRaisesRegex(ValueError, "stale composed account"):
+                self.resolve()
+            self.assertFalse((self.paper / "composed_settlement_unsafe.json").exists())
+            self.sim = self.reload()
+            self.assertEqual(self.sim.balance, 90.0)
+            self.assertTrue(self.sim.trades[0].resolved)
+            self.assertFalse(self.sim.trades[1].resolved)
+            self.assertTrue(self.sim.risk.state.max_drawdown_halt)
+            self.assertEqual([event.position_id for event in self.resolve()], ["sim-two"])
+            self.sim = self.reload()
+            self.assertEqual(self.sim.balance, 103.95)
+            self.assertTrue(all(trade.resolved for trade in self.sim.trades))
+            self.assertTrue(self.sim.risk.state.max_drawdown_halt)
+
+    def test_stale_session_only_is_rejected_before_any_account_write(self):
+        self.source_and_binding(outcome="NO")
+        session_path = self.paper / f"sim_{self.sim.session_id}.json"
+        saved = json.loads(session_path.read_text())
+        saved["scan_count"] += 1
+        session_path.write_text(json.dumps(saved))
+        with self.assertRaisesRegex(ValueError, "stale composed account"):
+            self.resolve()
+        self.assertEqual(json.loads(session_path.read_text())["scan_count"], saved["scan_count"])
+        self.assertFalse((self.paper / "composed_settlement_unsafe.json").exists())
+
     def test_recovery_after_session_write_and_interrupted_restore_is_repeatable(self):
         self.source_and_binding(outcome="NO")
         original = self.sim.session_store.save_session
