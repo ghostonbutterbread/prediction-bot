@@ -7,8 +7,8 @@
 - **Base commit:** `14982f867bc324aae21bb1c2c8e396fb176b4dfe`
 - **Intended integration target:** `beta` (local merge after exact-tree review; no push/runtime authorized by this task)
 - **Last updated:** 2026-10-17
-- **Latest immutable recovery checkpoint:** `d3bd34590e92ebfcfb5b11f0704750640ec16ffe`
-- **Feature implementation commits:** `28e99bc2d18f5981ec5a614726cf752d48a648c9`, `9b6d1880d16c3239f91c79297a2e5942a0dfe1e7`, `efb4a02ec5884572aa1aa9128b972cdc53b24616`, `03d24ab8727805434d66aeeccf190b741e4cd8ac`, `73918f499e7fa89b7eb060c0df1e1f2681f8b2e9`, `d3bd34590e92ebfcfb5b11f0704750640ec16ffe`
+- **Latest immutable recovery checkpoint:** `80a6d47147393d2e2fc7ec20615b9f33bdb4bd75`
+- **Feature implementation commits:** `28e99bc2d18f5981ec5a614726cf752d48a648c9`, `9b6d1880d16c3239f91c79297a2e5942a0dfe1e7`, `efb4a02ec5884572aa1aa9128b972cdc53b24616`, `03d24ab8727805434d66aeeccf190b741e4cd8ac`, `73918f499e7fa89b7eb060c0df1e1f2681f8b2e9`, `d3bd34590e92ebfcfb5b11f0704750640ec16ffe`, `80a6d47147393d2e2fc7ec20615b9f33bdb4bd75`
 
 ## Intent and implemented contract
 
@@ -38,10 +38,10 @@ The manifest join now rejects contradictory recorded-versus-strict outcomes befo
 ## Interruption / resume handoff
 
 - **Owning feature branch/ref:** `fix/source-router-unpriced-correctness`
-- **Latest immutable recovery checkpoint:** `d3bd34590e92ebfcfb5b11f0704750640ec16ffe` (sixth implementation); branch tip may also contain a later dossier-only handoff commit.
-- **Feature implementation commits:** `28e99bc2d18f5981ec5a614726cf752d48a648c9`, `9b6d1880d16c3239f91c79297a2e5942a0dfe1e7`, `efb4a02ec5884572aa1aa9128b972cdc53b24616`, `03d24ab8727805434d66aeeccf190b741e4cd8ac`, `73918f499e7fa89b7eb060c0df1e1f2681f8b2e9`, `d3bd34590e92ebfcfb5b11f0704750640ec16ffe`.
-- **Exact resume point:** commit the two RED→GREEN beta-review blocker repairs; redo code-only preflight from beta `de978fcf1ae2dcc85dfd9a4f66f47eb3f206f929`, integrated tests and independent exact-tree review, then local beta merge only if accepted. Runtime/cohort validation remains separate.
-- **Working-tree state:** repair changes pending isolated feature commit; update after committing.
+- **Latest immutable recovery checkpoint:** `80a6d47147393d2e2fc7ec20615b9f33bdb4bd75` (seventh implementation); branch tip may also contain a later dossier-only handoff commit.
+- **Feature implementation commits:** `28e99bc2d18f5981ec5a614726cf752d48a648c9`, `9b6d1880d16c3239f91c79297a2e5942a0dfe1e7`, `efb4a02ec5884572aa1aa9128b972cdc53b24616`, `03d24ab8727805434d66aeeccf190b741e4cd8ac`, `73918f499e7fa89b7eb060c0df1e1f2681f8b2e9`, `d3bd34590e92ebfcfb5b11f0704750640ec16ffe`, `80a6d47147393d2e2fc7ec20615b9f33bdb4bd75`.
+- **Exact resume point:** redo code-only preflight from beta `de978fcf1ae2dcc85dfd9a4f66f47eb3f206f929`, integrated tests and independent exact-tree review of the corrected feature, then local beta merge only if accepted. Runtime/cohort validation remains separate.
+- **Working-tree state:** implementation committed at `80a6d47147393d2e2fc7ec20615b9f33bdb4bd75`; clean after the following dossier-only handoff commit.
 
 ## Decision gates
 
