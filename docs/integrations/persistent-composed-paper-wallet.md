@@ -4,7 +4,7 @@
 - **Owner / task:** Hermes, prediction-bot Kanban `t_ab52708b`
 - **Branch / owning ref:** `feat/persistent-composed-paper-wallet`
 - **Base commit / intended target:** `3911f1808828261d8cfe712144e881c5b0882351` / local `beta`
-- **Last updated:** 2026-10-13 PDT
+- **Last updated:** 2026-10-17 PDT
 - **Latest independent ACCEPT:** entry implementation `b8fa1c7c6b2d4893890e3df21f9dc1c1766e22f4`. **Latest experimental recovery checkpoint:** `423932474e0ec00ffd27196596421ba4bd7a9543` (settlement code and tests; not independently reviewed or integrated); this dossier-only handoff follows it.
 - **Canonical context:** code-only reviewed saved pre-risk selector at beta `3911f18`; read-only seam audit `deleg_81fa2e8d`; `bot/forward_composed_paper.py`, `bot/composed_lane_wallet.py`, `bot/simulator.py`, `bot/paper_adapters.py`, `bot/resolver.py`.
 
@@ -22,6 +22,7 @@ Disabled-by-default callable `consume_persistent_composed_paper` accepts the sav
 - Tests: RED→GREEN latest-only, orphan BUY and mislabeled stale-observation regressions; ordinary observation-to-publication lag still opens. 16 focused passed; full `PYTHONPATH=. python3 -B -m unittest discover -s tests -q`: 1,439 OK, 7 skipped. Tests use temporary paper roots only.
 - Review: `deleg_dc185644` BLOCKED prior exact tip `d214e800c5ac952a51abff5ac89ba7e897ce5fba` (orphan picker BUY opened without control; old observed-at row sharing latest snapshot ID opened). Corrected at `b8fa1c7`; `deleg_f640c98b` ACCEPTED exact corrected tip `994b7eb1486d6372ead86035ffa7f981daafefa1` for **entry code only**, independently reproducing the prior failures and validating realistic publisher clocks, diagnostic extras, restart, 16 focused and 1,439 full OK/7 skipped. This is not settlement/enrollment acceptance.
 - Settlement experiment: `deleg_69ac514f` left partial files when its provider returned HTTP 402 (remaining budget could not meet requested context). Parent inspected the partial work, RED→GREEN-tested post-settlement re-entry, nonfinite settled P&L rejection, and bounded source streaming; 32 focused tests passed. Full isolated `PYTHONPATH=. python3 -B -m unittest discover -s tests -q`: **1,455 OK, 7 skipped**; `git diff --check` clean. No independent settlement review occurred; entry ACCEPT does **not** cover these changed files.
+- 2026-10-17 E2E entry seam: extended the real candidate loader → paper lane writer → saved pre-risk composer fixture through the persistent Simulator account. Corrected the fixture's two BUY market routes to the actual permitted daily-temperature route instead of weakening production validation. Two positions open in a temporary account, eight candidates retain BUY/SKIP selection, and restart is idempotent. One focused test passed; the full isolated suite ran 1,455 OK/7 skipped and `git diff --check` passed. This fixture stubs direct-router history, so it does **not** attest a production cohort, independent outcome authority, or settlement. Independent review remains pending for this newer tip.
 - Fresh cohort: not started; no archive or active account inspected.
 
 ## Blockers and deferred work
@@ -35,7 +36,7 @@ Disabled-by-default callable `consume_persistent_composed_paper` accepts the sav
 - **Owning feature branch/ref:** `feat/persistent-composed-paper-wallet`
 - **Latest independently accepted checkpoint:** `b8fa1c7c6b2d4893890e3df21f9dc1c1766e22f4` (entry code). **Latest unreviewed implementation checkpoint:** `423932474e0ec00ffd27196596421ba4bd7a9543` (experimental settlement). Current tip includes this later dossier-only handoff; reviewers must inspect the full diff from beta, not reuse the earlier entry verdict.
 - **Feature implementation commits:** `f3e5ec8eeabc54641d5e842042fb7ce311813c66`, `b8fa1c7c6b2d4893890e3df21f9dc1c1766e22f4`, `423932474e0ec00ffd27196596421ba4bd7a9543`.
-- **Exact resume point:** establish a verifiable forward strict-source and exact-binding producer, test unsafe-marker recovery across crash boundaries, then independently review settlement and the exact combined beta tree. Keep code-only and no activation until accepted.
+- **Exact resume point:** establish a verifiable forward strict-source and exact-binding producer, test unsafe-marker recovery across crash boundaries, add full collector→independent resolver→persistent-wallet E2E, then independently review settlement and the exact combined beta tree. Keep code-only and no activation until accepted.
 - **Working-tree state:** experimental settlement code and tests are committed at `4239324`; this dossier-only handoff follows. No beta merge, push, or runtime account change.
 
 ## Decision gates
@@ -52,3 +53,4 @@ Disabled-by-default callable `consume_persistent_composed_paper` accepts the sav
 - 2026-10-12 — `deleg_dc185644` independently BLOCKED entry tip `d214e80` for orphan picker BUY and stale observation sharing the latest snapshot ID. Parent reproduced both RED, fixed at `b8fa1c7` without changing extra diagnostic lanes; 16 focused, full 1,439 OK/7 skipped. Re-review required.
 - 2026-10-12 — `deleg_f640c98b` ACCEPTED exact corrected entry tip `994b7eb` for code-only checkpoint after independent RED repro, realistic fresh publisher and diagnostic control, restart check, and full 1,439 OK/7 skipped. Settlement/enrollment still blocked.
 - 2026-10-13 — settlement implementation delegation failed with HTTP 402 after changing only task-owned files; parent repaired bounded source reading and post-settlement entry continuity, full isolated suite 1,455 OK/7 skipped. This is an **unreviewed synthetic-only checkpoint**; source authority, forward binding producer and crash-recovery demonstration remain blockers.
+- 2026-10-17 — Ryushe authorized finishing the disabled paper feature, E2E test and beta integration, not deployment or live activation. Fetched `origin/beta` = local `de978fcf1ae2dcc85dfd9a4f66f47eb3f206f929`; isolated feature remains clean at start. Entry E2E focused pass with real lane writer and valid routes; independent read-only authority and crash audits in progress. No beta merge yet.

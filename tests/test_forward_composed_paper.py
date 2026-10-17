@@ -365,18 +365,21 @@ class ForwardCompositionTests(unittest.TestCase):
         stamp = "2026-09-01T12:00:00+00:00"
         with tempfile.TemporaryDirectory() as tmpdir:
             dataset = Path(tmpdir) / "collector_candidates.jsonl"
+            qualified_markets = {"c1": "KXHIGHNY-26SEP01-T80", "c2": "KXHIGHNY-26SEP01-T81"}
             for candidate_id, market_id, final_action in (("c1", "M1", "BUY_YES"), ("c2", "M2", "SKIP"),
                                                           ("c3", "M3", "SKIP"), ("c4", "M4", "SKIP"),
                                                           ("c5", "M5", "SKIP"), ("c6", "M6", "SKIP"),
                                                           ("c7", "M7", "SKIP"), ("c8", "M8", "SKIP")):
+                market_id = qualified_markets.get(candidate_id, market_id)
+                handler = "weather.daily_temperature.v1" if candidate_id in qualified_markets else "weather"
                 book_market = "OTHER" if candidate_id == "c4" else market_id
                 book_time = "2026-09-01T12:01:00+00:00" if candidate_id == "c5" else stamp
                 ask = 0.1 if candidate_id == "c7" else 0.4
                 candidate = {"schema_name": SCHEMA_NAME, "candidate_id": candidate_id,
                     "shared_snapshot_id": "snapshot-1", "run_id": "run-1", "market_id": market_id,
-                    "observed_at": stamp, "market": {"id": market_id, "question": "Will it happen?",
+                    "observed_at": stamp, "market": {"id": market_id, "question": "Will NYC high temperature be above 80 degrees?",
                     "exchange": "kalshi", "event_ticker": market_id,
-                    "route": {"allowed": True, "handler_id": "weather"}},
+                    "route": {"allowed": True, "handler_id": handler}},
                     "prices": {"order_book_snapshot": {"source": "book", "market_id": book_market,
                     "observed_at": book_time, "data": {"best_yes_ask": ask}}, "best_yes_ask": ask},
                     "decision": {"direction": final_action}}
@@ -394,8 +397,8 @@ class ForwardCompositionTests(unittest.TestCase):
                              "model_probability": 0.8}}
                         if candidate_id == "c6" else {"direction": "BUY_YES", "market_id": market_id,
                         "model_probability": 0.51 if candidate_id == "c8" else 0.8,
-                        "confidence": 0.9, "question": "Will it happen?",
-                        "exchange": "kalshi", "market_route": {"allowed": True, "handler_id": "weather"}})}}
+                        "confidence": 0.9, "question": "Will NYC high temperature be above 80 degrees?",
+                        "exchange": "kalshi", "market_route": {"allowed": True, "handler_id": handler}})}}
                 with dataset.open("a") as handle:
                     handle.write(json.dumps(row) + "\n")
             loaded = load_shared_candidate_paper_inputs(dataset, config={}, data_dir=Path(tmpdir) / "wallets",
@@ -404,7 +407,7 @@ class ForwardCompositionTests(unittest.TestCase):
             stable_rows = [{"shared_candidate_id": cid, "wallet_id": "stable_paper",
                 "run_id": "stable-run", "candidate_dataset_path": str(dataset),
                 "decision_role": "paper_shadow", "decision_id": "stable-" + cid,
-                "market_id": mid, "observed_at": stamp, "action": action,
+                "market_id": qualified_markets.get(cid, mid), "observed_at": stamp, "action": action,
                 "entry_price": 0.4 if action == "BUY_YES" else None,
                 "reason_code": "approved" if action == "BUY_YES" else "risk_rejected"}
                 for cid, mid, action in (("c1", "M1", "BUY_YES"), ("c2", "M2", "SKIP"),
@@ -467,6 +470,30 @@ class ForwardCompositionTests(unittest.TestCase):
             self.assertEqual(next(p for p in result["control_wallet"]["open_positions"] if p["market_id"] == "M7")["entry_price"], 0.1)
             self.assertEqual(result["combined_wallet"]["summary"]["opened_positions"], 2)
             self.assertEqual(result["candidate_universe"], "recorded_pre_risk_picker_intents")
+            # The same real lane-writer rows must reach the persistent Simulator,
+            # not only the in-memory diagnostic wallet above.
+            from bot.persistent_composed_paper import consume_persistent_composed_paper
+            paper_root = Path(tmpdir) / "composed" / "paper"
+            protected = {name: Path(tmpdir) / name / "paper" for name in ("stable", "beta", "live")}
+            account = {"starting_balance": 100.0, "enable_social": False,
+                "strategy": {"enable_ai": False, "enable_news": False, "enable_social": False},
+                "risk": {"kelly_fraction": 0.5, "max_bet_pct": 0.1}}
+            saved = Path(__file__).resolve().parents[1] / "lane_compositions" / "pre_risk_router_guard_kelly.yaml"
+            def enter():
+                return consume_persistent_composed_paper(
+                    saved_config_path=saved, lane_rows=rows, cohort_id="synthetic-forward-cohort",
+                    publisher_state=state, paper_root=paper_root, protected_roots=protected,
+                    account_config=account, enabled=True, now=now)
+            entered = enter()
+            self.assertEqual([row["status"] for row in entered["decisions"][:2]], ["opened", "opened"])
+            session_path, = paper_root.glob("sim_*.json")
+            session = json.loads(session_path.read_text())
+            self.assertEqual([trade["market_id"] for trade in session["trades"]],
+                             [qualified_markets["c1"], qualified_markets["c2"]])
+            self.assertTrue(all(not trade["resolved"] for trade in session["trades"]))
+            self.assertEqual([row["status"] for row in enter()["decisions"][:2]],
+                             ["already_processed", "already_processed"])
+            self.assertEqual(len(json.loads(session_path.read_text())["trades"]), 2)
             incomplete = evaluate_forward_composition(
                 [row for row in rows if not (row["shared_candidate_id"] == "c2" and row["policy"] == "shadow_pre_risk_picker")],
                 [], starting_balance_usd=100, kelly_sizer=FixedKelly(), risk_policy=ApprovingRisk(),
