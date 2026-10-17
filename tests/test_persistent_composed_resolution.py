@@ -122,21 +122,38 @@ class PersistentComposedResolutionTests(unittest.TestCase):
                     "observed_at": "2026-10-13T10:00:00+00:00"}
         intent = {**identity, "decision_id": "forward-combined:" + _digest(identity),
                   "lane_id": "forward_composed_paper", "action": "BUY_YES"}
+        self.source = self.root / "central" / "latest_resolutions.jsonl"
+        self.source.parent.mkdir()
+        feed_dir = self.root / "feed"
+        feed_dir.mkdir()
+        feed_config = {"resolution_feed": {"enabled": True, "mode": "incremental_unresolved",
+                       "output_dir": str(feed_dir), "central_output_dir": str(self.source.parent),
+                       "market_ref_paths": [str(self.root / "refs.jsonl")]}}
+        (feed_dir / "state.json").write_text(json.dumps({"schema_name": "resolution_feed_state",
+            "status": "refreshed", "mode": "incremental_unresolved",
+            "latest_resolution_path": str(self.source), "central_resolution_path": str(self.source),
+            "used_decision_ledger_paths": [str(self.root / "refs.jsonl")]}))
         self.source_and_binding(source_changes={"resolution": {"outcome": "NO"}})
         result = bind_composed_finalized_outcomes(intents=[intent], strict_resolutions_path=self.source,
-                                                  output_dir=self.root / "invalid-source")
+                                                  output_dir=self.root / "invalid-source", feed_config=feed_config)
         self.assertEqual(result.bindings_path.read_text(), "")
         self.assertEqual(json.loads(result.unbound_path.read_text())["reason_code"], "invalid_authoritative_resolution")
         with self.assertRaises(ValueError):
             bind_composed_finalized_outcomes(intents=[{**intent, "outcome": "YES"}],
                                              strict_resolutions_path=self.source,
-                                             output_dir=self.root / "untrusted-intent")
+                                             output_dir=self.root / "untrusted-intent", feed_config=feed_config)
         self.assertFalse((self.root / "untrusted-intent").exists())
         self.source_and_binding()
         self.source.write_bytes(self.source.read_bytes() * 2)
         duplicate = bind_composed_finalized_outcomes(intents=[intent], strict_resolutions_path=self.source,
-                                                     output_dir=self.root / "duplicate-source")
+                                                     output_dir=self.root / "duplicate-source", feed_config=feed_config)
         self.assertEqual(json.loads(duplicate.unbound_path.read_text())["reason_code"], "ambiguous_market_resolution")
+        fake = self.root / "caller_fabricated.jsonl"
+        fake.write_bytes(self.source.read_bytes())
+        with self.assertRaisesRegex(ValueError, "configured independent feed"):
+            bind_composed_finalized_outcomes(intents=[intent], strict_resolutions_path=fake,
+                                             output_dir=self.root / "fabricated-binding", feed_config=feed_config)
+        self.assertFalse((self.root / "fabricated-binding").exists())
 
     def test_missing_wrong_or_nonfinal_evidence_leaves_both_reservations(self):
         cases = ({"strict_resolution_source_sha256": "a" * 64},
@@ -250,6 +267,128 @@ class PersistentComposedResolutionTests(unittest.TestCase):
             self.reload()
         self.assertEqual(risk_path.read_text(), "{corrupt")
 
+    def test_parseable_daily_pnl_divergence_refuses_restart_without_overwriting_risk(self):
+        self.source_and_binding(outcome="NO")
+        self.assertEqual(self.resolve()[0].pnl, -10.0)
+        risk_path = self.sim.risk.data_path
+        risk = json.loads(risk_path.read_text())
+        self.assertEqual(risk["daily_pnl"], -10.0)
+        risk["daily_pnl"] = 0.0
+        changed = json.dumps(risk)
+        risk_path.write_text(changed)
+        with self.assertRaisesRegex(ValueError, "composed.*risk.*session"):
+            self.reload()
+        self.assertEqual(risk_path.read_text(), changed)
+
+    def test_parseable_cooldown_divergence_refuses_restart(self):
+        self.source_and_binding(outcome="NO")
+        self.assertEqual(self.resolve()[0].pnl, -10.0)
+        risk_path = self.sim.risk.data_path
+        risk = json.loads(risk_path.read_text())
+        self.assertEqual(risk["consecutive_losses"], 1)
+        risk["cooldown_until"] = "2099-01-01T00:00:00+00:00"
+        risk_path.write_text(json.dumps(risk))
+        with self.assertRaisesRegex(ValueError, "composed risk/session"):
+            self.reload()
+
+    def test_interrupted_risk_write_preserves_unsafe_pair_on_restart(self):
+        self.source_and_binding(outcome="NO")
+        original = self.sim.risk.record_outcome
+        def save_then_crash(*args, **kwargs):
+            original(*args, **kwargs)
+            raise RuntimeError("synthetic crash after risk save")
+        with patch.object(self.sim.risk, "record_outcome", side_effect=save_then_crash):
+            with self.assertRaisesRegex(RuntimeError, "synthetic crash"):
+                self.resolve()
+        risk_path = self.sim.risk.data_path
+        risk_before = risk_path.read_bytes()
+        self.reload()
+        self.assertEqual(risk_path.read_bytes(), risk_before)
+        self.assertTrue((self.paper / "composed_settlement_unsafe.json").is_file())
+
+    def test_explicit_recovery_restores_pre_settlement_pair_then_retries_once(self):
+        self.source_and_binding(outcome="NO")
+        original = self.sim.risk.record_outcome
+        def save_then_crash(*args, **kwargs):
+            original(*args, **kwargs)
+            raise RuntimeError("synthetic crash after risk write")
+        with patch.object(self.sim.risk, "record_outcome", side_effect=save_then_crash):
+            with self.assertRaisesRegex(RuntimeError, "synthetic crash"):
+                self.resolve()
+        self.sim = self.reload()
+        self.assertTrue((self.paper / "composed_settlement_unsafe.json").exists())
+        with self.assertRaisesRegex(ValueError, "acknowledgement"):
+            self.sim.resolution_adapter.recover_interrupted_exact_settlement()
+        self.assertTrue((self.paper / "composed_settlement_unsafe.json").exists())
+        self.sim.resolution_adapter.recover_interrupted_exact_settlement(acknowledge_no_external_writes=True)
+        self.assertFalse((self.paper / "composed_settlement_unsafe.json").exists())
+        self.sim = self.reload()
+        self.assertFalse(self.sim.trades[0].resolved)
+        self.assertEqual(self.sim.balance, 100.0)
+        self.assertEqual(self.sim.risk.state.daily_pnl, 0.0)
+        self.assertEqual(self.resolve()[0].pnl, -10.0)
+        self.assertEqual(self.resolve(), [])
+        self.sim = self.reload()
+        self.assertEqual(self.sim.balance, 90.0)
+        self.assertEqual(self.sim.risk.state.daily_pnl, -10.0)
+
+    def test_recovery_after_session_write_and_interrupted_restore_is_repeatable(self):
+        self.source_and_binding(outcome="NO")
+        original = self.sim.session_store.save_session
+        def save_then_crash():
+            original()
+            raise RuntimeError("synthetic crash after session write")
+        with patch.object(self.sim.session_store, "save_session", side_effect=save_then_crash):
+            with self.assertRaisesRegex(RuntimeError, "synthetic crash"):
+                self.resolve()
+        self.sim = self.reload()
+        with patch("bot.paper_adapters.os.replace", side_effect=OSError("restore interrupted")):
+            with self.assertRaisesRegex(OSError, "restore interrupted"):
+                self.sim.resolution_adapter.recover_interrupted_exact_settlement(
+                    acknowledge_no_external_writes=True)
+        self.assertTrue((self.paper / "composed_settlement_unsafe.json").exists())
+        self.sim.resolution_adapter.recover_interrupted_exact_settlement(acknowledge_no_external_writes=True)
+        self.sim = self.reload()
+        self.assertFalse(self.sim.trades[0].resolved)
+        self.assertEqual(self.sim.balance, 100.0)
+        self.assertEqual(self.sim.risk.state.daily_pnl, 0.0)
+        self.assertEqual(self.resolve()[0].pnl, -10.0)
+
+    def test_tampered_recovery_preimage_cannot_clear_unsafe_marker(self):
+        self.source_and_binding(outcome="NO")
+        original = self.sim.risk.record_outcome
+        def save_then_crash(*args, **kwargs):
+            original(*args, **kwargs)
+            raise RuntimeError("synthetic crash")
+        with patch.object(self.sim.risk, "record_outcome", side_effect=save_then_crash):
+            with self.assertRaisesRegex(RuntimeError, "synthetic crash"):
+                self.resolve()
+        marker_path = self.paper / "composed_settlement_unsafe.json"
+        marker = json.loads(marker_path.read_text())
+        (self.paper / marker["preimage_dir"] / "risk_state.json").write_text("{}")
+        self.sim = self.reload()
+        with self.assertRaisesRegex(ValueError, "preimage hash mismatch"):
+            self.sim.resolution_adapter.recover_interrupted_exact_settlement(
+                acknowledge_no_external_writes=True)
+        self.assertTrue(marker_path.exists())
+
+    def test_source_change_during_accounting_is_fenced_and_recoverable(self):
+        self.source_and_binding(outcome="YES")
+        original = self.sim.risk.record_outcome
+        def mutate_source_then_record(*args, **kwargs):
+            self.source.write_text("{changed during accounting}\n")
+            return original(*args, **kwargs)
+        with patch.object(self.sim.risk, "record_outcome", side_effect=mutate_source_then_record):
+            with self.assertRaisesRegex(RuntimeError, "dual-write verification failed"):
+                self.resolve()
+        self.assertTrue((self.paper / "composed_settlement_unsafe.json").exists())
+        self.sim = self.reload()
+        self.sim.resolution_adapter.recover_interrupted_exact_settlement(acknowledge_no_external_writes=True)
+        self.sim = self.reload()
+        self.assertFalse(self.sim.trades[0].resolved)
+        self.assertEqual(self.sim.balance, 100.0)
+        self.assertEqual(self.sim.risk.state.daily_pnl, 0.0)
+
     def test_composed_risk_save_failure_is_not_silently_reported_as_success(self):
         with patch("bot.risk.json.dump", side_effect=OSError("synthetic risk write failure")):
             with self.assertRaisesRegex(OSError, "synthetic risk write failure"):
@@ -280,7 +419,12 @@ class PersistentComposedResolutionTests(unittest.TestCase):
 
     def test_dual_write_must_be_durable_before_unsafe_marker_is_removed(self):
         self.source_and_binding(outcome="NO")
-        with patch("bot.paper_adapters.os.fsync", side_effect=[None, None, OSError("disk flush failed")]):
+        from bot.paper_adapters import _fsync_directory
+        def fail_after_writes(path):
+            if (self.paper / "composed_settlement_unsafe.json").exists() and self.sim.trades[0].resolved:
+                raise OSError("disk flush failed")
+            return _fsync_directory(path)
+        with patch("bot.paper_adapters._fsync_directory", side_effect=fail_after_writes):
             with self.assertRaisesRegex(OSError, "disk flush failed"):
                 self.resolve()
         self.assertTrue((self.paper / "composed_settlement_unsafe.json").exists())

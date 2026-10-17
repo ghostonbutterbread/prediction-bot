@@ -272,11 +272,17 @@ class Simulator:
 
         except Exception as e:
             if (self.data_dir / "composed_binding.json").is_file():
+                if isinstance(e, ValueError) and "composed risk/session" in str(e):
+                    raise
                 raise ValueError("composed session unavailable; account requires reconciliation") from e
             logger.error(f"Failed to load session {session_id or 'latest'}: {e}")
             return False
 
     def _apply_loaded_session(self, loaded: LoadedPaperSession) -> None:
+        composed = (self.data_dir / "composed_binding.json").is_file()
+        unsafe = (self.data_dir / "composed_settlement_unsafe.json").exists()
+        if composed and not unsafe:
+            self._verify_composed_risk_session(loaded)
         self.session_id = loaded.session_id
         self.starting_balance = loaded.starting_balance
         self.balance = loaded.balance
@@ -292,6 +298,10 @@ class Simulator:
         self.rolling_win_rate = 0.0
         self.rolling_win_count = 0
         self.rolling_loss_count = 0
+        if composed and unsafe:
+            # The two files may represent opposite sides of an interrupted
+            # settlement. Never rewrite either one while the fence is set.
+            return
         self.risk.sync_with_trades(
             self.trades,
             current_balance=self.balance,
@@ -306,6 +316,73 @@ class Simulator:
                 ",".join(startup_standby.get("reason_codes", [])) or "unknown",
                 startup_standby.get("useful_trade_capacity", 0.0),
             )
+
+    def _verify_composed_risk_session(self, loaded: LoadedPaperSession) -> None:
+        """Refuse a valid-JSON but divergent account before startup sync writes."""
+        state = self.risk.state
+        try:
+            if any(not math.isfinite(value) for value in (
+                    state.current_balance, state.starting_balance, state.daily_pnl,
+                    state.available_cash, state.reserved_capital)):
+                raise ValueError("nonfinite account value")
+            for risk_value, session_value in ((state.current_balance, loaded.balance),
+                                              (state.starting_balance, loaded.starting_balance),
+                                              (state.available_cash, loaded.available_cash),
+                                              (state.reserved_capital, loaded.reserved_capital)):
+                if abs(risk_value - session_value) > 0.011:
+                    raise ValueError("balance or reservation disagreement")
+            trades = loaded.trades
+            ids = [trade.id for trade in trades]
+            risk_rows = state.trade_history
+            if (len(set(ids)) != len(ids) or len(risk_rows) != len(trades)
+                    or any(not isinstance(row, dict) for row in risk_rows)):
+                raise ValueError("trade count or identity disagreement")
+            risk_by_id = {row.get("trade_id"): row for row in risk_rows}
+            if len(risk_by_id) != len(risk_rows) or set(risk_by_id) != set(ids):
+                raise ValueError("risk trade identity disagreement")
+            daily = 0.0
+            streak_wins = streak_losses = 0
+            settled = sorted((trade for trade in trades if trade.resolved),
+                             key=lambda trade: trade.resolved_at or "")
+            for trade in trades:
+                record = risk_by_id[trade.id]
+                if record.get("resolved") is not trade.resolved:
+                    raise ValueError("risk trade resolution disagreement")
+                if trade.resolved and trade.outcome != "VOID":
+                    if (trade.pnl is None or not math.isfinite(trade.pnl)
+                            or record.get("pnl") is None
+                            or abs(record["pnl"] - trade.pnl) > 0.0001):
+                        raise ValueError("risk trade P&L disagreement")
+            for trade in settled:
+                if trade.outcome == "VOID":
+                    continue
+                if not trade.resolved_at:
+                    raise ValueError("missing settlement processing clock")
+                if datetime.fromisoformat(trade.resolved_at).date().isoformat() == state.last_reset_date:
+                    daily += trade.pnl
+                if trade.pnl > 0:
+                    streak_wins += 1
+                    streak_losses = 0
+                elif trade.pnl < 0:
+                    streak_losses += 1
+                    streak_wins = 0
+                else:
+                    streak_wins = 0
+            if (abs(state.daily_pnl - daily) > 0.0001
+                    or state.consecutive_wins != streak_wins
+                    or state.consecutive_losses != streak_losses):
+                raise ValueError("risk counters disagree with settled session")
+            if streak_losses < self.risk.cooldown_after_losses:
+                if state.cooldown_until:
+                    raise ValueError("risk cooldown without loss threshold")
+            else:
+                last_loss = datetime.fromisoformat(settled[-1].resolved_at)
+                cooldown = datetime.fromisoformat(state.cooldown_until)
+                expected = last_loss + timedelta(minutes=self.risk.cooldown_after_losses * 3)
+                if abs((cooldown - expected).total_seconds()) > 5:
+                    raise ValueError("risk cooldown disagrees with settlement clock")
+        except (TypeError, AttributeError, ValueError, OverflowError) as exc:
+            raise ValueError("composed risk/session accounting disagrees; reconcile before entry") from exc
 
     def _hydrate_trade(self, t_data: dict, index: int) -> SimTrade:
         return SimTrade(

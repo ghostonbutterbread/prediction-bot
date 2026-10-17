@@ -7,11 +7,13 @@ import logging
 import fcntl
 import hashlib
 import os
+import shutil
+import tempfile
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from math import isfinite
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from bot.shared_core import (
     AccountState,
@@ -827,6 +829,34 @@ class SimulatorPaperResolutionAdapter:
             )
         return events
 
+    def resolve_configured_composed_positions(
+        self, *, intents: Sequence[Mapping[str, Any]], feed_config: Mapping[str, Any],
+        output_dir: str | Path, as_of: str | datetime,
+    ) -> list[ResolutionEvent]:
+        """Configured-feed paper entry point; never take an outcome from a decision.
+
+        No network refresh or account enrollment occurs here. A separately
+        owned resolution feed must already have published its latest state.
+        """
+        from bot.composed_resolution_binding import bind_composed_finalized_outcomes
+        from bot.resolution_feed import normalize_resolution_feed_config
+
+        if getattr(self.host, "runtime_mode", None) != "paper" or not (self.host.data_dir / "composed_binding.json").is_file():
+            raise ValueError("configured settlement requires a bound composed paper account")
+        target = Path(output_dir).resolve()
+        if target == self.host.data_dir or self.host.data_dir in target.parents:
+            raise ValueError("resolution binding output must be separate from paper account")
+        feed = normalize_resolution_feed_config(feed_config)
+        source = Path(feed["central_output_dir"]) / "latest_resolutions.jsonl"
+        artifacts = bind_composed_finalized_outcomes(
+            intents=intents, strict_resolutions_path=source,
+            output_dir=target, feed_config=feed_config,
+        )
+        return self.resolve_exact_positions(
+            binding_path=artifacts.bindings_path,
+            strict_resolutions_path=artifacts.frozen_resolutions_path, as_of=as_of,
+        )
+
     def resolve_exact_positions(
         self, *, binding_path: str | Path, strict_resolutions_path: str | Path, as_of: str | datetime,
     ) -> list[ResolutionEvent]:
@@ -954,8 +984,23 @@ class SimulatorPaperResolutionAdapter:
             # between the streamed evidence read and the accounting preflight.
             if source_hash != _stream_sha256(source_path):
                 raise ValueError("strict resolution source changed before accounting")
+            session_path = self.host.data_dir / f"sim_{self.host.session_id}.json"
+            preimage_dir = Path(tempfile.mkdtemp(prefix="composed_preimage_", dir=self.host.data_dir))
+            backups = {}
+            for original in (self.host.risk.data_path, session_path):
+                if not original.is_file() or original.parent != self.host.data_dir:
+                    raise ValueError("composed settlement requires saved risk and session state")
+                backup = preimage_dir / original.name
+                with original.open("rb") as reader, backup.open("xb") as writer:
+                    shutil.copyfileobj(reader, writer, length=1024 * 1024)
+                    writer.flush()
+                    os.fsync(writer.fileno())
+                backups[original.name] = _stream_sha256(backup)
+            _fsync_directory(preimage_dir)
+            _fsync_directory(self.host.data_dir)
             with unsafe.open("x", encoding="utf-8") as handle:
-                json.dump({"status": "unsafe_until_dual_write_verified", "trade_ids": [t.id for t, *_ in pending]}, handle)
+                json.dump({"status": "unsafe_until_dual_write_verified", "trade_ids": [t.id for t, *_ in pending],
+                           "preimage_dir": preimage_dir.name, "preimage_sha256": backups}, handle)
                 handle.flush()
                 os.fsync(handle.fileno())
             _fsync_directory(self.host.data_dir)
@@ -1011,7 +1056,70 @@ class SimulatorPaperResolutionAdapter:
             _fsync_directory(self.host.data_dir)
             unsafe.unlink()
             _fsync_directory(self.host.data_dir)
+            shutil.rmtree(preimage_dir)
             return events
+
+    def recover_interrupted_exact_settlement(self, *, acknowledge_no_external_writes: bool = False) -> None:
+        """Explicit operator rollback to verified pre-settlement files, never automatic.
+
+        The marker fences all paper decisions while either file can be partial.
+        Only use this on an isolated account after confirming no external writes
+        happened after the interruption; otherwise keep the marker and investigate.
+        """
+        if not acknowledge_no_external_writes:
+            raise ValueError("explicit no-external-writes acknowledgement required for composed recovery")
+        root = self.host.data_dir
+        if getattr(self.host, "runtime_mode", None) != "paper" or not (root / "composed_binding.json").is_file():
+            raise ValueError("recovery requires bound composed paper account")
+        unsafe = root / "composed_settlement_unsafe.json"
+        with (root / "composed.lock").open("a+b") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            marker = json.loads(unsafe.read_text())
+            name = marker.get("preimage_dir")
+            expected = marker.get("preimage_sha256")
+            session_name = f"sim_{self.host.session_id}.json"
+            if (not isinstance(name, str) or not name.startswith("composed_preimage_")
+                    or Path(name).name != name or not isinstance(expected, dict)
+                    or set(expected) != {"risk_state.json", session_name}):
+                raise ValueError("unsafe marker has no verified composed recovery preimage")
+            preimage_dir = root / name
+            if not preimage_dir.is_dir() or preimage_dir.is_symlink():
+                raise ValueError("composed recovery preimage is unavailable")
+            for filename, digest in expected.items():
+                backup = preimage_dir / filename
+                if (backup.is_symlink() or not backup.is_file() or not isinstance(digest, str)
+                        or _stream_sha256(backup) != digest):
+                    raise ValueError("composed recovery preimage hash mismatch")
+            # Each replace is atomic. If interrupted between them, the durable
+            # marker remains and the same preimages make recovery retryable.
+            for filename in ("risk_state.json", session_name):
+                path = root / filename
+                descriptor, temporary = tempfile.mkstemp(prefix=filename + ".restore.", dir=root)
+                try:
+                    with os.fdopen(descriptor, "wb") as writer, (preimage_dir / filename).open("rb") as reader:
+                        shutil.copyfileobj(reader, writer, length=1024 * 1024)
+                        writer.flush()
+                        os.fsync(writer.fileno())
+                    os.replace(temporary, path)
+                finally:
+                    if os.path.exists(temporary):
+                        os.unlink(temporary)
+            _fsync_directory(root)
+            if any(_stream_sha256(root / filename) != digest for filename, digest in expected.items()):
+                raise RuntimeError("composed recovery verification failed; unsafe marker retained")
+            self.host.risk._load_state()
+            if not self.host._load_session(self.host.session_id):
+                raise RuntimeError("composed recovery failed to reload; unsafe marker retained")
+            loaded = self.session_store.load_session(
+                self.host.session_id, trade_factory=self.host._hydrate_trade,
+                max_entry_price_default=self.host.max_entry_price,
+            )
+            if loaded is None:
+                raise RuntimeError("composed recovery session missing; unsafe marker retained")
+            self.host._verify_composed_risk_session(loaded)
+            unsafe.unlink()
+            _fsync_directory(root)
+            shutil.rmtree(preimage_dir)
 
 
 _EXACT_IDENTITY_FIELDS = ("composed_decision_id", "shared_candidate_id", "run_id", "market_id")

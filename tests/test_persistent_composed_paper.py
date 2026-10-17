@@ -327,7 +327,6 @@ class PersistentComposedPaperTests(unittest.TestCase):
                 self.consume(existing + self.rows("three", "KXHIGHNY-26OCT13-T82"))
 
     def test_feed_to_frozen_exact_binding_to_persistent_account_settlement(self):
-        from bot.composed_resolution_binding import bind_composed_finalized_outcomes
         from bot.forward_composed_paper import compose_forward_rows
         from bot.resolution_feed import run_resolution_feed_once
 
@@ -348,17 +347,17 @@ class PersistentComposedPaperTests(unittest.TestCase):
             fetch_market=lambda ticker: {"ticker": ticker, "status": "finalized",
                                          "result": "yes", "settlement_ts": settled})
         self.assertEqual(feed.status, "refreshed")
-        binding = bind_composed_finalized_outcomes(intents=[intent], strict_resolutions_path=feed.output_path,
-                                                    output_dir=self.base / "bound")
-        self.assertEqual(json.loads(binding.bindings_path.read_text())["outcome"], "YES")
-        feed.output_path.write_text("{new later source}\n")
         sim = Simulator({**self.account, "data_dir": str(self.paper_root), "trading": {"mode": "paper"},
                          "paper_wallets": {"allow_legacy_parent_session_lookup": False}})
-        events = sim.resolution_adapter.resolve_exact_positions(binding_path=binding.bindings_path,
-            strict_resolutions_path=binding.frozen_resolutions_path,
+        events = sim.resolution_adapter.resolve_configured_composed_positions(
+            intents=[intent], feed_config=config, output_dir=self.base / "bound",
             as_of=(datetime.fromisoformat(settled) + timedelta(minutes=2)).isoformat())
+        frozen_source = self.base / "bound" / "strict_resolutions.jsonl"
+        binding_path = self.base / "bound" / "exact_bindings.jsonl"
+        self.assertEqual(json.loads(binding_path.read_text())["outcome"], "YES")
+        feed.output_path.write_text("{new later source}\n")
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0].position_id, trade["id"])
-        self.assertEqual(sim.resolution_adapter.resolve_exact_positions(binding_path=binding.bindings_path,
-            strict_resolutions_path=binding.frozen_resolutions_path,
+        self.assertEqual(sim.resolution_adapter.resolve_exact_positions(binding_path=binding_path,
+            strict_resolutions_path=frozen_source,
             as_of=(datetime.fromisoformat(settled) + timedelta(minutes=2)).isoformat()), [])

@@ -18,6 +18,7 @@ import tempfile
 from bot.composed_lane_wallet import _reject_outcome_fields
 from bot.forward_composed_paper import _IDENTITY, _digest
 from bot.paper_adapters import _exact_assertions, _exact_clock, _exact_outcome, _same_source_stat
+from bot.resolution_feed import normalize_resolution_feed_config
 
 
 @dataclass(frozen=True)
@@ -35,12 +36,12 @@ def _jsonl(rows: list[dict[str, Any]]) -> bytes:
 
 def bind_composed_finalized_outcomes(
     *, intents: Sequence[Mapping[str, Any]], strict_resolutions_path: str | Path,
-    output_dir: str | Path,
+    output_dir: str | Path, feed_config: Mapping[str, Any],
 ) -> ComposedBindingArtifacts:
     """Produce immutable source copy and exact receipt bindings for BUY intents.
 
-    The source path must be an independently fetched finalized-resolution feed.
-    Its hash attests the frozen bytes, not the trustworthiness of a caller's path.
+    The configured feed publisher, not a caller-selected JSONL, owns the source
+    path. The trusted runtime config remains the trust anchor for that path.
     """
     accepted = []
     seen = set()
@@ -60,7 +61,25 @@ def bind_composed_finalized_outcomes(
         seen.add(key)
         accepted.append(key)
 
-    source = Path(strict_resolutions_path).resolve(strict=True)
+    feed = normalize_resolution_feed_config(feed_config)
+    configured = (Path(feed["central_output_dir"]) / "latest_resolutions.jsonl").absolute()
+    supplied = Path(strict_resolutions_path).absolute()
+    state_path = Path(feed["output_dir"]) / "state.json"
+    if (not feed["enabled"] or not feed["market_ref_paths"]
+            or supplied != configured or supplied.is_symlink()):
+        raise ValueError("resolution source must be the configured independent feed")
+    try:
+        raw_state = state_path.read_bytes()
+        state = json.loads(raw_state)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("configured independent feed state is unavailable") from exc
+    if (not isinstance(state, dict) or state.get("schema_name") != "resolution_feed_state"
+            or state.get("status") != "refreshed" or state.get("mode") != feed["mode"]
+            or any(Path(str(state.get(key) or "")).absolute() != configured
+                   for key in ("latest_resolution_path", "central_resolution_path"))
+            or not set(state.get("used_decision_ledger_paths") or []) & set(feed["market_ref_paths"])):
+        raise ValueError("configured independent feed publication does not match source")
+    source = supplied.resolve(strict=True)
     target = Path(output_dir).resolve()
     if source == target or source in target.parents or target in source.parents or target.exists():
         raise ValueError("binding output must be a new separate derived directory")
@@ -136,6 +155,8 @@ def bind_composed_finalized_outcomes(
         (staging / "unbound.jsonl").write_bytes(unbound_bytes)
         manifest = {"schema_name": "composed_exact_resolution_binding", "schema_version": 1,
                     "paper_only": True, "non_mutating": True, "source_path": str(source),
+                    "configured_feed_state_path": str(state_path.absolute()),
+                    "configured_feed_state_sha256": hashlib.sha256(raw_state).hexdigest(),
                     "strict_resolution_source_sha256": digest, "input_count": len(accepted),
                     "bound_count": len(bindings), "unbound_count": len(unbound),
                     "bindings_sha256": hashlib.sha256(binding_bytes).hexdigest(),
