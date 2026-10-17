@@ -332,6 +332,95 @@ class PersistentComposedResolutionTests(unittest.TestCase):
         self.assertEqual(self.sim.balance, 90.0)
         self.assertEqual(self.sim.risk.state.daily_pnl, -10.0)
 
+    def test_torn_risk_write_is_recoverable_without_constructing_simulator(self):
+        from bot.paper_adapters import recover_interrupted_composed_paper_account
+        self.source_and_binding(outcome="NO")
+        def torn_risk_write():
+            self.sim.risk.data_path.write_text("{partial")
+            raise OSError("synthetic torn risk write")
+        with patch.object(self.sim.risk, "_save_state", side_effect=torn_risk_write):
+            with self.assertRaisesRegex(OSError, "synthetic torn"):
+                self.resolve()
+        marker = self.paper / "composed_settlement_unsafe.json"
+        self.assertTrue(marker.is_file())
+        with self.assertRaisesRegex(ValueError, "composed risk state unavailable"):
+            self.reload()
+        with self.assertRaisesRegex(ValueError, "acknowledgement"):
+            recover_interrupted_composed_paper_account(paper_root=self.paper)
+        recover_interrupted_composed_paper_account(
+            paper_root=self.paper, acknowledge_no_external_writes=True)
+        self.assertFalse(marker.exists())
+        self.sim = self.reload()
+        self.assertFalse(self.sim.trades[0].resolved)
+        self.assertEqual(self.sim.balance, 100.0)
+        self.assertEqual(self.sim.risk.state.daily_pnl, 0.0)
+        self.assertEqual(self.resolve()[0].pnl, -10.0)
+        self.assertEqual(self.resolve(), [])
+
+    def test_parseable_drawdown_halt_removal_fails_closed(self):
+        self.sim.risk.max_session_drawdown_pct = 0.01
+        self.source_and_binding(outcome="NO")
+        self.resolve()
+        self.assertTrue(self.sim.risk.state.max_drawdown_halt)
+        risk_path = self.paper / "risk_state.json"
+        risk = json.loads(risk_path.read_text())
+        risk["max_drawdown_halt"] = False
+        risk_path.write_text(json.dumps(risk))
+        with patch.dict("os.environ", {"MAX_DRAWDOWN_PCT": "0.01"}):
+            with self.assertRaisesRegex(ValueError, "composed risk/session accounting"):
+                self.reload()
+
+    def test_torn_session_write_is_recoverable_without_constructing_simulator(self):
+        from bot.paper_adapters import recover_interrupted_composed_paper_account
+        self.source_and_binding(outcome="NO")
+        session_path = self.paper / f"sim_{self.sim.session_id}.json"
+        def torn_session_write():
+            session_path.write_text("{partial")
+            raise OSError("synthetic torn session write")
+        with patch.object(self.sim.session_store, "save_session", side_effect=torn_session_write):
+            with self.assertRaisesRegex(OSError, "synthetic torn"):
+                self.resolve()
+        marker = self.paper / "composed_settlement_unsafe.json"
+        self.assertTrue(marker.is_file())
+        with self.assertRaisesRegex(ValueError, "composed session unavailable"):
+            self.reload()
+        recover_interrupted_composed_paper_account(
+            paper_root=self.paper, acknowledge_no_external_writes=True)
+        self.assertFalse(marker.exists())
+        self.sim = self.reload()
+        self.assertFalse(self.sim.trades[0].resolved)
+        self.assertEqual(self.sim.balance, 100.0)
+        self.assertEqual(self.sim.risk.state.daily_pnl, 0.0)
+        self.assertEqual(self.resolve()[0].pnl, -10.0)
+
+    def test_past_drawdown_halt_removal_fails_after_balance_recovers(self):
+        second_market = "KXTEST-26OCT13-T81"
+        self.sim.trades[1].market_id = second_market
+        self.sim.risk.state.trade_history[1]["market_id"] = second_market
+        self.sim.risk._save_state()
+        self.sim._save_session()
+        self.sim.risk.max_session_drawdown_pct = 0.01
+        self.source_and_binding(outcome="NO")
+        self.resolve()
+        self.assertTrue(self.sim.risk.state.max_drawdown_halt)
+        # The second position was already open; settlement can restore the
+        # balance, but must not implicitly clear the latched admission halt.
+        self.source_and_binding(outcome="YES", composed_decision_id="decision-two",
+                                shared_candidate_id="candidate-two", market_id=second_market,
+                                source_changes={"market_id": second_market,
+                                                "requested_market_id": second_market,
+                                                "returned_market_id": second_market})
+        second_events = self.resolve()
+        self.assertEqual([event.position_id for event in second_events], ["sim-two"])
+        self.assertGreater(self.sim.balance, 100.0)
+        risk_path = self.paper / "risk_state.json"
+        risk = json.loads(risk_path.read_text())
+        risk["max_drawdown_halt"] = False
+        risk_path.write_text(json.dumps(risk))
+        with patch.dict("os.environ", {"MAX_DRAWDOWN_PCT": "0.01"}):
+            with self.assertRaisesRegex(ValueError, "composed risk/session accounting"):
+                self.reload()
+
     def test_recovery_after_session_write_and_interrupted_restore_is_repeatable(self):
         self.source_and_binding(outcome="NO")
         original = self.sim.session_store.save_session

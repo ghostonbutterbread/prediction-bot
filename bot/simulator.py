@@ -342,6 +342,9 @@ class Simulator:
                 raise ValueError("risk trade identity disagreement")
             daily = 0.0
             streak_wins = streak_losses = 0
+            running_balance = loaded.starting_balance
+            running_peak = running_balance
+            historically_halted = False
             settled = sorted((trade for trade in trades if trade.resolved),
                              key=lambda trade: trade.resolved_at or "")
             for trade in trades:
@@ -360,6 +363,12 @@ class Simulator:
                     raise ValueError("missing settlement processing clock")
                 if datetime.fromisoformat(trade.resolved_at).date().isoformat() == state.last_reset_date:
                     daily += trade.pnl
+                running_balance = round(running_balance + trade.pnl, 2)
+                running_peak = max(running_peak, running_balance)
+                if (running_peak > 0 and
+                        (running_peak - running_balance) / running_peak
+                        >= self.risk.max_session_drawdown_pct - 1e-10):
+                    historically_halted = True
                 if trade.pnl > 0:
                     streak_wins += 1
                     streak_losses = 0
@@ -372,6 +381,12 @@ class Simulator:
                     or state.consecutive_wins != streak_wins
                     or state.consecutive_losses != streak_losses):
                 raise ValueError("risk counters disagree with settled session")
+            high_water = max(state.session_starting_balance, state.session_peak_balance)
+            if (not state.max_drawdown_halt
+                    and (historically_halted or high_water > 0
+                         and (high_water - state.current_balance) / high_water
+                         >= self.risk.max_session_drawdown_pct)):
+                raise ValueError("session drawdown halt missing at current balance")
             if streak_losses < self.risk.cooldown_after_losses:
                 if state.cooldown_until:
                     raise ValueError("risk cooldown without loss threshold")

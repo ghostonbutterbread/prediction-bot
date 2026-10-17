@@ -65,6 +65,9 @@ class PaperPersistenceHost(PaperSimulatorHost, Protocol):
     def _apply_loaded_session(self, loaded: "LoadedPaperSession") -> None:
         ...
 
+    def _load_session(self, session_id: str | None = None) -> bool:
+        ...
+
 
 @dataclass(slots=True)
 class LoadedPaperSession:
@@ -1060,66 +1063,85 @@ class SimulatorPaperResolutionAdapter:
             return events
 
     def recover_interrupted_exact_settlement(self, *, acknowledge_no_external_writes: bool = False) -> None:
-        """Explicit operator rollback to verified pre-settlement files, never automatic.
+        """Rollback the account pair explicitly; use standalone API if construction fails."""
+        recover_interrupted_composed_paper_account(
+            paper_root=self.host.data_dir,
+            acknowledge_no_external_writes=acknowledge_no_external_writes,
+        )
+        self.host.risk._load_state()
+        if not self.host._load_session(self.host.session_id):
+            raise RuntimeError("composed recovery restored files but Simulator reload failed")
 
-        The marker fences all paper decisions while either file can be partial.
-        Only use this on an isolated account after confirming no external writes
-        happened after the interruption; otherwise keep the marker and investigate.
-        """
-        if not acknowledge_no_external_writes:
-            raise ValueError("explicit no-external-writes acknowledgement required for composed recovery")
-        root = self.host.data_dir
-        if getattr(self.host, "runtime_mode", None) != "paper" or not (root / "composed_binding.json").is_file():
-            raise ValueError("recovery requires bound composed paper account")
-        unsafe = root / "composed_settlement_unsafe.json"
-        with (root / "composed.lock").open("a+b") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            marker = json.loads(unsafe.read_text())
-            name = marker.get("preimage_dir")
-            expected = marker.get("preimage_sha256")
-            session_name = f"sim_{self.host.session_id}.json"
-            if (not isinstance(name, str) or not name.startswith("composed_preimage_")
-                    or Path(name).name != name or not isinstance(expected, dict)
-                    or set(expected) != {"risk_state.json", session_name}):
-                raise ValueError("unsafe marker has no verified composed recovery preimage")
-            preimage_dir = root / name
-            if not preimage_dir.is_dir() or preimage_dir.is_symlink():
-                raise ValueError("composed recovery preimage is unavailable")
-            for filename, digest in expected.items():
-                backup = preimage_dir / filename
-                if (backup.is_symlink() or not backup.is_file() or not isinstance(digest, str)
-                        or _stream_sha256(backup) != digest):
-                    raise ValueError("composed recovery preimage hash mismatch")
-            # Each replace is atomic. If interrupted between them, the durable
-            # marker remains and the same preimages make recovery retryable.
-            for filename in ("risk_state.json", session_name):
-                path = root / filename
-                descriptor, temporary = tempfile.mkstemp(prefix=filename + ".restore.", dir=root)
-                try:
-                    with os.fdopen(descriptor, "wb") as writer, (preimage_dir / filename).open("rb") as reader:
-                        shutil.copyfileobj(reader, writer, length=1024 * 1024)
-                        writer.flush()
-                        os.fsync(writer.fileno())
-                    os.replace(temporary, path)
-                finally:
-                    if os.path.exists(temporary):
-                        os.unlink(temporary)
-            _fsync_directory(root)
-            if any(_stream_sha256(root / filename) != digest for filename, digest in expected.items()):
-                raise RuntimeError("composed recovery verification failed; unsafe marker retained")
-            self.host.risk._load_state()
-            if not self.host._load_session(self.host.session_id):
-                raise RuntimeError("composed recovery failed to reload; unsafe marker retained")
-            loaded = self.session_store.load_session(
-                self.host.session_id, trade_factory=self.host._hydrate_trade,
-                max_entry_price_default=self.host.max_entry_price,
-            )
-            if loaded is None:
-                raise RuntimeError("composed recovery session missing; unsafe marker retained")
-            self.host._verify_composed_risk_session(loaded)
-            unsafe.unlink()
-            _fsync_directory(root)
-            shutil.rmtree(preimage_dir)
+
+def recover_interrupted_composed_paper_account(
+    *, paper_root: str | Path, acknowledge_no_external_writes: bool = False,
+) -> None:
+    """Offline rollback of a fenced bound PAPER account, without constructing Simulator.
+
+    This is deliberately manual. Confirm exclusive account ownership and no
+    external writes before acknowledging; a torn JSON risk/session file may
+    prevent normal Simulator construction. The saved preimages are immutable
+    inputs to this recovery, never fabricated from partially settled state.
+    """
+    if not acknowledge_no_external_writes:
+        raise ValueError("explicit no-external-writes acknowledgement required for composed recovery")
+    root = Path(paper_root)
+    if (root.is_symlink() or not root.is_dir()
+            or not (root / "composed_binding.json").is_file()):
+        raise ValueError("recovery requires bound composed paper account")
+    binding = json.loads((root / "composed_binding.json").read_text())
+    if (not isinstance(binding, dict) or binding.get("schema_name") != "persistent_composed_paper_binding"
+            or binding.get("paper_only") is not True):
+        raise ValueError("recovery requires bound composed paper account")
+    unsafe = root / "composed_settlement_unsafe.json"
+    with (root / "composed.lock").open("a+b") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        marker = json.loads(unsafe.read_text())
+        name = marker.get("preimage_dir")
+        expected = marker.get("preimage_sha256")
+        sessions = list(root.glob("sim_*.json"))
+        if (len(sessions) != 1 or not isinstance(name, str)
+                or not name.startswith("composed_preimage_") or Path(name).name != name
+                or not isinstance(expected, dict)
+                or set(expected) != {"risk_state.json", sessions[0].name}):
+            raise ValueError("unsafe marker has no verified composed recovery preimage")
+        preimage_dir = root / name
+        if not preimage_dir.is_dir() or preimage_dir.is_symlink():
+            raise ValueError("composed recovery preimage is unavailable")
+        for filename, digest in expected.items():
+            backup = preimage_dir / filename
+            if (backup.is_symlink() or not backup.is_file() or not isinstance(digest, str)
+                    or _stream_sha256(backup) != digest):
+                raise ValueError("composed recovery preimage hash mismatch")
+        # Each replace is atomic. If interrupted between them, the durable
+        # marker remains and the same preimages make recovery retryable.
+        for filename in ("risk_state.json", sessions[0].name):
+            path = root / filename
+            descriptor, temporary = tempfile.mkstemp(prefix=filename + ".restore.", dir=root)
+            try:
+                with os.fdopen(descriptor, "wb") as writer, (preimage_dir / filename).open("rb") as reader:
+                    shutil.copyfileobj(reader, writer, length=1024 * 1024)
+                    writer.flush()
+                    os.fsync(writer.fileno())
+                os.replace(temporary, path)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
+        _fsync_directory(root)
+        if any(_stream_sha256(root / filename) != digest for filename, digest in expected.items()):
+            raise RuntimeError("composed recovery verification failed; unsafe marker retained")
+        risk = json.loads((root / "risk_state.json").read_text())
+        session = json.loads(sessions[0].read_text())
+        if (not isinstance(risk, dict) or not isinstance(session, dict)
+                or session.get("session_id") != sessions[0].stem.removeprefix("sim_")
+                or not isinstance(session.get("trades"), list)
+                or not isinstance(risk.get("trade_history"), list)
+                or risk.get("current_balance") != session.get("balance")
+                or risk.get("reserved_capital") != session.get("reserved_capital")):
+            raise ValueError("composed recovery preimages disagree; unsafe marker retained")
+        unsafe.unlink()
+        _fsync_directory(root)
+        shutil.rmtree(preimage_dir)
 
 
 _EXACT_IDENTITY_FIELDS = ("composed_decision_id", "shared_candidate_id", "run_id", "market_id")
