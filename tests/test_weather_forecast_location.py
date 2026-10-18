@@ -134,6 +134,52 @@ class ForecastLocationTests(unittest.TestCase):
                 self.assertEqual([r for r in requests if not r.url.path.endswith("/observations/latest")], [],
                                  "a station conflict must not query any forecast")
 
+    def test_unparseable_explicit_metadata_cannot_use_configured_forecast_or_warm_cache(self):
+        requests = []
+
+        def handler(request):
+            requests.append(request)
+            if request.url.path == "/stations/KLAX":
+                payload = station_payload()
+            elif request.url.path.startswith("/points/"):
+                payload = {"properties": {"gridId": "LOX", "gridX": 1, "gridY": 1}}
+            elif request.url.path.startswith("/gridpoints/"):
+                payload = forecast_payload()
+            elif request.url.host == "api.open-meteo.com":
+                payload = {"hourly": {"time": [TARGET + "T12:00"], "temperature_2m": [72]},
+                           "current": {"temperature_2m": 69}}
+            else:
+                payload = {"properties": {}}
+            return httpx.Response(200, json=payload)
+
+        engine = self.engine(handler)
+        question = "Will Los Angeles high temperature be above 80° on Oct 19, 2026?"
+        # Absent station metadata remains a usable, inferred configured forecast.
+        self.assertIsNotNone(engine._score_temperature_market(question, .5, market_date=TARGET))
+        cases = (
+            ({"station_id": "not-a-station"}, "explicit_station_unresolved"),
+            ({"station_cli": "not-a-station"}, "explicit_station_unresolved"),
+            ({"weather_context": {"station_id": "not-a-station"}}, "explicit_station_unresolved"),
+            ({"station_id": "KBUR", "metadata": {"station_id": "not-a-station"}}, "conflicting_explicit_stations"),
+            ({"station_id": "not-a-station", "rules_primary": "Recorded at CLILAX"}, "conflicting_explicit_stations"),
+        )
+        for metadata, reason in cases:
+            with self.subTest(metadata=metadata):
+                before = len(requests)
+                signal = engine._score_temperature_market(
+                    question, .5, market_date=TARGET, market_metadata=metadata,
+                )
+                self.assertIsNone(signal, "unresolved explicit metadata must not be discarded or use the warm configured forecast")
+                self.assertEqual([r for r in requests[before:] if not r.url.path.endswith("/observations/latest")], [])
+                result = list(engine._cache.values())[-1][0]
+                for snapshot in result.details["source_snapshots"][:2]:
+                    self.assertFalse(snapshot.scoreable_forecast)
+                    self.assertEqual(snapshot.availability_reason, reason)
+                    location = snapshot.source_details["forecast_location"]
+                    self.assertEqual(location["station_origin"], "market_explicit")
+                    self.assertIsNone(location.get("station_id"))
+                    self.assertNotIn("latitude", location)
+
     def test_market_explicit_station_changes_real_queries_and_engine_cache_identity(self):
         requests = []
         # KBUR point and grids are synthetic distinct-location test values.

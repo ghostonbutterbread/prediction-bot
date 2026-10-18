@@ -148,8 +148,9 @@ def _forecast_station_selection(city: str, metadata: dict | None = None) -> dict
         if value is None or value == "":
             continue
         resolved = resolve_weather_station({"station_id": value})
-        if resolved.source == "explicit_station_field":
-            candidates.append((resolved, "station_metadata"))
+        # Present-but-unresolved is still an explicit assertion, not permission
+        # to use the configured city station or discard it beside a valid alias.
+        candidates.append((resolved, "station_metadata"))
     for field_name in ("rules_primary", "rules_secondary"):
         text = (metadata or {}).get(field_name)
         if not isinstance(text, str):
