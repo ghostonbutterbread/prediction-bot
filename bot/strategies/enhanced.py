@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
 
+from bot.feeds.weather_pro import project_probability_evidence
 from bot.feeds.news import NewsFeed
 from bot.feeds.twitter import SocialFeed
 from bot.feeds.ai_signal import AISignalFeed
@@ -235,6 +236,9 @@ class EnhancedStrategyEngine:
                 adjusted = dict(sig)
                 adjusted["predicted_prob"] = validation.adjusted_prob
                 adjusted["confidence"] = validation.adjusted_confidence
+                evidence = project_probability_evidence(adjusted.pop("probability_evidence", None), validation.adjusted_prob)
+                if evidence is not None:
+                    adjusted["probability_evidence"] = evidence
                 if validation.warnings:
                     adjusted.setdefault("warnings", []).extend(validation.warnings)
                 validated_signals[name] = adjusted
@@ -309,6 +313,12 @@ class EnhancedStrategyEngine:
             "exchange": market.exchange,
             "direction": direction,
             "model_probability": round(weighted_prob, 4),
+            "probability_evidence": {
+                "schema_version": 1, "yes_probability": round(weighted_prob, 4),
+                "basis": "heuristic_weighted_ensemble_v1",
+                "calibration_status": "not_established",
+                "fallback_reason": "empirical_contract_probability_unavailable",
+            },
             "market_price": round(entry_price, 4),
             "yes_market_price": yes_price,
             "no_market_price": no_price,
@@ -409,6 +419,9 @@ class EnhancedStrategyEngine:
                 adjusted = dict(sig)
                 adjusted["predicted_prob"] = validation.adjusted_prob
                 adjusted["confidence"] = validation.adjusted_confidence
+                evidence = project_probability_evidence(adjusted.pop("probability_evidence", None), validation.adjusted_prob)
+                if evidence is not None:
+                    adjusted["probability_evidence"] = evidence
                 if validation.warnings:
                     adjusted.setdefault("warnings", []).extend(validation.warnings)
                 validated_signals[name] = adjusted
@@ -461,6 +474,12 @@ class EnhancedStrategyEngine:
             "exchange": market.exchange,
             "direction": direction,
             "model_probability": round(weighted_prob, 4),
+            "probability_evidence": {
+                "schema_version": 1, "yes_probability": round(weighted_prob, 4),
+                "basis": "heuristic_weighted_ensemble_v1",
+                "calibration_status": "not_established",
+                "fallback_reason": "empirical_contract_probability_unavailable",
+            },
             "market_price": round(entry_price, 4),
             "yes_market_price": yes_price,
             "no_market_price": no_price,

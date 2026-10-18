@@ -13,6 +13,7 @@ from typing import Any, Mapping
 
 
 from bot.shared_market_feed import shared_candidate_identity_mismatch
+from bot.feeds.weather_pro import project_probability_evidence
 
 REPLAY_DECISION_INPUT_SCHEMA_NAME = "replay_decision_input"
 REPLAY_DECISION_INPUT_SCHEMA_VERSION = 1
@@ -86,6 +87,15 @@ _SOURCE_METADATA_V1 = {
     "is_daytime": _SCALAR, "periods_used": [_PERIOD_REF_V1], "high_period": _PERIOD_REF_V1,
     "low_period": _PERIOD_REF_V1, "source": _SCALAR, "city": _SCALAR,
     "observation_time": _SCALAR,
+    "forecast_location": {
+        "station_id": _SCALAR, "station_cli": _SCALAR, "station_origin": _SCALAR,
+        "station_mapping": _SCALAR, "station_evidence_field": _SCALAR,
+        "city": _SCALAR, "basis": _SCALAR, "availability_reason": _SCALAR,
+        "latitude": _SCALAR, "longitude": _SCALAR, "coordinate_source": _SCALAR,
+        "coordinate_url": _SCALAR, "coordinates_fetched_at": _SCALAR,
+    },
+    "forecast_query_url": _SCALAR, "response_latitude": _SCALAR,
+    "response_longitude": _SCALAR,
 }
 _WEATHER_SOURCE_V1 = {
     "source_id": _SCALAR, "source_name": _SCALAR, "source_family": _SCALAR,
@@ -126,9 +136,22 @@ _WEATHER_SIGNAL_DATA_V1 = {
     "station_resolution": _STATION_RESOLUTION_V1, "date_validation": _DATE_VALIDATION_V1,
     "source_details": [_WEATHER_SOURCE_V1],
 }
+_WEATHER_PROBABILITY_EVIDENCE_V1 = {
+    "schema_version": _SCALAR, "yes_probability": _SCALAR, "basis": _SCALAR,
+    "calibration_status": _SCALAR, "fallback_reason": _SCALAR,
+    "source_id": _SCALAR, "forecast_policy_id": _SCALAR,
+    "location_provenance": {
+        "basis": _SCALAR, "station_id": _SCALAR, "station_cli": _SCALAR,
+        "station_origin": _SCALAR, "station_mapping": _SCALAR,
+        "station_evidence_field": _SCALAR, "city": _SCALAR,
+        "latitude": _SCALAR, "longitude": _SCALAR, "coordinate_source": _SCALAR,
+        "coordinate_url": _SCALAR, "coordinates_fetched_at": _SCALAR,
+    },
+}
 _WEATHER_SOURCE_SIGNAL_V1 = {
     "signal_type": _SCALAR, "predicted_prob": _SCALAR, "confidence": _SCALAR,
     "source_timestamp": _SCALAR, "ttl_seconds": _SCALAR, "question_side": _SCALAR,
+    "probability_evidence": _WEATHER_PROBABILITY_EVIDENCE_V1,
     "data": _WEATHER_SIGNAL_DATA_V1,
 }
 _WEATHER_PROVENANCE_V1 = {
@@ -703,6 +726,12 @@ def _sanitized_allowlisted_mapping(
         )
         if copied_value is not _UNSET:
             copied[key_text] = copied_value
+    if schema is _WEATHER_SOURCE_SIGNAL_V1 and "probability_evidence" in value:
+        evidence = project_probability_evidence(copied.pop("probability_evidence", None), copied.get("predicted_prob"))
+        if evidence is not None and evidence["basis"] == "heuristic_weather_distance_v1":
+            copied["probability_evidence"] = evidence
+        else:
+            _add_omitted_field(omitted_fields, f"{path}.probability_evidence", "unallowlisted")
     return copied
 
 
@@ -924,6 +953,15 @@ def _allowlisted_mapping(value: Any, schema: Mapping[str, Any], path: str, error
         copied_value = _allowlisted_value(nested_value, spec, nested_path, errors)
         if copied_value is not _UNSET:
             copied[key_text] = copied_value
+    if schema is _WEATHER_SOURCE_SIGNAL_V1 and "probability_evidence" in value:
+        evidence = project_probability_evidence(copied.pop("probability_evidence", None), copied.get("predicted_prob"))
+        if evidence is not None and evidence["basis"] == "heuristic_weather_distance_v1":
+            copied["probability_evidence"] = evidence
+        else:
+            errors.append(ReplayDecisionInputError(
+                "invalid_probability_evidence", f"{path}.probability_evidence",
+                "weather receipt must describe the recorded heuristic YES probability without claiming calibration",
+            ))
     return copied
 
 

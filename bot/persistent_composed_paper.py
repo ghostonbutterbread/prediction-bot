@@ -20,6 +20,7 @@ import os
 from bot.file_ops import atomic_write_json
 from bot.forward_composed_paper import PICKER, CONTROL, _IDENTITY, _digest as forward_digest, compose_forward_rows, validate_forward_combination
 from bot.composed_lane_wallet import _reject_outcome_fields, _timestamp
+from bot.feeds.weather_pro import project_probability_evidence
 from bot.market_router import route_market
 from bot.shared_market_runtime import shared_snapshot_is_fresh
 from bot.simulator import Simulator
@@ -175,7 +176,15 @@ def consume_persistent_composed_paper(
         results = []
         for decision_id, pair, signal in prepared:
             path = journal_dir / (decision_id.removeprefix("forward-combined:") + ".json")
-            fingerprint = _digest({"pair": pair, "signal": signal})
+            fingerprint_signal = signal
+            if signal is not None and "source_router_position_caps" not in (account_config.get("risk") or {}):
+                # Provenance enrichment must not invalidate a legacy no-config
+                # journal. Keep it on the actual submitted/persisted signal,
+                # but hash the same numeric/control input shape as before.
+                fingerprint_signal = {key: value for key, value in signal.items() if key != "probability_evidence"}
+                fingerprint_signal["signals"] = {key: value for key, value in signal["signals"].items()
+                                                 if key != "probability_evidence"}
+            fingerprint = _digest({"pair": pair, "signal": fingerprint_signal})
             if path.exists():
                 entry = json.loads(path.read_text())
                 if entry.get("decision_id") != decision_id or entry.get("fingerprint") != fingerprint:
@@ -336,6 +345,12 @@ def _prepare_signal(intent: Mapping[str, Any], pair: Mapping[str, Any],
                           "run_id": intent["run_id"], "shared_snapshot_id": intent["shared_snapshot_id"],
                           "selected_side_recorded_ask": quote, "conservative_estimate": price,
                           "quote_not_fill": True}}
+    evidence = project_probability_evidence(intent["source_context"].get("probability_evidence"), probability)
+    if evidence is not None:
+        # The root reaches the decision seam; nested signals survive SimTrade
+        # serialization. Absent evidence adds no keys to legacy fingerprints.
+        signal["probability_evidence"] = evidence
+        signal["signals"]["probability_evidence"] = evidence
     # Simulator re-routes from the market identity and question; it must agree
     # with the selected recorded route before a journal or account is created.
     if route.get("allowed") is not True or route.get("handler_id") != route_market(signal, {"scan": {

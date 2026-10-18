@@ -21,8 +21,22 @@ class _Http:
     def __init__(self, payload):
         self.payload = payload
 
-    def get(self, *args, **kwargs):
-        return _Response(self.payload)
+    def get(self, url, **kwargs):
+        # Synthetic KAUS geometry and grid keep these tests about date/temperature
+        # selection while exercising the station -> points -> forecast contract.
+        if url == "https://api.weather.gov/stations/KAUS":
+            return _Response({
+                "geometry": {"type": "Point", "coordinates": [-97.7, 30.2]},
+                "properties": {"stationIdentifier": "KAUS"},
+            })
+        if url == "https://api.weather.gov/points/30.2,-97.7":
+            return _Response({"properties": {"gridId": "EWX", "gridX": 152, "gridY": 91}})
+        if url in (
+            "https://api.weather.gov/gridpoints/EWX/152,91/forecast",
+            "https://api.open-meteo.com/v1/forecast",
+        ):
+            return _Response(self.payload)
+        raise AssertionError(f"Unexpected forecast fixture request: {url}")
 
     def close(self):
         return None
@@ -90,7 +104,6 @@ class ForecastTargetingTests(unittest.TestCase):
                  "startTime": "2026-08-02T18:00:00-05:00", "endTime": "2026-08-03T06:00:00-05:00"},
             ]},
         })
-        feed._points_cache["austin"] = (datetime.now(timezone.utc), ("EWX", 152, 91))
 
         snapshot = feed.get_forecast("austin", target_date="2026-08-02")
 
@@ -107,7 +120,6 @@ class ForecastTargetingTests(unittest.TestCase):
             {"number": 3, "name": "Sunday Night", "temperature": 68, "isDaytime": False,
              "startTime": "2026-09-27T18:00:00-07:00", "endTime": "2026-09-28T06:00:00-07:00"},
         ]}})
-        feed._points_cache["austin"] = (datetime.now(timezone.utc), ("EWX", 152, 91))
 
         low = feed.get_forecast("austin", target_date="2026-09-27", measurement_kind="low")
         self.assertTrue(low.scoreable_forecast)
@@ -124,7 +136,6 @@ class ForecastTargetingTests(unittest.TestCase):
             {"number": 2, "name": "Sunday Night", "temperature": 68, "isDaytime": False,
              "startTime": "2026-09-27T18:00:00-07:00", "endTime": "2026-09-28T06:00:00-07:00"},
         ]}})
-        feed._points_cache["austin"] = (datetime.now(timezone.utc), ("EWX", 152, 91))
 
         low = feed.get_forecast("austin", target_date="2026-09-27", measurement_kind="low")
         self.assertFalse(low.scoreable_forecast)
@@ -135,7 +146,6 @@ class ForecastTargetingTests(unittest.TestCase):
 
     def test_nws_requested_kind_survives_unrelated_missing_temperature(self):
         feed = NWSFeed()
-        feed._points_cache["austin"] = (datetime.now(timezone.utc), ("EWX", 152, 91))
         feed.http = _Http({"properties": {"periods": [
             {"name": "Sunday", "temperature": 84, "isDaytime": True,
              "startTime": "2026-09-27T06:00:00-07:00", "endTime": "2026-09-27T18:00:00-07:00"},
@@ -169,7 +179,6 @@ class ForecastTargetingTests(unittest.TestCase):
                 {"name": "Sunday Night", "temperature": 68, "isDaytime": False,
                  "startTime": "2026-09-27T18:00:00-07:00", "endTime": "2026-09-28T06:00:00-07:00"},
             ]}}))
-            engine.nws._points_cache["austin"] = (datetime.now(timezone.utc), ("EWX", 152, 91))
             setattr(engine.nws, "get_station_observation", lambda city: None)
             engine.open_meteo.get_forecast = lambda *_args, **_kwargs: None
             signal = engine._score_temperature_market(
@@ -194,7 +203,6 @@ class ForecastTargetingTests(unittest.TestCase):
                 {"name": "Sunday Night", "temperature": None, "isDaytime": False,
                  "startTime": "2026-09-27T18:00:00-07:00", "endTime": "2026-09-28T06:00:00-07:00"},
             ]}}))
-            engine.nws._points_cache["austin"] = (datetime.now(timezone.utc), ("EWX", 152, 91))
             setattr(engine.nws, "get_station_observation", lambda city: None)
             engine.open_meteo.get_forecast = lambda *_args, **_kwargs: None
             signal = engine._score_temperature_market(
@@ -248,7 +256,6 @@ class ForecastTargetingTests(unittest.TestCase):
                 }],
             },
         })
-        feed._points_cache["austin"] = (datetime.now(timezone.utc), ("EWX", 152, 91))
 
         snapshot = feed.get_forecast("austin", target_date="2026-08-02")
 

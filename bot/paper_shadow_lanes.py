@@ -361,6 +361,13 @@ def _build_lane_row(
         row["shared_snapshot_id"] = shared_snapshot_id
         row["provenance"]["shared_snapshot_id"] = shared_snapshot_id
     if lane.lane_id in {"control_stable", PRE_RISK_PICKER_LANE_ID}:
+        from bot.feeds.weather_pro import project_probability_evidence
+
+        # The row's model_probability remains canonical YES odds, including NO
+        # actions. A receipt must describe those exact inputs, not Router rank.
+        evidence = project_probability_evidence(signal.get("probability_evidence"), row["model_probability"])
+        if evidence is not None:
+            row["probability_evidence"] = evidence
         # Control and pre-risk rows retain only decision-time wallet inputs.
         row["question"] = _optional_text(signal.get("question"))
         row["exchange"] = _optional_text(signal.get("exchange"))

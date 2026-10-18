@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import Any
 import math
 
+from bot.feeds.weather_pro import project_probability_evidence
 from bot.risk import RiskManager
 from bot.shared_core import AccountState, TradeContext, build_trade_decision
 
@@ -43,6 +44,9 @@ def build_composed_trade_context(
     confidence = _probability(row.get("confidence"), "confidence")
     selected_probability = yes_probability if action == "BUY_YES" else 1.0 - yes_probability
     source_context = dict(row.get("source_context") or {})
+    evidence = project_probability_evidence(source_context.pop("probability_evidence", None), yes_probability)
+    if evidence is not None:
+        source_context["probability_evidence"] = evidence
     # Older sealed compositions identify Router participation in provenance
     # rather than an explicit context marker. Project that identity even when
     # grade evidence is absent: enabling caps must not make absence a bypass.
@@ -103,6 +107,8 @@ def build_composed_trade_context(
         "yes_probability": yes_probability,
         "selected_side_probability": selected_probability,
         "probability_provider": "composition.model_probability",
+        "probability_evidence_status": "recorded" if evidence is not None else "legacy_unknown",
+        **({"probability_evidence": evidence} if evidence is not None else {}),
         "non_mutating": True,
     }
 
@@ -173,6 +179,9 @@ def evaluate_composed_intents(
                 open_positions=state.open_positions)
         decision = build_trade_decision(context, kelly_sizer=kelly_sizer, risk_policy=decision_risk, min_edge=min_edge, min_confidence=min_confidence, max_entry_price=max_entry_price)
         row = {"decision_id": intent_receipt["decision_id"], "market_id": context.market_id, "observed_at": intent_receipt["observed_at"], "action": decision.action if decision.approved else "SKIP", "available_cash_before_usd": round(cash, 6), "requested_size_usd": decision.requested_position_size, "approved_stake_usd": decision.position_size or 0.0, "reason_code": decision.reason_code, "shared_core_reasoning": decision.reasoning, "status": "skipped"}
+        row["probability_evidence_status"] = intent_receipt["probability_evidence_status"]
+        if "probability_evidence" in intent_receipt:
+            row["probability_evidence"] = intent_receipt["probability_evidence"]
         if decision.approved and decision.position_size and decision.position_size > 0:
             stake = float(decision.position_size)
             if stake > cash:
@@ -180,6 +189,8 @@ def evaluate_composed_intents(
             else:
                 cash -= stake
                 positions.append({"decision_id": row["decision_id"], "shared_candidate_id": _required_text(intent, "shared_candidate_id"), "run_id": _required_text(intent, "run_id"), "market_id": context.market_id, "action": decision.action, "entry_price": float(decision.entry_price or 0.0), "model_probability": context.model_probability, "event_key": str(intent.get("event_key") or context.market_id), "stake_usd": stake, "observed_at": now})
+                if "probability_evidence" in intent_receipt:
+                    positions[-1]["probability_evidence"] = intent_receipt["probability_evidence"]
                 row.update(status="opened", available_cash_after_usd=round(cash, 6))
         decisions.append(row)
     cash, due = _settle_due(positions, settlement_by_id, cash, None, fee_rate=fee_rate)

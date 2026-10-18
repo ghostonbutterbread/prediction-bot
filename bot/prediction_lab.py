@@ -1080,6 +1080,26 @@ class PredictionLab:
         }
         evidence = build_weather_source_confidence_evidence(evidence_payload)
         station_resolution = evidence.get("weather_station_resolution") if isinstance(evidence.get("weather_station_resolution"), dict) else {}
+        # Contract/ticker station inference is only a legacy fallback. When the
+        # producer recorded where it queried, that query identity owns forecast
+        # labels, including an inferred default or an explicit city-only null.
+        location_details = [detail for detail in self._iter_weather_source_details(weather_data)
+                            if isinstance(detail.get("source_metadata"), dict)
+                            and isinstance(detail["source_metadata"].get("forecast_location"), dict)]
+        primary_detail = next((detail for detail in location_details
+                               if detail.get("source_name") == weather_data.get("forecast_driver")
+                               or detail.get("role") == "forecast_primary"), None)
+        if primary_detail is None:
+            primary_detail = next((detail for detail in location_details if detail.get("scoreable_forecast") is True), None)
+        forecast_location = primary_detail["source_metadata"]["forecast_location"] if primary_detail is not None else None
+        if forecast_location is not None:
+            station_resolution = {
+                "station_id": forecast_location.get("station_id"),
+                "station_cli": forecast_location.get("station_cli"),
+                "mapping": forecast_location.get("station_mapping") or "unknown",
+                "source": forecast_location.get("station_origin"),
+                "reason": "recorded_forecast_location",
+            }
         market_context = {
             "market_id": market_id,
             "ticker": market_id,
@@ -1119,6 +1139,13 @@ class PredictionLab:
             "edge": weather_signal.get("edge"),
             "data": dict(weather_data),
         }
+        from bot.feeds.weather_pro import project_probability_evidence
+
+        probability_evidence = project_probability_evidence(
+            weather_signal.get("probability_evidence"), source_signal["predicted_prob"],
+        )
+        if probability_evidence is not None and probability_evidence["basis"] == "heuristic_weather_distance_v1":
+            source_signal["probability_evidence"] = probability_evidence
         snapshot = {
             "artifact_version": 1,
             "mode": source_mode,
@@ -1147,9 +1174,11 @@ class PredictionLab:
             "settlement_source": settlement_source,
             "settlement_authority": settlement_authority,
             "forecast_driver": forecast_driver,
-            "station_id": station_resolution.get("station_id") or weather_data.get("station_id") or weather_signal.get("station_id"),
-            "station_cli": station_resolution.get("station_cli") or weather_data.get("station_cli") or weather_signal.get("station_cli"),
-            "station_mapping": evidence.get("weather_station_mapping"),
+            "station_id": (station_resolution.get("station_id") if forecast_location is not None else
+                           station_resolution.get("station_id") or weather_data.get("station_id") or weather_signal.get("station_id")),
+            "station_cli": (station_resolution.get("station_cli") if forecast_location is not None else
+                            station_resolution.get("station_cli") or weather_data.get("station_cli") or weather_signal.get("station_cli")),
+            "station_mapping": station_resolution.get("mapping") if forecast_location is not None else evidence.get("weather_station_mapping"),
             "station_resolution": station_resolution,
             "forecast": {
                 "high": weather_data.get("forecast_high"),
@@ -1335,9 +1364,12 @@ class PredictionLab:
                     weight_note = weight_note or "not_recorded_by_weather_engine"
             elif not weight_note:
                 weight_note = "recorded_by_weather_engine"
+            metadata = detail.get("source_metadata") if isinstance(detail.get("source_metadata"), dict) else {}
+            location = metadata.get("forecast_location") if isinstance(metadata.get("forecast_location"), dict) else None
             source = {
                 "source_id": detail.get("source_id"),
                 "source_name": source_name,
+                "source_location_basis": location.get("basis") if location is not None else detail.get("source_location_basis"),
                 "source_location_city": detail.get("source_location_city"),
                 "forecast_measurement_kind": detail.get("forecast_measurement_kind"),
                 "contract_shape": detail.get("contract_shape"),
@@ -1362,9 +1394,12 @@ class PredictionLab:
                 "as_of": detail.get("as_of") or detail.get("fetched_at") or as_of,
                 "source_fetched_at": detail.get("fetched_at"),
                 "source_as_of": detail.get("as_of"),
-                "station_id": detail.get("station_id") or station_resolution.get("station_id"),
-                "station_cli": detail.get("station_cli") or station_resolution.get("station_cli"),
-                "station_mapping": detail.get("station_mapping") or station_resolution.get("mapping"),
+                "station_id": (location.get("station_id") if location is not None else
+                               detail.get("station_id") or station_resolution.get("station_id")),
+                "station_cli": (location.get("station_cli") if location is not None else
+                                detail.get("station_cli") or station_resolution.get("station_cli")),
+                "station_mapping": (location.get("station_mapping") if location is not None else
+                                    detail.get("station_mapping") or station_resolution.get("mapping")),
                 "settlement_source": settlement_source,
                 "settlement_authority": weather_data.get("settlement_authority"),
                 "forecast_driver": weather_data.get("forecast_driver"),

@@ -13,6 +13,7 @@ import json
 import math
 
 from bot.composed_lane_wallet import _reject_outcome_fields, _timestamp, evaluate_composed_intents
+from bot.feeds.weather_pro import project_probability_evidence
 from bot.shared_market_runtime import shared_snapshot_is_fresh
 
 CONTROL = "control_stable"
@@ -161,6 +162,9 @@ def compose_forward_rows(rows: Sequence[Mapping[str, Any]], *, combination: Mapp
                         "exchange": control.get("exchange") or "kalshi", "model_probability": probability,
                         "confidence": confidence, "event_key": event_key,
                         "source_context": {"market_route": route}, "quote_not_fill": True}
+                evidence = project_probability_evidence(control.get("probability_evidence"), probability)
+                if evidence is not None:
+                    base["source_context"]["probability_evidence"] = evidence
                 if control_quoted:
                     intents.append({**base, "lane_id": CONTROL, "decision_id": "forward-control:" + _digest(identity),
                                     "action": action, "entry_price": stable_price})
