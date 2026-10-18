@@ -37,6 +37,9 @@ class ProbabilityEvidenceProjectionTests(unittest.TestCase):
                 "enable_news": False, "enable_social": False, "enable_ai": False,
                 "min_edge": 0.01, "signal_audit_path": str(self.root / "audit.jsonl")}})
         self.addCleanup(self.lab.strategy.live_feeds.close)
+        # Forecast and candidate clocks are fixed; validate at that candidate,
+        # not the later wall clock used to run this historical fixture.
+        self.lab.strategy.validator.as_of = _Clock.fromisoformat(STAMP)
 
     def weather(self, high, *, metadata, city_only=False):
         def handler(request):
@@ -111,6 +114,17 @@ class ProbabilityEvidenceProjectionTests(unittest.TestCase):
     @staticmethod
     def snapshot(row):
         return row["decision_artifact"]["source_context"]["data"]["weather_source_snapshot"]
+
+    def test_producer_fixture_uses_recorded_decision_time_when_wall_clock_advances(self):
+        class LaterWallClock(_Clock):
+            @classmethod
+            def now(cls, tz=None):
+                return super().now(tz).replace(day=20)
+
+        with patch("bot.strategies.signal_validator.datetime", LaterWallClock):
+            row, weather, ensemble = self.producer(72)
+        self.assertEqual(ensemble["direction"], "BUY_NO")
+        self.assertEqual(self.snapshot(row)["source_signal"]["probability_evidence"], weather["probability_evidence"])
 
     def test_collector_rebuild_preserves_valid_weather_yes_receipt_not_ensemble_odds(self):
         for high, action in ((88, "BUY_YES"), (72, "BUY_NO")):
