@@ -10,9 +10,10 @@ Cross-validates multiple sources for higher confidence.
 """
 
 import logging
+import math
 import re
 import httpx
-from typing import Optional
+from typing import Any, Mapping, Optional
 from datetime import date, datetime, timezone, timedelta
 from dataclasses import dataclass, field
 
@@ -124,6 +125,93 @@ CITY_NWS = {
     "tampa": ("TBW", 97, 47, "KTPA"),           # Tampa International
     "death valley": ("VEF", 158, 38, "KDWA"),   # Death Valley
 }
+
+
+def _configured_forecast_station(city: str) -> dict:
+    """A forecast default is not evidence of the contract's settlement station."""
+    configured = CITY_NWS.get(city.lower().strip())
+    return {
+        "station_id": configured[3] if configured else None,
+        "station_origin": "configured_city_station" if configured else "city_only",
+        "station_mapping": "inferred" if configured else "unknown",
+    }
+
+
+def _forecast_station_selection(city: str, metadata: dict | None = None) -> dict:
+    # Lazy import avoids the historical-provider -> weather_pro import cycle.
+    from bot.weather.station_mapping import _iter_signal_values, resolve_weather_station
+
+    candidates = []
+    # Use the resolver's exact direct/nested alias set, but resolve every
+    # assertion separately: its first-match shortcut cannot prove agreement.
+    for value in _iter_signal_values(metadata or {}):
+        if value is None or value == "":
+            continue
+        resolved = resolve_weather_station({"station_id": value})
+        if resolved.source == "explicit_station_field":
+            candidates.append((resolved, "station_metadata"))
+    for field_name in ("rules_primary", "rules_secondary"):
+        text = (metadata or {}).get(field_name)
+        if not isinstance(text, str):
+            continue
+        for match in re.finditer(r"\b(?:CLI[A-Z0-9]{3,4}|K[A-Z0-9]{3,4})\b", text):
+            token = match.group()
+            resolved = resolve_weather_station({"station_cli" if token.startswith("CLI") else "station_id": token})
+            candidates.append((resolved, field_name))
+    if candidates:
+        identities = {resolved.station_id or f"CLI{resolved.station_cli}" for resolved, _ in candidates}
+        resolved, field_name = candidates[0]
+        return {"station_id": resolved.station_id if len(identities) == 1 else None,
+                "station_cli": resolved.station_cli if len(identities) == 1 else None,
+                "station_origin": "market_explicit",
+                "station_mapping": "conflicting" if len(identities) > 1 else "exact" if resolved.station_id else "unknown",
+                "station_evidence_field": field_name,
+                **({"availability_reason": "conflicting_explicit_stations"} if len(identities) > 1 else {})}
+    return _configured_forecast_station(city)
+
+
+def _resolve_forecast_location(city: str, http: httpx.Client, cache: dict, station: dict) -> dict:
+    """Resolve GeoJSON station geometry, never substitute a centroid for a station."""
+    location = {**station, "city": city.lower().strip()}
+    station_id = station.get("station_id")
+    if station.get("availability_reason"):
+        return {**location, "basis": "station"}
+    if not station_id and station.get("station_origin") == "market_explicit":
+        return {**location, "basis": "station", "availability_reason": "explicit_station_unresolved"}
+    if not station_id:
+        coords = CITY_COORDS.get(location["city"])
+        return {**location, "basis": "city_centroid", "coordinate_source": "configured_city_coordinates",
+                "latitude": coords[0] if coords else None, "longitude": coords[1] if coords else None}
+
+    url = f"https://api.weather.gov/stations/{station_id}"
+    location.update(basis="station", coordinate_source="nws_station_metadata", coordinate_url=url)
+    now = datetime.now(timezone.utc)
+    cached = cache.get(station_id)
+    if cached and now - cached[0] < timedelta(hours=6):
+        return {**location, **cached[1]}
+    try:
+        resp = http.get(url, headers={"User-Agent": "PredictionBot/1.0"})
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, dict):
+            raise ValueError("invalid station metadata")
+        geometry = data.get("geometry")
+        props = data.get("properties")
+        if (not isinstance(geometry, dict) or not isinstance(props, dict)
+                or props.get("stationIdentifier") != station_id or geometry.get("type") != "Point"):
+            raise ValueError("station metadata identity or geometry mismatch")
+        lon, lat = geometry["coordinates"]
+        if (isinstance(lat, bool) or isinstance(lon, bool)
+                or not isinstance(lat, (int, float)) or not isinstance(lon, (int, float))
+                or not math.isfinite(lat) or not math.isfinite(lon)
+                or not -90 <= lat <= 90 or not -180 <= lon <= 180):
+            raise ValueError("invalid station coordinates")
+        coordinates = {"latitude": lat, "longitude": lon, "coordinates_fetched_at": now.isoformat()}
+        cache[station_id] = (now, coordinates)
+        return {**location, **coordinates}
+    except (httpx.HTTPError, ValueError, TypeError, KeyError) as exc:
+        logger.debug("NWS station coordinates unavailable for %s: %s", station_id, exc)
+        return {**location, "availability_reason": "station_coordinates_unavailable"}
 
 
 def _settlement_authority(metadata: dict | None) -> dict:
@@ -242,13 +330,24 @@ class OpenMeteoFeed:
 
     def __init__(self):
         self.http = httpx.Client(timeout=10)
+        self._station_location_cache: dict = {}
 
-    def get_forecast(self, city: str, *, target_date: str | None = None) -> Optional[WeatherSnapshot]:
-        coords = CITY_COORDS.get(city.lower())
-        if not coords:
-            return None
+    def get_forecast(
+        self, city: str, *, target_date: str | None = None, station_resolution: dict | None = None,
+    ) -> Optional[WeatherSnapshot]:
+        location = _resolve_forecast_location(
+            city, self.http, self._station_location_cache,
+            station_resolution if station_resolution is not None else _configured_forecast_station(city),
+        )
+        location_details = {"forecast_location": location, "forecast_query_url": self.BASE}
+        lat, lon = location.get("latitude"), location.get("longitude")
+        if lat is None or lon is None:
+            return _unavailable_snapshot(
+                city=city, source="open-meteo", target_date=target_date,
+                reason=location.get("availability_reason") or "forecast_coordinates_unavailable",
+                source_details=location_details,
+            )
 
-        lat, lon = coords
         try:
             params = {
                 "latitude": lat,
@@ -273,6 +372,7 @@ class OpenMeteoFeed:
                 return _unavailable_snapshot(
                     city=city, source="open-meteo", target_date=target_date,
                     reason="source_forecast_missing_hourly_temperatures", fetched_at=fetched_at,
+                    source_details=location_details,
                 )
 
             target = _target_date_text(target_date)
@@ -280,6 +380,7 @@ class OpenMeteoFeed:
                 return _unavailable_snapshot(
                     city=city, source="open-meteo", target_date=target_date,
                     reason="invalid_market_target_date", fetched_at=fetched_at,
+                    source_details=location_details,
                 )
             selected_temps = []
             selected_times = []
@@ -295,7 +396,7 @@ class OpenMeteoFeed:
                 return _unavailable_snapshot(
                     city=city, source="open-meteo", target_date=target,
                     reason="target_date_not_in_source_forecast", fetched_at=fetched_at,
-                    source_details={"timezone": data.get("timezone"), "utc_offset_seconds": data.get("utc_offset_seconds")},
+                    source_details={**location_details, "timezone": data.get("timezone"), "utc_offset_seconds": data.get("utc_offset_seconds")},
                 )
 
             forecast_start = selected_times[0]
@@ -331,6 +432,10 @@ class OpenMeteoFeed:
                         "source_period_start": forecast_start,
                         "source_period_end": forecast_end,
                     },
+                    **location_details,
+                    "forecast_query_url": self.BASE,
+                    "response_latitude": data.get("latitude"),
+                    "response_longitude": data.get("longitude"),
                     "timezone": data.get("timezone"),
                     "utc_offset_seconds": data.get("utc_offset_seconds"),
                     "current_time": current.get("time"),
@@ -342,6 +447,7 @@ class OpenMeteoFeed:
             return _unavailable_snapshot(
                 city=city, source="open-meteo", target_date=target_date,
                 reason="source_forecast_request_failed",
+                source_details=location_details,
             )
 
     def close(self):
@@ -353,43 +459,47 @@ class NWSFeed:
 
     def __init__(self):
         self.http = httpx.Client(timeout=10)
-        self._points_cache: dict[str, tuple[datetime, tuple[str, int, int]]] = {}
+        self._station_location_cache: dict = {}
+        self._points_cache: dict[tuple, tuple[datetime, tuple[str, int, int]]] = {}
         self._points_cache_ttl = timedelta(hours=6)
 
-    def _resolve_forecast_grid(self, city: str) -> Optional[tuple[str, int, int, str]]:
-        city_key = city.lower().strip()
-        station_data = CITY_NWS.get(city_key)
-        coords = CITY_COORDS.get(city_key)
-        if not station_data or not coords:
+    def _resolve_forecast_grid(self, city: str, *, forecast_location: dict | None = None) -> Optional[tuple[str, int, int, str | None]]:
+        location = forecast_location if forecast_location is not None else _resolve_forecast_location(
+            city, self.http, self._station_location_cache, _configured_forecast_station(city),
+        )
+        lat, lon = location.get("latitude"), location.get("longitude")
+        if lat is None or lon is None:
             return None
-
-        _, _, _, station = station_data
-        cached = self._points_cache.get(city_key)
+        station = location.get("station_id")
+        cache_key = (location["basis"], station, lat, lon)
+        cached = self._points_cache.get(cache_key)
         now = datetime.now(timezone.utc)
         if cached and (now - cached[0]) < self._points_cache_ttl:
             office, grid_x, grid_y = cached[1]
             return office, grid_x, grid_y, station
 
-        lat, lon = coords
         try:
             resp = self.http.get(
                 f"https://api.weather.gov/points/{lat},{lon}",
                 headers={"User-Agent": "PredictionBot/1.0"},
+                # NWS redirects station geometry to its supported precision.
+                follow_redirects=True,
             )
             resp.raise_for_status()
-            props = resp.json().get("properties", {})
+            data = resp.json()
+            props = data.get("properties") if isinstance(data, dict) else None
+            if not isinstance(props, dict):
+                raise ValueError("invalid NWS points metadata")
             office = props.get("gridId")
             grid_x = props.get("gridX")
             grid_y = props.get("gridY")
             if office and grid_x is not None and grid_y is not None:
                 resolved = (str(office), int(grid_x), int(grid_y))
-                self._points_cache[city_key] = (now, resolved)
+                self._points_cache[cache_key] = (now, resolved)
                 return resolved[0], resolved[1], resolved[2], station
-        except Exception as e:
-            logger.debug(f"NWS points lookup error for {city}: {e}")
-
-        office, grid_x, grid_y, station = station_data
-        return office, grid_x, grid_y, station
+        except (httpx.HTTPError, ValueError, TypeError) as exc:
+            logger.debug("NWS points lookup error for %s: %s", city, exc)
+        return None
 
     def get_station_observation(self, city: str) -> Optional[dict]:
         """
@@ -434,14 +544,25 @@ class NWSFeed:
 
     def get_forecast(
         self, city: str, *, target_date: str | None = None, measurement_kind: str | None = None,
+        station_resolution: dict | None = None,
     ) -> Optional[WeatherSnapshot]:
-        grid = self._resolve_forecast_grid(city)
+        location = _resolve_forecast_location(
+            city, self.http, self._station_location_cache,
+            station_resolution if station_resolution is not None else _configured_forecast_station(city),
+        )
+        location_details: dict = {"forecast_location": location}
+        grid = self._resolve_forecast_grid(city, forecast_location=location)
         if not grid:
-            return None
+            return _unavailable_snapshot(
+                city=city, source="nws", target_date=target_date,
+                reason=location.get("availability_reason") or "source_forecast_grid_unavailable",
+                source_details=location_details,
+            )
 
         office, grid_x, grid_y, station = grid
+        url = f"https://api.weather.gov/gridpoints/{office}/{grid_x},{grid_y}/forecast"
+        location_details["forecast_query_url"] = url
         try:
-            url = f"https://api.weather.gov/gridpoints/{office}/{grid_x},{grid_y}/forecast"
             resp = self.http.get(url, headers={"User-Agent": "PredictionBot/1.0"})
             resp.raise_for_status()
             data = resp.json()
@@ -450,25 +571,25 @@ class NWSFeed:
             fetched_at = datetime.now(timezone.utc)
             target = _target_date_text(target_date)
             if target_date is not None and target is None:
-                return _unavailable_snapshot(city=city, source="nws", target_date=target_date, reason="invalid_market_target_date", fetched_at=fetched_at)
+                return _unavailable_snapshot(city=city, source="nws", target_date=target_date, reason="invalid_market_target_date", fetched_at=fetched_at, source_details=location_details)
             if not periods:
-                return _unavailable_snapshot(city=city, source="nws", target_date=target, reason="source_forecast_missing_periods", fetched_at=fetched_at)
+                return _unavailable_snapshot(city=city, source="nws", target_date=target, reason="source_forecast_missing_periods", fetched_at=fetched_at, source_details=location_details)
             if target:
                 dated_periods: list[dict] = []
                 for period in periods:
                     start = period.get("startTime")
                     if not isinstance(start, str) or not start:
-                        return _unavailable_snapshot(city=city, source="nws", target_date=target, reason="source_forecast_period_timezone_ambiguous", fetched_at=fetched_at)
+                        return _unavailable_snapshot(city=city, source="nws", target_date=target, reason="source_forecast_period_timezone_ambiguous", fetched_at=fetched_at, source_details=location_details)
                     parsed = datetime.fromisoformat(start.replace("Z", "+00:00"))
                     if parsed.tzinfo is None:
-                        return _unavailable_snapshot(city=city, source="nws", target_date=target, reason="source_forecast_period_timezone_ambiguous", fetched_at=fetched_at)
+                        return _unavailable_snapshot(city=city, source="nws", target_date=target, reason="source_forecast_period_timezone_ambiguous", fetched_at=fetched_at, source_details=location_details)
                     if parsed.date().isoformat() == target:
                         dated_periods.append(period)
                 if not dated_periods:
-                    return _unavailable_snapshot(city=city, source="nws", target_date=target, reason="target_date_not_in_source_forecast", fetched_at=fetched_at)
+                    return _unavailable_snapshot(city=city, source="nws", target_date=target, reason="target_date_not_in_source_forecast", fetched_at=fetched_at, source_details=location_details)
                 high_period = next((p for p in dated_periods if p.get("isDaytime") is True), None)
                 if high_period is None:
-                    return _unavailable_snapshot(city=city, source="nws", target_date=target, reason="target_date_missing_daytime_forecast_period", fetched_at=fetched_at)
+                    return _unavailable_snapshot(city=city, source="nws", target_date=target, reason="target_date_missing_daytime_forecast_period", fetched_at=fetched_at, source_details=location_details)
                 # The night beginning on the target date forecasts the *next*
                 # morning. Prefer the night ending on the target morning for a
                 # daily low; never use the following morning for a low market.
@@ -484,7 +605,7 @@ class NWSFeed:
                         morning_low = period
                         break
                 if measurement_kind == "low" and morning_low is None:
-                    return _unavailable_snapshot(city=city, source="nws", target_date=target, reason="target_date_missing_low_forecast_period", fetched_at=fetched_at)
+                    return _unavailable_snapshot(city=city, source="nws", target_date=target, reason="target_date_missing_low_forecast_period", fetched_at=fetched_at, source_details=location_details)
                 low_period = morning_low or next((p for p in dated_periods if p.get("isDaytime") is False), high_period)
             else:
                 high_period = next((p for p in periods if p.get("isDaytime") is True), periods[0])
@@ -494,7 +615,7 @@ class NWSFeed:
             if ((measurement_kind == "high" and high is None)
                     or (measurement_kind == "low" and low is None)
                     or (measurement_kind not in {"high", "low"} and (high is None or low is None))):
-                return _unavailable_snapshot(city=city, source="nws", target_date=target, reason="source_forecast_missing_temperature", fetched_at=fetched_at)
+                return _unavailable_snapshot(city=city, source="nws", target_date=target, reason="source_forecast_missing_temperature", fetched_at=fetched_at, source_details=location_details)
             selected_period = low_period if target and measurement_kind == "low" else high_period
             today = selected_period
             temp = selected_period.get("temperature")
@@ -538,6 +659,8 @@ class NWSFeed:
                         "source_period_end": period_end,
                         "source_timezone": _timezone_offset_label(period_start),
                     },
+                    **location_details,
+                    "forecast_query_url": url,
                     "office": office,
                     "grid_x": grid_x,
                     "grid_y": grid_y,
@@ -554,7 +677,7 @@ class NWSFeed:
             )
         except Exception as e:
             logger.debug(f"NWS error for {city}: {e}")
-            return _unavailable_snapshot(city=city, source="nws", target_date=target_date, reason="source_forecast_request_failed")
+            return _unavailable_snapshot(city=city, source="nws", target_date=target_date, reason="source_forecast_request_failed", source_details=location_details)
 
     @staticmethod
     def _period_ref(period: dict) -> dict:
@@ -586,16 +709,24 @@ class OpenWeatherMapFeed:
         self.api_key = api_key or os.getenv("OPENWEATHER_API_KEY", "")
         self.http = httpx.Client(timeout=10)
         self.available = bool(self.api_key)
+        self._station_location_cache: dict = {}
 
-    def get_forecast(self, city: str) -> Optional[WeatherSnapshot]:
+    def get_forecast(self, city: str, *, station_resolution: dict | None = None) -> Optional[WeatherSnapshot]:
         if not self.available:
             return None
 
-        coords = CITY_COORDS.get(city.lower())
-        if not coords:
-            return None
+        location = _resolve_forecast_location(
+            city, self.http, self._station_location_cache,
+            station_resolution if station_resolution is not None else _configured_forecast_station(city),
+        )
+        lat, lon = location.get("latitude"), location.get("longitude")
+        if lat is None or lon is None:
+            return _unavailable_snapshot(
+                city=city, source="openweathermap", target_date=None,
+                reason=location.get("availability_reason") or "forecast_coordinates_unavailable",
+                source_details={"forecast_location": location},
+            )
 
-        lat, lon = coords
         try:
             # Current weather + forecast
             params = {
@@ -636,15 +767,50 @@ class OpenWeatherMapFeed:
                 forecast_end=str(times_used[-1]) if times_used else None,
                 forecast_times=[str(value) for value in times_used],
                 source_details={
+                    "forecast_location": location,
+                    "forecast_query_url": f"{self.BASE}/forecast",
                     "forecast_times_used": [str(value) for value in times_used],
                 },
             )
         except Exception as e:
             logger.debug(f"OpenWeatherMap error for {city}: {e}")
-            return None
+            return _unavailable_snapshot(
+                city=city, source="openweathermap", target_date=None, reason="source_forecast_request_failed",
+                source_details={"forecast_location": location, "forecast_query_url": f"{self.BASE}/forecast"},
+            )
 
     def close(self):
         self.http.close()
+
+
+def project_probability_evidence(value: Any, yes_probability: Any) -> dict[str, Any] | None:
+    """Copy only a consistent, decision-time heuristic receipt (YES semantics)."""
+    if not isinstance(value, Mapping) or type(value.get("schema_version")) is not int or value["schema_version"] != 1:
+        return None
+    probability = value.get("yes_probability")
+    if (isinstance(probability, bool) or not isinstance(probability, (int, float))
+            or not 0 <= probability <= 1 or not math.isfinite(probability)
+            or isinstance(yes_probability, bool) or probability != yes_probability
+            or value.get("basis") not in ("heuristic_weather_distance_v1", "heuristic_weighted_ensemble_v1")
+            or value.get("calibration_status") != "not_established"
+            or value.get("fallback_reason") != "empirical_contract_probability_unavailable"):
+        return None
+    receipt = {key: value[key] for key in (
+        "schema_version", "yes_probability", "basis", "calibration_status", "fallback_reason")}
+    for key in ("source_id", "forecast_policy_id"):
+        if isinstance(value.get(key), str) and value[key]:
+            receipt[key] = value[key]
+    location = value.get("location_provenance")
+    if isinstance(location, Mapping):
+        projected = {key: item for key, item in location.items()
+            if key in {"basis", "station_id", "station_cli", "station_origin", "station_mapping",
+                       "station_evidence_field", "city", "latitude", "longitude", "coordinate_source",
+                       "coordinate_url", "coordinates_fetched_at"}
+            and isinstance(item, (str, int, float)) and not isinstance(item, bool)
+            and (not isinstance(item, float) or math.isfinite(item))}
+        if projected:
+            receipt["location_provenance"] = projected
+    return receipt
 
 
 class ProWeatherEngine:
@@ -674,14 +840,17 @@ class ProWeatherEngine:
 
     def get_forecast(
         self, city: str, *, target_date: str | None = None, require_target: bool = False,
-        measurement_kind: str | None = None,
+        measurement_kind: str | None = None, station_resolution: dict | None = None,
     ) -> Optional[MultiSourceForecast]:
         """Get cross-validated forecast from all sources."""
         city_lower = city.lower().strip()
         target = _target_date_text(target_date)
+        station = station_resolution if station_resolution is not None else _configured_forecast_station(city_lower)
 
-        # Check cache
-        cache_key = (city_lower, target, require_target, measurement_kind)
+        # Location identity and origin are part of the forecast promise. Never
+        # let a configured-city result satisfy a different explicit station.
+        cache_key = (city_lower, target, require_target, measurement_kind,
+                     tuple(sorted(station.items())), CITY_COORDS.get(city_lower))
         if cache_key in self._cache:
             cached, ts = self._cache[cache_key]
             if (datetime.now(timezone.utc) - ts).total_seconds() < self._cache_ttl:
@@ -704,7 +873,7 @@ class ProWeatherEngine:
         source_snapshots = []
 
         # Fetch from all sources
-        om = self.open_meteo.get_forecast(city_lower, target_date=target)
+        om = self.open_meteo.get_forecast(city_lower, target_date=target, station_resolution=station)
         if om:
             source_snapshots.append(om)
             if self._snapshot_is_plausible(om, measurement_kind):
@@ -712,7 +881,8 @@ class ProWeatherEngine:
             else:
                 logger.warning(f"Open-Meteo forecast unavailable for {city_lower}: {om.availability_reason or 'implausible_forecast'}")
 
-        nws = self.nws.get_forecast(city_lower, target_date=target, measurement_kind=measurement_kind)
+        nws = self.nws.get_forecast(city_lower, target_date=target, measurement_kind=measurement_kind,
+                                    station_resolution=station)
         if nws:
             source_snapshots.append(nws)
             if self._snapshot_is_plausible(nws, measurement_kind):
@@ -725,7 +895,7 @@ class ProWeatherEngine:
                 city=city_lower, source="openweathermap", target_date=target,
                 reason="source_forecast_period_timezone_ambiguous",
             )
-            if target else self.owm.get_forecast(city_lower)
+            if target else self.owm.get_forecast(city_lower, station_resolution=station)
         )
         if owm:
             source_snapshots.append(owm)
@@ -879,6 +1049,7 @@ class ProWeatherEngine:
         forecast = self.get_forecast(
             city, target_date=market_date, require_target=True,
             measurement_kind="high" if is_high else "low",
+            station_resolution=_forecast_station_selection(city, market_metadata),
         )
         if not forecast or not forecast.sources_used:
             return None
@@ -948,9 +1119,36 @@ class ProWeatherEngine:
         edge = abs(predicted_prob - yes_price)
 
         authority = _settlement_authority(market_metadata)
+        # Describe the existing heuristic; this is not a fitted distribution or
+        # an empirical per-contract probability. Keep the numeric path intact.
+        yes_probability = round(max(0.01, min(0.99, predicted_prob)), 4)
+        probability_evidence = {
+            "schema_version": 1, "yes_probability": yes_probability,
+            "basis": "heuristic_weather_distance_v1",
+            "calibration_status": "not_established",
+            "fallback_reason": "empirical_contract_probability_unavailable",
+        }
+        driver = forecast.details.get("forecast_driver")
+        if isinstance(driver, str) and driver:
+            probability_evidence["forecast_policy_id"] = driver
+        if driver in forecast.sources_used:
+            probability_evidence["source_id"] = driver
+            snapshot = next((s for s in forecast.details.get("source_snapshots", [])
+                             if isinstance(s, WeatherSnapshot) and s.source == driver), None)
+            location = snapshot.source_details.get("forecast_location") if snapshot else None
+            if isinstance(location, dict):
+                probability_evidence["location_provenance"] = {
+                    key: value for key, value in location.items()
+                    if key in {"basis", "station_id", "station_cli", "station_origin", "station_mapping",
+                               "station_evidence_field", "city", "latitude", "longitude",
+                               "coordinate_source", "coordinate_url", "coordinates_fetched_at"}
+                    and isinstance(value, (str, int, float)) and not isinstance(value, bool)
+                    and (not isinstance(value, float) or math.isfinite(value))
+                }
         return {
             "signal_type": "weather",
-            "predicted_prob": round(max(0.01, min(0.99, predicted_prob)), 4),
+            "predicted_prob": yes_probability,
+            "probability_evidence": probability_evidence,
             "confidence": forecast.confidence,
             "source_timestamp": forecast.fetched_at.isoformat(),
             "ttl_seconds": self._cache_ttl,
@@ -1019,6 +1217,9 @@ class ProWeatherEngine:
                     "source_id": source.lower().replace("-", "_").replace(" ", "_"),
                     "source_name": source,
                     "source_location_city": city,
+                    "source_location_basis": snapshot.source_details.get("forecast_location", {}).get("basis") if snapshot else None,
+                    "station_id": snapshot.source_details.get("forecast_location", {}).get("station_id") if snapshot else None,
+                    "station_mapping": snapshot.source_details.get("forecast_location", {}).get("station_mapping") if snapshot else None,
                     "forecast_measurement_kind": forecast_measurement_kind,
                     "contract_shape": contract_shape,
                     "question_side": question_side,
