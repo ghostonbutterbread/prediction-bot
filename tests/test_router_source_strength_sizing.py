@@ -89,6 +89,45 @@ class RouterSourceStrengthTests(unittest.TestCase):
                       enabled=True, now=datetime.fromisoformat(baseline["observed_at"]))
         return root, params, consume_persistent_composed_paper
 
+    def test_opposite_grade_never_opens_forward_but_disabled_policy_is_unchanged(self):
+        for side, opposite in (("BUY_YES", "NO"), ("BUY_NO", "YES")):
+            for strength in ("WEAK", "STRONG"):
+                with self.subTest(side=side, strength=strength):
+                    rows = cohort(f"{strength}_{opposite}", side)
+                    report = self.evaluate(rows)
+                    row = report["combined_wallet"]["decision_rows"][0]
+                    self.assertEqual((row["status"], row["reason_code"]),
+                                     ("skipped", "source_router_cap_evidence_invalid"))
+                    self.assertEqual(report["combined_wallet"]["open_positions"], [])
+                    self.assertEqual(report["control_wallet"]["decision_rows"][0]["status"], "opened")
+                    off = self.evaluate(rows, risk=self.risk(caps=None))
+                    self.assertEqual(off["combined_wallet"]["decision_rows"][0]["approved_stake_usd"], 10)
+
+    def test_opposite_grade_never_reserves_persistent_capital_or_retries(self):
+        for side, opposite in (("BUY_YES", "NO"), ("BUY_NO", "YES")):
+            for strength in ("WEAK", "STRONG"):
+                with self.subTest(side=side, strength=strength):
+                    root, params, consume = self.persistent_case(
+                        cohort(f"{strength}_{opposite}", side), name=f"{side}_{strength}")
+                    report = consume(**params)
+                    row = report["decisions"][0]
+                    self.assertEqual((row["status"], row["reason_code"]),
+                                     ("skipped", "source_router_cap_evidence_invalid"))
+                    session = json.loads(next(root.glob("sim_*.json")).read_text())
+                    self.assertEqual((session["trades"], session["reserved_capital"], session["available_cash"]),
+                                     ([], 0, 100))
+                    self.assertEqual(consume(**params)["decisions"][0]["status"], "already_processed")
+
+    def test_enabled_cap_requires_grade_bound_to_explicit_buy_direction(self):
+        for direction in (None, "SKIP", "YES", "buy_yes", True):
+            with self.subTest(direction=direction):
+                signal: dict[str, Any] = {"router_decision_metadata": {"source_grade": "STRONG_YES"}}
+                if direction is not None:
+                    signal["direction"] = direction
+                decision = self.risk().check_trade(signal, 10)
+                self.assertFalse(decision.approved)
+                self.assertEqual(decision.metadata["reason_code"], "source_router_cap_evidence_invalid")
+
     def test_final_capped_stake_rechecks_real_kelly_economics(self):
         for side, grade in (("BUY_YES", "WEAK_YES"), ("BUY_NO", "WEAK_NO")):
             for kwargs, code in (({"min_expected_net_profit_usd": 1.0}, "final_expected_net_profit_below_minimum"),
@@ -232,11 +271,11 @@ class RouterSourceStrengthTests(unittest.TestCase):
         self.assertEqual(decision.metadata["reason_code"], "source_router_cap_evidence_invalid")
         # An omitted strength in a partial policy is not an unlimited category.
         decision = self.risk(caps={"weak": 0.01}).check_trade(
-            {"router_decision_metadata": {"source_grade": "STRONG_YES"}}, 10)
+            {"direction": "BUY_YES", "router_decision_metadata": {"source_grade": "STRONG_YES"}}, 10)
         self.assertFalse(decision.approved)
 
     def test_router_caps_intersect_kelly_cash_exposure_event_and_position_limits(self):
-        signal = {"router_decision_metadata": {"source_grade": "STRONG_YES"}}
+        signal = {"direction": "BUY_YES", "router_decision_metadata": {"source_grade": "STRONG_YES"}}
         for requested, settings, cash, exposure, expected in (
                 (0.55, {}, 100, 0, 0.55),
                 (10, {"max_position_size_usd": 0.75}, 100, 0, 0.75),
@@ -263,7 +302,7 @@ class RouterSourceStrengthTests(unittest.TestCase):
         self.assertEqual(decision.position_size, 2)
         for cap in (0, 0.00009, 0.00999):
             decision = self.risk(caps={"weak": cap}, min_position_size=1).check_trade(
-                {"router_decision_metadata": {"source_grade": "WEAK_YES"}}, 10)
+                {"direction": "BUY_YES", "router_decision_metadata": {"source_grade": "WEAK_YES"}}, 10)
             self.assertFalse(decision.approved)
             self.assertEqual(decision.metadata["reason_code"], "source_router_cap_below_minimum")
 

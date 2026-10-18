@@ -620,9 +620,14 @@ class RiskManager:
             grade = evidence.get("source_grade") if isinstance(evidence, Mapping) else None
             strength = {"WEAK_YES": "weak", "WEAK_NO": "weak",
                         "STRONG_YES": "strong", "STRONG_NO": "strong"}.get(grade) if isinstance(grade, str) else None
-            if strength is None or strength not in self.source_router_position_caps:
+            expected_direction = {
+                "WEAK_YES": "BUY_YES", "STRONG_YES": "BUY_YES",
+                "WEAK_NO": "BUY_NO", "STRONG_NO": "BUY_NO",
+            }.get(grade) if isinstance(grade, str) else None
+            if (strength is None or strength not in self.source_router_position_caps
+                    or signal.get("direction") != expected_direction):
                 return RiskDecision(
-                    approved=False, reason="Router source grade missing, invalid or unconfigured",
+                    approved=False, reason="Router source grade missing, invalid, unconfigured or inconsistent with selected direction",
                     original_size=original_size, risk_score=1.0,
                     metadata={"reason_code": "source_router_cap_evidence_invalid"},
                 )
