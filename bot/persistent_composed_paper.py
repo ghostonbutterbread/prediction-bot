@@ -19,7 +19,7 @@ import os
 
 from bot.file_ops import atomic_write_json
 from bot.forward_composed_paper import PICKER, CONTROL, _IDENTITY, _digest as forward_digest, compose_forward_rows, validate_forward_combination
-from bot.composed_lane_wallet import _timestamp
+from bot.composed_lane_wallet import _reject_outcome_fields, _timestamp
 from bot.market_router import route_market
 from bot.shared_market_runtime import shared_snapshot_is_fresh
 from bot.simulator import Simulator
@@ -99,7 +99,9 @@ def consume_persistent_composed_paper(
         intent = selected.get(decision_id)
         if pair["combined_action"] in {"BUY_YES", "BUY_NO"} and intent is None:
             raise ValueError("composed BUY lacks complete qualified intent")
-        signal = _prepare_signal(intent, pair, latest) if intent is not None else None
+        signal = _prepare_signal(intent, pair, latest, router_caps_enabled=(
+            "source_router_position_caps" in (account_config.get("risk") or {})
+        )) if intent is not None else None
         prepared.append((decision_id, pair, signal))
     if not prepared:
         raise ValueError("cohort has no composed decisions")
@@ -299,7 +301,8 @@ def _account_settings(config: Mapping[str, Any], root: Path) -> dict[str, Any]:
 
 
 def _prepare_signal(intent: Mapping[str, Any], pair: Mapping[str, Any],
-                    lane_rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+                    lane_rows: Sequence[Mapping[str, Any]], *, router_caps_enabled: bool = False) -> dict[str, Any]:
+    _reject_outcome_fields(intent)
     action = intent["action"]
     price = intent["entry_price"]
     probability = intent["model_probability"]
@@ -323,6 +326,11 @@ def _prepare_signal(intent: Mapping[str, Any], pair: Mapping[str, Any],
               "market_price": price, "edge": selected - price,
               "event_ticker": intent["event_key"],
               "shared_candidate_id": intent["shared_candidate_id"],
+              # Only opt-in accounts gain Router evidence on the actual signal;
+              # preserve legacy no-config signal fingerprints across restarts.
+              **{key: intent["source_context"][key]
+                 for key in ("router_selection", "router_decision_metadata")
+                 if router_caps_enabled and key in intent["source_context"]},
               "signals": {"composed_decision_id": intent["decision_id"],
                           "shared_candidate_id": intent["shared_candidate_id"],
                           "run_id": intent["run_id"], "shared_snapshot_id": intent["shared_snapshot_id"],

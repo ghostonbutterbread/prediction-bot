@@ -1123,11 +1123,31 @@ class KellySizer:
         if size <= 0:
             return 0
 
-        gross_profit_if_win = size * ((1 - market_price) / market_price)
-        net_profit_if_win = gross_profit_if_win * (1 - self.fee_rate)
-        expected_net_profit = (p * net_profit_if_win) - ((1 - p) * size)
-        if expected_net_profit < self.min_expected_net_profit_usd:
-            return 0
-        if size < self.min_position_size_usd:
+        if not self.assess_trade_economics(p, market_price, size)["approved"]:
             return 0
         return size
+
+    def assess_trade_economics(self, model_prob: float, market_price: float,
+                               position_size: float) -> dict[str, Any]:
+        """Canonical monetary gates for initial Kelly and final capped stakes.
+
+        Assess only: never enlarge a stake to satisfy a monetary minimum. This
+        deliberately retains the existing winnings-fee model, not a new fee model.
+        """
+        gross_profit_if_win = position_size * ((1 - market_price) / market_price)
+        net_profit_if_win = gross_profit_if_win * (1 - self.fee_rate)
+        expected_net_profit = (model_prob * net_profit_if_win) - ((1 - model_prob) * position_size)
+        if expected_net_profit < self.min_expected_net_profit_usd:
+            code = "expected_net_profit_below_minimum"
+            reason = (f"Expected net profit ${expected_net_profit:.4f} below minimum "
+                      f"${self.min_expected_net_profit_usd:.4f}")
+        elif position_size < self.min_position_size_usd:
+            code = "position_size_below_minimum"
+            reason = f"Position size ${position_size:.2f} below minimum ${self.min_position_size_usd:.2f}"
+        else:
+            code, reason = "approved", "Trade economics approved"
+        return {"approved": code == "approved", "reason_code": code, "reason": reason,
+                "position_size_usd": position_size, "expected_net_profit_usd": expected_net_profit,
+                "min_position_size_usd": self.min_position_size_usd,
+                "min_expected_net_profit_usd": self.min_expected_net_profit_usd,
+                "fee_rate": self.fee_rate}

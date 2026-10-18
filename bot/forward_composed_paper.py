@@ -65,7 +65,8 @@ def compose_forward_rows(rows: Sequence[Mapping[str, Any]], *, combination: Mapp
         if policy not in {CONTROL, PICKER, ROUTER, GUARD, PRE_RISK_GUARD}:
             continue
         # Router source-history provenance may legitimately describe earlier
-        # outcomes. Never forward it: inspect only its allowlisted admission flag.
+        # outcomes. Never forward it: project only scalar decision-time grade
+        # evidence and an explicit selection marker for the combined wallet.
         if policy == ROUTER:
             _reject_outcome_fields({k: v for k, v in row.items() if k != "provenance"})
         else:
@@ -86,6 +87,8 @@ def compose_forward_rows(rows: Sequence[Mapping[str, Any]], *, combination: Mapp
             identity = dict(zip(_IDENTITY, key))
             action = str(control.get("action") or "SKIP").upper()
             reason = None
+            router: Mapping[str, Any] = {}
+            history: Mapping[str, Any] = {}
             if not all(key) or not _valid_time(key[-1]):
                 reason = "incomplete_shared_identity"
             elif len(group[baseline_policy]) != 1:
@@ -162,7 +165,19 @@ def compose_forward_rows(rows: Sequence[Mapping[str, Any]], *, combination: Mapp
                     intents.append({**base, "lane_id": CONTROL, "decision_id": "forward-control:" + _digest(identity),
                                     "action": action, "entry_price": stable_price})
                 if reason is None:
-                    intents.append({**base, "lane_id": "forward_composed_paper", "decision_id": "forward-combined:" + _digest(identity),
+                    combined_source = dict(base["source_context"])
+                    if require_router:
+                        # Do not transport source history, observations, or scores.
+                        # Missing/malformed grades remain marked as Router-selected
+                        # so an enabled risk cap policy can reject them explicitly.
+                        grade = history.get("source_grade")
+                        combined_source.update(
+                            router_selection={"role": "veto", "policy": ROUTER,
+                                              "decision_id": router.get("decision_id")},
+                            router_decision_metadata={"source_grade": grade if isinstance(grade, str) else None},
+                        )
+                    intents.append({**base, "source_context": combined_source,
+                                    "lane_id": "forward_composed_paper", "decision_id": "forward-combined:" + _digest(identity),
                                     "action": action, "entry_price": price})
     return pairs, intents
 
