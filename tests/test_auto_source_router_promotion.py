@@ -64,10 +64,29 @@ def _strict_resolution(market_id: str) -> dict:
         "market_id": market_id, "requested_market_id": market_id, "returned_market_id": market_id,
         "market_status": "finalized", "kalshi_result": "yes", "settlement_ts": "2026-08-04T00:00:00Z",
         "resolution_id": "authoritative-resolution-1",
+        # Explicit resolver knowledge for this fixture, not a settlement fallback.
+        "resolved_at": "2026-08-04T00:00:00Z",
     }
 
 
 class AutoSourceRouterPromotionTests(unittest.TestCase):
+    def test_published_history_exposes_predictive_partial_forecasts_without_strict_relabelling(self):
+        from bot.weather.predictive_source_history import load_predictive_source_history
+        row = _collector_row()
+        source = row['decision_artifact']['source_context']['data']['weather_source_snapshot']['sources'][0]
+        source.update(forecast_start='2026-08-03T06:00:00-07:00', forecast_end='2026-08-03T18:00:00-07:00',
+                      forecast_period_name='Monday', is_daytime=True)
+        resolution = _strict_resolution(row['market_id'])
+        resolution['resolution'] = {'resolved_at': '2026-08-07T00:00:00Z', 'outcome': 'YES', 'source': 'kalshi_api'}
+        result = self.run_pipeline([row], [resolution])
+        history = load_predictive_source_history(result.history_path.parent / 'run_metadata.json')
+        self.assertTrue(history[0]['eligible_for_predictive_history'])
+        self.assertFalse(history[0]['eligible_for_source_history'])
+        self.assertEqual(history[0]['known_after'], '2026-08-07T00:00:00+00:00')
+        self.assertEqual(result.counts['predictive_eligible'], 1)
+        self.assertEqual(history[0]['forecast_semantics']['period_name'], 'Monday')
+        self.assertIs(history[0]['forecast_semantics']['is_daytime'], True)
+
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
         self.root = Path(self.tempdir.name)
@@ -425,7 +444,7 @@ class AutoSourceRouterPromotionTests(unittest.TestCase):
         self.assertEqual(result.counts["eligible"], 1)
         self.assertTrue(history["eligible_for_source_history"])
         self.assertEqual(history["settlement_ts"], "2026-08-04T00:00:00Z")
-        self.assertEqual(history["known_after"], history["settlement_ts"])
+        self.assertEqual(history["known_after"], "2026-08-04T00:00:00+00:00")
         self.assertIn("source_record_sha256", history["source_provenance"])
         self.assertIn("strict_resolution_source_sha256", history["resolution_provenance"])
         manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
@@ -442,7 +461,7 @@ class AutoSourceRouterPromotionTests(unittest.TestCase):
 
         self.assertEqual(stats["history_ledger_rows"], 1)
         self.assertTrue(loaded[0]["source_router_history_only"])
-        self.assertEqual(loaded[0]["settlement_ts"], loaded[0]["known_after"])
+        self.assertEqual(loaded[0]["known_after"], "2026-08-04T00:00:00+00:00")
 
     def test_generation_is_accepted_by_verified_collector_consumer_with_exact_manifest_ledger(self) -> None:
         row = _collector_row()

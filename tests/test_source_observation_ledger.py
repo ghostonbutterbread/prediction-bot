@@ -7,6 +7,7 @@ from pathlib import Path
 from bot.weather.source_observation_ledger import (
     is_eligible_for_future_history,
     materialize_source_observation_ledger,
+    predictive_source_observation_proof,
     source_correctness_target_proof,
     strict_source_observation_proof,
 )
@@ -713,7 +714,11 @@ class SourceObservationLedgerTests(unittest.TestCase):
             market_kind="high", contract_shape="tail", question_side="above",
             observed_at="2026-08-01T12:00:00+00:00",
         )
-        self.assertEqual(proof["status"], "eligible")
+        self.assertEqual(proof["reasons"], ["partial_day_high_proxy_not_full_day"])
+        predictive = predictive_source_observation_proof(source_record=source, strict_proof=proof,
+            target_proof=source_correctness_target_proof(source_record=source, snapshot={}, market_date="2026-08-03"),
+            observed_at="2026-08-01T12:00:00+00:00")
+        self.assertEqual(predictive["status"], "eligible_predictive_source_proof")
 
     def test_strict_history_requires_resolvable_timezone_for_local_period_end(self) -> None:
         source = {

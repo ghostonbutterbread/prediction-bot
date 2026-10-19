@@ -40,9 +40,9 @@ class WeatherRegistryTests(unittest.TestCase):
         sources = registry.get_sources("miami_fl")
 
         self.assertEqual(city["city"], "Miami")
-        self.assertEqual(len(sources), 2)
+        self.assertEqual(len(sources), 3)
         self.assertEqual(sources[0]["source_id"], "src_nws_mfl")
-        self.assertEqual(city["watch_only"], ["src_station_kmia"])
+        self.assertEqual(city["watch_only"], ["src_station_kmia", "src_local_wsvn_weather"])
 
     def test_update_source_score_is_in_memory_until_saved(self):
         registry = WeatherRegistry.from_file()
@@ -189,7 +189,7 @@ class WeatherMarketCityMapperTests(unittest.TestCase):
         self.assertEqual(context.primary_source_id, "src_nws_lix")
 
     def test_returns_none_for_unknown_city(self):
-        self.assertIsNone(self.mapper.resolve("Will the high temp in Washington be above 88°?", "KXHIGHTDC"))
+        self.assertIsNone(self.mapper.resolve("Will the high temp in Anchorage be above 88°?", "KXHIGHTANC"))
 
 
 class WeatherObservationIntegrationTests(unittest.TestCase):
@@ -284,9 +284,9 @@ class WeatherObservationIntegrationTests(unittest.TestCase):
             log_path = Path(tmpdir) / "weather_observations.jsonl"
             engine = self._build_engine(log_path)
             market = make_market(
-                "Will the high temp in Washington be above 84°?",
-                market_id="mkt-dc",
-                category="KXHIGHTDC",
+                "Will the high temp in Anchorage be above 84°?",
+                market_id="mkt-anchorage",
+                category="KXHIGHTANC",
             )
             current_ts = datetime.now(timezone.utc).isoformat()
             weather_signal = {

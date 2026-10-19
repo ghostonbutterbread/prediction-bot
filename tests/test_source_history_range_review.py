@@ -177,7 +177,7 @@ class ReviewRangeTests(unittest.TestCase):
                 writer = auto_populate_source_router_history(collector_snapshots_path=raw,
                     strict_resolutions_path=resolutions, output_root=root/'data/derived_reports/history', storage_root=root)
                 manifest_data = json.loads(writer.manifest_path.read_text())
-                self.assertEqual(manifest_data['source_projection'], 'all_candidates_range_forecast_v7')
+                self.assertEqual(manifest_data['source_projection'], 'all_candidates_predictive_forecast_v8')
                 identity = {
                     'schema_name': 'auto_source_router_history_promotion', 'schema_version': 2,
                     'collector_snapshots_sha256': hashlib.sha256(before[0]).hexdigest(),
@@ -186,8 +186,9 @@ class ReviewRangeTests(unittest.TestCase):
                 def generation(version):
                     value = dict(identity, source_projection=f'all_candidates_range_forecast_v{version}')
                     return hashlib.sha256((json.dumps(value, sort_keys=True, separators=(',', ':')) + '\n').encode()).hexdigest()
-                self.assertEqual(writer.generation_dir.name, generation(7))
-                for old_version in (3, 4, 5, 6):
+                expected = dict(identity, source_projection='all_candidates_predictive_forecast_v8')
+                self.assertEqual(writer.generation_dir.name, hashlib.sha256((json.dumps(expected, sort_keys=True, separators=(',', ':')) + '\n').encode()).hexdigest())
+                for old_version in (3, 4, 5, 6, 7):
                     self.assertNotEqual(writer.generation_dir.name, generation(old_version))
                 history = [json.loads(x) for x in writer.history_path.read_text().splitlines()]
                 scores = load_verified_strict_scorecard_rows(writer.scoreboard_path)

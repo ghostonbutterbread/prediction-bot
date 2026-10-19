@@ -1,8 +1,9 @@
 # Weather source catalog for the source-scoreboard evaluator.
 #
-# This is metadata only. It does not enable a source, fetch network data, or
-# promote any source to trading. External provider claims are leads until the
-# scoreboard edge evaluator validates them against Kalshi finalized outcomes.
+# Metadata and capability catalog. Research-only entries remain unavailable
+# until an adapter and authorized access exist; the collector retains that status.
+# Collection does not promote a source to trading. External provider claims
+# remain leads until validated against independently finalized outcomes.
 
 sources:
   - source_id: nws
@@ -38,6 +39,17 @@ sources:
       - model_grid_may_not_match_settlement_station
     adapter_status: active
     trading_status: scoreboard_only
+
+  - source_id: openweathermap
+    family: openweathermap
+    category: model_forecast
+    api: api.openweathermap.org
+    cost: credentialed_free_tier
+    license_notes: provider access and storage terms require review
+    adapter_status: optional_key_required
+    dated_forecast_status: unavailable_pending_explicit_source_local_date_adapter
+    credential_prerequisite: OPENWEATHER_API_KEY
+    trading_status: disabled
 
   - source_id: metar_asos
     family: noaa_station_observation
