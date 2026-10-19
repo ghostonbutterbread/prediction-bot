@@ -4,6 +4,7 @@ Status: implementation gate GREEN; independent combined review and all original 
 Owner/task: Hermes / t_6c73f5cc. Review owner: pre-created t_6c52f822; release owner: t_d0fb16e8.
 Branch: fix/contextual-tie-abstention-t_6c73f5cc.
 Checkout: /home/ryushe/.hermes/kanban/boards/prediction-bot/workspaces/t_1f18d5be/t_6c73f5cc/candidate.
+Implementation recovery checkpoint: 8a16df2aa7a3a866748527cf4182eed6cda3964e. A later dossier-only commit records this checkpoint; production/test bytes are unchanged. Recover this branch/ref or the attached incremental Git bundle, not the unchanged canonical feature alone.
 Continuation base: e54114a6afbff37fbd7bd6eb2af1e6859199e2b3 (test dossier), with test implementation 3a3ae0550c0633b6d11cb3c3847697d10f8f6f69, atop canonical feature 1bd33fe11e20388fb5b72ea5e72d16bc6157cd25. No feature reconstruction or replacement of upstream collection/history is necessary.
 Intended eventual integration target: beta, after independent acceptance and explicit disposition of outstanding permission gates; main is not a target. No beta fetch/preflight/integration or canonical feature mutation was needed for this pinned local continuation. The local source/test ref was fetched before editing.
 
