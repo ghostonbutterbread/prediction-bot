@@ -520,6 +520,24 @@ def _source_period_target_problem(
     low_ends_on_target = bool(period_dates["end"]) and all(
         period_day == target for period_day in period_dates["end"]
     )
+    local_prior_night = source.get("forecast_type") == "local_prior_night_low_predictor"
+    if local_prior_night:
+        # The local daily-row minimum predicts the following morning. Its
+        # retained start is the prior day's row timestamp, not a fabricated
+        # nighttime boundary; the producer does not supply a period end.
+        # This explicit target mapping proves a predictor, never a daily low.
+        if not (
+            is_low and str(source.get("source_evidence_version")).strip() == "1"
+            and source.get("evidence_type") == "forecast"
+            and source.get("scoreable_forecast") is True
+            and mapping.get("mapping") == "source_local_dated_predictor"
+            and _normalized_date(mapping.get("market_target_date")) == market_date
+            and _normalized_date(mapping.get("source_target_date")) == market_date
+            and source_timezone is not None and period_dates["start"]
+            and all(day == target - timedelta(days=1) for day in period_dates["start"])
+            and (not period_dates["end"] or low_ends_on_target)
+        ):
+            return "source_period_target_mismatch"
     full_day_low = (is_low and bool(period_times["start"] and period_times["end"])
                     and all(period.date() == target and period.hour == 0 and period.minute == 0
                             and period.second == 0 and period.microsecond == 0
@@ -533,7 +551,7 @@ def _source_period_target_problem(
             day_offset = (period_day - target).days
             if day_offset == 0:
                 continue
-            if boundary == "start" and day_offset == -1 and is_low and low_ends_on_target:
+            if boundary == "start" and day_offset == -1 and is_low and (low_ends_on_target or local_prior_night):
                 continue
             if boundary == "end" and day_offset == 1 and (not is_low or full_day_low):
                 continue

@@ -16,6 +16,8 @@ import httpx
 from typing import Any, Mapping, Optional
 from datetime import date, datetime, timezone, timedelta
 from dataclasses import dataclass, field
+from bot.collector_paths import collector_root
+from bot.feeds.weather_capture_store import WeatherCaptureStore, CaptureRetentionError
 
 logger = logging.getLogger(__name__)
 
@@ -327,14 +329,12 @@ def _unavailable_snapshot(
     )
 
 
-def _response_capture(response, *, url: str, parameters: dict | None = None) -> dict:
-    """Exact response bytes inline in the existing collector, never a second archive.
+def _response_capture(response, *, capture_store: WeatherCaptureStore, url: str, parameters: dict | None = None) -> dict:
+    """Retain exact response bytes once; return only verified compact references.
 
     Minimal legacy HTTP fixtures expose JSON only; mark their reserialization
     explicitly rather than claiming those are original transport bytes.
     """
-    import base64
-    import hashlib
     import json
 
     raw = getattr(response, 'content', None)
@@ -342,21 +342,16 @@ def _response_capture(response, *, url: str, parameters: dict | None = None) -> 
     if not isinstance(raw, bytes):
         raw = json.dumps(response.json(), ensure_ascii=False).encode('utf-8')
         representation = 'json_reserialized_no_transport_bytes'
-    try:
-        payload = {'payload_text': raw.decode('utf-8'), 'payload_encoding': 'utf-8'}
-    except UnicodeDecodeError:
-        payload = {'payload_base64': base64.b64encode(raw).decode('ascii'), 'payload_encoding': 'base64'}
     headers = getattr(response, 'headers', {})
-    return {**payload, 'payload_sha256': hashlib.sha256(raw).hexdigest(),
+    return capture_store.retain(raw, metadata={
             'retrieval_url': url, 'request_parameters': parameters or {},
             'http_status': getattr(response, 'status_code', None),
             'content_type': headers.get('content-type'), 'representation': representation,
-            'fetched_at': datetime.now(timezone.utc).isoformat(),
-            'storage': 'inline_central_collector_source_metadata'}
+            'fetched_at': datetime.now(timezone.utc).isoformat()})
 
 
-def _retain_forecast_response(details: dict, response, *, url: str, parameters: dict | None = None) -> None:
-    capture = _response_capture(response, url=url, parameters=parameters)
+def _retain_forecast_response(details: dict, response, *, capture_store: WeatherCaptureStore, url: str, parameters: dict | None = None) -> None:
+    capture = _response_capture(response, capture_store=capture_store, url=url, parameters=parameters)
     details['capture'] = capture
     details['collection_attempts'] = [{'url': url, 'http_status': capture['http_status'],
                                       'fetched_at': capture['fetched_at']}]
@@ -369,7 +364,8 @@ class OpenMeteoFeed:
     """
     BASE = "https://api.open-meteo.com/v1/forecast"
 
-    def __init__(self):
+    def __init__(self, *, capture_store: WeatherCaptureStore | None = None):
+        self.capture_store = capture_store or WeatherCaptureStore(storage_root=collector_root())
         self.http = httpx.Client(timeout=10)
         self._station_location_cache: dict = {}
 
@@ -400,7 +396,7 @@ class OpenMeteoFeed:
                 "timezone": "auto",
             }
             resp = self.http.get(self.BASE, params=params)
-            _retain_forecast_response(location_details, resp, url=self.BASE, parameters=params)
+            _retain_forecast_response(location_details, resp, capture_store=self.capture_store, url=self.BASE, parameters=params)
             resp.raise_for_status()
             data = resp.json()
 
@@ -484,6 +480,8 @@ class OpenMeteoFeed:
                     "forecast_times_used": list(selected_times),
                 },
             )
+        except CaptureRetentionError:
+            raise
         except Exception as e:
             logger.debug(f"Open-Meteo error for {city}: {e}")
             location_details['adapter_error_type'] = type(e).__name__
@@ -501,7 +499,8 @@ class OpenMeteoFeed:
 class NWSFeed:
     """NWS API: free, no key, US only, 1-2 hour updates. Also provides real-time station observations."""
 
-    def __init__(self):
+    def __init__(self, *, capture_store: WeatherCaptureStore | None = None):
+        self.capture_store = capture_store or WeatherCaptureStore(storage_root=collector_root())
         self.http = httpx.Client(timeout=10)
         self._station_location_cache: dict = {}
         self._points_cache: dict[tuple, tuple[datetime, tuple[str, int, int]]] = {}
@@ -608,7 +607,7 @@ class NWSFeed:
         location_details["forecast_query_url"] = url
         try:
             resp = self.http.get(url, headers={"User-Agent": "PredictionBot/1.0"})
-            _retain_forecast_response(location_details, resp, url=url)
+            _retain_forecast_response(location_details, resp, capture_store=self.capture_store, url=url)
             resp.raise_for_status()
             data = resp.json()
             location_details['source_reported_updated_at'] = data.get('properties', {}).get('updateTime')
@@ -671,7 +670,7 @@ class NWSFeed:
             period_end = today.get("endTime")
             periods_used = [self._period_ref(period) for period in (high_period, low_period)]
 
-            return WeatherSnapshot(
+            snapshot = WeatherSnapshot(
                 city=city.lower(),
                 high_temp_f=float(high) if high is not None else None,
                 low_temp_f=float(low) if low is not None else None,
@@ -719,8 +718,12 @@ class NWSFeed:
                     "periods_used": periods_used,
                     "high_period": self._period_ref(high_period),
                     "low_period": self._period_ref(low_period),
+                    "source_clock_basis": "capture_time_with_separate_provider_update_time",
                 },
             )
+            return _apply_source_clock_eligibility(snapshot, location_details.get('source_reported_updated_at'))
+        except CaptureRetentionError:
+            raise
         except Exception as e:
             logger.debug(f"NWS error for {city}: {e}")
             location_details['adapter_error_type'] = type(e).__name__
@@ -745,59 +748,110 @@ class NWSFeed:
         self.http.close()
 
 
+def _apply_source_clock_eligibility(snapshot: WeatherSnapshot, value: object, *, milliseconds: bool = False) -> WeatherSnapshot:
+    """A source cache/update clock is evidence, not automatically issuance time."""
+    if value is None:
+        return snapshot
+    try:
+        if milliseconds:
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ValueError('invalid cache clock')
+            clock = datetime.fromtimestamp(value / 1000, timezone.utc)
+        else:
+            clock = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+        if clock.utcoffset() is None:
+            raise ValueError('timezone ambiguous source clock')
+        capture_at = datetime.fromisoformat(snapshot.source_details['capture']['fetched_at'])
+        reason = 'source_reported_clock_after_capture' if clock > capture_at else None
+    except (TypeError, ValueError, OverflowError, OSError):
+        reason = 'source_reported_clock_invalid'
+    snapshot.source_details['source_clock_eligibility'] = 'ineligible' if reason else 'consistent_with_capture'
+    if reason:
+        snapshot.scoreable_forecast = False
+        snapshot.availability_reason = reason
+        snapshot.source_details.update(forecast_availability='unavailable', availability_reason=reason)
+    return snapshot
+
+
 class LocalForecastFeed:
     """Capture each configured public page; numeric support is schema-specific.
 
-    Inline raw captures travel in source_metadata to the existing central
-    collector archive. This feed does not create a second archival service.
+    Raw captures belong to the collector store, not repeated scoring wrappers.
     """
-    def __init__(self, http: httpx.Client):
+    def __init__(self, http: httpx.Client, *, capture_store: WeatherCaptureStore | None = None):
         self.http = http
+        self.capture_store = capture_store or WeatherCaptureStore(storage_root=collector_root())
 
     def get_forecast(self, source: dict, *, target_date: str | None,
                      measurement_kind: str | None = None) -> WeatherSnapshot:
-        from bot.feeds.weather_local import LocalForecastUnavailable, parse_gray_daily
+        from bot.feeds.weather_local import LocalForecastUnavailable, parse_gray_daily, local_geography_reason
+        from bot.feeds.weather_local_fox import parse_fox_daily
+        from bot.feeds.weather_local_tegna import parse_tegna_daily
+        from bot.feeds.weather_local_other import OTHER_LOCAL_ADAPTERS, OTHER_LOCAL_URLS, OTHER_LOCAL_UNAVAILABLE_REASONS
 
         city, source_id = source['city'].lower(), source['source_id']
+        request_url = OTHER_LOCAL_URLS.get(source_id, source['url'])
         details = {'source_id': source_id, 'source_name': source['name'],
                    'source_family': 'local_broadcast', 'collection_adapter': source.get('collection_adapter'),
-                   'forecast_query_url': source['url'], 'collection_attempts': [],
+                   'registry_url': source['url'], 'forecast_query_url': request_url, 'collection_attempts': [],
                    'capability_blocker': source.get('collection_blocker'),
                    'forecast_location': {'city': city, 'basis': 'city', 'city_id': source['city_id']}}
         target = _target_date_text(target_date)
         if target is None:
             return _unavailable_snapshot(city=city, source=source_id, target_date=target_date,
                                          reason='missing_market_target_date', source_details=details)
-        attempt = {'url': source['url'], 'attempted_at': datetime.now(timezone.utc).isoformat()}
+        attempt = {'url': request_url, 'attempted_at': datetime.now(timezone.utc).isoformat()}
         details['collection_attempts'].append(attempt)
         try:
-            response = self.http.get(source['url'], follow_redirects=True)
+            response = self.http.get(request_url, follow_redirects=True)
             attempt['http_status'] = response.status_code
             fetched_at = datetime.now(timezone.utc)
-            details['capture'] = _response_capture(response, url=source['url'])
+            details['capture'] = _response_capture(response, capture_store=self.capture_store, url=request_url)
             response.raise_for_status()
-            parser = {'gray_fusion_daily_v1': parse_gray_daily}.get(source.get('collection_adapter', ''))
+            if source_id in OTHER_LOCAL_UNAVAILABLE_REASONS:
+                raise LocalForecastUnavailable(OTHER_LOCAL_UNAVAILABLE_REASONS[source_id])
+            parser = OTHER_LOCAL_ADAPTERS.get(source_id) or {'gray_fusion_daily_v1': parse_gray_daily,
+                      'fox_nuxt_daily_v1': parse_fox_daily,
+                      'tegna_public_html_v1': parse_tegna_daily}.get(source.get('collection_adapter', ''))
             if parser is None:
                 details['prerequisite'] = 'observed_dated_local_forecast_payload_and_parser'
                 raise LocalForecastUnavailable('source_specific_numeric_adapter_unavailable')
             parsed = parser(response.text, city=source['city'], target_date=target,
-                            measurement_kind=measurement_kind, timezone_name=source['timezone'])
+                            measurement_kind=measurement_kind, timezone_name=source['timezone'],
+                            **({'fetched_at': fetched_at} if parser is parse_tegna_daily else {}))
             details.update(forecast_type=parsed['forecast_type'], raw_forecast=parsed['raw_forecast'],
                            payload_locator=parsed['payload_locator'],
                            source_cache_updated_at_ms=parsed['cache_updated_at_ms'])
-            details['forecast_location'].update(parsed['location'])
+            for key in ('selected_period', 'source_updated_at', 'period_semantics',
+                        'full_day_measurement_equivalent', 'date_mapping_basis', 'period_basis'):
+                if key in parsed:
+                    details[key] = parsed[key]
+            if 'payload_sha256' in parsed:
+                details['parser_payload_sha256'] = parsed['payload_sha256']
+            details['source_reported_location'] = parsed['location']
+            # The registry's city/timezone is the predictor binding. Provider
+            # coordinates are not an independently verified query or station.
+            geography_reason = local_geography_reason(parsed['location'], city=city, city_id=source['city_id'])
+            details['forecast_location']['geography_basis'] = 'registry_city_and_source_label_timezone'
+            details['forecast_location']['coordinate_basis'] = 'source_reported_unverified'
             details.update(source_evidence_version=1, evidence_type='forecast', forecast_availability='available',
-                           source_as_of=fetched_at.isoformat(), source_clock_basis='capture_time_provider_issue_time_unavailable',
+                           source_as_of=parsed.get('source_as_of', fetched_at.isoformat()),
+                           source_clock_basis=parsed.get('source_clock_basis', 'capture_time_provider_issue_time_unavailable'),
                            target_mapping={'market_target_date': target, 'source_target_date': target,
                                            'mapping': 'source_local_dated_predictor',
                                            'source_timezone': parsed['location'].get('ianaTimeZone'),
                                            'source_period_start': parsed['period_start'],
                                            'source_period_end': parsed['period_end']})
-            return WeatherSnapshot(city=city, source=source_id, high_temp_f=parsed['high'],
+            snapshot = WeatherSnapshot(city=city, source=source_id, high_temp_f=parsed['high'],
                 low_temp_f=parsed['low'], current_temp_f=None, fetched_at=fetched_at,
                 as_of=fetched_at, forecast_hours_ahead=0, confidence=0,
                 weather_date=target, forecast_date=target, forecast_start=parsed['period_start'],
                 forecast_end=parsed['period_end'], source_details=details)
+            if geography_reason:
+                snapshot.scoreable_forecast = False
+                snapshot.availability_reason = geography_reason
+                details.update(forecast_availability='unavailable', availability_reason=geography_reason)
+            return _apply_source_clock_eligibility(snapshot, parsed['cache_updated_at_ms'], milliseconds=True)
         except LocalForecastUnavailable as exc:
             reason = str(exc)
         except httpx.HTTPStatusError:
@@ -935,9 +989,11 @@ class ProWeatherEngine:
     returns a high-confidence forecast.
     """
 
-    def __init__(self):
-        self.open_meteo = OpenMeteoFeed()
-        self.nws = NWSFeed()
+    def __init__(self, *, capture_store: WeatherCaptureStore | None = None):
+        # Collector owner injects one store, rooted independently of this checkout.
+        self.capture_store = capture_store or WeatherCaptureStore(storage_root=collector_root())
+        self.open_meteo = OpenMeteoFeed(capture_store=self.capture_store)
+        self.nws = NWSFeed(capture_store=self.capture_store)
         self.owm = OpenWeatherMapFeed()
         self._cache = {}
         self._cache_ttl = 600  # 10 min
@@ -998,6 +1054,7 @@ class ProWeatherEngine:
                 sources_used=[], confidence=0, fetched_at=datetime.now(timezone.utc),
                 details={"source_snapshots": source_snapshots},
             )
+            self._retain_collection_receipt(result, target=target, measurement_kind=measurement_kind)
             self._cache[cache_key] = (result, datetime.now(timezone.utc))
             return result
 
@@ -1008,6 +1065,8 @@ class ProWeatherEngine:
         def collect(source, fetch):
             try:
                 snapshot = fetch()
+            except CaptureRetentionError:
+                raise
             except Exception as exc:
                 logger.warning('Weather adapter %s failed: %s', source, type(exc).__name__)
                 snapshot = _unavailable_snapshot(city=city_lower, source=source, target_date=target,
@@ -1038,15 +1097,19 @@ class ProWeatherEngine:
                                       else 'explicit_source_local_date_forecast_adapter'})
             if target or not self.owm.available else self.owm.get_forecast(city_lower, station_resolution=station)))
 
-        local_feed = LocalForecastFeed(self.nws.http)
+        local_feed = LocalForecastFeed(self.nws.http, capture_store=self.capture_store)
         for source in local_candidates:
-            collect(source['source_id'], lambda source=source: (
-                _unavailable_snapshot(city=city_lower, source=source['source_id'], target_date=target,
-                    reason=station.get('availability_reason') or 'explicit_station_unresolved',
-                    source_details={'forecast_location': station})
-                if station.get('availability_reason') or (station.get('station_origin') == 'market_explicit'
-                                                         and not station.get('station_id'))
-                else local_feed.get_forecast(source, target_date=target, measurement_kind=measurement_kind)))
+            snapshot = collect(source['source_id'], lambda source=source: local_feed.get_forecast(
+                source, target_date=target, measurement_kind=measurement_kind))
+            # Capture is city-owned; unresolved contract authority disqualifies
+            # use only, never the independent fetch or its original values.
+            snapshot.source_details['market_station_association'] = dict(station)
+            if station.get('availability_reason') or (station.get('station_origin') == 'market_explicit'
+                                                      and not station.get('station_id')):
+                snapshot.scoreable_forecast = False
+                snapshot.availability_reason = station.get('availability_reason') or 'explicit_station_unresolved'
+                snapshot.source_details.update(forecast_availability='unavailable',
+                                               availability_reason=snapshot.availability_reason)
         source_snapshots.extend(unavailable_candidates)
         snapshots = [snapshot for snapshot in source_snapshots if self._snapshot_is_plausible(snapshot, measurement_kind)]
 
@@ -1057,6 +1120,7 @@ class ProWeatherEngine:
                 sources_used=[], confidence=0, fetched_at=datetime.now(timezone.utc),
                 details={"source_snapshots": source_snapshots, "local_station_observation": local_station_observation},
             )
+            self._retain_collection_receipt(result, target=target, measurement_kind=measurement_kind)
             self._cache[cache_key] = (result, datetime.now(timezone.utc))
             return result
 
@@ -1160,8 +1224,20 @@ class ProWeatherEngine:
         )
 
         result.details["source_snapshots"] = source_snapshots
+        self._retain_collection_receipt(result, target=target, measurement_kind=measurement_kind)
         self._cache[cache_key] = (result, datetime.now(timezone.utc))
         return result
+
+    def _retain_collection_receipt(self, forecast: MultiSourceForecast, *, target: str | None,
+                                   measurement_kind: str | None) -> MultiSourceForecast:
+        """Collection evidence survives independently of a scoring decision."""
+        forecast.details['collection_receipt'] = self.capture_store.retain_receipt({
+            'schema_version': 1, 'kind': 'weather_collection', 'city': forecast.city,
+            'market_target_date': target, 'forecast_measurement_kind': measurement_kind,
+            'observed_at': forecast.fetched_at.isoformat(),
+            'sources': self._source_contribution_details(forecast, city=forecast.city,
+                                                        forecast_measurement_kind=measurement_kind)})
+        return forecast
 
     @staticmethod
     def select_source_forecast(forecast: MultiSourceForecast, source_id: str, *,
@@ -1222,8 +1298,19 @@ class ProWeatherEngine:
             measurement_kind="high" if is_high else "low",
             station_resolution=_forecast_station_selection(city, market_metadata),
         )
-        if not forecast or not forecast.sources_used:
+        if not forecast:
             return None
+        if not forecast.sources_used:
+            return {
+                'signal_type': 'weather', 'collection_only': True, 'prediction_available': False,
+                'availability_reason': 'no_eligible_forecast_sources', 'confidence': 0,
+                'source_timestamp': forecast.fetched_at.isoformat(), 'ttl_seconds': self._cache_ttl,
+                'data': {'city': city, 'market_target_date': market_date, 'sources': [],
+                         'forecast_high': None, 'forecast_low': None, 'forecast_driver': None,
+                         'collection_receipt': forecast.details.get('collection_receipt'),
+                         'source_details': self._source_contribution_details(forecast, city=city,
+                             forecast_measurement_kind='high' if is_high else 'low')},
+            }
         if selected_source_id is not None:
             forecast = self.select_source_forecast(forecast, selected_source_id,
                                                   measurement_kind='high' if is_high else 'low')
@@ -1338,6 +1425,7 @@ class ProWeatherEngine:
                 "city": city,
                 "market_target_date": market_date,
                 "sources": forecast.sources_used,
+                "collection_receipt": forecast.details.get('collection_receipt'),
                 "agreement": forecast.source_agreement,
                 "source_details": self._source_contribution_details(
                     forecast,

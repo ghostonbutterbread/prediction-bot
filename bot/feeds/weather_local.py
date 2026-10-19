@@ -30,6 +30,37 @@ class _Scripts(HTMLParser):
             self.current = None
 
 
+def local_geography_reason(location: dict, *, city: str, city_id: str) -> str | None:
+    """Check explicit contradictions against existing registry/query identities.
+
+    This is not a geocoder or a city-boundary proof. Noncanonical coordinates
+    remain source-reported metadata, never verified station/query geography.
+    No centroid equality or invented distance/radius is required of a source.
+    """
+    from bot.feeds.weather_pro import CITY_COORDS
+    from bot.weather.registry import WeatherRegistry
+
+    registered = WeatherRegistry.from_file().get_city(city_id)
+    state = location.get('adminDistrictCode')
+    if state is not None and state != registered['state']:
+        return 'source_forecast_state_mismatch'
+    lat, lon = location.get('latitude'), location.get('longitude')
+    if lat is None and lon is None:
+        return None
+    if isinstance(lat, bool) or isinstance(lon, bool):
+        return 'source_forecast_coordinates_invalid'
+    try:
+        lat, lon = float(lat), float(lon)
+    except (ValueError, TypeError):
+        return 'source_forecast_coordinates_invalid'
+    if not math.isfinite(lat) or not math.isfinite(lon) or not -90 <= lat <= 90 or not -180 <= lon <= 180:
+        return 'source_forecast_coordinates_invalid'
+    cities = {name for name, coords in CITY_COORDS.items() if coords == (lat, lon)}
+    if cities and city.lower().strip() not in cities:
+        return 'source_forecast_coordinate_city_mismatch'
+    return None
+
+
 def parse_gray_daily(page: str, *, city: str, target_date: str,
                      measurement_kind: str | None = None, timezone_name: str | None = None) -> dict:
     """Gray Fusion's imperial dailyForecast is a labelled predictor, not a CLI actual.
