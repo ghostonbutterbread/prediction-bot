@@ -1099,7 +1099,10 @@ class PredictionLab:
                 "mapping": forecast_location.get("station_mapping") or "unknown",
                 "source": forecast_location.get("station_origin"),
                 "reason": "recorded_forecast_location",
+                "city": forecast_location.get('city') or weather_data.get('city'),
             }
+            from bot.weather.contextual_source_flow import recorded_city_context
+            station_resolution.update(recorded_city_context(station_resolution['city']))
         market_context = {
             "market_id": market_id,
             "ticker": market_id,
@@ -1410,6 +1413,8 @@ class PredictionLab:
                 "skip_reason": detail.get("skip_reason"),
                 "date_validation": detail.get("date_validation") if isinstance(detail.get("date_validation"), dict) else None,
             }
+            from bot.weather.contextual_source_flow import recorded_source_fields
+            source.update(recorded_source_fields(detail))
             PredictionLab._copy_optional_weather_date_fields(source, detail)
             PredictionLab._copy_optional_forecast_metadata(source, detail)
             sources.append({key: value for key, value in source.items() if value is not None})

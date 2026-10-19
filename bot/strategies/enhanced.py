@@ -10,7 +10,7 @@ from bot.feeds.weather_pro import project_probability_evidence
 from bot.feeds.news import NewsFeed
 from bot.feeds.twitter import SocialFeed
 from bot.feeds.ai_signal import AISignalFeed
-from bot.feeds.live_data import LiveFeedAggregator
+from bot.feeds.live_data import LiveFeedAggregator, is_temperature_question
 from bot.strategies.signal_validator import SignalAuditLog, SignalValidator
 from bot.strategy_policy import coerce_strategy_policy, strategy_policy_status
 from bot.weather import ObservationLog, WeatherMarketCityMapper
@@ -135,7 +135,11 @@ class EnhancedStrategyEngine:
             self.ai_feed = AISignalFeed(config)
 
         # Live data feeds (weather, crypto, forex)
-        self.live_feeds = LiveFeedAggregator()
+        selection = config.get('weather_source_selection')
+        self.contextual_weather_selection_enabled = isinstance(selection, dict) and selection.get('enabled') is True
+        self.live_feeds = (LiveFeedAggregator(weather_source_selection=selection)
+                           if self.contextual_weather_selection_enabled
+                           else LiveFeedAggregator())
         self.validator = SignalValidator()
         self.signal_audit = SignalAuditLog(config.get("signal_audit_path", "data/signal_audit.jsonl"))
         self.enable_weather_observation_log = bool(config.get("enable_weather_observation_log", False))
@@ -188,6 +192,8 @@ class EnhancedStrategyEngine:
 
         # 3.5 Live data signal (weather forecasts, crypto prices, forex)
         live_signal = self._live_data_signal(market)
+        if self._contextual_weather_observer_only(live_signal, market.question):
+            return None
         if live_signal:
             signals["live"] = live_signal
             weights["live"] = 0.50  # Heavy weight — real data beats generic signals
@@ -391,6 +397,12 @@ class EnhancedStrategyEngine:
                 weights["ai"] = self.ai_weight
 
         trace.raw_signals = {name: dict(signal) for name, signal in signals.items()}
+        if self._contextual_weather_observer_only(live_signal, market.question):
+            trace.skip_reason_code = 'contextual_weather_observer_only'
+            trace.gate_metadata['weather_source_selection'] = (
+                live_signal['data']['weather_source_selection'] if live_signal is not None
+                else {'routeable':False,'blockers':['no_current_weather_signal']})
+            return None, trace
         if not signals:
             trace.skip_reason_code = "no_raw_signals"
             return None, trace
@@ -951,6 +963,13 @@ class EnhancedStrategyEngine:
             self._last_news_lookup_sources_failed = True
             logger.debug(f"News signal error: {e}")
             return None
+
+    def _contextual_weather_observer_only(self, signal: dict | None, question: str) -> bool:
+        if self.contextual_weather_selection_enabled and is_temperature_question(question) and signal is None:
+            return True
+        data = signal.get('data') if isinstance(signal, dict) else None
+        audit = data.get('weather_source_selection') if isinstance(data, dict) else None
+        return isinstance(audit, dict) and audit.get('routeable') is False
 
     def _live_data_signal(self, market) -> Optional[dict]:
         """Get market-specific live data signal (weather, crypto, forex)."""

@@ -20,6 +20,10 @@ from dataclasses import dataclass
 logger = logging.getLogger(__name__)
 
 
+def is_temperature_question(question: str) -> bool:
+    return any(word in question.lower() for word in ('temperature', 'temp', '°', 'degrees', 'high', 'low'))
+
+
 def _infer_question_side(question: str) -> Optional[str]:
     q = (question or "").lower()
     if any(token in q for token in [" below ", " under ", "<", " less than "]):
@@ -899,7 +903,8 @@ class LiveFeedAggregator:
     Single entry point for the strategy engine.
     """
 
-    def __init__(self):
+    def __init__(self, *, weather_source_selection: dict | None = None):
+        self.weather_source_selection = dict(weather_source_selection or {})
         self.weather = ProWeatherEngine()  # Multi-source weather engine
         self.crypto = CryptoFeed()
         self.forex = ForexFeed()
@@ -918,10 +923,12 @@ class LiveFeedAggregator:
         q = question.lower()
 
         # Temperature markets → multi-source weather engine
-        if any(w in q for w in ["temperature", "temp", "°", "degrees", "high", "low"]):
+        if is_temperature_question(question):
             # If no city in question, try to extract from series ticker
             # e.g., KXHIGHAUS → Austin, KXHIGHPHIL → Philadelphia, KXLOWCHI → Chicago
             score_with_context = getattr(self.weather, "score_temperature_market_with_context", None)
+            if callable(score_with_context) and self.weather_source_selection.get('enabled') is True:
+                score_with_context = self._score_contextual_weather
             if not any(c in q for c in CITY_COORDS):
                 city = self._city_from_ticker(category)
                 if city:
@@ -949,6 +956,26 @@ class LiveFeedAggregator:
             return self.forex.score_forex_market(question, yes_price)
 
         return None
+
+    def _score_contextual_weather(self, question: str, yes_price: float, *,
+                                  category: str = '', market_metadata: dict | None = None) -> Optional[dict]:
+        from bot.weather.contextual_source_flow import select_captured_weather_source
+
+        raw = self.weather.score_temperature_market_with_context(
+            question, yes_price, category=category, market_metadata=market_metadata)
+        if raw is None:
+            return None
+        audit = select_captured_weather_source(raw, question=question, market_id=category,
+            market_metadata=market_metadata, observed_at=datetime.now(timezone.utc).isoformat(),
+            config=self.weather_source_selection)
+        result = raw
+        if audit['routeable']:
+            result = self.weather.score_temperature_market_with_context(
+                question, yes_price, category=category, market_metadata=market_metadata,
+                selected_source_id=audit['chosen_source_id'])
+        if result is not None:
+            result['data']['weather_source_selection'] = audit
+        return result
 
     def close(self):
         self.weather.close()

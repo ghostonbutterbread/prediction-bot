@@ -112,6 +112,7 @@ _WEATHER_SOURCE_V1 = {
     "weather_date": _SCALAR, "forecast_date": _SCALAR, "target_forecast_date": _SCALAR,
     "target_date": _SCALAR, "fetched_at": _SCALAR, "as_of": _SCALAR,
     "observed_at": _SCALAR, "source_fetched_at": _SCALAR, "source_as_of": _SCALAR,
+    "forecast_type": _SCALAR,
     "forecast_start": _SCALAR, "forecast_end": _SCALAR, "forecast_times": [_SCALAR],
     "forecast_period_name": _SCALAR, "forecast_period_start": _SCALAR,
     "forecast_period_end": _SCALAR, "period_name": _SCALAR, "period_start": _SCALAR,
@@ -123,7 +124,21 @@ _WEATHER_SOURCE_V1 = {
     "source_agreement_score": _SCALAR, "date_validation": _DATE_VALIDATION_V1,
     "source_metadata": _SOURCE_METADATA_V1,
 }
+_CONTEXTUAL_WEATHER_SELECTION_V1 = {
+    key: _SCALAR for key in (
+        'routeable', 'chosen_source_id', 'selected_forecast_temp_f', 'prior_sample_count',
+        'min_sample_count', 'max_history_events', 'selection_mode', 'confidence_type',
+        'history_availability_field', 'history_generation_sha256', 'current_input_kind',
+        'current_observed_at', 'current_input_sha256', 'current_projection_sha256', 'rank_score', 'slice_key',
+    )
+}
+_CONTEXTUAL_WEATHER_SELECTION_V1.update({
+    'blockers': [_SCALAR],
+    'source_scores': [{**{key: _SCALAR for key in ('source_id','sample_count','wins','losses','win_rate','shortfall')},
+                       'source_observation_ids': [_SCALAR]}],
+})
 _WEATHER_SIGNAL_DATA_V1 = {
+    'weather_source_selection': _CONTEXTUAL_WEATHER_SELECTION_V1,
     "forecast_high": _SCALAR, "forecast_low": _SCALAR, "current_temp": _SCALAR,
     "actual_temp_used": _SCALAR, "predicted_temp": _SCALAR, "threshold": _SCALAR,
     "city": _SCALAR, "sources": [_SCALAR], "agreement": _SCALAR,
