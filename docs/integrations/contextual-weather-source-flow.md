@@ -4,7 +4,7 @@ Status: implementation in progress; no deployment authorized or performed.
 Owner: Hermes; project Kanban `t_1f18d5be`; Discord thread `1561068455967457281`.
 Canonical branch: `feat/contextual-weather-source-flow`.
 Integration target: `beta`; `main` is not an activation target.
-Implementation checkpoint: `f640acd5290283537a8316d2b0667a3e23a0ad53` (initial collection/learning boundaries, resolver-knowledge assertions, and opt-in consumer bridge; recovery only, independent review blockers still prevent release). Prior initial-boundary full-suite checkpoint: `152eb6a0c7bafda3083f62d4da4b6d60a9c3cdc7`. Later tip may include dossier-only handoff; concurrent collection/history repairs and further parser work are not included in these tested checkpoints. Supersedes: none; extends existing source collection/router rather than replacing preserved raw evidence.
+Implementation checkpoint: `cccab2d9243fe106fff5da98d821b6baa1034709` (initial boundaries, consumer bridge and independently exercised local parser families; **collector wiring incomplete**, recovery only and review blockers prevent release). Bridge checkpoint: `f640acd5290283537a8316d2b0667a3e23a0ad53`; initial-boundary full-suite checkpoint: `152eb6a0c7bafda3083f62d4da4b6d60a9c3cdc7`. Later tip may include dossier-only handoff; concurrent collection/history repairs are not included in these tested checkpoints. Supersedes: none; extends existing source collection/router rather than replacing preserved raw evidence.
 
 ## Intent and explicit dependency
 
