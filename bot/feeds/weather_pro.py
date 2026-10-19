@@ -353,8 +353,28 @@ def _response_capture(response, *, capture_store: WeatherCaptureStore, url: str,
 def _retain_forecast_response(details: dict, response, *, capture_store: WeatherCaptureStore, url: str, parameters: dict | None = None) -> None:
     capture = _response_capture(response, capture_store=capture_store, url=url, parameters=parameters)
     details['capture'] = capture
-    details['collection_attempts'] = [{'url': url, 'http_status': capture['http_status'],
-                                      'fetched_at': capture['fetched_at']}]
+    details['collection_attempts'][-1].update(http_status=capture['http_status'],
+        fetched_at=capture['fetched_at'], attempt_status='response_retained')
+
+
+def _forecast_attempt(details: dict, url: str, *, parameters: dict | None = None) -> None:
+    details.setdefault('collection_attempts', []).append({
+        'url': url, 'request_parameters': parameters or {},
+        'attempted_at': datetime.now(timezone.utc).isoformat(), 'attempt_status': 'attempted',
+    })
+
+
+def _forecast_failure(details: dict, exc: Exception) -> None:
+    attempt = details['collection_attempts'][-1]
+    if isinstance(exc, httpx.HTTPStatusError):
+        category = 'http_status_failure'
+    elif isinstance(exc, httpx.RequestError):
+        category = 'transport_failure'
+    else:
+        category = 'parser_failure' if 'capture' in details else 'adapter_failure'
+    attempt.update(attempt_status=category, error_type=type(exc).__name__)
+    details['adapter_error_type'] = type(exc).__name__
+    details['adapter_error_category'] = category
 
 
 class OpenMeteoFeed:
@@ -385,8 +405,7 @@ class OpenMeteoFeed:
                 source_details=location_details,
             )
 
-        try:
-            params = {
+        params = {
                 "latitude": lat,
                 "longitude": lon,
                 "hourly": "temperature_2m",
@@ -394,11 +413,14 @@ class OpenMeteoFeed:
                 "temperature_unit": "fahrenheit",
                 "forecast_days": 2,
                 "timezone": "auto",
-            }
+        }
+        _forecast_attempt(location_details, self.BASE, parameters=params)
+        try:
             resp = self.http.get(self.BASE, params=params)
             _retain_forecast_response(location_details, resp, capture_store=self.capture_store, url=self.BASE, parameters=params)
             resp.raise_for_status()
             data = resp.json()
+            location_details['collection_attempts'][-1]['attempt_status'] = 'parsed'
 
             current = data.get("current", {})
             hourly = data.get("hourly", {})
@@ -484,7 +506,7 @@ class OpenMeteoFeed:
             raise
         except Exception as e:
             logger.debug(f"Open-Meteo error for {city}: {e}")
-            location_details['adapter_error_type'] = type(e).__name__
+            _forecast_failure(location_details, e)
             reason = 'source_forecast_request_failed'
             return _unavailable_snapshot(
                 city=city, source="open-meteo", target_date=target_date,
@@ -605,11 +627,13 @@ class NWSFeed:
         office, grid_x, grid_y, station = grid
         url = f"https://api.weather.gov/gridpoints/{office}/{grid_x},{grid_y}/forecast"
         location_details["forecast_query_url"] = url
+        _forecast_attempt(location_details, url)
         try:
             resp = self.http.get(url, headers={"User-Agent": "PredictionBot/1.0"})
             _retain_forecast_response(location_details, resp, capture_store=self.capture_store, url=url)
             resp.raise_for_status()
             data = resp.json()
+            location_details['collection_attempts'][-1]['attempt_status'] = 'parsed'
             location_details['source_reported_updated_at'] = data.get('properties', {}).get('updateTime')
 
             periods = data.get("properties", {}).get("periods", [])
@@ -726,7 +750,7 @@ class NWSFeed:
             raise
         except Exception as e:
             logger.debug(f"NWS error for {city}: {e}")
-            location_details['adapter_error_type'] = type(e).__name__
+            _forecast_failure(location_details, e)
             reason = 'source_forecast_request_failed'
             return _unavailable_snapshot(city=city, source="nws", target_date=target_date, reason=reason, source_details=location_details)
 

@@ -243,11 +243,13 @@ def parse_fox_daily(page: str, *, city: str, target_date: str,
         value = period['temp']
         if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value):
             raise LocalForecastUnavailable('source_forecast_temperature_invalid')
+        label_parts = [part.strip() for part in source_label.split(',')]
         return {'high': None if is_low else value, 'low': value if is_low else None,
                 'period_start': period['date'], 'period_end': end,
                 'forecast_type': 'local_prior_night_low_predictor' if is_low else 'local_daytime_high_predictor',
                 'raw_forecast': row, 'selected_period': key,
-                'location': {'city': source_label.split(',')[0], 'displayName': source_label,
+                'location': {'city': label_parts[0], 'displayName': source_label,
+                             **({'state': label_parts[1]} if len(label_parts) >= 2 and label_parts[1] else {}),
                              'ianaTimeZone': timezone_name},
                 'cache_updated_at_ms': None,
                 'source_updated_at': None,

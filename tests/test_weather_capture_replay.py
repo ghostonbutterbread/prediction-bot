@@ -112,6 +112,22 @@ class WeatherCaptureReplayTests(unittest.TestCase):
         self.assertTrue(verify_replay_decision_input_record_v1(record))
         return replay_snapshot(record)
 
+    def test_compact_global_attempt_context_survives_sealed_projection(self):
+        with captured_replay_row() as (row, _, _, _):
+            metadata = next(s for s in row['decision_artifact']['source_context']['data']['weather_source_snapshot']['sources']
+                            if s['source_id'] == CAPTURES[0]['source_id'])['source_metadata']
+            metadata['adapter_error_category'] = 'transport_failure'
+            metadata['source_reported_location'] = {'city': 'Austin', 'displayName': 'Austin, MN', 'state': 'MN'}
+            attempt = metadata['collection_attempts'][0]
+            attempt.update(attempt_status='transport_failure', request_parameters={
+                'latitude': 30.27, 'timezone': 'auto', 'api_key': 'not projected'})
+            projected = next(s for s in self.project(row)['sources'] if s['source_id'] == CAPTURES[0]['source_id'])['source_metadata']
+            self.assertEqual(projected['adapter_error_category'], 'transport_failure')
+            self.assertEqual(projected['collection_attempts'][0]['attempt_status'], 'transport_failure')
+            self.assertEqual(projected['collection_attempts'][0]['request_parameters'],
+                             {'latitude': 30.27, 'timezone': 'auto'})
+            self.assertEqual(projected['source_reported_location']['displayName'], 'Austin, MN')
+
     def test_actual_eligible_and_collection_only_capture_references_round_trip(self):
         for unavailable in (False, True):
             with self.subTest(unavailable=unavailable), captured_replay_row(unavailable=unavailable) as (row, store, body, signal):

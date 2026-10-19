@@ -146,6 +146,8 @@ class PredictiveMaterializationTests(unittest.TestCase):
             sources = strike['source_inputs']['source_context']['data']['weather_source_snapshot']['sources']
             for source in sources:
                 source['source_as_of'] = '2026-08-01T11:56:00+00:00'
+                # The later revision must be captured after its issue clock.
+                source['source_fetched_at'] = '2026-08-01T11:57:00+00:00'
                 source['forecast_high'] = 85.
             records += [original, _seal(strike)]
         result, rows = self.materialize(records, official='NO', known='2026-12-01T00:00:00+00:00')

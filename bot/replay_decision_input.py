@@ -104,6 +104,7 @@ _COLLECTION_RECEIPT_V1 = {
 _COLLECTION_ATTEMPT_V1 = {
     "url": _PUBLIC_WEATHER_URL, "attempted_at": _SCALAR, "fetched_at": _SCALAR,
     "http_status": _SCALAR, "error_type": _SCALAR,
+    "request_parameters": _PUBLIC_WEATHER_QUERY_V1, "attempt_status": _SCALAR,
 }
 _MARKET_STATION_ASSOCIATION_V1 = {
     key: _SCALAR for key in (
@@ -125,11 +126,12 @@ _SOURCE_METADATA_V1 = {
     "source_updated_at": _SCALAR, "source_cache_updated_at_ms": _SCALAR,
     "source_reported_updated_at": _SCALAR, "source_clock_basis": _SCALAR,
     "source_clock_eligibility": _SCALAR, "adapter_error_type": _SCALAR,
+    "adapter_error_category": _SCALAR,
     "market_station_association": _MARKET_STATION_ASSOCIATION_V1,
     # These are provider-reported labels/coordinates, not verified geography.
     "source_reported_location": {
         key: _SCALAR for key in (
-            "city", "market", "ianaTimeZone", "timezone_basis", "latitude", "longitude",
+            "city", "market", "displayName", "ianaTimeZone", "timezone_basis", "latitude", "longitude",
             "adminDistrictCode", "adminDistrict", "stateAbbreviation", "state",
             "country", "countryCode", "postalKey",
         )

@@ -370,6 +370,8 @@ def _pending_rows_for_input(row: Mapping[str, Any], identity: Mapping[str, Any])
                 "source_correctness_eligibility": eligibility,
                 "source_target_proof": target_proof,
                 "strict_source_proof": strict_proof,
+                "retained_clock_evidence": _retained_forecast_clocks(
+                    source_record, snapshot, identity["decision_key"]["observed_at_utc"])[0],
                 "predictive_source_proof": predictive_proof,
                 "forecast_semantics": {
                     "evidence_type": source_record.get("evidence_type"),
@@ -614,6 +616,8 @@ def strict_source_observation_proof(
         reasons.append("missing_or_unoffset_source_as_of")
     elif observed_at_time is None or source_as_of_time > observed_at_time:
         reasons.append("source_as_of_after_immutable_observed_at")
+    _, clock_reasons = _retained_forecast_clocks(source_record, snapshot, observed_at)
+    reasons.extend(reason for reason in clock_reasons if reason not in reasons)
     source_timezone_name = _text(mapping.get("source_timezone"))
     hourly_day_end = _complete_open_meteo_hourly_day_end(source_record, mapping, _normalized_date(market_date))
     if source_as_of_time is not None:
@@ -708,6 +712,39 @@ def strict_source_observation_proof(
         "question_side": expected["question_side"],
     }
 
+
+def _retained_forecast_clocks(source: Mapping[str, Any], snapshot: Mapping[str, Any],
+                              observed_at: Any) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    """Validate all retained issue/capture aliases without replacing originals.
+
+    Source and snapshot captures can differ; aliases within one object assert
+    the same clock. An issue can precede but cannot follow its earliest capture.
+    """
+    groups = {
+        "source_issue": (source, ("source_as_of", "as_of", "observed_at")),
+        "snapshot_issue": (snapshot, ("source_as_of", "as_of", "source_timestamp")),
+        "source_capture": (source, ("source_fetched_at", "fetched_at")),
+        "snapshot_capture": (snapshot, ("source_fetched_at", "fetched_at")),
+    }
+    evidence = {name: {key: record[key] for key in keys if key in record and record[key] is not None}
+                for name, (record, keys) in groups.items()}
+    reasons: list[str] = []
+    observed = _parse_time(observed_at)
+    issue_times: list[datetime] = []
+    capture_times: list[datetime] = []
+    for name, values in evidence.items():
+        parsed = [_parse_time(value) for value in values.values()]
+        if any(value is None for value in parsed):
+            reasons.append("invalid_retained_source_clock")
+        valid = [value for value in parsed if value is not None]
+        if len(set(valid)) > 1:
+            reasons.append("conflicting_retained_source_clock_aliases")
+        if any(observed is None or value > observed for value in valid):
+            reasons.append("retained_source_clock_after_immutable_observed_at")
+        (capture_times if name.endswith("capture") else issue_times).extend(valid)
+    if issue_times and capture_times and max(issue_times) > min(capture_times):
+        reasons.append("source_issue_after_declared_capture")
+    return evidence, list(dict.fromkeys(reasons))
 
 def predictive_source_observation_proof(
     *, source_record: Mapping[str, Any], target_proof: Mapping[str, Any], strict_proof: Mapping[str, Any],
