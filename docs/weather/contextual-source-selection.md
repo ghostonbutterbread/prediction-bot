@@ -86,7 +86,9 @@ independent Las Vegas event fixtures, independently bound YES/NO resolutions,
 real history materialization/loading, actual mocked-HTTP NWS and KVVU
 collection, aggregator and both strategy paths, PredictionLab snapshot/replay,
 and the actual composed wallet's unchanged entry-price rejection. It is fixture
-correctness evidence, not forward performance or calibration evidence. Local
-adapter coverage remains the collection builder's documented two verified
-numeric adapters, with the other 22 city sources explicitly blocked; this bridge
-does not add or claim parsers for them.
+correctness evidence, not forward performance or calibration evidence. This
+bridge adds no adapters. Separately, the initial two local adapters and eighteen
+additional parser candidates have captured-payload evidence, but canonical
+collector/registry wiring and combined review remain pending. Four other local
+sources have documented date/location/access limitations; low coverage also
+varies by source. Parser success alone is not end-to-end collection coverage.
