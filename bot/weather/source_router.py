@@ -500,17 +500,17 @@ def select_source_for_candidate(
         "history_events_selected": sum(len(rows) for rows in independent_candidates.values()),
         "history_representative_selection": "earliest_recorded_forecast_observation_v1",
     }
-    ranked = [_source_stats(source_id, rows) for source_id, rows in independent_candidates.items()]
-    ranked.sort(
-        key=lambda row: (
+    def support_key(row: Mapping[str, Any]) -> tuple:
+        # Source IDs stabilize audit ordering, but provide no empirical support.
+        return (
             row["sample_count"] >= min_sample_count,
             row["win_rate"] if row["win_rate"] is not None else -1.0,
             row["avg_binary_edge_realized"] if row["avg_binary_edge_realized"] is not None else -999.0,
             row["sample_count"],
-            row["source_id"],
-        ),
-        reverse=True,
-    )
+        )
+
+    ranked = [_source_stats(source_id, rows) for source_id, rows in independent_candidates.items()]
+    ranked.sort(key=lambda row: (*support_key(row), row["source_id"]), reverse=True)
     usable = [row for row in ranked if row["sample_count"] >= min_sample_count]
     if predictive:
         selector_history_audit["source_scores"] = [
@@ -536,18 +536,22 @@ def select_source_for_candidate(
             **selector_history_audit,
         }
     chosen = usable[0]
+    tied = [row["source_id"] for row in usable if support_key(row) == support_key(chosen)]
+    unresolved_tie = predictive and len(tied) > 1
+    if predictive:
+        selector_history_audit["tied_source_ids"] = sorted(tied) if unresolved_tie else []
     return {
-        "routeable": True,
+        "routeable": not unresolved_tie,
         "selection_mode": "as_of_resolved_scoreboard",
         "slice_key": "|".join(slice_key),
-        "chosen_source_id": chosen["source_id"],
-        "chosen_source_name": chosen["source_name"],
+        "chosen_source_id": None if unresolved_tie else chosen["source_id"],
+        "chosen_source_name": None if unresolved_tie else chosen["source_name"],
         "chosen_source_backoff_level": "city_kind_shape" if predictive else "city_kind_shape_question_side",
         "prior_sample_count": chosen["sample_count"],
         "prior_win_rate": chosen["win_rate"],
         "prior_avg_binary_edge_realized": chosen["avg_binary_edge_realized"],
         "min_sample_count": min_sample_count,
-        "blockers": [],
+        "blockers": ["unresolved_contextual_source_tie"] if unresolved_tie else [],
         "candidate_source_count": len(ranked),
         **selector_history_audit,
     }

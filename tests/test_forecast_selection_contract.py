@@ -401,6 +401,84 @@ class ForecastSelectionContractTests(unittest.TestCase):
             self.assertIsNone(choice['chosen_source_id'])
             self.assertTrue(choice['blockers'], 'tie abstention needs an explicit reason')
 
+    def test_tie_reaches_actual_aggregator_as_observer_only_with_all_receipts(self):
+        self.history()
+        tied = copy.deepcopy(self.inputs)
+        for record in tied:
+            for source in record['source_inputs']['source_context']['data']['weather_source_snapshot']['sources']:
+                source['forecast_high'] = 80.
+        history, _ = self.materialize([seal(record) for record in tied], self.independent, 'tie-downstream')
+        result = self.score(self.aggregator(history))
+        audit = self.audit(result)
+        self.assertFalse(audit['routeable'])
+        self.assertEqual(audit['blockers'], ['unresolved_contextual_source_tie'])
+        self.assertEqual({(score['sample_count'], score['wins'], score['losses'])
+                          for score in audit['source_scores']}, {(30, 25, 5)})
+        self.assertIsNone(audit['chosen_source_id'])
+        self.assertIsNone(audit['selected_forecast_temp_f'])
+        # Aggregator preserves the raw heuristic as diagnostic evidence. Only
+        # the strategy's actual observer gate decides whether it is actionable.
+        self.assertEqual(result['predicted_prob'], .85)
+        self.assertEqual({score['source_id'] for score in audit['source_scores']}, {'nws', LOCAL})
+        self.assertIn(LOCAL, {source['source_id'] for source in result['data']['source_details']})
+        from bot.strategies.enhanced import EnhancedStrategyEngine, strategy_config_with_policy
+        from bot.feeds.weather_capture_store import WeatherCaptureStore
+        strategy = EnhancedStrategyEngine(strategy_config_with_policy({'strategy': dict(
+            enable_news=False, enable_social=False, enable_ai=False, min_edge=.01,
+            signal_audit_path=str(self.root / 'audit.jsonl'),
+            weather_source_selection=dict(enabled=True, history_metadata_path=str(history.metadata_path)))}),
+            capture_store=WeatherCaptureStore(storage_root=self.root))
+        strategy.live_feeds.close()
+        strategy.live_feeds = self.aggregator(history)
+        market = SimpleNamespace(id=CURRENT_ID, exchange='kalshi', question=QUESTION,
+            yes_price=.4, no_price=.4, volume=10000, liquidity=10000, category='Weather',
+            metadata=dict(city='Las Vegas', city_id='las_vegas_nv', market_kind='high', event_ticker='KXHIGHLV-26OCT19'))
+        with patch('bot.strategies.signal_validator.datetime', FrozenClock), \
+             patch('bot.strategies.enhanced.datetime', FrozenClock), \
+             patch.object(strategy, '_price_signal', return_value=dict(signal_type='price', predicted_prob=.9, confidence=.9)), \
+             patch.object(strategy, '_volume_signal', return_value=None), \
+             patch.object(strategy, '_time_signal', return_value=None):
+            decision, trace = strategy.analyze_market_with_trace(market)
+            self.assertIsNone(decision)
+            self.assertEqual(trace.skip_reason_code, 'contextual_weather_observer_only')
+            self.assertEqual(trace.raw_signals['live']['data']['weather_source_selection']['blockers'],
+                             ['unresolved_contextual_source_tie'])
+            self.assertIsNone(strategy.analyze_market(market), 'price fallback must not turn a tie into a buy')
+
+    def test_one_event_advantage_is_not_misclassified_as_unresolved_tie(self):
+        self.history()
+        records = copy.deepcopy(self.inputs)
+        for record in records:
+            for source in record['source_inputs']['source_context']['data']['weather_source_snapshot']['sources']:
+                source['forecast_high'] = 80.
+        records[0]['source_inputs']['source_context']['data']['weather_source_snapshot']['sources'][0]['forecast_high'] = 90.
+        _, rows = self.materialize([seal(record) for record in records], self.independent, 'one-event-advantage')
+        choice = self.selector()(self.current(), rows)
+        self.assertTrue(choice['routeable'])
+        self.assertEqual(choice['chosen_source_id'], 'nws')
+        self.assertEqual(choice['tied_source_ids'], [])
+        self.assertEqual({score['source_id']: score['wins'] for score in choice['source_scores']}, {'nws': 26, LOCAL: 25})
+
+    def test_only_ties_at_the_best_eligible_score_block_selection(self):
+        self.history()
+        for top_tied in (True, False):
+            with self.subTest(top_tied=top_tied):
+                records = copy.deepcopy(self.inputs)
+                for record in records:
+                    sources = record['source_inputs']['source_context']['data']['weather_source_snapshot']['sources']
+                    if not top_tied:
+                        sources[0]['forecast_high'], sources[1]['forecast_high'] = 80., 90.
+                    sources.append(dict(sources[1], source_id='other_local', source_name='other_local'))
+                _, rows = self.materialize([seal(record) for record in records], self.independent, 'three-sources-' + str(top_tied))
+                current = self.current()
+                sources = current['source_inputs']['source_context']['data']['weather_source_snapshot']['sources']
+                sources.append(dict(sources[1], source_id='other_local', source_name='other_local'))
+                choice = self.selector()(seal(current), rows)
+                self.assertEqual(choice['routeable'], not top_tied)
+                self.assertEqual(choice['tied_source_ids'], sorted([LOCAL, 'other_local']) if top_tied else [])
+                self.assertEqual(choice['chosen_source_id'], None if top_tied else 'nws')
+                self.assertEqual(len(choice['source_scores']), 3)
+
     def test_non_independent_or_mismatched_resolution_cannot_score(self):
         record = historical_input('2026-08-03')
         fake = resolution(record)

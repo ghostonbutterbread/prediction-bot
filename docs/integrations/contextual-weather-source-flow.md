@@ -1,6 +1,6 @@
 # Contextual weather source flow
 
-Status: parent combined checks green and fresh consumer scoped PASS; capture review INCOMPLETE pending execution approval for two named checks. Local recovery checkpoint only, not release/integration/activation acceptance.
+Status: isolated implementation continuation `t_6c73f5cc` turns the 13-test contract GREEN and passes 210 targeted offline tests (16 contract cases). Fresh independent review remains pending; capture review is still INCOMPLETE at the same two approval-gated checks. No release/integration/activation acceptance. See `forecast-selection-implementation.md` for the continuation branch, evidence and exact boundaries.
 Owner: Hermes; project Kanban `t_1f18d5be`; Discord thread `1561068455967457281`.
 Canonical branch: `feat/contextual-weather-source-flow`.
 Integration target: `beta`; `main` is not an activation target.
