@@ -51,6 +51,8 @@ def select_captured_weather_source(
                  history_availability_field='known_after', source_scores=[],
                  current_input_kind='derived_captured_current_projection',
                  current_observed_at=observed_at)
+    if signal.get('collection_only') is True or signal.get('prediction_available') is False:
+        return {**audit, 'blockers':[signal.get('availability_reason') or 'no_current_weather_prediction']}
     data = signal['data']
     # Already-canonical collector source rows go through the one replay
     # allowlist/normalizer. Only the adapter's recorded type needs lifting from

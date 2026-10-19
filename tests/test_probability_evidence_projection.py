@@ -33,6 +33,7 @@ class ProbabilityEvidenceProjectionTests(unittest.TestCase):
             guard.start()
             self.addCleanup(guard.stop)
         self.lab = PredictionLab({"data_dir": str(self.root / "collector"),
+            "runtime": {"storage_root": str(self.root / "collector")},
             "prediction_lab": {"mode": "collector"}, "strategy": {
                 "enable_news": False, "enable_social": False, "enable_ai": False,
                 "min_edge": 0.01, "signal_audit_path": str(self.root / "audit.jsonl")}})
@@ -64,7 +65,7 @@ class ProbabilityEvidenceProjectionTests(unittest.TestCase):
             else:
                 self.fail(f"unexpected weather request: {request.url}")
             return httpx.Response(200, json=payload)
-        engine = ProWeatherEngine()
+        engine = ProWeatherEngine(capture_store=self.lab.capture_store)
         self.addCleanup(engine.close)
         for feed in (engine.nws, engine.open_meteo, engine.owm):
             feed.http.close()

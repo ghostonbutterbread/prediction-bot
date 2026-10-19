@@ -802,10 +802,12 @@ class LocalForecastFeed:
                                          reason='missing_market_target_date', source_details=details)
         attempt = {'url': request_url, 'attempted_at': datetime.now(timezone.utc).isoformat()}
         details['collection_attempts'].append(attempt)
+        fetched_at = None
         try:
             response = self.http.get(request_url, follow_redirects=True)
             attempt['http_status'] = response.status_code
             fetched_at = datetime.now(timezone.utc)
+            attempt['fetched_at'] = fetched_at.isoformat()
             details['capture'] = _response_capture(response, capture_store=self.capture_store, url=request_url)
             response.raise_for_status()
             if source_id in OTHER_LOCAL_UNAVAILABLE_REASONS:
@@ -852,17 +854,29 @@ class LocalForecastFeed:
                 snapshot.availability_reason = geography_reason
                 details.update(forecast_availability='unavailable', availability_reason=geography_reason)
             return _apply_source_clock_eligibility(snapshot, parsed['cache_updated_at_ms'], milliseconds=True)
+        except CaptureRetentionError:
+            # Storage is an operational failure, not a missing forecast. Never
+            # let the engine cache a result whose evidence could not be retained.
+            raise
         except LocalForecastUnavailable as exc:
             reason = str(exc)
+            details['adapter_error_type'] = attempt['error_type'] = type(exc).__name__
         except httpx.HTTPStatusError:
             reason = f"source_http_status_{attempt['http_status']}"
         except httpx.HTTPError as exc:
             reason = 'source_forecast_request_failed'
             attempt['error_type'] = type(exc).__name__
-        except UnicodeError:
+        except UnicodeError as exc:
             reason = 'source_payload_encoding_unsupported'
+            details['adapter_error_type'] = attempt['error_type'] = type(exc).__name__
+        except Exception as exc:
+            # This boundary owns the in-progress capture and attempt. The outer
+            # engine cannot reconstruct them if a parser unexpectedly fails.
+            reason = 'source_forecast_unexpected_error'
+            details['adapter_error_type'] = attempt['error_type'] = type(exc).__name__
+            logger.warning('Weather adapter %s failed: %s', source_id, type(exc).__name__)
         return _unavailable_snapshot(city=city, source=source_id, target_date=target,
-                                     reason=reason, source_details=details)
+                                     reason=reason, fetched_at=fetched_at, source_details=details)
 
 
 class OpenWeatherMapFeed:

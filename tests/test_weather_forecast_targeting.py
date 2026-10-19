@@ -1,7 +1,12 @@
+import json
+import os
+from pathlib import Path
+import tempfile
 import unittest
 from datetime import datetime, timezone
 
-from bot.feeds.weather_pro import NWSFeed, OpenMeteoFeed, ProWeatherEngine, WeatherSnapshot
+from bot.feeds.weather_capture_store import WeatherCaptureStore
+from bot.feeds.weather_pro import MultiSourceForecast, NWSFeed, OpenMeteoFeed, ProWeatherEngine, WeatherSnapshot
 from bot.prediction_lab import PredictionLab
 from bot.weather.source_scoreboard import extract_source_forecast_observations
 
@@ -43,8 +48,14 @@ class _Http:
 
 
 class ForecastTargetingTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(dir=os.environ["TMPDIR"])
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.capture_store = WeatherCaptureStore(storage_root=self.root)
+
     def test_open_meteo_selects_exact_next_day_source_local_forecast(self):
-        feed = OpenMeteoFeed()
+        feed = OpenMeteoFeed(capture_store=self.capture_store)
         feed.http = _Http({
             "timezone": "America/Chicago",
             "utc_offset_seconds": -18000,
@@ -65,7 +76,7 @@ class ForecastTargetingTests(unittest.TestCase):
         self.assertEqual(snapshot.source_details["source_as_of"], snapshot.fetched_at.isoformat())
 
     def test_current_day_open_meteo_window_is_unavailable_for_next_day_market(self):
-        feed = OpenMeteoFeed()
+        feed = OpenMeteoFeed(capture_store=self.capture_store)
         feed.http = _Http({
             "timezone": "America/Chicago",
             "current": {"temperature_2m": 70},
@@ -79,11 +90,25 @@ class ForecastTargetingTests(unittest.TestCase):
         self.assertIsNone(snapshot.high_temp_f)
 
     def test_scoring_declines_when_no_exact_target_forecast_is_available(self):
-        engine = ProWeatherEngine()
+        engine = ProWeatherEngine(capture_store=self.capture_store)
         try:
-            engine.get_forecast = lambda *_args, **_kwargs: type("Forecast", (), {
-                "sources_used": [], "high_temp_f": None, "low_temp_f": None,
-            })()
+            # A real adapter supplies its unavailable snapshot and capture clock;
+            # the fixture does not invent a provider issuance or numeric forecast.
+            engine.open_meteo.http.close()
+            engine.open_meteo.http = _Http({
+                "timezone": "America/Chicago",
+                "hourly": {"time": ["2026-08-01T12:00"], "temperature_2m": [80]},
+            })
+            unavailable = engine.open_meteo.get_forecast("austin", target_date="2026-08-02")
+            self.assertFalse(unavailable.scoreable_forecast)
+            self.assertEqual(unavailable.availability_reason, "target_date_not_in_source_forecast")
+            forecast = MultiSourceForecast(
+                city="austin", sources_used=[], high_temp_f=None, low_temp_f=None,
+                current_temp_f=None, confidence=0, fetched_at=unavailable.fetched_at,
+                details={"source_snapshots": [unavailable]},
+            )
+            engine._retain_collection_receipt(forecast, target="2026-08-02", measurement_kind="high")
+            engine.get_forecast = lambda *_args, **_kwargs: forecast
             result = engine._score_temperature_market(
                 "Will Austin high temperature be above 80° on Aug 2, 2026?",
                 0.55,
@@ -92,10 +117,24 @@ class ForecastTargetingTests(unittest.TestCase):
         finally:
             engine.close()
 
-        self.assertIsNone(result)
+        self.assertTrue(result["collection_only"])
+        self.assertIs(result["prediction_available"], False)
+        self.assertEqual(result["confidence"], 0)
+        self.assertNotIn("predicted_prob", result)
+        self.assertNotIn("direction", result)
+        self.assertEqual(result["source_timestamp"], unavailable.fetched_at.isoformat())
+        [source] = result["data"]["source_details"]
+        self.assertFalse(source["scoreable_forecast"])
+        self.assertEqual(source["availability_reason"], "target_date_not_in_source_forecast")
+        metadata = source["source_metadata"]
+        self.assertTrue(metadata["collection_attempts"])
+        self.assertNotIn("source_updated_at", metadata)
+        retained = json.loads(self.capture_store.read_receipt_verified(result["data"]["collection_receipt"]))
+        self.assertEqual(retained["sources"], result["data"]["source_details"])
+        self.assertTrue(self.capture_store.read_verified(metadata["capture"]))
 
     def test_nws_records_offset_aware_source_timezone_for_exact_target(self):
-        feed = NWSFeed()
+        feed = NWSFeed(capture_store=self.capture_store)
         feed.http = _Http({
             "properties": {"periods": [
                 {"number": 1, "name": "Tomorrow", "temperature": 84, "isDaytime": True,
@@ -111,7 +150,7 @@ class ForecastTargetingTests(unittest.TestCase):
         self.assertEqual(snapshot.source_details["target_mapping"]["source_timezone"], "UTC-05:00")
 
     def test_nws_low_uses_night_ending_on_target_morning(self):
-        feed = NWSFeed()
+        feed = NWSFeed(capture_store=self.capture_store)
         feed.http = _Http({"properties": {"periods": [
             {"number": 1, "name": "Saturday Night", "temperature": 58, "isDaytime": False,
              "startTime": "2026-09-26T18:00:00-07:00", "endTime": "2026-09-27T06:00:00-07:00"},
@@ -129,7 +168,7 @@ class ForecastTargetingTests(unittest.TestCase):
         self.assertEqual(low.source_details["target_mapping"]["source_period_end"], "2026-09-27T06:00:00-07:00")
 
     def test_nws_low_missing_prior_night_does_not_borrow_next_morning(self):
-        feed = NWSFeed()
+        feed = NWSFeed(capture_store=self.capture_store)
         feed.http = _Http({"properties": {"periods": [
             {"number": 1, "name": "Sunday", "temperature": 84, "isDaytime": True,
              "startTime": "2026-09-27T06:00:00-07:00", "endTime": "2026-09-27T18:00:00-07:00"},
@@ -145,7 +184,7 @@ class ForecastTargetingTests(unittest.TestCase):
         self.assertEqual(high.high_temp_f, 84)
 
     def test_nws_requested_kind_survives_unrelated_missing_temperature(self):
-        feed = NWSFeed()
+        feed = NWSFeed(capture_store=self.capture_store)
         feed.http = _Http({"properties": {"periods": [
             {"name": "Sunday", "temperature": 84, "isDaytime": True,
              "startTime": "2026-09-27T06:00:00-07:00", "endTime": "2026-09-27T18:00:00-07:00"},
@@ -169,7 +208,7 @@ class ForecastTargetingTests(unittest.TestCase):
         self.assertIsNone(low.high_temp_f)
 
     def test_scored_low_uses_morning_period_and_retains_source_period_proof(self):
-        engine = ProWeatherEngine()
+        engine = ProWeatherEngine(capture_store=self.capture_store)
         try:
             setattr(engine.nws, "http", _Http({"properties": {"periods": [
                 {"name": "Saturday Night", "temperature": 58, "isDaytime": False,
@@ -195,7 +234,7 @@ class ForecastTargetingTests(unittest.TestCase):
             engine.close()
 
     def test_high_scoring_survives_missing_unrelated_night_temperature(self):
-        engine = ProWeatherEngine()
+        engine = ProWeatherEngine(capture_store=self.capture_store)
         try:
             setattr(engine.nws, "http", _Http({"properties": {"periods": [
                 {"name": "Sunday", "temperature": 84, "isDaytime": True,
@@ -215,7 +254,7 @@ class ForecastTargetingTests(unittest.TestCase):
             engine.close()
 
     def test_requested_kind_confidence_ignores_other_temperature_kind(self):
-        engine = ProWeatherEngine()
+        engine = ProWeatherEngine(capture_store=self.capture_store)
         try:
             now = datetime.now(timezone.utc)
             def snapshot(source, high, low):
@@ -247,7 +286,7 @@ class ForecastTargetingTests(unittest.TestCase):
             engine.close()
 
     def test_nws_fails_closed_when_target_period_timezone_is_ambiguous(self):
-        feed = NWSFeed()
+        feed = NWSFeed(capture_store=self.capture_store)
         feed.http = _Http({
             "properties": {
                 "periods": [{
@@ -263,17 +302,19 @@ class ForecastTargetingTests(unittest.TestCase):
         self.assertEqual(snapshot.availability_reason, "source_forecast_period_timezone_ambiguous")
 
     def test_local_station_current_observation_is_typed_as_observation(self):
-        engine = ProWeatherEngine()
+        engine = ProWeatherEngine(capture_store=self.capture_store)
         try:
-            details = engine._source_contribution_details(type("Forecast", (), {
-                "sources_used": [],
-                "details": {
+            details = engine._source_contribution_details(MultiSourceForecast(
+                city="austin", sources_used=[], high_temp_f=None, low_temp_f=None,
+                current_temp_f=None, confidence=0, fetched_at=datetime.now(timezone.utc),
+                details={
+                    "source_snapshots": [],
                     "local_station_observation": {
                         "station": "KAUS", "city": "austin", "current_temp_f": 81.0,
                         "observation_time": "2026-08-01T17:00:00Z", "source": "nws_observation",
                     },
                 },
-            })())
+            ))
         finally:
             engine.close()
 

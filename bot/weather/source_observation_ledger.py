@@ -654,7 +654,16 @@ def strict_source_observation_proof(
             or effective_period_end.date() != period_start.date() + timedelta(days=1)
             or effective_period_end.time().isoformat() != "00:00:00"
         ))
-        if partial_day or (kind == "low" and _text(mapping.get("mapping")) == "source_local_nws_night_low_proxy"):
+        metadata = source_record.get("source_metadata")
+        # Calendar-label midnight bounds are not provider measurement-interval
+        # proof. Preserve the producer's explicit non-equivalence at either
+        # recorded alias, even when those bounds resemble an entire day.
+        explicitly_non_full_day = (
+            source_record.get("full_day_measurement_equivalent") is False
+            or (isinstance(metadata, Mapping) and metadata.get("full_day_measurement_equivalent") is False)
+        )
+        if (partial_day or explicitly_non_full_day
+                or (kind == "low" and _text(mapping.get("mapping")) == "source_local_nws_night_low_proxy")):
             reasons.append(f"partial_day_{kind}_proxy_not_full_day")
     if not source_timezone_name:
         reasons.append("missing_source_timezone")

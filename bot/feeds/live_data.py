@@ -24,8 +24,51 @@ def is_temperature_question(question: str) -> bool:
     """Require temperature semantics, not price words such as below/high/low."""
     import re
 
-    return bool(re.search(r'\b(?:temperature|temp|degrees?|fahrenheit|celsius)\b|°',
-                          question, flags=re.IGNORECASE))
+    if re.search(r'\b(?:temperature|temp|fahrenheit|celsius)\b|°',
+                 question, flags=re.IGNORECASE):
+        return True
+
+    # Bare "degrees" is ambiguous. Require a location as the measured subject,
+    # a temperature predicate, and the COMPLETE numeric measurement phrase.
+    # A unit-prefix match would misread "85 degrees awarded ..." as weather.
+    from bot.feeds.weather_pro import CITY_COORDS
+    from bot.weather.date_matcher import MONTHS
+
+    cities = '|'.join(re.escape(city) for city in CITY_COORDS)
+    extremum = r'(?:high|low|maximum|minimum)'
+    subject = (rf'(?:(?:{cities})(?:\s+{extremum})?'
+               rf'|(?:the\s+)?{extremum}\s+in\s+(?:{cities}))')
+    comparison = r'(?:above|below|over|under|at\s+(?:least|most)|more\s+than|less\s+than)'
+    predicate = (rf'(?:exceed|reach|hit|be(?:\s+{comparison})?'
+                 rf'|(?:fall|rise)\s+{comparison}'
+                 rf'|have\s+(?:a\s+)?{extremum}\s+(?:{comparison}|of))')
+    # Optional calendar/relative-time context closes the measurement phrase;
+    # arbitrary noun modifiers after "degrees" do not. This only recognizes
+    # scope: the collector still owns date validation and numerical scoring.
+    months = '|'.join(MONTHS)
+    calendar = (rf'(?:\d{{4}}(?:-\d{{2}}-\d{{2}})?'
+                rf'|(?:{months})\.?\s+\d{{1,4}}(?:st|nd|rd|th)?(?:,?\s+\d{{4}})?)')
+    temporal = rf'(?:\s+(?:(?:on|in|for)\s+)?(?:{calendar}|today|tomorrow|tonight))?'
+    return bool(re.fullmatch(
+        rf'\s*will\s+{subject}\s+{predicate}\s+'
+        rf'[+-]?\d+(?:\.\d+)?\s+degrees?{temporal}\s*[?.!]?\s*',
+        question, flags=re.IGNORECASE))
+
+
+def is_temperature_market(question: str, *, market_id: str = '', category: str = '',
+                          market_metadata: dict | None = None) -> bool:
+    """Scope collection/observer gates, not permission to manufacture odds.
+
+    Canonical daily-temperature identity also covers contracts whose question
+    shorthand the numerical scorer cannot parse. Question-only compatibility
+    requires genuine temperature terms/units, not qualifications or price words.
+    """
+    from bot.market_router import route_market
+
+    route = route_market({'id': market_id, 'question': question,
+                          'category': category, 'metadata': market_metadata or {}})
+    return (route.group == 'weather' and route.family == 'daily_temperature'
+            or is_temperature_question(question))
 
 
 def _infer_question_side(question: str) -> Optional[str]:
@@ -898,6 +941,8 @@ class ForexFeed:
         self.http.close()
 
 
+from bot.feeds.weather_capture_store import WeatherCaptureStore
+from bot.collector_paths import collector_root
 from bot.feeds.weather_pro import ProWeatherEngine, CITY_COORDS
 
 
@@ -907,9 +952,11 @@ class LiveFeedAggregator:
     Single entry point for the strategy engine.
     """
 
-    def __init__(self, *, weather_source_selection: dict | None = None):
+    def __init__(self, *, weather_source_selection: dict | None = None,
+                 capture_store: WeatherCaptureStore | None = None):
         self.weather_source_selection = dict(weather_source_selection or {})
-        self.weather = ProWeatherEngine()  # Multi-source weather engine
+        self.capture_store = capture_store if capture_store is not None else WeatherCaptureStore(storage_root=collector_root())
+        self.weather = ProWeatherEngine(capture_store=self.capture_store)
         self.crypto = CryptoFeed()
         self.forex = ForexFeed()
 
@@ -927,7 +974,8 @@ class LiveFeedAggregator:
         q = question.lower()
 
         # Temperature markets → multi-source weather engine
-        if is_temperature_question(question):
+        if is_temperature_market(question, market_id=market_id, category=category,
+                                 market_metadata=market_metadata):
             # If no city in question, try to extract from series ticker
             # e.g., KXHIGHAUS → Austin, KXHIGHPHIL → Philadelphia, KXLOWCHI → Chicago
             score_with_context = getattr(self.weather, "score_temperature_market_with_context", None)

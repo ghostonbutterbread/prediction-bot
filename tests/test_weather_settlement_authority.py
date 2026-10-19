@@ -1,4 +1,5 @@
 """Synthetic decision-time rule text; not historical rule capture or resolved weather."""
+import tempfile
 import unittest
 from unittest.mock import patch
 from datetime import datetime, timezone
@@ -6,6 +7,7 @@ from datetime import datetime, timezone
 from bot.exchanges.kalshi import KalshiExchange, _market_from_raw
 from bot.feeds.live_data import LiveFeedAggregator
 from bot.feeds.weather_pro import MultiSourceForecast, ProWeatherEngine, WeatherSnapshot
+from bot.feeds.weather_capture_store import WeatherCaptureStore
 from bot.prediction_lab import PredictionLab
 from bot.replay_decision_input import build_replay_decision_input_v1, verify_replay_decision_input_v1
 from bot.shared_market_feed import build_shared_market_candidate_row, normalize_shared_candidate_input, shared_candidate_market_from_row
@@ -28,6 +30,11 @@ def _market(ticker, rule):
 
 
 class WeatherSettlementAuthorityTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.capture_store = WeatherCaptureStore(storage_root=temporary.name)
+
     def test_shared_only_candidate_preserves_decision_time_rules_for_weather_authority(self):
         market = _market("KXLOWTPHX-26SEP24-T73", TWC_RULE)
         market.no_price = 0.50
@@ -86,7 +93,7 @@ class WeatherSettlementAuthorityTests(unittest.TestCase):
         reconstructed = normalize_shared_candidate_input(shared)
         self.assertTrue(reconstructed.ok)
         self.assertTrue({"rules_primary", "rules_secondary"}.isdisjoint(reconstructed.market.metadata))
-        engine = ProWeatherEngine()
+        engine = ProWeatherEngine(capture_store=self.capture_store)
         now = datetime.now(timezone.utc)
         engine.nws.get_forecast = lambda *_args, **_kwargs: WeatherSnapshot(
             city="phoenix", source="nws", high_temp_f=100, low_temp_f=72,
@@ -115,7 +122,7 @@ class WeatherSettlementAuthorityTests(unittest.TestCase):
             engine.close()
 
     def test_market_rules_do_not_change_forecast_value_confidence_or_driver(self):
-        engine = ProWeatherEngine()
+        engine = ProWeatherEngine(capture_store=self.capture_store)
         now = datetime.now(timezone.utc)
         def source(name, low):
             return WeatherSnapshot(city="phoenix", source=name, high_temp_f=100,

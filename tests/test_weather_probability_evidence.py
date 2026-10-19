@@ -8,6 +8,7 @@ import unittest
 from datetime import datetime, timezone
 from unittest.mock import patch
 
+from bot.feeds.weather_capture_store import WeatherCaptureStore
 from bot.feeds.weather_pro import ProWeatherEngine, WeatherSnapshot
 
 
@@ -32,7 +33,7 @@ class WeatherProbabilityEvidenceTests(unittest.TestCase):
             self.addCleanup(guard.stop)
 
     def weather(self, high=88):
-        engine = ProWeatherEngine()
+        engine = ProWeatherEngine(capture_store=WeatherCaptureStore(storage_root=self.root))
         self.addCleanup(engine.close)
         now = datetime.now(timezone.utc)
         snapshot = WeatherSnapshot(city="los angeles", high_temp_f=high, low_temp_f=60,

@@ -77,7 +77,12 @@ class PredictionLab:
             strategy_cfg["enable_social"] = False
         if self.lab_cfg.get("disable_ai", True):
             strategy_cfg["enable_ai"] = False
-        self.strategy = EnhancedStrategyEngine(strategy_cfg)
+        from bot.collector_paths import collector_root
+        from bot.feeds.weather_capture_store import WeatherCaptureStore
+
+        self.capture_store = WeatherCaptureStore(storage_root=collector_root(
+            (self.config.get('runtime') or {}).get('storage_root')))
+        self.strategy = EnhancedStrategyEngine(strategy_cfg, capture_store=self.capture_store)
         self.groups = [str(group).strip().lower() for group in (self.lab_cfg.get("groups") or ["weather"]) if str(group).strip()]
         self.max_markets_per_run = int(self.lab_cfg.get("max_markets_per_run", 500) or 500)
         self.max_new_predictions_per_seed = int(self.lab_cfg.get("max_new_predictions_per_seed", 500) or 500)
@@ -1142,10 +1147,15 @@ class PredictionLab:
             "edge": weather_signal.get("edge"),
             "data": dict(weather_data),
         }
+        if 'predicted_prob' not in weather_signal:
+            source_signal.pop('predicted_prob')
+        for field in ('collection_only', 'prediction_available', 'availability_reason'):
+            if field in weather_signal:
+                source_signal[field] = weather_signal[field]
         from bot.feeds.weather_pro import project_probability_evidence
 
         probability_evidence = project_probability_evidence(
-            weather_signal.get("probability_evidence"), source_signal["predicted_prob"],
+            weather_signal.get("probability_evidence"), source_signal.get("predicted_prob"),
         )
         if probability_evidence is not None and probability_evidence["basis"] == "heuristic_weather_distance_v1":
             source_signal["probability_evidence"] = probability_evidence
@@ -1223,6 +1233,13 @@ class PredictionLab:
             "warnings": list(weather_signal.get("warnings") or []) + list(trace.get("warnings") or []) + list(artifact.get("warnings") or []),
             "source_signal": source_signal,
         }
+        if 'predicted_prob' not in weather_signal:
+            snapshot.pop('predicted_prob')
+        for field in ('collection_only', 'prediction_available', 'availability_reason'):
+            if field in weather_signal:
+                snapshot[field] = weather_signal[field]
+        if 'collection_receipt' in weather_data:
+            snapshot['collection_receipt'] = weather_data['collection_receipt']
         self._copy_optional_weather_date_fields(snapshot, validation_weather_data, validated_weather_date=validated_weather_date)
         self._copy_optional_forecast_metadata(snapshot, validation_weather_data)
         return snapshot

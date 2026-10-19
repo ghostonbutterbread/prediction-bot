@@ -41,9 +41,24 @@ def local_geography_reason(location: dict, *, city: str, city_id: str) -> str | 
     from bot.weather.registry import WeatherRegistry
 
     registered = WeatherRegistry.from_file().get_city(city_id)
-    state = location.get('adminDistrictCode')
-    if state is not None and state != registered['state']:
-        return 'source_forecast_state_mismatch'
+    # These transports declare the same state-code meaning under different
+    # names. Check every declaration, including the selected Scripps day row;
+    # choosing a first nonempty alias would conceal explicit contradictions.
+    declared_locations = [location]
+    if isinstance(location.get('selected_period_location'), dict):
+        declared_locations.append(location['selected_period_location'])
+    for declared in declared_locations:
+        for key in ('adminDistrictCode', 'stateAbbreviation', 'state'):
+            state = declared.get(key)
+            if state is None:
+                continue
+            state_code = state.strip().upper() if isinstance(state, str) else None
+            if key == 'state' and state_code == 'OKLAHOMA':
+                # Observed Sinclair declares the full name beside its code.
+                # Interpret that known spelling without rewriting either value.
+                state_code = 'OK'
+            if state_code != registered['state']:
+                return 'source_forecast_state_mismatch'
     lat, lon = location.get('latitude'), location.get('longitude')
     if lat is None and lon is None:
         return None

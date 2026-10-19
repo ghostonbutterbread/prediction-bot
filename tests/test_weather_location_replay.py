@@ -75,7 +75,11 @@ class WeatherLocationReplayTests(unittest.TestCase):
                 self.fail(f"Unexpected producer request: {request.url}")
             return httpx.Response(200, json=payload)
 
-        engine = ProWeatherEngine()
+        from bot.feeds.weather_capture_store import WeatherCaptureStore
+        captures = tempfile.TemporaryDirectory(prefix='location-replay-captures-')
+        self.addCleanup(captures.cleanup)
+        self.capture_store = WeatherCaptureStore(storage_root=captures.name)
+        engine = ProWeatherEngine(capture_store=self.capture_store)
         self.addCleanup(engine.close)
         for feed in (engine.nws, engine.open_meteo, engine.owm):
             feed.http.close()
@@ -114,6 +118,11 @@ class WeatherLocationReplayTests(unittest.TestCase):
         self.assertTrue(verify_replay_decision_input_v1(result.record, result.canonical_input_json))
         sealed = json.loads(json.dumps(result.record))
         self.assertTrue(verify_replay_decision_input_record_v1(sealed))
+        capture_refs = [s['source_metadata']['capture'] for s in self.replay_snapshot(sealed)['sources']
+                        if s.get('source_id') in {'nws', 'open_meteo'}]
+        self.assertEqual(len(capture_refs), 2)
+        for capture in capture_refs:
+            self.assertTrue(self.capture_store.read_verified(capture))
         # Exercise the real file exporter too, using only this synthetic row.
         # No historical archive is read or modified.
         with tempfile.TemporaryDirectory() as temporary:

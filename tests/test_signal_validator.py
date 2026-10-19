@@ -1,8 +1,10 @@
+import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 
 from bot.exchanges.base import Market
 from bot.feeds.weather_pro import MultiSourceForecast, NWSFeed, ProWeatherEngine, WeatherSnapshot
+from bot.feeds.weather_capture_store import WeatherCaptureStore
 from bot.strategies.signal_validator import SignalValidator
 
 
@@ -264,7 +266,9 @@ class SignalValidatorTests(unittest.TestCase):
             def close(self):
                 return None
 
-        feed = NWSFeed()
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        feed = NWSFeed(capture_store=WeatherCaptureStore(storage_root=temporary.name))
         self.addCleanup(feed.close)
         feed.http.close()
         feed.http = FakeHttp()

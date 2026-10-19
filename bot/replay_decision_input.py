@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from math import isfinite
 from typing import Any, Mapping
+from urllib.parse import parse_qsl, urlsplit
 
 
 from bot.shared_market_feed import shared_candidate_identity_mismatch
@@ -51,6 +52,7 @@ _SANITIZED_TOP_LEVEL_CONTRACT_FIELDS = frozenset(
 # from this v1 schema, so unreviewed fields cannot cross the replay boundary.
 _SCALAR = object()
 _OPTIONAL_WEATHER_PROVENANCE = object()
+_PUBLIC_WEATHER_URL = object()
 _JSON_SCALAR_TYPES = (str, int, float, bool, type(None))
 _DATE_VALIDATION_V1 = {
     "ok": _SCALAR, "reason": _SCALAR, "market_date": _SCALAR, "weather_date": _SCALAR,
@@ -79,7 +81,61 @@ _SETTLEMENT_AUTHORITY_V1 = {
     "source": _SCALAR, "status": _SCALAR, "evidence_field": _SCALAR,
     "evidence_origin": _SCALAR,
 }
+# Exact transport/collection references only: no body, headers, arbitrary
+# parameters, or recursive provenance. The receipt stays independently verifiable
+# against the collector-owned store rather than being replaced by a replay hash.
+_PUBLIC_WEATHER_QUERY_V1 = {
+    key: _SCALAR for key in (
+        "latitude", "longitude", "hourly", "current", "temperature_unit",
+        "forecast_days", "timezone", "start_date", "end_date",
+    )
+}
+_CAPTURE_REF_V1 = {
+    "schema_version": _SCALAR, "storage": _SCALAR, "payload_sha256": _SCALAR,
+    "payload_bytes": _SCALAR, "raw_payload_locator": _SCALAR,
+    "capture_receipt_locator": _SCALAR, "capture_receipt_sha256": _SCALAR,
+    "retrieval_url": _PUBLIC_WEATHER_URL, "request_parameters": _PUBLIC_WEATHER_QUERY_V1,
+    "http_status": _SCALAR, "content_type": _SCALAR, "representation": _SCALAR,
+    "fetched_at": _SCALAR,
+}
+_COLLECTION_RECEIPT_V1 = {
+    "schema_version": _SCALAR, "receipt_locator": _SCALAR, "receipt_sha256": _SCALAR,
+}
+_COLLECTION_ATTEMPT_V1 = {
+    "url": _PUBLIC_WEATHER_URL, "attempted_at": _SCALAR, "fetched_at": _SCALAR,
+    "http_status": _SCALAR, "error_type": _SCALAR,
+}
+_MARKET_STATION_ASSOCIATION_V1 = {
+    key: _SCALAR for key in (
+        "station_id", "station_cli", "station_origin", "station_mapping",
+        "station_evidence_field", "availability_reason", "city", "basis",
+    )
+}
+_SOURCE_PERIOD_SEMANTICS_V1 = {
+    key: _SCALAR for key in (
+        "selected_period", "period_basis", "period_semantics",
+        "full_day_measurement_equivalent", "date_mapping_basis",
+    )
+}
 _SOURCE_METADATA_V1 = {
+    **_SOURCE_PERIOD_SEMANTICS_V1,
+    "capture": _CAPTURE_REF_V1, "collection_attempts": [_COLLECTION_ATTEMPT_V1],
+    "registry_url": _PUBLIC_WEATHER_URL, "parser_payload_sha256": _SCALAR,
+    "payload_locator": _SCALAR, "collection_adapter": _SCALAR,
+    "source_updated_at": _SCALAR, "source_cache_updated_at_ms": _SCALAR,
+    "source_reported_updated_at": _SCALAR, "source_clock_basis": _SCALAR,
+    "source_clock_eligibility": _SCALAR, "adapter_error_type": _SCALAR,
+    "market_station_association": _MARKET_STATION_ASSOCIATION_V1,
+    # These are provider-reported labels/coordinates, not verified geography.
+    "source_reported_location": {
+        key: _SCALAR for key in (
+            "city", "market", "ianaTimeZone", "timezone_basis", "latitude", "longitude",
+            "adminDistrictCode", "adminDistrict", "stateAbbreviation", "state",
+            "country", "countryCode", "postalKey",
+        )
+    } | {"selected_period_location": {
+        key: _SCALAR for key in ("city", "state", "stateAbbreviation", "adminDistrictCode")
+    }},
     "timezone": _SCALAR, "utc_offset_seconds": _SCALAR, "current_time": _SCALAR,
     "forecast_times_used": [_SCALAR], "office": _SCALAR, "grid_x": _SCALAR,
     "grid_y": _SCALAR, "station_id": _SCALAR, "period_name": _SCALAR,
@@ -90,14 +146,16 @@ _SOURCE_METADATA_V1 = {
     "forecast_location": {
         "station_id": _SCALAR, "station_cli": _SCALAR, "station_origin": _SCALAR,
         "station_mapping": _SCALAR, "station_evidence_field": _SCALAR,
-        "city": _SCALAR, "basis": _SCALAR, "availability_reason": _SCALAR,
+        "city": _SCALAR, "city_id": _SCALAR, "basis": _SCALAR, "availability_reason": _SCALAR,
+        "geography_basis": _SCALAR, "coordinate_basis": _SCALAR,
         "latitude": _SCALAR, "longitude": _SCALAR, "coordinate_source": _SCALAR,
         "coordinate_url": _SCALAR, "coordinates_fetched_at": _SCALAR,
     },
-    "forecast_query_url": _SCALAR, "response_latitude": _SCALAR,
+    "forecast_query_url": _PUBLIC_WEATHER_URL, "response_latitude": _SCALAR,
     "response_longitude": _SCALAR,
 }
 _WEATHER_SOURCE_V1 = {
+    **_SOURCE_PERIOD_SEMANTICS_V1,
     "source_id": _SCALAR, "source_name": _SCALAR, "source_family": _SCALAR,
     "source_location_basis": _SCALAR, "source_location_city": _SCALAR,
     "forecast_measurement_kind": _SCALAR, "contract_shape": _SCALAR, "question_side": _SCALAR,
@@ -138,6 +196,7 @@ _CONTEXTUAL_WEATHER_SELECTION_V1.update({
                        'source_observation_ids': [_SCALAR]}],
 })
 _WEATHER_SIGNAL_DATA_V1 = {
+    "collection_receipt": _COLLECTION_RECEIPT_V1,
     'weather_source_selection': _CONTEXTUAL_WEATHER_SELECTION_V1,
     "forecast_high": _SCALAR, "forecast_low": _SCALAR, "current_temp": _SCALAR,
     "actual_temp_used": _SCALAR, "predicted_temp": _SCALAR, "threshold": _SCALAR,
@@ -164,6 +223,7 @@ _WEATHER_PROBABILITY_EVIDENCE_V1 = {
     },
 }
 _WEATHER_SOURCE_SIGNAL_V1 = {
+    "collection_only": _SCALAR, "prediction_available": _SCALAR, "availability_reason": _SCALAR,
     "signal_type": _SCALAR, "predicted_prob": _SCALAR, "confidence": _SCALAR,
     "source_timestamp": _SCALAR, "ttl_seconds": _SCALAR, "question_side": _SCALAR,
     "probability_evidence": _WEATHER_PROBABILITY_EVIDENCE_V1,
@@ -173,6 +233,8 @@ _WEATHER_PROVENANCE_V1 = {
     "source_mode": _SCALAR, "source_provenance": _SCALAR, "anti_hindsight": _SCALAR,
 }
 _WEATHER_SNAPSHOT_V1 = {
+    "collection_receipt": _COLLECTION_RECEIPT_V1,
+    "collection_only": _SCALAR, "prediction_available": _SCALAR, "availability_reason": _SCALAR,
     "artifact_version": _SCALAR, "mode": _SCALAR, "source_provenance": _SCALAR,
     "provenance": _OPTIONAL_WEATHER_PROVENANCE,
     "source_name": _SCALAR, "signal_name": _SCALAR, "signal_role": _SCALAR,
@@ -778,6 +840,11 @@ def _sanitized_allowlisted_value(
             return _json_scalar(value)
         _add_omitted_field(omitted_fields, path, "unallowlisted")
         return _UNSET
+    if spec is _PUBLIC_WEATHER_URL:
+        if _public_weather_url(value):
+            return value
+        _add_omitted_field(omitted_fields, path, "unallowlisted")
+        return _UNSET
     if spec is _OPTIONAL_WEATHER_PROVENANCE:
         if value is None:
             return None
@@ -1000,6 +1067,13 @@ def _allowlisted_value(value: Any, spec: Any, path: str, errors: list[ReplayDeci
             return _json_scalar(value)
         errors.append(ReplayDecisionInputError("invalid_unallowlisted_input_type", path, "allowlisted input field must be a JSON scalar"))
         return _UNSET
+    if spec is _PUBLIC_WEATHER_URL:
+        if _public_weather_url(value):
+            return value
+        errors.append(ReplayDecisionInputError(
+            "invalid_public_weather_url", path, "weather URL must not contain credentials or unreviewed query parameters",
+        ))
+        return _UNSET
     if spec is _OPTIONAL_WEATHER_PROVENANCE:
         if value is None:
             return None
@@ -1021,6 +1095,19 @@ def _allowlisted_value(value: Any, spec: Any, path: str, errors: list[ReplayDeci
             return _UNSET
         return copied
     raise AssertionError(f"invalid allowlist specification at {path}")
+
+
+def _public_weather_url(value: Any) -> bool:
+    """Keep public retrieval provenance without opening a credential channel."""
+    if not isinstance(value, str):
+        return False
+    try:
+        url = urlsplit(value)
+        return bool(url.scheme in {"http", "https"} and url.hostname
+                    and url.username is None and url.password is None and not url.fragment
+                    and all(key in _PUBLIC_WEATHER_QUERY_V1 for key, _ in parse_qsl(url.query, keep_blank_values=True)))
+    except ValueError:
+        return False
 
 
 def _json_scalar(value: Any) -> Any:

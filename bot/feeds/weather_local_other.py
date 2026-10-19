@@ -43,6 +43,8 @@ def parse_sinclair_daily(page: str, *, city: str, target_date: str,
         raise LocalForecastUnavailable('source_specific_forecast_schema_missing')
     try:
         forecast, _ = json.JSONDecoder().raw_decode(flight[position + len(marker):].lstrip())
+        if not isinstance(forecast['city'], str):
+            raise LocalForecastUnavailable('source_specific_forecast_schema_invalid')
         if forecast['city'].casefold() != city.casefold():
             raise LocalForecastUnavailable('source_forecast_city_mismatch')
         if timezone_name is not None and timezone_name != 'America/Chicago':
@@ -60,7 +62,8 @@ def parse_sinclair_daily(page: str, *, city: str, target_date: str,
                         'forecast_type': 'local_prior_night_low_predictor' if measurement_kind == 'low' else 'local_daytime_high_predictor',
                         'raw_forecast': row,
                         'location': {**{key: forecast.get(key) for key in
-                                        ('city', 'stateAbbreviation', 'latitude', 'longitude')},
+                                        ('city', 'stateAbbreviation', 'state', 'adminDistrictCode', 'latitude', 'longitude')
+                                        if key in forecast},
                                      'ianaTimeZone': 'America/Chicago'},
                         'cache_updated_at_ms': None,
                         'payload_locator': 'self.__next_f[1].forecast.weatherForecasts'}
@@ -98,6 +101,8 @@ def parse_scripps_daily(page: str, *, city: str, target_date: str,
         if data is None:
             raise LocalForecastUnavailable('source_specific_forecast_schema_missing')
         location = data['currentConditions'][0] if 'currentConditions' in data else data['days'][0]
+        if not isinstance(location['city'], str):
+            raise LocalForecastUnavailable('source_specific_forecast_schema_invalid')
         if location['city'].casefold() != city.casefold():
             raise LocalForecastUnavailable('source_forecast_city_mismatch')
         # The full page proves tempUnits=f; its daily-only sibling carries the
@@ -114,6 +119,8 @@ def parse_scripps_daily(page: str, *, city: str, target_date: str,
         if row is None:
             raise LocalForecastUnavailable('target_date_missing_low_forecast_period' if measurement_kind == 'low'
                                            else 'target_date_not_in_source_forecast')
+        if not isinstance(row['city'], str):
+            raise LocalForecastUnavailable('source_specific_forecast_schema_invalid')
         if row['city'].casefold() != city.casefold():
             raise LocalForecastUnavailable('source_forecast_city_mismatch')
         try:
@@ -130,7 +137,10 @@ def parse_scripps_daily(page: str, *, city: str, target_date: str,
                 'period_basis': 'source_calendar_date_label',
                 'forecast_type': 'local_prior_night_low_predictor' if measurement_kind == 'low' else 'local_daytime_high_predictor',
                 'raw_forecast': row,
-                'location': {**{key: location.get(key) for key in ('city', 'state')},
+                'location': {**{key: location[key] for key in
+                                 ('city', 'state', 'stateAbbreviation', 'adminDistrictCode') if key in location},
+                             'selected_period_location': {key: row[key] for key in
+                                 ('city', 'state', 'stateAbbreviation', 'adminDistrictCode') if key in row},
                              'ianaTimeZone': 'America/Los_Angeles'},
                 'cache_updated_at_ms': None,
                 'payload_locator': 'div[data-props].days'}

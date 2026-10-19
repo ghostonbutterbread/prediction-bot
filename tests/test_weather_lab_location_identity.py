@@ -1,6 +1,11 @@
 """Recorded query geography must not be overwritten by static contract/ticker labels."""
 import copy
+from functools import partial
 import unittest
+from unittest.mock import patch
+
+from bot.feeds.weather_capture_store import WeatherCaptureStore
+from bot.feeds.weather_pro import ProWeatherEngine
 
 import test_probability_evidence_projection as fixtures
 from bot.replay_decision_input import build_replay_decision_input_v1, verify_replay_decision_input_record_v1
@@ -11,6 +16,13 @@ class WeatherLabLocationIdentityTests(unittest.TestCase):
         self.fixture = fixtures.ProbabilityEvidenceProjectionTests()
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
+        # The shared fixture clears the environment; inject its own scratch store
+        # at its weather-engine construction seam, not a global collector root.
+        store = WeatherCaptureStore(storage_root=self.fixture.root)
+        factory = patch.object(fixtures, "ProWeatherEngine",
+                               partial(ProWeatherEngine, capture_store=store))
+        factory.start()
+        self.addCleanup(factory.stop)
 
     def sealed(self, **kwargs):
         row, weather, _ = self.fixture.producer(**kwargs)
@@ -60,7 +72,19 @@ class WeatherLabLocationIdentityTests(unittest.TestCase):
             if location is None:
                 continue
             with self.subTest(source=source["source_name"]):
-                self.assertEqual(location["basis"], "city_centroid")
+                if source["source_name"].startswith("src_local_"):
+                    # This fixture has only global-source mock responses. A failed
+                    # city-page attempt retains its own city identity, not the
+                    # global query's centroid or the contract's ticker station.
+                    self.assertEqual(location["basis"], "city")
+                    self.assertFalse(source["scoreable_forecast"])
+                    self.assertEqual(source["availability_reason"], "source_forecast_unexpected_error")
+                    metadata = source["source_metadata"]
+                    self.assertEqual(metadata["adapter_error_type"], "AssertionError")
+                    self.assertEqual(len(metadata["collection_attempts"]), 1)
+                    self.assertEqual(metadata["collection_attempts"][0]["url"], metadata["forecast_query_url"])
+                else:
+                    self.assertEqual(location["basis"], "city_centroid")
                 self.assertIsNone(location.get("station_id"))
                 self.assertIsNone(source.get("station_id"))
                 self.assertIsNone(source.get("station_cli"))

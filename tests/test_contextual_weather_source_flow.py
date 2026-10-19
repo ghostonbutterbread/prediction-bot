@@ -20,7 +20,7 @@ from bot.weather.source_observation_ledger import materialize_source_observation
 from bot.replay_outcome_binding import bind_replay_finalized_outcomes
 from test_contextual_predictive_source_history import predictor_input, resolution_for
 from test_source_observation_ledger import _seal, _write_jsonl
-from test_weather_broad_collection import gray_page
+from test_weather_broad_collection import gray_page as _gray_page
 
 LOCAL = 'src_local_kvvu_weather'
 QUESTION = 'Will Las Vegas high temperature be above 85° on Oct 19, 2026?'
@@ -33,6 +33,14 @@ class Clock(datetime):
     def now(cls, tz=None):
         value = cls(2026, 10, 18, 19, tzinfo=timezone.utc)
         return value.astimezone(tz) if tz else value.replace(tzinfo=None)
+
+
+def gray_page(**kwargs):
+    # The shared parser fixture was fetched Oct 19; this decision is Oct 18.
+    # Keep its real schema, but issue the test page at this fixture's capture
+    # clock rather than bypassing the producer's future-clock ineligibility.
+    issue_ms = int(Clock.now(timezone.utc).timestamp() * 1000)
+    return _gray_page(**kwargs).replace('"lastModified": 1792375876036', f'"lastModified": {issue_ms}')
 
 
 class ContextualWeatherSourceFlowTests(unittest.TestCase):
@@ -83,7 +91,9 @@ class ContextualWeatherSourceFlowTests(unittest.TestCase):
             'min_edge':.01, 'signal_audit_path':str(self.root / 'audit.jsonl')}
         if selection is not None:
             config['weather_source_selection'] = selection
-        engine = EnhancedStrategyEngine(strategy_config_with_policy({'strategy':config}))
+        from bot.feeds.weather_capture_store import WeatherCaptureStore
+        engine = EnhancedStrategyEngine(strategy_config_with_policy({'strategy':config}),
+            capture_store=WeatherCaptureStore(storage_root=self.root))
         self.addCleanup(engine.live_feeds.close)
         weather = engine.live_feeds.weather
         weather.owm.available = False
@@ -170,7 +180,9 @@ class ContextualWeatherSourceFlowTests(unittest.TestCase):
         price = {'signal_type':'price','predicted_prob':.9,'confidence':.9}
         result, trace = self.analyze(strategy, price=price)
         self.assertIsNone(result)
-        self.assertEqual(trace.skip_reason_code,'contextual_weather_observer_only')
+        self.assertEqual(trace.skip_reason_code,'weather_collection_only')
+        self.assertTrue(trace.raw_signals['live']['collection_only'])
+        self.assertNotIn('predicted_prob', trace.raw_signals['live'])
         self.assertIsNone(self.analyze(strategy, price=price, traced=False))
 
     def test_current_local_date_and_city_failures_never_borrow_its_winning_history(self):
@@ -216,6 +228,9 @@ class ContextualWeatherSourceFlowTests(unittest.TestCase):
     def test_disabled_config_is_identical_to_legacy_and_does_not_open_history(self):
         legacy = self.strategy()
         disabled = self.strategy({'enabled':False,'history_metadata_path':str(self.root / 'missing.json')})
+        # Compare the same cached collection, including unique durable receipt
+        # identities; separate HTTP attempts intentionally have distinct IDs.
+        disabled.live_feeds.weather._cache = legacy.live_feeds.weather._cache
         original, trace_original = self.analyze(legacy)
         result, trace = self.analyze(disabled)
         self.assertEqual(result,original)
@@ -309,7 +324,8 @@ class ContextualWeatherSourceFlowTests(unittest.TestCase):
         live = selected_trace.raw_signals['live']
         self.assertEqual(live['data']['predicted_temp'], 80, live['data'].get('weather_source_selection'))
         self.assertEqual(live['data']['forecast_driver'], LOCAL)
-        self.assertNotEqual(live['predicted_prob'], control_trace.raw_signals['live']['predicted_prob'])
+        self.assertEqual(live['predicted_prob'], .10)
+        self.assertEqual(control_trace.raw_signals['live']['predicted_prob'], .85)
         self.assertIsNotNone(selected_signal)
         self.assertIsNotNone(control_signal)
         self.assertNotEqual(selected_signal['model_probability'], control_signal['model_probability'])

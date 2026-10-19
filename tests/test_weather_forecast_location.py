@@ -1,4 +1,7 @@
 """Location requests are exercised through real feeds; all HTTP is mocked."""
+import json
+import os
+import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 
@@ -6,12 +9,21 @@ import httpx
 
 from unittest.mock import patch
 
+from bot.feeds.weather_capture_store import WeatherCaptureStore
 from bot.feeds.weather_pro import CITY_COORDS, NWSFeed, OpenMeteoFeed, OpenWeatherMapFeed, ProWeatherEngine
+from bot.weather.registry import WeatherRegistry
 
 
 TARGET = "2026-10-19"
 # Public NOAA /stations/KLAX geometry checked for this repair; not model output.
 LAX_COORDS = (-118.38889, 33.93806)  # GeoJSON longitude, latitude
+# Synthetic dated city predictor, deliberately not station-associated evidence.
+CITY_FORECAST_PAGE = (
+    '<div class="city">Los Angeles, CA</div><script>'
+    'window.__NUXT__=(function(t){return {weeklyData:[{hi:t,lo:63,'
+    'day:{temp:t,date:"2026-10-19T07:00:00-0700"},'
+    'night:{temp:63,date:"2026-10-19T19:00:00-0700"}}]}}(85));</script>'
+)
 
 
 def station_payload(station="KLAX", coords=LAX_COORDS):
@@ -29,6 +41,11 @@ def forecast_payload(high=72):
 
 
 class ForecastLocationTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(dir=os.environ["TMPDIR"])
+        self.addCleanup(temporary.cleanup)
+        self.capture_store = WeatherCaptureStore(storage_root=temporary.name)
+
     def client(self, handler):
         client = httpx.Client(transport=httpx.MockTransport(handler))
         self.addCleanup(client.close)
@@ -47,7 +64,7 @@ class ForecastLocationTests(unittest.TestCase):
                 return httpx.Response(200, json=forecast_payload())
             return httpx.Response(404)
 
-        feed = NWSFeed()
+        feed = NWSFeed(capture_store=self.capture_store)
         feed.http.close()
         feed.http = self.client(handler)
         snapshot = feed.get_forecast("los angeles", target_date=TARGET)
@@ -82,7 +99,7 @@ class ForecastLocationTests(unittest.TestCase):
                 "hourly": {"time": [TARGET + "T12:00"], "temperature_2m": [72]},
             })
 
-        feed = OpenMeteoFeed()
+        feed = OpenMeteoFeed(capture_store=self.capture_store)
         feed.http.close()
         feed.http = self.client(handler)
         snapshot = feed.get_forecast("los angeles", target_date=TARGET)
@@ -96,15 +113,75 @@ class ForecastLocationTests(unittest.TestCase):
         self.assertEqual(location["station_origin"], "configured_city_station")
         self.assertEqual(snapshot.source_details["response_latitude"], 33.95)
         self.assertEqual(snapshot.source_details["response_longitude"], -118.4)
-    def engine(self, handler):
-        engine = ProWeatherEngine()
+    def engine(self, handler, *, city_forecast=False):
+        engine = ProWeatherEngine(capture_store=self.capture_store)
         self.addCleanup(engine.close)
+        if city_forecast:
+            engine.registry = WeatherRegistry.from_file()
+            [source] = engine.registry.collection_sources("los angeles")
+            # Explicit adapter fixture; do not depend on concurrent registry edits.
+            source["collection_adapter"] = "fox_nuxt_daily_v1"
+            registry = patch.object(engine.registry, "collection_sources", return_value=[source])
+            registry.start()
+            self.addCleanup(registry.stop)
+            original = handler
+            def city_handler(request):
+                if str(request.url) == source["url"]:
+                    original(request)  # Preserve the test's complete request log.
+                    return httpx.Response(200, text=CITY_FORECAST_PAGE)
+                return original(request)
+            handler = city_handler
         for feed in (engine.nws, engine.open_meteo, engine.owm):
             feed.http.close()
             feed.http = self.client(handler)
         return engine
 
-    def test_conflicting_explicit_metadata_aliases_do_not_query_or_score(self):
+    def assert_city_collection_only(self, signal, requests, reason, *, collected_requests=None):
+        self.assertIsInstance(signal, dict)
+        self.assertTrue(signal["collection_only"])
+        self.assertIs(signal["prediction_available"], False)
+        self.assertEqual(signal["confidence"], 0)
+        self.assertNotIn("predicted_prob", signal)
+        self.assertNotIn("direction", signal)
+        self.assertEqual(signal["availability_reason"], "no_eligible_forecast_sources")
+        self.assertEqual(signal["data"]["sources"], [])
+        sources = signal["data"]["source_details"]
+        self.assertTrue(sources)
+        self.assertTrue(all(not row["scoreable_forecast"] for row in sources))
+        local = next(row for row in sources if row["source_id"] == "src_local_kttv_weather")
+        self.assertEqual(local["availability_reason"], reason)
+        self.assertEqual(local["forecast_high"], 85)
+        metadata = local["source_metadata"]
+        association = metadata["market_station_association"]
+        self.assertEqual(association["station_origin"], "market_explicit")
+        self.assertIsNone(association.get("station_id"))
+        if reason == "conflicting_explicit_stations":
+            self.assertEqual(association["availability_reason"], reason)
+        self.assertEqual(metadata["forecast_location"]["basis"], "city")
+        self.assertNotIn("station_id", metadata["forecast_location"])
+        self.assertEqual(metadata["collection_attempts"][0]["http_status"], 200)
+        self.assertEqual(self.capture_store.read_verified(metadata["capture"]), CITY_FORECAST_PAGE.encode())
+        receipt = json.loads(self.capture_store.read_receipt_verified(signal["data"]["collection_receipt"]))
+        retained = next(row for row in receipt["sources"] if row["source_id"] == local["source_id"])
+        self.assertEqual(retained["source_metadata"]["capture"], metadata["capture"])
+        self.assertEqual(retained["source_metadata"]["collection_attempts"], metadata["collection_attempts"])
+        self.assertEqual(retained["availability_reason"], reason)
+        # Equivalent unresolved identities may legitimately reuse a retained
+        # collection; a warm *configured* forecast still must not score them.
+        collected = requests if collected_requests is None else collected_requests
+        self.assertTrue(any(str(r.url) == metadata["forecast_query_url"] for r in collected))
+        # Current station observations may still be collected, never forecasts
+        # or station-geometry queries for an unresolved/conflicting association.
+        self.assertTrue(all(r.url.path.endswith("/observations/latest") for r in requests
+                            if r.url.host == "api.weather.gov"))
+        self.assertFalse(any(r.url.host == "api.open-meteo.com" for r in requests))
+        for source in sources:
+            if source["source_id"] in {"nws", "open_meteo"}:
+                self.assertEqual(source["availability_reason"], reason)
+            if source.get("evidence_type") == "observation":
+                self.assertFalse(source["scoreable_forecast"])
+
+    def test_conflicting_explicit_metadata_aliases_collect_city_without_scoring(self):
         for metadata in (
             {"station_id": "KBUR", "settlement_station": "KLAX"},
             {"station_id": "KBUR", "station_cli": "LAX"},
@@ -125,14 +202,12 @@ class ForecastLocationTests(unittest.TestCase):
                         payload = {"hourly": {"time": [TARGET + "T12:00"], "temperature_2m": [72]},
                                    "current": {"temperature_2m": 69}}
                     return httpx.Response(200, json=payload)
-                engine = self.engine(handler)
+                engine = self.engine(handler, city_forecast=True)
                 signal = engine._score_temperature_market(
                     "Will Los Angeles high temperature be above 80° on Oct 19, 2026?", .5,
                     market_date=TARGET, market_metadata=metadata,
                 )
-                self.assertIsNone(signal, "all explicit station assertions must agree")
-                self.assertEqual([r for r in requests if not r.url.path.endswith("/observations/latest")], [],
-                                 "a station conflict must not query any forecast")
+                self.assert_city_collection_only(signal, requests, "conflicting_explicit_stations")
 
     def test_unparseable_explicit_metadata_cannot_use_configured_forecast_or_warm_cache(self):
         requests = []
@@ -152,7 +227,7 @@ class ForecastLocationTests(unittest.TestCase):
                 payload = {"properties": {}}
             return httpx.Response(200, json=payload)
 
-        engine = self.engine(handler)
+        engine = self.engine(handler, city_forecast=True)
         question = "Will Los Angeles high temperature be above 80° on Oct 19, 2026?"
         # Absent station metadata remains a usable, inferred configured forecast.
         self.assertIsNotNone(engine._score_temperature_market(question, .5, market_date=TARGET))
@@ -169,8 +244,7 @@ class ForecastLocationTests(unittest.TestCase):
                 signal = engine._score_temperature_market(
                     question, .5, market_date=TARGET, market_metadata=metadata,
                 )
-                self.assertIsNone(signal, "unresolved explicit metadata must not be discarded or use the warm configured forecast")
-                self.assertEqual([r for r in requests[before:] if not r.url.path.endswith("/observations/latest")], [])
+                self.assert_city_collection_only(signal, requests[before:], reason, collected_requests=requests)
                 result = list(engine._cache.values())[-1][0]
                 for snapshot in result.details["source_snapshots"][:2]:
                     self.assertFalse(snapshot.scoreable_forecast)
@@ -274,13 +348,12 @@ class ForecastLocationTests(unittest.TestCase):
             else:
                 payload = {"properties": {}}
             return httpx.Response(200, json=payload)
-        engine = self.engine(handler)
+        engine = self.engine(handler, city_forecast=True)
         signal = engine._score_temperature_market(
             "Will Los Angeles high temperature be above 80°?", .5, market_date=TARGET,
             market_metadata={"rules_primary": "The maximum recorded at CLIZZZ is above 80°F."},
         )
-        self.assertIsNone(signal)
-        self.assertFalse(any("/points/" in r.url.path or r.url.host == "api.open-meteo.com" for r in requests))
+        self.assert_city_collection_only(signal, requests, "explicit_station_unresolved")
         result = next(iter(engine._cache.values()))[0]
         for snapshot in result.details["source_snapshots"][:2]:
             self.assertEqual(snapshot.availability_reason, "explicit_station_unresolved")
@@ -288,7 +361,9 @@ class ForecastLocationTests(unittest.TestCase):
             self.assertEqual(snapshot.source_details["forecast_location"]["station_mapping"], "unknown")
             self.assertNotIn("latitude", snapshot.source_details["forecast_location"])
     def test_conflicting_explicit_stations_do_not_choose_first_or_reuse_city_cache(self):
+        requests = []
         def handler(request):
+            requests.append(request)
             if request.url.path.startswith("/stations/") and not request.url.path.endswith("/latest"):
                 return httpx.Response(200, json=station_payload())
             if request.url.path.startswith("/points/"):
@@ -297,7 +372,7 @@ class ForecastLocationTests(unittest.TestCase):
                 return httpx.Response(200, json=forecast_payload())
             return httpx.Response(200, json={"properties": {}, "current": {"temperature_2m": 69},
                                            "hourly": {"time": [TARGET + "T12:00"], "temperature_2m": [72]}})
-        engine = self.engine(handler)
+        engine = self.engine(handler, city_forecast=True)
         question = "Will Los Angeles high temperature be above 80°?"
         self.assertIsNotNone(engine._score_temperature_market(question, .5, market_date=TARGET))
         for metadata in (
@@ -306,7 +381,10 @@ class ForecastLocationTests(unittest.TestCase):
             {"rules_primary": "Recorded at CLILAX or KPHX"},
         ):
             with self.subTest(metadata=metadata):
-                self.assertIsNone(engine._score_temperature_market(question, .5, market_date=TARGET, market_metadata=metadata))
+                before = len(requests)
+                signal = engine._score_temperature_market(question, .5, market_date=TARGET, market_metadata=metadata)
+                self.assert_city_collection_only(signal, requests[before:], "conflicting_explicit_stations",
+                                                 collected_requests=requests)
         result = list(engine._cache.values())[-1][0]
         self.assertEqual(result.details["source_snapshots"][0].availability_reason, "conflicting_explicit_stations")
     def test_optional_openweathermap_does_not_reintroduce_city_centroid_into_station_blend(self):
@@ -335,7 +413,7 @@ class ForecastLocationTests(unittest.TestCase):
             return httpx.Response(503)
         for cls in (NWSFeed, OpenMeteoFeed, OpenWeatherMapFeed):
             with self.subTest(feed=cls.__name__):
-                feed = cls(api_key="test-only-placeholder") if cls is OpenWeatherMapFeed else cls()
+                feed = cls(api_key="test-only-placeholder") if cls is OpenWeatherMapFeed else cls(capture_store=self.capture_store)
                 feed.http.close()
                 feed.http = self.client(handler)
                 snapshot = feed.get_forecast("los angeles")
@@ -359,7 +437,7 @@ class ForecastLocationTests(unittest.TestCase):
             return httpx.Response(200, json=payload)
         for cls in (NWSFeed, OpenMeteoFeed):
             with self.subTest(feed=cls.__name__):
-                feed = cls()
+                feed = cls(capture_store=self.capture_store)
                 feed.http.close()
                 feed.http = self.client(handler)
                 snapshot = feed.get_forecast("los angeles", target_date="2026-10-25")
@@ -383,7 +461,7 @@ class ForecastLocationTests(unittest.TestCase):
                     # json= rejects NaN, so return encoded JSON for that case.
                     import json
                     return httpx.Response(200, text=json.dumps(payload))
-                feed = NWSFeed()
+                feed = NWSFeed(capture_store=self.capture_store)
                 feed.http.close()
                 feed.http = self.client(handler)
                 try:
@@ -436,7 +514,7 @@ class ForecastLocationTests(unittest.TestCase):
                     if request.url.path == "/stations/KLAX" and not fail_station:
                         return httpx.Response(200, json=station_payload())
                     return httpx.Response(503)
-                feed = NWSFeed()
+                feed = NWSFeed(capture_store=self.capture_store)
                 feed.http.close()
                 feed.http = self.client(handler)
                 feed._points_cache["los angeles"] = (datetime.now(timezone.utc), ("LOX", 154, 44))
@@ -460,7 +538,7 @@ class ForecastLocationTests(unittest.TestCase):
             else:
                 payload = forecast_payload(72 if "/1,1/" in request.url.path else 88)
             return httpx.Response(200, json=payload)
-        feed = NWSFeed()
+        feed = NWSFeed(capture_store=self.capture_store)
         feed.http.close()
         feed.http = self.client(handler)
         first = feed.get_forecast("los angeles", target_date=TARGET)
@@ -491,7 +569,7 @@ class ForecastLocationTests(unittest.TestCase):
             if path.startswith("/gridpoints/"):
                 return httpx.Response(200, json=forecast_payload())
             return httpx.Response(404)
-        feed = NWSFeed()
+        feed = NWSFeed(capture_store=self.capture_store)
         feed.http.close()
         feed.http = self.client(handler)
         forecast = feed.get_forecast("los angeles", target_date=TARGET)
@@ -505,7 +583,7 @@ class ForecastLocationTests(unittest.TestCase):
             with self.subTest(payload=payload):
                 def handler(request):
                     return httpx.Response(200, json=station_payload() if request.url.path.startswith("/stations/") else payload)
-                feed = NWSFeed()
+                feed = NWSFeed(capture_store=self.capture_store)
                 feed.http.close()
                 feed.http = self.client(handler)
                 try:

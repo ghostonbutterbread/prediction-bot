@@ -8,7 +8,7 @@ from html import escape
 from zoneinfo import ZoneInfo
 
 
-def sinclair_page(city="Oklahoma City", rows=None):
+def sinclair_page(city: object = "Oklahoma City", rows=None, **location):
     if rows is None:
         rows = []
         for day, high, low in [(18, 65, 40), (19, 69, 47), (20, 73, 50)]:
@@ -20,12 +20,13 @@ def sinclair_page(city="Oklahoma City", rows=None):
     data = {"forecast": {"city": city, "stateAbbreviation": "OK",
                           "latitude": "35.508", "longitude": "-97.478",
                           "weatherForecasts": rows}}
+    data['forecast'].update(location)
     # Real Next Flight transport: a JSON string containing a Flight record.
     flight = "1:" + json.dumps(data) + "\n"
     return "<script>self.__next_f.push(" + json.dumps([1, flight]) + ")</script>"
 
 
-def scripps_page(city="San Diego", units="f", high: object = "81", daily_only=False):
+def scripps_page(city: object = "San Diego", units="f", high: object = "81", daily_only=False):
     data = {"currentConditions": [{"city": city, "state": "CA", "tempUnits": units}],
             "days": [{"city": city, "state": "CA", "date": "10/18/2026", "day": "Sunday",
                       "high": "-", "low": "64", "icon": "https://weathercenter.ewscloud.com/static/weathericons/nighttime/clear.png"},
@@ -204,6 +205,19 @@ class OtherLocalForecastTests(unittest.TestCase):
         self.assertEqual(result["high"], 65)
         with self.assertRaisesRegex(module.LocalForecastUnavailable, "target_date_missing_low_forecast_period"):
             module.parse_sinclair_daily(split, city="oklahoma city", target_date="2026-10-18", measurement_kind="low")
+
+
+    def test_null_and_type_invalid_provider_city_are_schema_errors(self):
+        module = self.module()
+        for invalid in (None, 42, [], {}):
+            for adapter, page, city in (
+                (module.parse_sinclair_daily, sinclair_page(city=invalid), 'oklahoma city'),
+                (module.parse_scripps_daily, scripps_page(city=invalid), 'san diego'),
+            ):
+                with self.subTest(adapter=adapter.__name__, invalid=invalid):
+                    with self.assertRaisesRegex(module.LocalForecastUnavailable,
+                                                'source_specific_forecast_schema_invalid'):
+                        adapter(page, city=city, target_date='2026-10-19')
 
 
 if __name__ == "__main__":

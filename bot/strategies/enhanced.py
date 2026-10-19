@@ -7,10 +7,11 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
 
 from bot.feeds.weather_pro import project_probability_evidence
+from bot.feeds.weather_capture_store import WeatherCaptureStore, CaptureRetentionError
 from bot.feeds.news import NewsFeed
 from bot.feeds.twitter import SocialFeed
 from bot.feeds.ai_signal import AISignalFeed
-from bot.feeds.live_data import LiveFeedAggregator, is_temperature_question
+from bot.feeds.live_data import LiveFeedAggregator, is_temperature_market
 from bot.strategies.signal_validator import SignalAuditLog, SignalValidator
 from bot.strategy_policy import coerce_strategy_policy, strategy_policy_status
 from bot.weather import ObservationLog, WeatherMarketCityMapper
@@ -69,7 +70,7 @@ class EnhancedStrategyEngine:
     6. Time decay (markets resolving soon have clearer signals)
     """
 
-    def __init__(self, config: dict = None):
+    def __init__(self, config: dict = None, *, capture_store: WeatherCaptureStore | None = None):
         config = config or {}
         self.strategy_policy = coerce_strategy_policy(
             config.get("strategy_policy_normalized") or config.get("strategy_policy")
@@ -137,9 +138,13 @@ class EnhancedStrategyEngine:
         # Live data feeds (weather, crypto, forex)
         selection = config.get('weather_source_selection')
         self.contextual_weather_selection_enabled = isinstance(selection, dict) and selection.get('enabled') is True
-        self.live_feeds = (LiveFeedAggregator(weather_source_selection=selection)
-                           if self.contextual_weather_selection_enabled
-                           else LiveFeedAggregator())
+        feed_options = {}
+        if self.contextual_weather_selection_enabled:
+            feed_options['weather_source_selection'] = selection
+        if capture_store is not None:
+            feed_options['capture_store'] = capture_store
+        self.live_feeds = LiveFeedAggregator(**feed_options)
+        self.capture_store = getattr(self.live_feeds, 'capture_store', capture_store)
         self.validator = SignalValidator()
         self.signal_audit = SignalAuditLog(config.get("signal_audit_path", "data/signal_audit.jsonl"))
         self.enable_weather_observation_log = bool(config.get("enable_weather_observation_log", False))
@@ -192,7 +197,7 @@ class EnhancedStrategyEngine:
 
         # 3.5 Live data signal (weather forecasts, crypto prices, forex)
         live_signal = self._live_data_signal(market)
-        if self._contextual_weather_observer_only(live_signal, market.question):
+        if self._contextual_weather_observer_only(live_signal, market):
             return None
         if live_signal:
             signals["live"] = live_signal
@@ -397,11 +402,19 @@ class EnhancedStrategyEngine:
                 weights["ai"] = self.ai_weight
 
         trace.raw_signals = {name: dict(signal) for name, signal in signals.items()}
-        if self._contextual_weather_observer_only(live_signal, market.question):
-            trace.skip_reason_code = 'contextual_weather_observer_only'
-            trace.gate_metadata['weather_source_selection'] = (
-                live_signal['data']['weather_source_selection'] if live_signal is not None
-                else {'routeable':False,'blockers':['no_current_weather_signal']})
+        if self._contextual_weather_observer_only(live_signal, market):
+            collection_only = self._weather_collection_only(live_signal)
+            trace.skip_reason_code = ('weather_collection_only' if collection_only
+                                      else 'contextual_weather_observer_only')
+            data = (live_signal.get('data') or {}) if live_signal is not None else {}
+            availability_reason = live_signal.get('availability_reason') if live_signal is not None else None
+            trace.gate_metadata['weather_source_selection'] = data.get('weather_source_selection') or {
+                'routeable': False,
+                'blockers': [(availability_reason or 'no_current_weather_prediction')
+                             if collection_only else 'no_current_weather_signal'],
+            }
+            if collection_only and live_signal is not None:
+                trace.rejected_signals['live'] = {**live_signal, 'rejection_reason': trace.skip_reason_code}
             return None, trace
         if not signals:
             trace.skip_reason_code = "no_raw_signals"
@@ -964,8 +977,18 @@ class EnhancedStrategyEngine:
             logger.debug(f"News signal error: {e}")
             return None
 
-    def _contextual_weather_observer_only(self, signal: dict | None, question: str) -> bool:
-        if self.contextual_weather_selection_enabled and is_temperature_question(question) and signal is None:
+    @staticmethod
+    def _weather_collection_only(signal: dict | None) -> bool:
+        return (isinstance(signal, dict) and signal.get('signal_type') == 'weather'
+                and (signal.get('collection_only') is True or signal.get('prediction_available') is False))
+
+    def _contextual_weather_observer_only(self, signal: dict | None, market) -> bool:
+        if self._weather_collection_only(signal):
+            return True
+        if (self.contextual_weather_selection_enabled and signal is None
+                and is_temperature_market(market.question, market_id=getattr(market, 'id', ''),
+                                          category=getattr(market, 'category', ''),
+                                          market_metadata=getattr(market, 'metadata', None))):
             return True
         data = signal.get('data') if isinstance(signal, dict) else None
         audit = data.get('weather_source_selection') if isinstance(data, dict) else None
@@ -984,6 +1007,10 @@ class EnhancedStrategyEngine:
             if result:
                 return result
             return None
+        except CaptureRetentionError:
+            # Evidence persistence/integrity is an operational failure, not a
+            # provider outage that can authorize a price-only fallback.
+            raise
         except Exception as e:
             logger.debug(f"Live data signal error: {e}")
             return None

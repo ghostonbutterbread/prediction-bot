@@ -24,10 +24,16 @@ materialization is not hidden by a permanent process-local history cache.
 
 ## Concrete consumer path
 
-`strategy_config_with_policy` passes the strategy block to
-`EnhancedStrategyEngine`; enabled mode passes only this selection block to
-`LiveFeedAggregator`. Legacy/disabled mode still constructs the aggregator with
-no arguments, preserving existing callers and test doubles.
+`PredictionLab` resolves the existing effective collector root (environment
+`PREDICTION_BOT_COLLECTOR_ROOT` > `runtime.storage_root` > canonical collector
+volume) once, constructs one `WeatherCaptureStore` with that explicit absolute
+root, and injects the same instance through `EnhancedStrategyEngine` ->
+`LiveFeedAggregator` -> `ProWeatherEngine` and its global/local adapters.
+Standalone strategy/aggregator callers may inject `capture_store=` explicitly;
+without injection they retain the existing collector-root default. Relative
+configured roots are rejected; no checkout-relative evidence root is inferred.
+Disabled source selection still uses the configured store: persistence is not
+an opt-in selection feature.
 
 1. The existing ProWeatherEngine collects relevant global and city candidates
    independently and scores its legacy forecast to expose the captured source
@@ -70,6 +76,40 @@ recent prior `known_after` among the actual contextual comparison's selected
 history references; unrelated cities and future/equal-time outcomes do not
 refresh it. A stale comparison reports `stale_predictive_history`. No implicit
 calendar-age default was added to the 30/100 event policy.
+
+## Routing, unavailable evidence, and retention failures
+
+Collection and the enabled observer boundary use the same market scope:
+canonical `route_market` daily-temperature identity, or genuine question-only
+temperature terms/units. Canonical identity is **not** permission to score an
+unsupported question. In particular, an identified `KXHIGHLV` question using
+`85 F` may remain unsupported by the numerical scorer and must not fall through
+to price-only trading when contextual selection is enabled. Unrelated college
+qualifications (`college degrees`) and financial high/low/below wording do not
+become weather contracts; their matching-API controls remain unchanged.
+
+If collection returns `collection_only: true`, `prediction_available: false`,
+`confidence: 0`, both strategy APIs stop **before numerical validation or
+ensemble scoring, whether selection is enabled or disabled**. The traced reason
+is `weather_collection_only`; raw/rejected weather evidence retains every
+source attempt, unavailable reason and compact capture/collection reference.
+The contextual selector returns a nonrouteable receipt without projecting a
+numerical input or opening history. It does not invent `predicted_prob`,
+`direction`, calibration or a price-based weather opinion. PredictionLab's
+serialized source snapshot preserves these flags, the explicit availability
+reason and collection receipt, without adding absent odds. Successful forecasts
+and their existing probability/value, fee, sizing and risk gates are unchanged.
+
+`CaptureRetentionError` propagates through the strategy boundary in either mode
+and API. Persistence/integrity failures are not ordinary provider-unavailable
+results and cannot authorize a fallback. Original source bytes remain in the
+configured store; Lab artifacts contain compact references, not raw-body copies.
+
+Offline consumer coverage is in `tests/test_weather_capture_consumer.py`, using
+actual Lab construction, mocked HTTP for independently failing NWS/Open-Meteo/
+local transports, verified receipt/body rehydration, JSONL snapshot roundtrip,
+and configured/effective root identity checks. Replay allowlist verification and
+the corrected combined/full-suite release gate remain separate requirements.
 
 ## Bounded audit
 
