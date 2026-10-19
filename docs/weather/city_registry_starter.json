@@ -1118,13 +1118,13 @@
         "sample_size": 0
       },
       "last_reviewed": "2026-08-28",
-      "collection_status": "probe_supported_numeric_parser_unavailable",
+      "collection_status": "dated_predictor_adapter_available",
       "notes": [
         "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
         "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
       ],
-      "collection_adapter": "public_page_probe_v1",
-      "collection_blocker": "source_specific_dated_html_adapter_unverified"
+      "collection_adapter": "tegna_public_html_v1",
+      "collection_blocker": null
     },
     {
       "source_id": "src_local_ktbc_weather",
@@ -1150,13 +1150,13 @@
         "sample_size": 0
       },
       "last_reviewed": "2026-08-28",
-      "collection_status": "probe_supported_numeric_parser_unavailable",
+      "collection_status": "dated_predictor_adapter_available",
       "notes": [
         "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
         "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
       ],
-      "collection_adapter": "public_page_probe_v1",
-      "collection_blocker": "external_weather_widget_no_verified_dated_numeric_adapter"
+      "collection_adapter": "fox_nuxt_daily_v1",
+      "collection_blocker": null
     },
     {
       "source_id": "src_local_wfxt_weather",
@@ -1182,13 +1182,13 @@
         "sample_size": 0
       },
       "last_reviewed": "2026-08-28",
-      "collection_status": "probe_supported_numeric_parser_unavailable",
+      "collection_status": "capture_only_dated_predictor_unavailable",
       "notes": [
         "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
         "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
       ],
       "collection_adapter": "public_page_probe_v1",
-      "collection_blocker": "embedded_weather_api_contains_current_observation_not_verified_forecast"
+      "collection_blocker": "source_forecast_graphic_has_no_calendar_date_or_issue_clock"
     },
     {
       "source_id": "src_local_wls_weather",
@@ -1214,13 +1214,13 @@
         "sample_size": 0
       },
       "last_reviewed": "2026-08-28",
-      "collection_status": "probe_supported_numeric_parser_unavailable",
+      "collection_status": "dated_predictor_adapter_available",
       "notes": [
         "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
         "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
       ],
       "collection_adapter": "public_page_probe_v1",
-      "collection_blocker": "forecast_images_no_verified_numeric_date_adapter"
+      "collection_blocker": null
     },
     {
       "source_id": "src_local_kdfw_weather",
@@ -1246,13 +1246,13 @@
         "sample_size": 0
       },
       "last_reviewed": "2026-08-28",
-      "collection_status": "probe_supported_numeric_parser_unavailable",
+      "collection_status": "dated_predictor_adapter_available",
       "notes": [
         "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
         "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
       ],
-      "collection_adapter": "public_page_probe_v1",
-      "collection_blocker": "external_weather_widget_no_verified_dated_numeric_adapter"
+      "collection_adapter": "fox_nuxt_daily_v1",
+      "collection_blocker": null
     },
     {
       "source_id": "src_local_kusa_weather",
@@ -1278,13 +1278,13 @@
         "sample_size": 0
       },
       "last_reviewed": "2026-08-28",
-      "collection_status": "probe_supported_numeric_parser_unavailable",
+      "collection_status": "dated_predictor_adapter_available",
       "notes": [
         "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
         "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
       ],
-      "collection_adapter": "public_page_probe_v1",
-      "collection_blocker": "source_specific_dated_html_adapter_unverified"
+      "collection_adapter": "tegna_public_html_v1",
+      "collection_blocker": null
     },
     {
       "source_id": "src_local_kriv_weather",
@@ -1310,13 +1310,13 @@
         "sample_size": 0
       },
       "last_reviewed": "2026-08-28",
-      "collection_status": "probe_supported_numeric_parser_unavailable",
+      "collection_status": "dated_predictor_adapter_available",
       "notes": [
         "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
         "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
       ],
-      "collection_adapter": "public_page_probe_v1",
-      "collection_blocker": "external_weather_widget_no_verified_dated_numeric_adapter"
+      "collection_adapter": "fox_nuxt_daily_v1",
+      "collection_blocker": null
     },
     {
       "source_id": "src_local_kvvu_weather",
@@ -1342,7 +1342,7 @@
         "sample_size": 0
       },
       "last_reviewed": "2026-08-28",
-      "collection_status": "capture_supported",
+      "collection_status": "dated_predictor_adapter_available",
       "notes": [
         "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
         "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
@@ -1374,13 +1374,13 @@
         "sample_size": 0
       },
       "last_reviewed": "2026-08-28",
-      "collection_status": "probe_supported_numeric_parser_unavailable",
+      "collection_status": "dated_predictor_adapter_available",
       "notes": [
         "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
         "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
       ],
-      "collection_adapter": "public_page_probe_v1",
-      "collection_blocker": "external_weather_widget_no_verified_dated_numeric_adapter"
+      "collection_adapter": "fox_nuxt_daily_v1",
+      "collection_blocker": null
     },
     {
       "source_id": "src_local_wsvn_weather",
@@ -1406,13 +1406,13 @@
         "sample_size": 0
       },
       "last_reviewed": "2026-08-28",
-      "collection_status": "probe_supported_numeric_parser_unavailable",
+      "collection_status": "capture_only_dated_predictor_unavailable",
       "notes": [
         "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
         "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
       ],
       "collection_adapter": "public_page_probe_v1",
-      "collection_blocker": "external_weather_widget_no_verified_dated_numeric_adapter"
+      "collection_blocker": "source_miami_dated_numeric_missing_widget_requires_provider_api_key"
     },
     {
       "source_id": "src_local_kmsp_tv_weather",
@@ -1438,13 +1438,13 @@
         "sample_size": 0
       },
       "last_reviewed": "2026-08-28",
-      "collection_status": "probe_supported_numeric_parser_unavailable",
+      "collection_status": "dated_predictor_adapter_available",
       "notes": [
         "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
         "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
       ],
-      "collection_adapter": "public_page_probe_v1",
-      "collection_blocker": "external_weather_widget_no_verified_dated_numeric_adapter"
+      "collection_adapter": "fox_nuxt_daily_v1",
+      "collection_blocker": null
     },
     {
       "source_id": "src_local_wvue_weather",
@@ -1470,7 +1470,7 @@
         "sample_size": 0
       },
       "last_reviewed": "2026-08-28",
-      "collection_status": "capture_supported",
+      "collection_status": "dated_predictor_adapter_available",
       "notes": [
         "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
         "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
@@ -1502,13 +1502,13 @@
         "sample_size": 0
       },
       "last_reviewed": "2026-08-28",
-      "collection_status": "probe_supported_numeric_parser_unavailable",
+      "collection_status": "dated_predictor_adapter_available",
       "notes": [
         "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
         "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
       ],
-      "collection_adapter": "public_page_probe_v1",
-      "collection_blocker": "external_weather_widget_no_verified_dated_numeric_adapter"
+      "collection_adapter": "fox_nuxt_daily_v1",
+      "collection_blocker": null
     },
     {
       "source_id": "src_local_kokh_weather",
@@ -1534,13 +1534,13 @@
         "sample_size": 0
       },
       "last_reviewed": "2026-08-28",
-      "collection_status": "probe_supported_numeric_parser_unavailable",
+      "collection_status": "dated_predictor_adapter_available",
       "notes": [
         "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
         "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
       ],
       "collection_adapter": "public_page_probe_v1",
-      "collection_blocker": "rsc_forecast_transport_date_decoder_unverified"
+      "collection_blocker": null
     },
     {
       "source_id": "src_local_wtxf_weather",
@@ -1566,13 +1566,13 @@
         "sample_size": 0
       },
       "last_reviewed": "2026-08-28",
-      "collection_status": "probe_supported_numeric_parser_unavailable",
+      "collection_status": "dated_predictor_adapter_available",
       "notes": [
         "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
         "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
       ],
-      "collection_adapter": "public_page_probe_v1",
-      "collection_blocker": "external_weather_widget_no_verified_dated_numeric_adapter"
+      "collection_adapter": "fox_nuxt_daily_v1",
+      "collection_blocker": null
     },
     {
       "source_id": "src_local_ksaz_weather",
@@ -1598,13 +1598,13 @@
         "sample_size": 0
       },
       "last_reviewed": "2026-08-28",
-      "collection_status": "probe_supported_numeric_parser_unavailable",
+      "collection_status": "dated_predictor_adapter_available",
       "notes": [
         "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
         "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
       ],
-      "collection_adapter": "public_page_probe_v1",
-      "collection_blocker": "external_weather_widget_no_verified_dated_numeric_adapter"
+      "collection_adapter": "fox_nuxt_daily_v1",
+      "collection_blocker": null
     },
     {
       "source_id": "src_local_kens_weather",
@@ -1630,13 +1630,13 @@
         "sample_size": 0
       },
       "last_reviewed": "2026-08-28",
-      "collection_status": "probe_supported_numeric_parser_unavailable",
+      "collection_status": "dated_predictor_adapter_available",
       "notes": [
         "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
         "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
       ],
-      "collection_adapter": "public_page_probe_v1",
-      "collection_blocker": "source_specific_dated_html_adapter_unverified"
+      "collection_adapter": "tegna_public_html_v1",
+      "collection_blocker": null
     },
     {
       "source_id": "src_local_ktvu_weather",
@@ -1662,13 +1662,13 @@
         "sample_size": 0
       },
       "last_reviewed": "2026-08-28",
-      "collection_status": "probe_supported_numeric_parser_unavailable",
+      "collection_status": "dated_predictor_adapter_available",
       "notes": [
         "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
         "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
       ],
-      "collection_adapter": "public_page_probe_v1",
-      "collection_blocker": "external_weather_widget_no_verified_dated_numeric_adapter"
+      "collection_adapter": "fox_nuxt_daily_v1",
+      "collection_blocker": null
     },
     {
       "source_id": "src_local_kcpq_weather",
@@ -1694,13 +1694,13 @@
         "sample_size": 0
       },
       "last_reviewed": "2026-08-28",
-      "collection_status": "probe_supported_numeric_parser_unavailable",
+      "collection_status": "dated_predictor_adapter_available",
       "notes": [
         "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
         "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
       ],
-      "collection_adapter": "public_page_probe_v1",
-      "collection_blocker": "external_weather_widget_no_verified_dated_numeric_adapter"
+      "collection_adapter": "fox_nuxt_daily_v1",
+      "collection_blocker": null
     },
     {
       "source_id": "src_local_wusa_weather",
@@ -1726,13 +1726,13 @@
         "sample_size": 0
       },
       "last_reviewed": "2026-08-28",
-      "collection_status": "probe_supported_numeric_parser_unavailable",
+      "collection_status": "dated_predictor_adapter_available",
       "notes": [
         "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
         "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
       ],
-      "collection_adapter": "public_page_probe_v1",
-      "collection_blocker": "source_specific_dated_html_adapter_unverified"
+      "collection_adapter": "tegna_public_html_v1",
+      "collection_blocker": null
     },
     {
       "source_id": "src_local_abc7ny_weather",
@@ -1758,13 +1758,13 @@
         "sample_size": 0
       },
       "last_reviewed": "2026-08-28",
-      "collection_status": "probe_supported_numeric_parser_unavailable",
+      "collection_status": "capture_only_dated_predictor_unavailable",
       "notes": [
         "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
         "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
       ],
       "collection_adapter": "public_page_probe_v1",
-      "collection_blocker": "forecast_images_no_verified_numeric_date_adapter"
+      "collection_blocker": "source_newark_numeric_missing_only_new_york_city_article"
     },
     {
       "source_id": "src_local_kgtv_weather",
@@ -1790,13 +1790,13 @@
         "sample_size": 0
       },
       "last_reviewed": "2026-08-28",
-      "collection_status": "probe_supported_numeric_parser_unavailable",
+      "collection_status": "dated_predictor_adapter_available",
       "notes": [
         "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
         "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
       ],
       "collection_adapter": "public_page_probe_v1",
-      "collection_blocker": "external_weather_widget_no_verified_dated_numeric_adapter"
+      "collection_blocker": null
     },
     {
       "source_id": "src_local_wdrb_weather",
@@ -1822,13 +1822,13 @@
         "sample_size": 0
       },
       "last_reviewed": "2026-08-28",
-      "collection_status": "probe_supported_numeric_parser_unavailable",
+      "collection_status": "dated_predictor_adapter_available",
       "notes": [
         "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
         "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
       ],
       "collection_adapter": "public_page_probe_v1",
-      "collection_blocker": "public_url_returned_http_404"
+      "collection_blocker": null
     },
     {
       "source_id": "src_local_6abc_weather",
@@ -1854,13 +1854,13 @@
         "sample_size": 0
       },
       "last_reviewed": "2026-08-28",
-      "collection_status": "probe_supported_numeric_parser_unavailable",
+      "collection_status": "capture_only_dated_predictor_unavailable",
       "notes": [
         "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
         "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
       ],
       "collection_adapter": "public_page_probe_v1",
-      "collection_blocker": "forecast_images_no_verified_numeric_date_adapter"
+      "collection_blocker": "source_trenton_numeric_missing_only_philadelphia_article"
     }
   ]
 }

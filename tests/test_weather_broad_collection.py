@@ -232,8 +232,10 @@ class LocalCollectionTests(_CaptureTestCase):
         self.assertEqual(low.availability_reason, 'target_date_missing_low_forecast_period')
         self.assertIn('capture', low.source_details)
 
-    def test_unsupported_page_retains_payload_and_precise_prerequisite(self):
+    def test_unsupported_adapter_retains_payload_and_precise_prerequisite(self):
         source = WeatherRegistry.from_file().collection_sources('austin')[0]
+        # Austin now has a verified adapter; explicitly exercise an unsupported schema.
+        source['collection_adapter'] = 'unimplemented_source_schema_v1'
         client = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, text='<p>Current temperature 88. Tomorrow 90.</p>')))
         self.addCleanup(client.close)
         snapshot = weather_pro.LocalForecastFeed(client).get_forecast(source, target_date='2026-10-19', measurement_kind='high')
