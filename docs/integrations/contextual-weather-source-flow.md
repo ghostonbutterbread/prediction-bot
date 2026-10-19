@@ -4,7 +4,7 @@ Status: implementation in progress; no deployment authorized or performed.
 Owner: Hermes; project Kanban `t_1f18d5be`; Discord thread `1561068455967457281`.
 Canonical branch: `feat/contextual-weather-source-flow`.
 Integration target: `beta`; `main` is not an activation target.
-Implementation commit: pending. Supersedes: none; extends existing source collection/router rather than replacing preserved raw evidence.
+Implementation checkpoint: `5a4c005858c739f419894ddb64915b87798f1619` (initial collection/learning boundaries only; not final combined acceptance). The feature tip may include a later dossier-only handoff; bridge and further parser workers are still active and their uncommitted changes are not part of this checkpoint. Supersedes: none; extends existing source collection/router rather than replacing preserved raw evidence.
 
 ## Intent and explicit dependency
 
@@ -38,7 +38,7 @@ No live trades, balances, account/order access, paid subscriptions, credential h
 ## Current evidence, blockers and next action
 
 - Created and claimed `t_1f18d5be`; fetched origin/beta and verified local/remote base equality; isolated feature worktree is clean at the inherited checkpoint before feature edits.
-- Initial builder code returned uncommitted across collection, registry, predictive materialization/history and their tests; independent release acceptance is pending. Reports: `/home/ryushe/.hermes/cache/scratch/contextual-learning/report.md` and `/home/ryushe/.hermes/cache/scratch/contextual-weather-collection/collection-report.md`.
+- Initial builder collection/registry/predictive-history code is checkpointed at `5a4c005858c739f419894ddb64915b87798f1619`; independent release acceptance remains pending. Parent staged check caught two extra EOF blank lines omitted from workers' tracked-only checks; whitespace alone was cleaned, then 30 focused predictive/collection tests passed in0.532s under kernel outbound denial. Receipt `/home/ryushe/.hermes/cache/scratch/contextual-parent-verification/checkpoint-focused-receipt.json`. Reports: `/home/ryushe/.hermes/cache/scratch/contextual-learning/report.md` and `/home/ryushe/.hermes/cache/scratch/contextual-weather-collection/collection-report.md`.
 - Parent independently reconciled registry: 24 cities, 62 unique source entries, including 24 local candidates. Original 24 URL probe receipts contain 23 captures; all 23 exact-byte SHA-256 hashes verified. Initial numeric parsers work for KVVU and WVUE only. The other 22 are unfinished adapter/access cases, not a claim of numeric coverage or external blockers merely because code is missing.
 - Parent re-executed predictive boundary tests under inherited kernel outbound denial: 227 tests / 35.225s / OK / exit0. Parent separately ran 17 broad collection tests / 0.158s / OK, replayed exact public bytes through every local adapter, and verified all23 captures survive the actual engine -> central normalizer roundtrip. Evidence `/home/ryushe/.hermes/cache/scratch/contextual-parent-verification/parent-verification-receipt.json`; not a full repository suite or forward result.
 - Raw retention review concern is measured: captured local bodies total6,606,746bytes, max487,865bytes; inline repetition in every market/forecast artifact may multiply storage. Illustrative one capture/city/15min alone is634,247,616bytes/day, before duplicate serializations. This is a modelling assumption, not measured archive growth; collection reviewer must establish the concrete owner/impact before any repair.
