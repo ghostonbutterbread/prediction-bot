@@ -37,6 +37,7 @@ from bot.prediction_lab import PredictionLab
 from bot.prediction_lab_collect import PredictionLabCollectorDaemon
 from bot.resolution_feed import run_resolution_feed_once
 from bot.replay_decision_input import verify_replay_decision_input_record_v1
+from bot.weather.source_observation_ledger import is_eligible_for_predictive_history
 
 
 UTC = timezone.utc
@@ -386,7 +387,15 @@ class BetaDataFlowEndToEndTests(unittest.TestCase):
             self.assertEqual(row["source_id"], "nws")
             self.assertEqual(datetime.fromisoformat(row["source_as_of"]), COLLECTED_AT - timedelta(minutes=1))
             self.assertEqual(datetime.fromisoformat(row["observed_at"].replace("Z", "+00:00")), COLLECTED_AT)
-            self.assertEqual(row["known_after"], row["settlement_ts"])
+            # The original resolver receipt, not the older exchange event,
+            # establishes when this observation became knowable.
+            self.assertEqual(datetime.fromisoformat(row["known_after"]), RETRIEVED_AT)
+            self.assertTrue(row["resolver_knowledge_verified"])
+            self.assertFalse(is_eligible_for_predictive_history(
+                row, (SETTLEMENT_AT + timedelta(seconds=1)).isoformat()))
+            self.assertFalse(is_eligible_for_predictive_history(row, RETRIEVED_AT.isoformat()))
+            self.assertTrue(is_eligible_for_predictive_history(
+                row, (RETRIEVED_AT + timedelta(seconds=1)).isoformat()))
             self.assertEqual(datetime.fromisoformat(row["settlement_ts"].replace("Z", "+00:00")), SETTLEMENT_AT)
             self.assertIn("source_record_sha256", row["source_provenance"])
             self.assertIn("strict_resolution_source_sha256", row["resolution_provenance"])
@@ -419,6 +428,8 @@ class BetaDataFlowEndToEndTests(unittest.TestCase):
         self.assertEqual(len(fetched), 102, "resolved markets must not be refetched after restart")
         self.assertEqual(feed.output_path.read_bytes(), resolution_bytes)
 
+        # The legacy strict scorecard below deliberately uses settlement-time
+        # diagnostic availability; it is not the new knowledge-clock selector.
         # Fresh actual collector candidates feed the actual paper router through
         # the published current symlink; do not hand-author consumer source data.
         current_scorecard = auto_source_router_history_root() / "current" / "source_router_scoreboard" / "strict_finalized_source_scoreboard.jsonl"
