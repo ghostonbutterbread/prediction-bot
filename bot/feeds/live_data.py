@@ -21,7 +21,11 @@ logger = logging.getLogger(__name__)
 
 
 def is_temperature_question(question: str) -> bool:
-    return any(word in question.lower() for word in ('temperature', 'temp', '°', 'degrees', 'high', 'low'))
+    """Require temperature semantics, not price words such as below/high/low."""
+    import re
+
+    return bool(re.search(r'\b(?:temperature|temp|degrees?|fahrenheit|celsius)\b|°',
+                          question, flags=re.IGNORECASE))
 
 
 def _infer_question_side(question: str) -> Optional[str]:
