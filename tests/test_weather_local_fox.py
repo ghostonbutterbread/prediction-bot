@@ -4,7 +4,9 @@ Fixtures retain original weeklyData rows and referenced scalar bindings. Other
 page content was removed; capture SHA-256 identifies the complete raw evidence.
 No live network or machine-local fixture path is required by this test module.
 """
+from copy import deepcopy
 import importlib.util
+import json
 import unittest
 
 # Captured 2026-10-19 02:14 UTC. Fields: ID, SHA256, city, timezone, high,
@@ -159,6 +161,122 @@ class FoxForecastTests(unittest.TestCase):
         self.assertEqual(parsed['low'], 54)
         self.assertEqual(parsed['period_start'], '2026-10-20T19:00:00-0500')
         self.assertIsNone(parsed['period_end'])
+
+class FoxEndpointTests(unittest.TestCase):
+    def parse(self, page=AUSTIN_PAGE, kind='high', target='2026-10-19'):
+        from bot.feeds.weather_local_fox import parse_fox_daily
+        return parse_fox_daily(page, city='Austin', target_date=target,
+                               measurement_kind=kind, timezone_name='America/Chicago')
+
+    def assert_optional_end_omitted(self, kind, value):
+        baseline = self.parse(kind=kind)
+        original = baseline['period_end']
+        self.assertEqual(AUSTIN_PAGE.count(json.dumps(original)), 1)
+        if isinstance(value, (list, dict)):
+            # Nuxt references are scalar-only; malformed containers stay inert literals.
+            reference = 'dH' if kind == 'high' else 'dE'
+            page = AUSTIN_PAGE.replace('date:' + reference, 'date:' + json.dumps(value))
+        else:
+            page = AUSTIN_PAGE.replace(json.dumps(original), json.dumps(value))
+        expected = deepcopy(baseline)
+        expected['period_end'] = None
+        if kind == 'high':
+            # The normalized omission must not rewrite the source row.
+            expected['raw_forecast']['night']['date'] = value
+        self.assertEqual(self.parse(page, kind=kind), expected)
+
+    def test_naive_or_wrong_zone_optional_end_is_omitted(self):
+        for kind, clock in (('high', '19:00'), ('low', '07:00')):
+            for suffix in ('', '-0400'):
+                with self.subTest(kind=kind, suffix=suffix):
+                    self.assert_optional_end_omitted(kind, '2026-10-19T' + clock + ':00' + suffix)
+
+    def test_non_increasing_or_wrong_date_optional_end_is_omitted(self):
+        for kind in ('high', 'low'):
+            for value in (self.parse(kind=kind)['period_start'],
+                          '2026-10-18T07:00:00-0500',
+                          '2026-10-19T06:00:00-0500' if kind == 'high' else '2026-10-18T18:00:00-0500',
+                          '2026-10-20T07:00:00-0500',
+                          '2027-10-19T19:00:00-0500'):
+                with self.subTest(kind=kind, value=value):
+                    self.assert_optional_end_omitted(kind, value)
+
+    def test_malformed_optional_end_does_not_discard_numeric_predictor(self):
+        for kind in ('high', 'low'):
+            for value in (None, True, 19, [], {}, '', 'not-a-date',
+                          '2026-02-30T19:00:00-0600', '2026-10-19',
+                          '2026-10-19T25:00:00-0500'):
+                with self.subTest(kind=kind, value=value):
+                    self.assert_optional_end_omitted(kind, value)
+
+    def test_missing_or_nonobject_optional_period_keeps_numeric_predictor(self):
+        for kind, literal in (
+                ('high', 'night:{day_part:"Tomorrow night",temp:dJ,icon_code:ao,date:dH}'),
+                ('low', 'day:{day_part:"Tomorrow",temp:dI,icon_code:P,date:dE}')):
+            key = 'night' if kind == 'high' else 'day'
+            for value in (None, 19, []):
+                with self.subTest(kind=kind, value=value):
+                    page = AUSTIN_PAGE.replace(literal, key + ':' + json.dumps(value))
+                    self.assertNotEqual(page, AUSTIN_PAGE)
+                    expected = deepcopy(self.parse(kind=kind))
+                    expected['period_end'] = None
+                    if kind == 'high':
+                        expected['raw_forecast']['night'] = value
+                    self.assertEqual(self.parse(page, kind=kind), expected)
+            page = AUSTIN_PAGE.replace(literal + ',', '') if kind == 'low' else AUSTIN_PAGE.replace(',' + literal, '')
+            self.assertNotEqual(page, AUSTIN_PAGE)
+            expected = deepcopy(self.parse(kind=kind))
+            expected['period_end'] = None
+            if kind == 'high':
+                del expected['raw_forecast']['night']
+            self.assertEqual(self.parse(page, kind=kind), expected)
+
+    def test_valid_source_bounds_survive_spring_and_fall_offset_changes(self):
+        for prior, target, following, night_offset, day_offset in (
+                ('2026-03-07', '2026-03-08', '2026-03-09', '-0600', '-0500'),
+                ('2026-10-31', '2026-11-01', '2026-11-02', '-0500', '-0600')):
+            page = (AUSTIN_PAGE.replace('2026-10-18', prior)
+                    .replace('2026-10-19', target).replace('2026-10-20', following)
+                    .replace('-0500', day_offset)
+                    .replace(prior + 'T19:00:00' + day_offset, prior + 'T19:00:00' + night_offset))
+            for kind in ('high', 'low'):
+                with self.subTest(target=target, kind=kind):
+                    parsed = self.parse(page, kind=kind, target=target)
+                    start = prior + 'T19:00:00' + night_offset if kind == 'low' else target + 'T07:00:00' + day_offset
+                    end = target + ('T07:00:00' if kind == 'low' else 'T19:00:00') + day_offset
+                    self.assertEqual(parsed[kind], 52 if kind == 'low' else 79)
+                    self.assertEqual(parsed['period_start'], start)
+                    self.assertEqual(parsed['period_end'], end)
+                    self.assertEqual(parsed['raw_forecast'][parsed['selected_period']]['date'], start)
+
+    def test_dst_optional_end_uses_its_own_offset_not_start_offset(self):
+        spring = (AUSTIN_PAGE.replace('2026-10-18', '2026-03-07')
+                  .replace('2026-10-19', '2026-03-08').replace('2026-10-20', '2026-03-09')
+                  .replace('2026-03-07T19:00:00-0500', '2026-03-07T19:00:00-0600'))
+        for offset in ('-0600', '-0500'):
+            with self.subTest(nonexistent_spring_hour=offset):
+                page = spring.replace('2026-03-08T07:00:00-0500', '2026-03-08T02:30:00' + offset)
+                parsed = self.parse(page, kind='low', target='2026-03-08')
+                self.assertEqual(parsed['low'], 52)
+                self.assertIsNone(parsed['period_end'])
+        fall = (AUSTIN_PAGE.replace('2026-10-18', '2026-10-31')
+                .replace('2026-10-19', '2026-11-01').replace('2026-10-20', '2026-11-02'))
+        for offset in ('-0500', '-0600'):
+            with self.subTest(explicit_fall_fold=offset):
+                end = '2026-11-01T01:30:00' + offset
+                page = fall.replace('2026-11-01T07:00:00-0500', end)
+                parsed = self.parse(page, kind='low', target='2026-11-01')
+                self.assertEqual(parsed['low'], 52)
+                self.assertEqual(parsed['period_end'], end)
+
+    def test_valid_optional_end_is_not_replaced_by_an_invented_duration(self):
+        for kind in ('high', 'low'):
+            for end in ('2026-10-19T07:00:01-0500', '2026-10-19T23:59:59-0500'):
+                with self.subTest(kind=kind, end=end):
+                    baseline = self.parse(kind=kind)
+                    page = AUSTIN_PAGE.replace(baseline['period_end'], end)
+                    self.assertEqual(self.parse(page, kind=kind)['period_end'], end)
+
 
 if __name__ == '__main__':
     unittest.main()

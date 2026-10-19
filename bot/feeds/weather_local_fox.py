@@ -192,6 +192,8 @@ def parse_fox_daily(page: str, *, city: str, target_date: str,
     retains its HTTP capture/hash/fetch clock and uses capture-time provenance.
     A night beginning on date D predicts the morning of D+1. Its end is the
     captured following day start, or unknown when that day is not in the page.
+    Optional ends must be aware, source-zone-consistent, on the target date and
+    later than the selected start; invalid ends are omitted, not repaired.
     """
     try:
         target = date.fromisoformat(target_date)
@@ -216,14 +218,28 @@ def parse_fox_daily(page: str, *, city: str, target_date: str,
         period = row[key]
         if is_low:
             end = next((other['day']['date'] for other in rows
-                        if other.get('day', {}).get('date', '')[:10] == target.isoformat()), None)
+                        if isinstance(other.get('day'), dict)
+                        and isinstance(other['day'].get('date'), str)
+                        and other['day']['date'][:10] == target.isoformat()), None)
         else:
-            end = row.get('night', {}).get('date')
+            night = row.get('night')
+            end = night.get('date') if isinstance(night, dict) else None
         start = datetime.fromisoformat(period['date'])
         if start.utcoffset() is None:
             raise LocalForecastUnavailable('source_forecast_period_timezone_ambiguous')
         if timezone_name is None or start.utcoffset() != start.astimezone(ZoneInfo(timezone_name)).utcoffset():
             raise LocalForecastUnavailable('source_forecast_timezone_mismatch')
+        if not isinstance(end, str):
+            end = None
+        else:
+            try:
+                end_clock = datetime.fromisoformat(end)
+                if (end_clock.utcoffset() is None
+                        or end_clock.utcoffset() != end_clock.astimezone(ZoneInfo(timezone_name)).utcoffset()
+                        or end_clock <= start or end_clock.date() != target):
+                    end = None
+            except ValueError:
+                end = None
         value = period['temp']
         if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value):
             raise LocalForecastUnavailable('source_forecast_temperature_invalid')
