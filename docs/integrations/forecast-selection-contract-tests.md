@@ -3,6 +3,7 @@
 Status: intentionally RED; test-only handoff to implementation t_6c73f5cc.
 Owner/ref: local test/forecast-selection-t_860b3b33 in the task's isolated clone.
 Parent feature: feat/contextual-weather-source-flow @ 1bd33fe11e20388fb5b72ea5e72d16bc6157cd25.
+Immutable test implementation checkpoint: 3a3ae0550c0633b6d11cb3c3847697d10f8f6f69. This later dossier-only commit records its SHA; test/production bytes remain unchanged.
 Repair-only RED baseline: c71b2da68cdb58cc5de0644449e81771f07c36a4.
 Intended eventual integration target: beta, only after the existing feature's independent release gates. This test card neither integrates nor activates anything.
 
