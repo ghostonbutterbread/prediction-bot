@@ -38,6 +38,10 @@ class WeatherLegacyCityIdentityTests(unittest.TestCase):
                         assert identity is not None
                         self.assertEqual(identity.city, name)
 
+    def test_unregistered_composite_city_fragments_are_not_legacy_identity(self):
+        mapper = WeatherMarketCityMapper()
+        self.assertIsNone(mapper.resolve('', market_id='KXHIGHAUSMIA'))
+
     def test_no_unverified_death_valley_ticker_is_invented(self):
         registry = WeatherRegistry.from_file()
         city = next((c for c in registry.as_dict()['cities'] if c['city'].lower() == 'death valley'), None)

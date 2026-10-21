@@ -222,7 +222,4 @@ class WeatherMarketCityMapper:
         matches = {city_id for prefix in WEATHER_SERIES_PREFIXES
                    for token, city_id in self._ticker_aliases
                    if series == prefix + token}
-        # An explicitly supported historical spelling, not a suffix-fragment rule.
-        if series == "KXHIGHAUSMIA" and "miami_fl" in self._cities:
-            matches.add("miami_fl")
         return next(iter(matches)) if len(matches) == 1 else None

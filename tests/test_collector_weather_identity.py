@@ -343,12 +343,12 @@ class RegistryIdentityTests(unittest.TestCase):
     def test_legacy_registry_backed_aliases_remain_exact(self):
         for alias, expected in {'LA':'los_angeles_ca', 'SA':'san_antonio_tx', 'SD':'san_diego_ca',
                                 'SF':'san_francisco_ca', 'MIAMI':'miami_fl', 'NEWYORK':'new_york_ny',
-                                'LOSANGELES':'los_angeles_ca', 'AUSMIA':'miami_fl'}.items():
+                                'LOSANGELES':'los_angeles_ca'}.items():
             with self.subTest(alias=alias):
                 context = self.mapper.resolve('Will temperature be above 75°?', 'KXHIGH' + alias)
                 self.assertIsNotNone(context)
                 self.assertEqual(context.city_id, expected)
-        for ticker in ('KXHIGHSANITY', 'KXLOWNOTSDF', 'KXMINTEMPUNKNOWN', 'KXHIGHSANAUS',
+        for ticker in ('KXHIGHAUSMIA', 'KXHIGHSANITY', 'KXLOWNOTSDF', 'KXMINTEMPUNKNOWN', 'KXHIGHSANAUS',
                        'KXHIGHSAN-INVALID', 'KXHIGH-SAN', 'NOTKXHIGHSAN'):
             with self.subTest(ticker=ticker):
                 self.assertIsNone(self.mapper.resolve('Will temperature be above 75°?', ticker))
