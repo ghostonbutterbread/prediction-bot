@@ -8,6 +8,13 @@ This repository operates paper-only prediction-market research and forward-shado
 - A Git merge is **not** a deployment. Do not restart services, alter ignored runtime configs, or enable a lane merely because code has merged.
 - Do not modify historical raw ledgers. Derived reports and replay outputs must be separate, reproducible, and clearly labeled.
 
+## Source Router reads the dataset directly
+
+- **SourceRouter consumes the existing collector dataset through its verified index and independent resolution receipts. It does not require a separate SourceWriter.** Read `docs/architecture/persistent-storage-contract.md` before changing this flow.
+- Keep raw source evidence in place. Verify, sanitize, bind outcomes, collapse independent events and compute scorecards in memory; do not copy/rewrite source datasets or add a history publisher/generation service as a prerequisite to routing.
+- Legacy materializers, generation readers and disabled promotion configurations are compatibility tools, not the target architecture or unfinished SourceWriter work. Preserve their data/contracts until explicitly retired; do not reactivate them to make direct reading work.
+- When an existing consumer needs another evidence shape, adapt that consumer to the same qualified dataset with shared helpers. Report the exact missing field, proof or wiring instead of inventing a writing pipeline. Direct-read code availability, configured use and observed runtime use are separate facts; collected data must still pass identity, chronology, outcome-authority and sample-count checks.
+
 ## Canonical worktrees and Git workflow
 
 - Use a clean worktree based on `main` for implementation and review.

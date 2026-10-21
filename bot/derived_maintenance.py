@@ -1,8 +1,9 @@
 """Configuration-driven, derived-only beta maintenance orchestration.
 
-A frequent scheduler may call this module, but the configured intervals decide
-when the independent resolver and the lower-frequency SourceWriter promotion
-actually run.  The collector is deliberately not a child of this workflow.
+Legacy compatibility orchestration for explicitly configured resolution and
+materialized-history promotion. SourceRouter's canonical direct dataset reader
+does not need this promotion stage. Do not enable it as a routing prerequisite.
+The collector is deliberately not a child of this workflow.
 """
 from __future__ import annotations
 

@@ -20,6 +20,18 @@ Multi-exchange prediction market trading bot with news sentiment analysis, Kelly
 - **JSON/JSONL logging** — every scan, signal, and trade recorded in repo-local structured files
 - **Shared API throttling** — reusable read/write rate limiting for Kalshi-bound pull, resolve, and trade paths
 
+## Source Router: use the existing dataset
+
+SourceRouter reads existing collector evidence directly through its committed
+replay index and independently finalized resolution receipts. It verifies and
+derives qualified history/scorecards in memory; **a separate SourceWriter,
+source-dataset rewrite, or published history generation is not required**.
+The canonical architecture and exact input parameters are in
+[`docs/architecture/persistent-storage-contract.md`](docs/architecture/persistent-storage-contract.md#direct-dataset-sourcerouter-canonical).
+Legacy generation builders remain compatibility tools, not a development or
+activation prerequisite. Having data means it can be evaluated directly, not
+that unresolved, unproven or future evidence becomes eligible automatically.
+
 ## Kalshi rate limiting
 
 Kalshi request throttling is shared through `bot/http_rate_limit.py` and used by the exchange adapter for both reads and writes.

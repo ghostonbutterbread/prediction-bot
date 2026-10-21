@@ -1,7 +1,9 @@
-"""Safe, derived-only promotion of finalized collector evidence to Source Router history.
+"""Legacy materialized-history builder; not required by direct dataset SourceRouter.
 
-The pipeline is intentionally a post-resolver artifact builder: immutable
-collector snapshots are sanitized into sealed replay inputs, independently
+Retained for explicit compatibility use, not as the canonical data flow or a
+pending SourceWriter implementation. Do not enable it to use the direct reader.
+In this post-resolver artifact builder, immutable collector snapshots are
+sanitized into sealed replay inputs, independently
 finalized strict resolutions are bound by exact decision identity, and only
 strict source observations become router history.  It never changes snapshots,
 replay inputs, orders, wallets, or runtime configuration.

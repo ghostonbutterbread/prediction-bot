@@ -1,4 +1,6 @@
-# Disabled branch-local handoff for the strict auto-populated Source Router scorecard.
+# Legacy disabled generated-scorecard compatibility example, not the canonical flow.
+# SourceRouter reads the existing dataset directly; no promotion job is required.
+# See docs/architecture/persistent-storage-contract.md before selecting inputs.
 # Do not run directly. An owner must copy this to an ignored fresh-cohort config
 # and explicitly enable the paper shadow lane after the required review gate.
 # The promotion job must use data/derived_reports/auto_source_router_history as

@@ -1,9 +1,24 @@
 # Contextual weather source selection and collector defaults
 
-**Status:** implementation candidate; release and collector activation verification in progress.
+**Status:** collection/selection and clock repair integrated into beta; runtime activation is separate.
 **Owner:** Prediction Bot / Hermes; canonical specification is this file.
 **Supersedes:** the opt-in-only deployment description in earlier revisions of this file.
-**Implementation:** inherited collection/selection checkpoint `4b7ee3e4fadc4855faa4564dabb8ad64ecbf82a6`; collector-default checkpoint `3e0b7d3dbcccbffd1bc33ad03fd8ecf4635a9f99` (not yet release-approved or active).
+**Implementation:** independently approved combined tree integrated in beta
+`965b34bb025f7fa1e0828715cd8190374b849667`; this is code availability, not runtime activation.
+
+## Dataset-first architecture; no separate SourceWriter
+
+The canonical SourceRouter flow reads existing collector evidence, its committed
+index and independent resolutions directly; see
+`docs/architecture/persistent-storage-contract.md`. No source rewrite, new
+history publisher or generation service is a prerequisite. The strict Router's
+direct reader is already implemented. This document describes a different
+contextual-weather consumer whose current metadata loader still expects a
+materialized-history contract. That is an explicit consumer-wiring distinction,
+not unfinished SourceWriter scope: adapt the consumer to the same qualified
+dataset/shared helpers where necessary, rather than add a publisher. Do not
+claim this contextual bridge already supports the direct strict-scorecard
+result or that a collected-but-unqualified row supplies usable history.
 
 ## Required default workflow
 
@@ -11,7 +26,7 @@ The observer collector must implement **collect and retain → independently sco
 
 The collector daemon defaults contextual selection on only when its effective `prediction_lab` settings are `observer_mode: true` and `mode: collector`. Explicit `strategy.weather_source_selection` settings, including `enabled: false`, win. This does not change nonobserver paper/live defaults or activate wallets/orders. With insufficient or missing history the collector continues retaining source evidence; selection abstains instead of falling back to unrelated actionable odds.
 
-The default history metadata locator is `<effective collector root>/data/derived_reports/auto_source_router_history/current/source_observations/run_metadata.json`. The effective root follows the existing environment > runtime.storage_root > collector-volume precedence. Default selection policy remains 30 prior independent events minimum, 100 maximum per compatible source/location/kind/shape slice. A history publication clock cannot replace resolver knowledge time.
+The current compatibility metadata locator is `<effective collector root>/data/derived_reports/auto_source_router_history/current/source_observations/run_metadata.json`. It describes the existing loader, not a requirement to publish a new generation. The effective root follows the existing environment > runtime.storage_root > collector-volume precedence. Default selection policy remains 30 prior independent events minimum, 100 maximum per compatible source/location/kind/shape slice. A publication or read clock cannot replace resolver knowledge time.
 
 ### Release acceptance
 
@@ -19,7 +34,7 @@ The default history metadata locator is `<effective collector root>/data/derived
 - Independently finalized outcomes score all eligible retained predictors, including nontrades; only `known_after < current decision time` can inform selection. Duplicate polls are not extra independent events; equal empirical support abstains.
 - Demonstrate actual collector → sealed input → independent binding/materialization → later contextual source choice → changed numeric forecast/probability → unchanged price/risk gates using bounded offline disagreement fixtures.
 - Execute producer-free separate-process retained-data readback, real storage-failure/clean-retry, and all 19 hotfix/weather-veto function regressions. Preserve commands/results and integrity receipts on persistent derived storage, not only auto-pruned scratch.
-- Verify the configured resolver/history publication handoff separately from collection and raw archive growth; do not claim automatic learning from an inactive publisher or a missing metadata locator.
+- Verify the actual consumer's dataset/resolution inputs and eligibility separately from collection and raw archive growth. For the current compatibility loader, a missing metadata locator remains a real limitation; do not claim automatic learning or prescribe a new publisher to hide it.
 - Independently review the exact integrated/default tree and run the full offline suite, explicitly excluding production-archive probes. Before activation, record safe rollback, capacity/budget coverage including capture storage, and exactly one collector owner. After activation, read back a fresh retained multisource snapshot and the effective process/config/paths, with trading disabled.
 
 ## Explicit configuration override

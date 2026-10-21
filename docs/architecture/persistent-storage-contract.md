@@ -55,21 +55,77 @@ collector raw snapshot (immutable/append-only)
 
 independent market settlement
   → separate canonical resolution artifact
-  → exact identity-bound derived outcome
-  → qualified source observations and independent sample collapse
-  → immutable history generation
-  → stable current handoff for later Source Router decisions
+  → exact identity-bound outcome, joined at read time
+  → qualified source observations and independent sample collapse in memory
+  → SourceRouter decision directly from the existing dataset
 ```
 
 Source observations must precede their authoritative settlement to become predictive history. A later decision may use only evidence already available at its immutable cutoff. Observation-only, unavailable, future-dated, or contradictory source targets are not forecasts. VOID releases synthetic reservations without being counted as a directional win/loss or economic P&L.
 
+## Direct dataset SourceRouter (canonical)
+
+**Status:** accepted architecture; owner: Prediction Bot / Hermes. This section
+supersedes the separate SourceWriter/persisted-history-generation plan and the
+obsolete `docs/integrations/sourcewriter-indexed-artifacts.md` handoff (removed;
+retained in Git history). Ryushe reaffirmed this boundary in Discord message
+`1562336764885213315`: use the dataset directly, rather than rewrite sources.
+
+The collector owns raw evidence and its compact index; the independent resolver
+owns final resolution receipts. SourceRouter reads those existing inputs,
+verifies their committed identities and clocks, and derives eligible source
+history and scorecards in memory. No separate SourceWriter, copied source
+dataset, generated history directory, or recurring publisher is required.
+Ordinary collector/index/resolution writes and compact decision/audit receipts
+remain legitimate; this is not a ban on collecting data or recording decisions.
+
+The implemented entry point is
+`bot.weather.source_router_direct_history.load_direct_strict_source_history`,
+wired into `bot/paper_shadow_lanes.py`. Implementation
+`2d45eec4f4ee346e94d76a6a2f52ec03cb14430a` and integration
+`696900651abbd108f4285dee45ceee09cdf77d28` are historical references; use Git to
+verify the selected checkout before claiming availability or activation.
+
+Single-archive lane parameters are `collector_replay_index_path`,
+`collector_replay_manifest_path`, `strict_resolutions_path`, and
+`history_row_limit` (default 100). Alternatively supply `collector_replay_archives`,
+an explicit newest-first list of `index_path`, `manifest_path`, and
+`strict_resolutions_path` mappings. Do not mix the two modes or infer paths.
+The consumer supplies the immutable candidate decision timestamp.
+
+The limit counts **distinct events per source/city/kind/shape**, not the newest
+100 raw polls globally. The reader verifies and scans the committed index,
+hydrates referenced rows, applies canonical sanitization, exact independent
+outcome binding, source/target proof and strict decision-time eligibility, and
+collapses duplicate events. Incorrect but eligible forecasts remain in accuracy
+denominators; pending, ambiguous, VOID and future evidence cannot train a later
+decision. Missing or changed evidence fails closed rather than falling back to
+an unrelated generated history. The cap bounds selected history, not total I/O;
+do not claim a constant-cost read or already-proven runtime throughput.
+
+Dataset availability removes a rewriting prerequisite, not evidence checks or
+consumer wiring. Verify each actual consumer separately: the contextual-weather
+bridge currently uses `history_metadata_path` and
+`load_predictive_source_history`, not this strict-scorecard result. If that bridge
+needs direct access, adapt it to the same dataset/shared qualification helpers;
+do not introduce a writer/publisher as the solution. Its 30-event contextual
+floor and the strict Router's normal 100-event reliability floor are distinct
+and unchanged. Code merged, paths configured, and recent output proving use are
+three separate states; this contract does not activate any of them.
+
+Existing materializers, V2 generation readers, `auto_source_router_promotion`
+and disabled generated-scorecard configs are **legacy compatibility only**.
+They are not pending SourceWriter scope, a mandatory post-resolver stage, or a
+reason to copy archives. Preserve existing data and explicit compatibility
+inputs until separately retired; never silently enable legacy promotion.
+
 ## Collector replay-index committed prefixes (manifest version 2)
 
-This is the indexed-artifact foundation, **not yet a pointer-backed SourceWriter
-promotion contract**. The collector remains the only live index writer through
-its existing optional `prediction_lab_collect` hook. No worker is enabled by
-this change. The compact row schema remains version 1; the manifest is version
-2. Do not confuse these versions with SourceWriter generation versions.
+This is the collector-owned indexing contract used by direct dataset readers,
+not a prerequisite to implementing a separate writer. The collector remains
+the only live index writer through its existing optional
+`prediction_lab_collect` hook. No worker is enabled by this change. The compact
+row schema remains version 1; the manifest is version 2. These versions are
+independent of legacy generated-history schema versions.
 
 The version-2 manifest commits `committed_index_bytes` and `index_sha256` over
 exactly that compact-index prefix, `indexed_source_bytes` over complete raw
@@ -97,8 +153,8 @@ guarantee; the existing lock/atomic helpers retain their existing platform
 limitations.
 
 Readers may retain an exact manifest receipt and continue using its committed
-prefix after later appends. A future generation must seal/hash that receipt in
-its own immutable contract, rather than follow the mutable collector manifest.
+prefix after later appends. A reproducible decision or audit must bind the exact
+receipt it consumed rather than follow the mutable collector manifest later.
 Reading verifies the committed compact digest before filtering/hydration, then
 validates strictly increasing row numbers and ordered non-overlapping byte
 ranges across the complete compact prefix before any filtered/limited result or
@@ -116,18 +172,17 @@ validation pass, and a filtered hydration pass over the compact index (the
 last may stop early); updates validate their prior prefix in the same way and
 hash the extended compact index. None of these passes rereads the full raw
 archive. Verification is repeated **per load**, not cached per generation or
-process. This is not computationally incremental
-SourceWriter or a per-decision verification cache.
+process. This is not a per-decision verification cache or a constant-cost query.
 
 Legacy collector manifest version 1 remains read-compatible for its original
 replay use, but cannot be silently extended/upgraded into a committed
 checkpoint: update reports an explicit offline migration prerequisite. Existing
-V2 copy-backed SourceWriter generations and V1 promotion rejection remain
-unchanged. Migration, verified relocation, rejected-row locators, bounded
-resolution binding/materialization/collapse, and both pointer-backed consumers
-are remaining integration gates. In particular, invalid-row counts alone do
-not preserve exporter rejection reasons; SourceWriter must not treat the
-accepted-row-only index iterator as a complete source archive.
+V2 copy-backed generations and V1 promotion rejection remain legacy
+compatibility behavior, not direct-reader prerequisites. Migration or relocation
+work is needed only for an actual unsupported input. Invalid-row counts alone
+do not preserve exporter rejection reasons: the accepted-row-only index is not
+a complete accounting of rejected raw records. Do not turn that coverage limit
+into a requirement to rewrite the source archive.
 
 ## Composition diagnostics
 

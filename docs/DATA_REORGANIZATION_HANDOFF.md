@@ -1,6 +1,11 @@
 # Prediction Bot Data Reorganization Handoff
 
-**Status:** proposed; read-only discovery and compatibility plan first
+**Status:** historical migration proposal, not current runtime attestation.
+The SourceWriter rebuild/re-enable scope is superseded by the canonical direct
+dataset contract in `docs/architecture/persistent-storage-contract.md`.
+Paths, services and capacity figures below describe the old discovery snapshot;
+re-verify them before any operational action. This document authorizes no move,
+deletion, writer implementation or activation.
 
 **Owner:** a dedicated data-migration agent working from an isolated feature branch/worktree based on `beta`
 
@@ -36,7 +41,7 @@ The active service is `prediction-lab-strict-source-cohort-20260823.service` and
 
 This raw snapshot stream and compact replay index are high-priority evidence and active-supporting inputs.
 
-### Source Router handoff
+### Legacy generated-scorecard handoff (compatibility only)
 
 ```text
 /mnt/data-collection/prediction-bot/data/derived_reports/
@@ -51,7 +56,7 @@ The branch-local disabled paper configuration points to that exact scoreboard:
 /home/ryushe/projects/prediction-bot-beta-integration/config.paper_source_router_auto_population.yaml
 ```
 
-The paper shadow and Source Router lanes are intentionally disabled. Preserve the `derived_reports/auto_source_router_history/current` compatibility path until a reviewed successor is deployed.
+The paper shadow and Source Router lanes in that historical configuration were intentionally disabled. Preserve the `derived_reports/auto_source_router_history/current` path for any explicit legacy consumers until separately retired. Canonical SourceRouter reads the existing dataset/index/resolutions directly; this generated handoff is not required for direct mode.
 
 ### Previous root-drive material now preserved on collector storage
 
@@ -121,15 +126,19 @@ data/
    - prevention of derived output next to raw snapshots.
 6. Obtain approval for the exact first-cohort move plan before mutating data.
 
-## SourceWriter-specific requirement
+## Legacy generation retention, not a SourceWriter rebuild
 
-The previous root-drive incident came from 45 full SourceWriter generations retaining complete materialized inputs. The agent must design a bounded retention and compact-reference strategy before promotion can be enabled again:
+The historical incident involved full-copy generations retaining materialized
+inputs. Do not repair that architecture by building another writer or making
+generation publication a routing prerequisite. SourceRouter uses the existing
+collector dataset directly. Existing generations remain preserved compatibility
+and audit artifacts; any later approved retention cleanup must:
 
 - retain the stable current generation plus explicitly selected audit milestones;
 - use the compact replay-index/locator model and on-demand hydration rather than copying full collector snapshots into every generation;
 - preserve manifests and hashes for retained generations;
 - make retention deletion explicit, reviewed, and receipt-backed;
-- keep promotion disabled until this behavior is tested and accepted.
+- leave legacy promotion inactive; direct reading does not require re-enabling it.
 
 ## Migration verification checklist
 
@@ -150,7 +159,7 @@ A read-only migration proposal—not a blind filesystem reorganization—with:
 - complete path-reference matrix;
 - proposed first inactive cohort migration;
 - compatibility/rollback plan;
-- retention proposal for SourceWriter generations;
+- retention proposal for existing legacy generations only, not a new writer;
 - exact config/code changes required to make the layout durable;
 - focused test plan and acceptance criteria;
 - explicit list of deletions or archival moves requiring separate approval.
@@ -160,4 +169,4 @@ A read-only migration proposal—not a blind filesystem reorganization—with:
 - DataCollector is approximately 85% full, with roughly 60 GB free.
 - The legacy root-migration archive alone is about 99 GB.
 - The old SourceWriter archive contains about 45 historical generations and orphaned staging material.
-- The active Source Router handoff is only the mounted `current` generation; it is not the legacy archive.
+- The historical generated handoff was the mounted `current` generation, not the legacy archive. This is not a claim about current configured/runtime use; direct mode reads the dataset rather than that generation.
