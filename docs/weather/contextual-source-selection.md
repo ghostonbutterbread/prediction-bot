@@ -10,15 +10,16 @@
 
 The canonical SourceRouter flow reads existing collector evidence, its committed
 index and independent resolutions directly; see
-`docs/architecture/persistent-storage-contract.md`. No source rewrite, new
-history publisher or generation service is a prerequisite. The strict Router's
-direct reader is already implemented. This document describes a different
-contextual-weather consumer whose current metadata loader still expects a
-materialized-history contract. That is an explicit consumer-wiring distinction,
-not unfinished SourceWriter scope: adapt the consumer to the same qualified
-dataset/shared helpers where necessary, rather than add a publisher. Do not
-claim this contextual bridge already supports the direct strict-scorecard
-result or that a collected-but-unqualified row supplies usable history.
+`docs/architecture/persistent-storage-contract.md`. The contextual-weather
+consumer can now read those same explicit paths through
+`source_router_direct_predictive.load_direct_predictive_source_history`, using
+shared indexed hydration, independent binding, source proof, resolver clock and
+event-collapse helpers. It derives predictive observations in memory, not the
+strict Router's different full-day measurement scorecard. No source rewrite,
+new history publisher or generation service is a prerequisite. The old
+materialized-history metadata input remains an explicit compatibility path.
+Code availability does not establish configured use or live learning: every
+row still has to qualify by identity, chronology, outcome and support.
 
 ## Required default workflow
 
@@ -26,7 +27,17 @@ The observer collector must implement **collect and retain → independently sco
 
 The collector daemon defaults contextual selection on only when its effective `prediction_lab` settings are `observer_mode: true` and `mode: collector`. Explicit `strategy.weather_source_selection` settings, including `enabled: false`, win. This does not change nonobserver paper/live defaults or activate wallets/orders. With insufficient or missing history the collector continues retaining source evidence; selection abstains instead of falling back to unrelated actionable odds.
 
-The current compatibility metadata locator is `<effective collector root>/data/derived_reports/auto_source_router_history/current/source_observations/run_metadata.json`. It describes the existing loader, not a requirement to publish a new generation. The effective root follows the existing environment > runtime.storage_root > collector-volume precedence. Default selection policy remains 30 prior independent events minimum, 100 maximum per compatible source/location/kind/shape slice. A publication or read clock cannot replace resolver knowledge time.
+An explicit direct configuration supplies `collector_replay_index_path`,
+`collector_replay_manifest_path`, and `strict_resolutions_path`, or an explicit
+`collector_replay_archives` list of those three paths (as `index_path`,
+`manifest_path`, `strict_resolutions_path` per archive). Direct paths take
+precedence over a simultaneously supplied compatibility metadata path; incomplete
+or invalid direct inputs fail closed rather than falling back. The old default
+metadata locator is `<effective collector root>/data/derived_reports/auto_source_router_history/current/source_observations/run_metadata.json`;
+it is not a generated-history prerequisite. The effective root follows environment
+> runtime.storage_root > collector-volume precedence. Default policy remains 30
+prior independent events minimum, 100 maximum per compatible source/location/
+kind/shape slice. A publication or read clock cannot replace resolver knowledge.
 
 ### Release acceptance
 
@@ -34,7 +45,7 @@ The current compatibility metadata locator is `<effective collector root>/data/d
 - Independently finalized outcomes score all eligible retained predictors, including nontrades; only `known_after < current decision time` can inform selection. Duplicate polls are not extra independent events; equal empirical support abstains.
 - Demonstrate actual collector → sealed input → independent binding/materialization → later contextual source choice → changed numeric forecast/probability → unchanged price/risk gates using bounded offline disagreement fixtures.
 - Execute producer-free separate-process retained-data readback, real storage-failure/clean-retry, and all 19 hotfix/weather-veto function regressions. Preserve commands/results and integrity receipts on persistent derived storage, not only auto-pruned scratch.
-- Verify the actual consumer's dataset/resolution inputs and eligibility separately from collection and raw archive growth. For the current compatibility loader, a missing metadata locator remains a real limitation; do not claim automatic learning or prescribe a new publisher to hide it.
+- Verify the actual consumer's configured dataset/resolution inputs and eligibility separately from collection and raw archive growth. Without explicit direct paths, the compatibility loader still needs its metadata locator; do not claim automatic learning or prescribe a new publisher to hide missing configuration.
 - Independently review the exact integrated/default tree and run the full offline suite, explicitly excluding production-archive probes. Before activation, record safe rollback, capacity/budget coverage including capture storage, and exactly one collector owner. After activation, read back a fresh retained multisource snapshot and the effective process/config/paths, with trading disabled.
 
 ## Explicit configuration override
@@ -59,6 +70,10 @@ outcomes and original strict resolver rows. The bridge uses
 it does not synthesize accuracy, use purchased-position-only history, or read a
 full raw collector archive. History is loaded per weather decision, so a newer
 materialization is not hidden by a permanent process-local history cache.
+For direct use, replace this compatibility input with the three committed-index
+paths above; no generated history file is needed. The collector default still
+populates the legacy locator for compatibility; operational path configuration
+and activation are separate from this code change.
 
 ## Concrete consumer path
 
@@ -153,8 +168,9 @@ the corrected combined/full-suite release gate remain separate requirements.
 
 `data.weather_source_selection` contains chosen stable ID/value, routeability and
 blockers, effective policy, prior count/rank, per-source wins/losses/count/rate,
-up to three representative observation IDs per source, the materialization
-metadata generation SHA-256, and current derived-input/projection hashes and
+up to three representative observation IDs per source, the pinned direct
+index/resolution receipt digest (or compatibility materialization metadata
+SHA-256), and current derived-input/projection hashes and
 clock. It intentionally excludes the full history and duplicate current source
 pool. The collector's original source details remain the evidence owner; the
 receipt hashes do not claim raw archive provenance.

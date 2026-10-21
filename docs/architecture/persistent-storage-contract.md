@@ -103,14 +103,14 @@ an unrelated generated history. The cap bounds selected history, not total I/O;
 do not claim a constant-cost read or already-proven runtime throughput.
 
 Dataset availability removes a rewriting prerequisite, not evidence checks or
-consumer wiring. Verify each actual consumer separately: the contextual-weather
-bridge currently uses `history_metadata_path` and
-`load_predictive_source_history`, not this strict-scorecard result. If that bridge
-needs direct access, adapt it to the same dataset/shared qualification helpers;
-do not introduce a writer/publisher as the solution. Its 30-event contextual
-floor and the strict Router's normal 100-event reliability floor are distinct
-and unchanged. Code merged, paths configured, and recent output proving use are
-three separate states; this contract does not activate any of them.
+consumer wiring. The contextual-weather bridge now accepts explicit committed-index
+and independent-resolution paths and derives predictive source observations in
+memory using shared qualification helpers; it retains `history_metadata_path`
+with `load_predictive_source_history` as compatibility when no direct paths are
+configured. Its predictive 30-event contextual floor and the strict Router's
+normal 100-event reliability floor are distinct and unchanged. Code merged,
+paths configured, and recent output proving use are three separate states; this
+contract does not activate any of them.
 
 Existing materializers, V2 generation readers, `auto_source_router_promotion`
 and disabled generated-scorecard configs are **legacy compatibility only**.
