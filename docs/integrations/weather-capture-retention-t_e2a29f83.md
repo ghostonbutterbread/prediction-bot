@@ -1,6 +1,6 @@
 # Weather capture storage safety — isolated implementation handoff
 
-Owner: t_e2a29f83. Branch: `fix/weather-capture-retention-t_e2a29f83`, fetched base and intended integration target `origin/beta` at `7d72c9d74e7dace5f498d85deda33906f961beb1`. Independent review child `t_4088555e` must decide integration; this is not deployment approval.
+Owner: t_e2a29f83. Branch: `fix/weather-capture-retention-t_e2a29f83`, fetched base and intended integration target `origin/beta` at `7d72c9d74e7dace5f498d85deda33906f961beb1`. CLOSED / APPROVED for code integration only: independent review t_4088555e approved implementation checkpoint `5235561b651ea80fd0ab6cf91cebb3fadbd5fa9c` / tree `d9ae8e95440309443a3c44efbcd5a99ca814575a`; independent combined review t_cc0b2274 approved exact integration tree `c40e7bbfa0afb61e7648e90099c16faa63835b6c` on 2026-10-21 (focused 367/full 1774, zero failures/errors, seven absent-runtime-config skips and one exact production-archive exclusion). This later checkpoint changes only this dossier; exclude it on beta and preserve the exact approved product tree. Neither approval authorizes activation or production-root action. Operator-controlled canonical accounting preflight remains mandatory.
 
 ## Contract
 
