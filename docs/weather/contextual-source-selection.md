@@ -1,7 +1,30 @@
-# Opt-in contextual weather source selection
+# Contextual weather source selection and collector defaults
 
-This bridge is disabled unless explicitly enabled under `strategy`. It does not
-enable a runtime, publish history, place orders, or change wallet/risk policies.
+**Status:** implementation candidate; release and collector activation verification in progress.
+**Owner:** Prediction Bot / Hermes; canonical specification is this file.
+**Supersedes:** the opt-in-only deployment description in earlier revisions of this file.
+**Implementation:** inherited collection/selection checkpoint `4b7ee3e4fadc4855faa4564dabb8ad64ecbf82a6`; collector-default checkpoint `3e0b7d3dbcccbffd1bc33ad03fd8ecf4635a9f99` (not yet release-approved or active).
+
+## Required default workflow
+
+The observer collector must implement **collect and retain → independently score → compare prior contextual history → select → pass the selected numeric forecast**. Collection is not gated on the winning source, purchased positions, source trust label, or minimum history count. Every configured supported global/city forecast is attempted independently; unsupported or unavailable sources retain explicit reasons. Station/current observations remain context, not forward forecasts or settlement authority.
+
+The collector daemon defaults contextual selection on only when its effective `prediction_lab` settings are `observer_mode: true` and `mode: collector`. Explicit `strategy.weather_source_selection` settings, including `enabled: false`, win. This does not change nonobserver paper/live defaults or activate wallets/orders. With insufficient or missing history the collector continues retaining source evidence; selection abstains instead of falling back to unrelated actionable odds.
+
+The default history metadata locator is `<effective collector root>/data/derived_reports/auto_source_router_history/current/source_observations/run_metadata.json`. The effective root follows the existing environment > runtime.storage_root > collector-volume precedence. Default selection policy remains 30 prior independent events minimum, 100 maximum per compatible source/location/kind/shape slice. A history publication clock cannot replace resolver knowledge time.
+
+### Release acceptance
+
+- Preserve original forecast values, exact target date/location/period semantics, request/source/capture clocks, failures, losing and nonselected sources, raw payload hashes and verified compact references.
+- Independently finalized outcomes score all eligible retained predictors, including nontrades; only `known_after < current decision time` can inform selection. Duplicate polls are not extra independent events; equal empirical support abstains.
+- Demonstrate actual collector → sealed input → independent binding/materialization → later contextual source choice → changed numeric forecast/probability → unchanged price/risk gates using bounded offline disagreement fixtures.
+- Execute producer-free separate-process retained-data readback, real storage-failure/clean-retry, and all 19 hotfix/weather-veto function regressions. Preserve commands/results and integrity receipts on persistent derived storage, not only auto-pruned scratch.
+- Verify the configured resolver/history publication handoff separately from collection and raw archive growth; do not claim automatic learning from an inactive publisher or a missing metadata locator.
+- Independently review the exact integrated/default tree and run the full offline suite, explicitly excluding production-archive probes. Before activation, record safe rollback, capacity/budget coverage including capture storage, and exactly one collector owner. After activation, read back a fresh retained multisource snapshot and the effective process/config/paths, with trading disabled.
+
+## Explicit configuration override
+
+The settings below illustrate an explicit opt-out. Loading them does not enable a runtime, publish history, place orders, or change wallet/risk policies.
 
 ```yaml
 strategy:
@@ -127,8 +150,10 @@ real history materialization/loading, actual mocked-HTTP NWS and KVVU
 collection, aggregator and both strategy paths, PredictionLab snapshot/replay,
 and the actual composed wallet's unchanged entry-price rejection. It is fixture
 correctness evidence, not forward performance or calibration evidence. This
-bridge adds no adapters. Separately, the initial two local adapters and eighteen
-additional parser candidates have captured-payload evidence, but canonical
-collector/registry wiring and combined review remain pending. Four other local
-sources have documented date/location/access limitations; low coverage also
-varies by source. Parser success alone is not end-to-end collection coverage.
+bridge adds no adapters by itself. The combined implementation wires 20 local
+adapter candidates through the configured registry without test overrides. Four
+other local sources retain documented date/location/access limitations;
+WLS-low remains unavailable and TEGNA hourly lows remain explicitly partial.
+Parser success alone is not live coverage, independent provider skill, or
+upstream-provider independence. Registry/parser and full consumer/replay tests
+must remain part of the combined release gate.
