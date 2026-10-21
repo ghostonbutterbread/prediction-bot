@@ -9,9 +9,11 @@ from typing import Any, Mapping, Sequence
 
 from bot.collector_replay_index import load_indexed_collector_rows_reverse
 from bot.replay_decision_input import build_replay_decision_input_v1
-from bot.replay_outcome_binding import _bound_outcome_row, _decision_identity as binding_identity
+from bot.replay_outcome_binding import (
+    _bound_outcome_row, _decision_identity as binding_identity, _normalize_strict_resolution,
+)
 from bot.weather.source_observation_ledger import (
-    _attach_resolver_knowledge, _decision_identity, _normalized_outcome,
+    _decision_identity, _normalized_outcome, _resolver_knowledge_fields,
     _parse_time, _pending_rows_for_input, _source_implied_outcome,
     is_eligible_for_predictive_history, predictive_context_supported,
 )
@@ -62,16 +64,31 @@ def load_direct_predictive_source_history(
         if not all(path.is_file() for path in (index_file, manifest_file, resolution_file)):
             raise ValueError('committed collector replay index, manifest and strict resolutions must be readable files')
         resolution_index, resolution_sha256 = _load_stable_resolution_index(resolution_file)
-        # Reuse the ledger's exact resolver receipt/clock qualification, once
-        # per resolution file rather than once per selected observation.
-        outcomes = {
-            market_id: {'market_id': market_id, **resolution,
-                'provenance': {'strict_resolution_source_sha256': resolution_sha256,
-                    'strict_resolution_source_line_number': resolution['source_line_number'],
-                    'raw_resolution_row_sha256': resolution['raw_row_sha256']}}
-            for market_id, resolution in resolution_index.accepted.items()
-        }
-        _attach_resolver_knowledge(outcomes.values(), resolution_file)
+        # The strict reader already holds one authoritative resolution index.
+        # Stream its original receipts again for knowledge clocks, enriching
+        # that same map rather than copying all resolutions or splitting the
+        # entire file into a second in-memory buffer per weather decision.
+        with resolution_file.open('rb') as stream:
+            for line_number, line in enumerate(stream, 1):
+                try:
+                    raw_resolution = json.loads(line)
+                except (ValueError, TypeError):
+                    continue
+                if not isinstance(raw_resolution, Mapping):
+                    continue
+                market_id = raw_resolution.get('market_id')
+                if not isinstance(market_id, str):
+                    continue
+                resolution = resolution_index.accepted.get(market_id)
+                if resolution is None or resolution['source_line_number'] != line_number:
+                    continue
+                if hashlib.sha256(line.rstrip(b'\r\n')).hexdigest() != resolution['raw_row_sha256']:
+                    raise ValueError('independent resolver receipt mismatch')
+                normalized_resolution = _normalize_strict_resolution(raw_resolution, market_id)
+                if normalized_resolution is None or any(normalized_resolution[key] != resolution[key]
+                        for key in ('official_outcome', 'settlement_ts', 'resolution_id')):
+                    raise ValueError('independent resolver identity/outcome mismatch')
+                resolution.update(_resolver_knowledge_fields(raw_resolution, resolution))
         manifest_sha256 = hashlib.sha256(manifest_file.read_bytes()).hexdigest()
         receipts.append({'index_path': str(index_file), 'manifest_path': str(manifest_file),
             'strict_resolutions_path': str(resolution_file),
@@ -88,9 +105,11 @@ def load_direct_predictive_source_history(
             decision_identity = _decision_identity(built.record)
             if decision_identity is None:
                 raise ValueError('sanitized replay input failed its source identity contract')
-            resolution = outcomes.get(identity['market_id'])
+            resolution = resolution_index.accepted.get(identity['market_id'])
             if resolution is None or resolution['official_outcome'] == 'VOID':
                 continue
+            if 'resolver_knowledge_verified' not in resolution:
+                raise ValueError('independent resolver receipt changed during clock binding')
             bound = _bound_outcome_row(identity, resolution, strict_resolution_source_sha256=resolution_sha256)
             normalized = _normalized_outcome(bound)
             if normalized is None:
@@ -128,7 +147,9 @@ def load_direct_predictive_source_history(
                         representatives[event] = row
                 elif len(representatives) < accepted_limit:
                     representatives[event] = row
-                elif len(sources) > 1:
+                else:
+                    # Raw append order is not physical weather-event order:
+                    # late backfills must not crowd newer events out of the cap.
                     oldest = min(representatives, key=lambda key:
                         (_history_event_recency_key(representatives[key]), key))
                     if (_history_event_recency_key(row), event) > (

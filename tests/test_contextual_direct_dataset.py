@@ -28,12 +28,13 @@ class ContextualDirectDatasetTests(unittest.TestCase):
         self.current['market']['question'] = 'Will Seattle high temperature be above 70°?'
         self.current = _seal(self.current)
 
-    def dataset(self, count=30, *, knowledge=None, duplicate=False, partial=False, equal=False):
+    def dataset(self, count=30, *, knowledge=None, duplicate=False, partial=False, equal=False, reverse=False):
         raw, outcomes = [], []
         for i in range(count):
             day = (date(2026, 8, 3) + timedelta(days=i)).isoformat()
             row = predictor_input(day, raw_hash=f'{i:064x}')
-            row['market_id'] = row['decision_key']['market_id'] = f'KXHIGHSEA-26AUG{i + 3:02}-T70'
+            token = date.fromisoformat(day).strftime('%y%b%d').upper()
+            row['market_id'] = row['decision_key']['market_id'] = f'KXHIGHSEA-{token}-T70'
             row['market']['question'] = f'Will Seattle high temperature be above 70° on {day}?'
             snapshot = row['source_inputs']['source_context']['data']['weather_source_snapshot']
             snapshot.update(market_id=row['market_id'], question=row['market']['question'])
@@ -52,6 +53,8 @@ class ContextualDirectDatasetTests(unittest.TestCase):
                 known=knowledge or '2026-10-18T18:00:00+00:00')
             outcome['resolution_id'] = f'independent-{i}'
             outcomes.append(outcome)
+        if reverse:
+            raw.reverse()  # Newest event first, oldest backfill appended last.
         if duplicate:
             raw.append(raw[0])
         _write_jsonl(self.archive, raw)
@@ -116,6 +119,15 @@ class ContextualDirectDatasetTests(unittest.TestCase):
         selected = self.select()
         self.assertFalse(selected['routeable'])
         self.assertIn('unresolved_contextual_source_tie', selected['blockers'])
+
+    def test_event_budget_uses_newest_dates_not_collector_append_order(self):
+        self.dataset(31, reverse=True)
+        history = load_direct_predictive_source_history(index_path=self.index,
+            manifest_path=self.manifest, strict_resolutions_path=self.resolutions,
+            accepted_limit=30, as_of_decision_time='2026-10-18T19:00:01+00:00')
+        self.assertEqual(len(history.rows), 60)
+        self.assertNotIn('2026-08-03', {row['market_date'] for row in history.rows})
+        self.assertIn('2026-09-02', {row['market_date'] for row in history.rows})
 
 
 if __name__ == '__main__':
