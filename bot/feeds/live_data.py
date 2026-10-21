@@ -943,7 +943,7 @@ class ForexFeed:
 
 from bot.feeds.weather_capture_store import WeatherCaptureStore
 from bot.collector_paths import collector_root
-from bot.feeds.weather_pro import ProWeatherEngine, CITY_COORDS
+from bot.feeds.weather_pro import ProWeatherEngine
 
 
 class LiveFeedAggregator:
@@ -976,23 +976,21 @@ class LiveFeedAggregator:
         # Temperature markets → multi-source weather engine
         if is_temperature_market(question, market_id=market_id, category=category,
                                  market_metadata=market_metadata):
-            # If no city in question, try to extract from series ticker
-            # e.g., KXHIGHAUS → Austin, KXHIGHPHIL → Philadelphia, KXLOWCHI → Chicago
+            from bot.weather.market_mapping import WeatherMarketCityMapper, resolve_weather_measurement_kind
+
+            context = WeatherMarketCityMapper().resolve(question, category, market_id=market_id,
+                                                         market_metadata=market_metadata)
+            kind = resolve_weather_measurement_kind(question, category, market_id=market_id,
+                                                     market_metadata=market_metadata)
+            if context is None or kind is None:
+                return None
             score_with_context = getattr(self.weather, "score_temperature_market_with_context", None)
             if callable(score_with_context) and self.weather_source_selection.get('enabled') is True:
                 score_with_context = self._score_contextual_weather
-            if not any(c in q for c in CITY_COORDS):
-                city = self._city_from_ticker(category)
-                if city:
-                    # Inject city into question for the weather engine
-                    modified_q = question + f" in {city}"
-                    if callable(score_with_context):
-                        return score_with_context(modified_q, yes_price, category=market_id or category,
-                                                  market_metadata=market_metadata)
-                    return self.weather.score_temperature_market(modified_q, yes_price)
             if callable(score_with_context):
-                return score_with_context(question, yes_price, category=market_id or category,
-                                          market_metadata=market_metadata)
+                return score_with_context(question, yes_price, category=category, market_id=market_id,
+                                          market_metadata=market_metadata, city=context.city.lower(),
+                                          measurement_kind=kind)
             return self.weather.score_temperature_market(question, yes_price)
 
         # Crypto markets
@@ -1010,21 +1008,24 @@ class LiveFeedAggregator:
         return None
 
     def _score_contextual_weather(self, question: str, yes_price: float, *,
-                                  category: str = '', market_metadata: dict | None = None) -> Optional[dict]:
+                                  category: str = '', market_id: str = '',
+                                  market_metadata: dict | None = None, city: str | None = None,
+                                  measurement_kind: str | None = None) -> Optional[dict]:
         from bot.weather.contextual_source_flow import select_captured_weather_source
 
         raw = self.weather.score_temperature_market_with_context(
-            question, yes_price, category=category, market_metadata=market_metadata)
+            question, yes_price, category=category, market_id=market_id, market_metadata=market_metadata,
+            city=city, measurement_kind=measurement_kind)
         if raw is None:
             return None
-        audit = select_captured_weather_source(raw, question=question, market_id=category,
+        audit = select_captured_weather_source(raw, question=question, market_id=market_id or category,
             market_metadata=market_metadata, observed_at=datetime.now(timezone.utc).isoformat(),
             config=self.weather_source_selection)
         result = raw
         if audit['routeable']:
             result = self.weather.score_temperature_market_with_context(
-                question, yes_price, category=category, market_metadata=market_metadata,
-                selected_source_id=audit['chosen_source_id'])
+                question, yes_price, category=category, market_id=market_id, market_metadata=market_metadata,
+                city=city, measurement_kind=measurement_kind, selected_source_id=audit['chosen_source_id'])
         if result is not None:
             result['data']['weather_source_selection'] = audit
         return result
@@ -1035,52 +1036,8 @@ class LiveFeedAggregator:
         self.forex.close()
 
     def _city_from_ticker(self, ticker: str) -> Optional[str]:
-        """Extract city name from Kalshi series ticker.
-        
-        Examples:
-          KXHIGHAUS → austin
-          KXHIGHPHIL → philadelphia  
-          KXLOWCHI → chicago
-          KXMINTEMPDEN → denver
-          KXHIGHTEMPMIAMI → miami
-        """
-        if not ticker:
-            return None
-        
-        ticker_upper = ticker.upper()
-        
-        # Map ticker suffixes to city names
-        ticker_cities = {
-            "AUS": "austin",
-            "PHIL": "philadelphia",
-            "CHI": "chicago",
-            "LA": "los angeles",
-            "NYC": "new york",
-            "NY": "new york",
-            "MIA": "miami",
-            "DEN": "denver",
-            "SEA": "seattle",
-            "BOS": "boston",
-            "HOU": "houston",
-            "DAL": "dallas",
-            "PHX": "phoenix",
-            "ATL": "atlanta",
-            "MIN": "minneapolis",
-            "NOLA": "new orleans",
-            "SA": "san antonio",
-            "LV": "las vegas",
-            "OKC": "oklahoma city",
-            "PDX": "portland",
-            "NSH": "nashville",
-            "DET": "detroit",
-            "SD": "san diego",
-            "TPA": "tampa",
-            "SF": "san francisco",
-        }
-        
-        # Try matching from longest suffix first
-        for suffix, city in sorted(ticker_cities.items(), key=lambda x: -len(x[0])):
-            if suffix in ticker_upper:
-                return city
-        
-        return None
+        """Compatibility helper using the same registry-backed exact resolver."""
+        from bot.weather.market_mapping import WeatherMarketCityMapper
+
+        context = WeatherMarketCityMapper().resolve('', ticker)
+        return context.city.lower() if context else None

@@ -1308,29 +1308,47 @@ class ProWeatherEngine:
     def score_temperature_market_with_context(
         self, question: str, yes_price: float, *, category: str = "",
         market_metadata: dict | None = None, selected_source_id: str | None = None,
+        market_id: str = "", city: str | None = None, measurement_kind: str | None = None,
     ) -> Optional[dict]:
-        market_date = _market_target_date(question, category=category)
+        from bot.weather.market_mapping import WeatherMarketCityMapper, resolve_weather_measurement_kind
+
+        if city is None:
+            context = WeatherMarketCityMapper().resolve(question, category, market_id=market_id,
+                                                         market_metadata=market_metadata)
+            if context is None:
+                return None
+            city = context.city.lower()
+        if measurement_kind is None:
+            measurement_kind = resolve_weather_measurement_kind(question, category, market_id=market_id,
+                                                                  market_metadata=market_metadata)
+        if measurement_kind not in ('high', 'low'):
+            return None
+        market_date = _market_target_date(question, category=market_id or category)
         return self._score_temperature_market(question, yes_price, market_date=market_date,
-                                              market_metadata=market_metadata, selected_source_id=selected_source_id)
+            market_metadata=market_metadata, selected_source_id=selected_source_id,
+            city=city, measurement_kind=measurement_kind)
 
     def _score_temperature_market(
         self, question: str, yes_price: float, *, market_date: str | None,
         market_metadata: dict | None = None, selected_source_id: str | None = None,
+        city: str | None = None, measurement_kind: str | None = None,
     ) -> Optional[dict]:
         """Score a temperature market using multi-source data."""
         import re
+        from bot.weather.market_mapping import WeatherMarketCityMapper, resolve_weather_measurement_kind
 
-        # Find city
-        city = None
-        for c in CITY_COORDS:
-            if c in question.lower():
-                city = c
-                break
-        if not city:
+        # Direct legacy callers share the resolver; contextual callers pass the
+        # original resolved identity explicitly, never as appended question text.
+        if city is None:
+            context = WeatherMarketCityMapper().resolve(question, market_metadata=market_metadata)
+            city = context.city.lower() if context else None
+        if measurement_kind is None:
+            measurement_kind = resolve_weather_measurement_kind(question, market_metadata=market_metadata)
+        if city not in CITY_COORDS or measurement_kind not in ('high', 'low'):
             return None
 
         q = question.lower()
-        is_high = "high" in q or "maximum" in q or "max" in q
+        is_high = measurement_kind == 'high'
         forecast = self.get_forecast(
             city, target_date=market_date, require_target=True,
             measurement_kind="high" if is_high else "low",

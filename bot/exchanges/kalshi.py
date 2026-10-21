@@ -306,7 +306,7 @@ class KalshiExchange(BaseExchange):
                 'status': data.get('status', ''),
                 'source': source,
                 'series': series_ticker or data.get('series_ticker'),
-                'series_ticker': series_ticker or data.get('series_ticker'),
+                'series_ticker': data.get('series_ticker') or series_ticker,
                 'event_ticker': data.get('event_ticker'),
                 'market_subtitle': data.get('subtitle') or data.get('market_subtitle'),
                 'yes_subtitle': data.get('yes_subtitle'),
@@ -1006,7 +1006,8 @@ def _parse_dt_raw(dt_str) -> Optional[datetime]:
 def _contract_metadata(data) -> dict:
     """Preserve returned decision-time contract fields, including zero strikes."""
     fields = ("strike_type", "floor_strike", "cap_strike", "rules_primary",
-              "rules_secondary", "subtitle", "yes_subtitle", "no_subtitle")
+              "rules_secondary", "subtitle", "yes_subtitle", "no_subtitle",
+              "custom_strike", "ticker", "series_ticker", "event_ticker")
     if isinstance(data, dict):
         return {key: data[key] for key in fields if key in data}
     return {key: getattr(data, key) for key in fields if hasattr(data, key)}
