@@ -65,6 +65,20 @@ class PredictionLabCollectorDaemon:
             elif "trading_enabled" in trading_cfg:
                 config["trading_enabled"] = bool(trading_cfg.get("trading_enabled"))
             self._refresh_runtime_paths(config)
+        # Collection is independent of routing maturity. Default only this
+        # observer entry point to contextual choice; paper/live consumers retain
+        # their explicitly selected policies, and operators can still opt out.
+        lab_cfg = config.get("prediction_lab", {}) or {}
+        if lab_cfg.get("observer_mode") is True and lab_cfg.get("mode") == "collector":
+            from bot.collector_paths import auto_source_router_history_root
+
+            selection = config.setdefault("strategy", {}).setdefault("weather_source_selection", {})
+            selection.setdefault("enabled", True)
+            selection.setdefault("min_sample_count", 30)
+            selection.setdefault("max_history_events", 100)
+            selection.setdefault("history_metadata_path", str(
+                auto_source_router_history_root((config.get("runtime") or {}).get("storage_root"))
+                / "current" / "source_observations" / "run_metadata.json"))
         config["_config_path"] = str(self.config_path)
         return config
 
