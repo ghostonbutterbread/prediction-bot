@@ -6,10 +6,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
 
+from bot.feeds.weather_pro import project_probability_evidence
+from bot.feeds.weather_capture_store import WeatherCaptureStore, CaptureRetentionError
 from bot.feeds.news import NewsFeed
 from bot.feeds.twitter import SocialFeed
 from bot.feeds.ai_signal import AISignalFeed
-from bot.feeds.live_data import LiveFeedAggregator
+from bot.feeds.live_data import LiveFeedAggregator, is_temperature_market
 from bot.strategies.signal_validator import SignalAuditLog, SignalValidator
 from bot.strategy_policy import coerce_strategy_policy, strategy_policy_status
 from bot.weather import ObservationLog, WeatherMarketCityMapper
@@ -68,7 +70,7 @@ class EnhancedStrategyEngine:
     6. Time decay (markets resolving soon have clearer signals)
     """
 
-    def __init__(self, config: dict = None):
+    def __init__(self, config: dict = None, *, capture_store: WeatherCaptureStore | None = None):
         config = config or {}
         self.strategy_policy = coerce_strategy_policy(
             config.get("strategy_policy_normalized") or config.get("strategy_policy")
@@ -134,7 +136,15 @@ class EnhancedStrategyEngine:
             self.ai_feed = AISignalFeed(config)
 
         # Live data feeds (weather, crypto, forex)
-        self.live_feeds = LiveFeedAggregator()
+        selection = config.get('weather_source_selection')
+        self.contextual_weather_selection_enabled = isinstance(selection, dict) and selection.get('enabled') is True
+        feed_options = {}
+        if self.contextual_weather_selection_enabled:
+            feed_options['weather_source_selection'] = selection
+        if capture_store is not None:
+            feed_options['capture_store'] = capture_store
+        self.live_feeds = LiveFeedAggregator(**feed_options)
+        self.capture_store = getattr(self.live_feeds, 'capture_store', capture_store)
         self.validator = SignalValidator()
         self.signal_audit = SignalAuditLog(config.get("signal_audit_path", "data/signal_audit.jsonl"))
         self.enable_weather_observation_log = bool(config.get("enable_weather_observation_log", False))
@@ -187,6 +197,8 @@ class EnhancedStrategyEngine:
 
         # 3.5 Live data signal (weather forecasts, crypto prices, forex)
         live_signal = self._live_data_signal(market)
+        if self._contextual_weather_observer_only(live_signal, market):
+            return None
         if live_signal:
             signals["live"] = live_signal
             weights["live"] = 0.50  # Heavy weight — real data beats generic signals
@@ -235,6 +247,9 @@ class EnhancedStrategyEngine:
                 adjusted = dict(sig)
                 adjusted["predicted_prob"] = validation.adjusted_prob
                 adjusted["confidence"] = validation.adjusted_confidence
+                evidence = project_probability_evidence(adjusted.pop("probability_evidence", None), validation.adjusted_prob)
+                if evidence is not None:
+                    adjusted["probability_evidence"] = evidence
                 if validation.warnings:
                     adjusted.setdefault("warnings", []).extend(validation.warnings)
                 validated_signals[name] = adjusted
@@ -309,6 +324,12 @@ class EnhancedStrategyEngine:
             "exchange": market.exchange,
             "direction": direction,
             "model_probability": round(weighted_prob, 4),
+            "probability_evidence": {
+                "schema_version": 1, "yes_probability": round(weighted_prob, 4),
+                "basis": "heuristic_weighted_ensemble_v1",
+                "calibration_status": "not_established",
+                "fallback_reason": "empirical_contract_probability_unavailable",
+            },
             "market_price": round(entry_price, 4),
             "yes_market_price": yes_price,
             "no_market_price": no_price,
@@ -381,6 +402,20 @@ class EnhancedStrategyEngine:
                 weights["ai"] = self.ai_weight
 
         trace.raw_signals = {name: dict(signal) for name, signal in signals.items()}
+        if self._contextual_weather_observer_only(live_signal, market):
+            collection_only = self._weather_collection_only(live_signal)
+            trace.skip_reason_code = ('weather_collection_only' if collection_only
+                                      else 'contextual_weather_observer_only')
+            data = (live_signal.get('data') or {}) if live_signal is not None else {}
+            availability_reason = live_signal.get('availability_reason') if live_signal is not None else None
+            trace.gate_metadata['weather_source_selection'] = data.get('weather_source_selection') or {
+                'routeable': False,
+                'blockers': [(availability_reason or 'no_current_weather_prediction')
+                             if collection_only else 'no_current_weather_signal'],
+            }
+            if collection_only and live_signal is not None:
+                trace.rejected_signals['live'] = {**live_signal, 'rejection_reason': trace.skip_reason_code}
+            return None, trace
         if not signals:
             trace.skip_reason_code = "no_raw_signals"
             return None, trace
@@ -409,6 +444,9 @@ class EnhancedStrategyEngine:
                 adjusted = dict(sig)
                 adjusted["predicted_prob"] = validation.adjusted_prob
                 adjusted["confidence"] = validation.adjusted_confidence
+                evidence = project_probability_evidence(adjusted.pop("probability_evidence", None), validation.adjusted_prob)
+                if evidence is not None:
+                    adjusted["probability_evidence"] = evidence
                 if validation.warnings:
                     adjusted.setdefault("warnings", []).extend(validation.warnings)
                 validated_signals[name] = adjusted
@@ -461,6 +499,12 @@ class EnhancedStrategyEngine:
             "exchange": market.exchange,
             "direction": direction,
             "model_probability": round(weighted_prob, 4),
+            "probability_evidence": {
+                "schema_version": 1, "yes_probability": round(weighted_prob, 4),
+                "basis": "heuristic_weighted_ensemble_v1",
+                "calibration_status": "not_established",
+                "fallback_reason": "empirical_contract_probability_unavailable",
+            },
             "market_price": round(entry_price, 4),
             "yes_market_price": yes_price,
             "no_market_price": no_price,
@@ -933,6 +977,23 @@ class EnhancedStrategyEngine:
             logger.debug(f"News signal error: {e}")
             return None
 
+    @staticmethod
+    def _weather_collection_only(signal: dict | None) -> bool:
+        return (isinstance(signal, dict) and signal.get('signal_type') == 'weather'
+                and (signal.get('collection_only') is True or signal.get('prediction_available') is False))
+
+    def _contextual_weather_observer_only(self, signal: dict | None, market) -> bool:
+        if self._weather_collection_only(signal):
+            return True
+        if (self.contextual_weather_selection_enabled and signal is None
+                and is_temperature_market(market.question, market_id=getattr(market, 'id', ''),
+                                          category=getattr(market, 'category', ''),
+                                          market_metadata=getattr(market, 'metadata', None))):
+            return True
+        data = signal.get('data') if isinstance(signal, dict) else None
+        audit = data.get('weather_source_selection') if isinstance(data, dict) else None
+        return isinstance(audit, dict) and audit.get('routeable') is False
+
     def _live_data_signal(self, market) -> Optional[dict]:
         """Get market-specific live data signal (weather, crypto, forex)."""
         try:
@@ -946,6 +1007,10 @@ class EnhancedStrategyEngine:
             if result:
                 return result
             return None
+        except CaptureRetentionError:
+            # Evidence persistence/integrity is an operational failure, not a
+            # provider outage that can authorize a price-only fallback.
+            raise
         except Exception as e:
             logger.debug(f"Live data signal error: {e}")
             return None
@@ -1123,11 +1188,31 @@ class KellySizer:
         if size <= 0:
             return 0
 
-        gross_profit_if_win = size * ((1 - market_price) / market_price)
-        net_profit_if_win = gross_profit_if_win * (1 - self.fee_rate)
-        expected_net_profit = (p * net_profit_if_win) - ((1 - p) * size)
-        if expected_net_profit < self.min_expected_net_profit_usd:
-            return 0
-        if size < self.min_position_size_usd:
+        if not self.assess_trade_economics(p, market_price, size)["approved"]:
             return 0
         return size
+
+    def assess_trade_economics(self, model_prob: float, market_price: float,
+                               position_size: float) -> dict[str, Any]:
+        """Canonical monetary gates for initial Kelly and final capped stakes.
+
+        Assess only: never enlarge a stake to satisfy a monetary minimum. This
+        deliberately retains the existing winnings-fee model, not a new fee model.
+        """
+        gross_profit_if_win = position_size * ((1 - market_price) / market_price)
+        net_profit_if_win = gross_profit_if_win * (1 - self.fee_rate)
+        expected_net_profit = (model_prob * net_profit_if_win) - ((1 - model_prob) * position_size)
+        if expected_net_profit < self.min_expected_net_profit_usd:
+            code = "expected_net_profit_below_minimum"
+            reason = (f"Expected net profit ${expected_net_profit:.4f} below minimum "
+                      f"${self.min_expected_net_profit_usd:.4f}")
+        elif position_size < self.min_position_size_usd:
+            code = "position_size_below_minimum"
+            reason = f"Position size ${position_size:.2f} below minimum ${self.min_position_size_usd:.2f}"
+        else:
+            code, reason = "approved", "Trade economics approved"
+        return {"approved": code == "approved", "reason_code": code, "reason": reason,
+                "position_size_usd": position_size, "expected_net_profit_usd": expected_net_profit,
+                "min_position_size_usd": self.min_position_size_usd,
+                "min_expected_net_profit_usd": self.min_expected_net_profit_usd,
+                "fee_rate": self.fee_rate}

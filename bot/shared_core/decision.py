@@ -550,6 +550,46 @@ def build_trade_decision(
             reasoning=reasoning,
         )
 
+    # The opt-in Router cap can invalidate monetary gates checked at the
+    # initial Kelly size. Reuse that sizer's canonical economics on the FINAL
+    # risk-approved stake; custom/fake sizers without this API retain behavior.
+    final_size = _coerce_optional_float(getattr(risk_decision, "adjusted_size", None)) or 0.0
+    if risk_metadata.get("source_router_position_cap") is not None and event_snapshot["retrade"]:
+        final_costs = estimate_retrade_costs(
+            edge=edge, win_probability=win_probability, entry_price=entry_price,
+            position_size=final_size, event_snapshot=event_snapshot,
+            retrade_policy=retrade_policy, context=context,
+        )
+        reasoning["retrade"]["final_cost_summary"] = final_costs
+        min_expected_profit = float(retrade_policy.get("min_retrade_expected_profit_usd", 0.0) or 0.0)
+        if final_costs["expected_profit_usd"] < min_expected_profit:
+            return TradeDecision(
+                action="SKIP", approved=False,
+                reason_code="final_retrade_expected_profit_below_threshold",
+                reason=(f"Final capped retrade expected profit ${final_costs['expected_profit_usd']:.4f} "
+                        f"below minimum ${min_expected_profit:.4f}"),
+                edge=edge, confidence=confidence, entry_price=entry_price,
+                win_probability=win_probability, requested_position_size=requested_size,
+                risk_score=float(getattr(risk_decision, "risk_score", 0.0) or 0.0),
+                warnings=list(getattr(risk_decision, "warnings", []) or []), reasoning=reasoning,
+            )
+
+    economics_check = getattr(type(kelly_sizer), "assess_trade_economics", None)
+    if risk_metadata.get("source_router_position_cap") is not None and callable(economics_check):
+        economics: Any = economics_check(kelly_sizer, win_probability, entry_price, final_size)
+        reasoning["final_trade_economics"] = economics
+        if not economics["approved"]:
+            return TradeDecision(
+                action="SKIP", approved=False,
+                reason_code="final_" + economics["reason_code"],
+                reason="Final capped trade: " + economics["reason"],
+                edge=edge, confidence=confidence, entry_price=entry_price,
+                win_probability=win_probability, requested_position_size=requested_size,
+                risk_score=float(getattr(risk_decision, "risk_score", 0.0) or 0.0),
+                warnings=list(getattr(risk_decision, "warnings", []) or []),
+                reasoning=reasoning,
+            )
+
     return TradeDecision(
         action=direction,
         approved=True,

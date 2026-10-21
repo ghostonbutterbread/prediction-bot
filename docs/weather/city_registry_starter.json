@@ -15,7 +15,7 @@
       "status": "active",
       "trusted_primary": ["src_nws_ffc"],
       "trusted_secondary": [],
-      "watch_only": ["src_station_katl"],
+      "watch_only": ["src_station_katl", "src_local_wxia_weather"],
       "rejected": [],
       "updated_at": null,
       "notes": []
@@ -34,7 +34,7 @@
       "status": "active",
       "trusted_primary": ["src_nws_ewx_austin"],
       "trusted_secondary": [],
-      "watch_only": ["src_station_kaus"],
+      "watch_only": ["src_station_kaus", "src_local_ktbc_weather"],
       "rejected": [],
       "updated_at": null,
       "notes": []
@@ -53,7 +53,7 @@
       "status": "active",
       "trusted_primary": ["src_nws_box"],
       "trusted_secondary": [],
-      "watch_only": ["src_station_kbos"],
+      "watch_only": ["src_station_kbos", "src_local_wfxt_weather"],
       "rejected": [],
       "updated_at": null,
       "notes": []
@@ -72,7 +72,7 @@
       "status": "active",
       "trusted_primary": ["src_nws_lot"],
       "trusted_secondary": [],
-      "watch_only": ["src_station_kmdw"],
+      "watch_only": ["src_station_kmdw", "src_local_wls_weather"],
       "rejected": [],
       "updated_at": null,
       "notes": []
@@ -91,7 +91,7 @@
       "status": "active",
       "trusted_primary": ["src_nws_fwd"],
       "trusted_secondary": [],
-      "watch_only": ["src_station_kdfw"],
+      "watch_only": ["src_station_kdfw", "src_local_kdfw_weather"],
       "rejected": [],
       "updated_at": null,
       "notes": []
@@ -110,7 +110,7 @@
       "status": "active",
       "trusted_primary": ["src_nws_bou"],
       "trusted_secondary": [],
-      "watch_only": ["src_station_kden"],
+      "watch_only": ["src_station_kden", "src_local_kusa_weather"],
       "rejected": [],
       "updated_at": null,
       "notes": []
@@ -129,7 +129,7 @@
       "status": "active",
       "trusted_primary": ["src_nws_hgx"],
       "trusted_secondary": [],
-      "watch_only": ["src_station_khou"],
+      "watch_only": ["src_station_khou", "src_local_kriv_weather"],
       "rejected": [],
       "updated_at": null,
       "notes": []
@@ -148,7 +148,7 @@
       "status": "active",
       "trusted_primary": ["src_nws_vef"],
       "trusted_secondary": [],
-      "watch_only": ["src_station_klas"],
+      "watch_only": ["src_station_klas", "src_local_kvvu_weather"],
       "rejected": [],
       "updated_at": null,
       "notes": []
@@ -167,7 +167,7 @@
       "status": "active",
       "trusted_primary": ["src_nws_lox"],
       "trusted_secondary": [],
-      "watch_only": ["src_station_klax"],
+      "watch_only": ["src_station_klax", "src_local_kttv_weather"],
       "rejected": [],
       "updated_at": null,
       "notes": []
@@ -186,7 +186,7 @@
       "status": "active",
       "trusted_primary": ["src_nws_mfl"],
       "trusted_secondary": [],
-      "watch_only": ["src_station_kmia"],
+      "watch_only": ["src_station_kmia", "src_local_wsvn_weather"],
       "rejected": [],
       "updated_at": null,
       "notes": []
@@ -205,7 +205,7 @@
       "status": "active",
       "trusted_primary": ["src_nws_mpx"],
       "trusted_secondary": [],
-      "watch_only": ["src_station_kmsp"],
+      "watch_only": ["src_station_kmsp", "src_local_kmsp_tv_weather"],
       "rejected": [],
       "updated_at": null,
       "notes": []
@@ -224,7 +224,7 @@
       "status": "active",
       "trusted_primary": ["src_nws_lix"],
       "trusted_secondary": [],
-      "watch_only": ["src_station_kmsy"],
+      "watch_only": ["src_station_kmsy", "src_local_wvue_weather"],
       "rejected": [],
       "updated_at": null,
       "notes": []
@@ -243,7 +243,7 @@
       "status": "active",
       "trusted_primary": ["src_nws_okx"],
       "trusted_secondary": [],
-      "watch_only": ["src_station_knyc"],
+      "watch_only": ["src_station_knyc", "src_local_wnyw_weather"],
       "rejected": [],
       "updated_at": null,
       "notes": []
@@ -262,7 +262,7 @@
       "status": "active",
       "trusted_primary": ["src_nws_oun"],
       "trusted_secondary": [],
-      "watch_only": ["src_station_kokc"],
+      "watch_only": ["src_station_kokc", "src_local_kokh_weather"],
       "rejected": [],
       "updated_at": null,
       "notes": []
@@ -281,7 +281,7 @@
       "status": "active",
       "trusted_primary": ["src_nws_phi"],
       "trusted_secondary": [],
-      "watch_only": ["src_station_kphl"],
+      "watch_only": ["src_station_kphl", "src_local_wtxf_weather"],
       "rejected": [],
       "updated_at": null,
       "notes": []
@@ -300,7 +300,7 @@
       "status": "active",
       "trusted_primary": ["src_nws_psr"],
       "trusted_secondary": [],
-      "watch_only": ["src_station_kphx"],
+      "watch_only": ["src_station_kphx", "src_local_ksaz_weather"],
       "rejected": [],
       "updated_at": null,
       "notes": []
@@ -319,7 +319,7 @@
       "status": "active",
       "trusted_primary": ["src_nws_ewx_san_antonio"],
       "trusted_secondary": [],
-      "watch_only": ["src_station_ksat"],
+      "watch_only": ["src_station_ksat", "src_local_kens_weather"],
       "rejected": [],
       "updated_at": null,
       "notes": []
@@ -338,7 +338,7 @@
       "status": "active",
       "trusted_primary": ["src_nws_mtr"],
       "trusted_secondary": [],
-      "watch_only": ["src_station_ksfo"],
+      "watch_only": ["src_station_ksfo", "src_local_ktvu_weather"],
       "rejected": [],
       "updated_at": null,
       "notes": []
@@ -357,10 +357,132 @@
       "status": "active",
       "trusted_primary": ["src_nws_sew"],
       "trusted_secondary": [],
-      "watch_only": ["src_station_ksea"],
+      "watch_only": ["src_station_ksea", "src_local_kcpq_weather"],
       "rejected": [],
       "updated_at": null,
       "notes": []
+    },
+    {
+      "city_id": "washington_dc",
+      "city": "Washington",
+      "state": "DC",
+      "country": "US",
+      "timezone": "America/New_York",
+      "ticker_aliases": [
+        "DC"
+      ],
+      "default_market_types": [
+        "high_temp",
+        "low_temp"
+      ],
+      "resolution_notes": "Kalshi inspected rules settle through The Weather Company CLIDCA.",
+      "status": "active",
+      "trusted_primary": [],
+      "trusted_secondary": [],
+      "watch_only": [
+        "src_local_wusa_weather"
+      ],
+      "rejected": [],
+      "updated_at": null,
+      "notes": []
+    },
+    {
+      "city_id": "newark_nj",
+      "city": "Newark",
+      "state": "NJ",
+      "country": "US",
+      "timezone": "America/New_York",
+      "ticker_aliases": [
+        "EWR"
+      ],
+      "default_market_types": [
+        "high_temp",
+        "low_temp"
+      ],
+      "resolution_notes": "Kalshi inspected rules settle through The Weather Company CLIEWR.",
+      "status": "active",
+      "trusted_primary": [],
+      "trusted_secondary": [],
+      "watch_only": [
+        "src_local_abc7ny_weather"
+      ],
+      "rejected": [],
+      "updated_at": null,
+      "notes": []
+    },
+    {
+      "city_id": "san_diego_ca",
+      "city": "San Diego",
+      "state": "CA",
+      "country": "US",
+      "timezone": "America/Los_Angeles",
+      "ticker_aliases": [
+        "SAN"
+      ],
+      "default_market_types": [
+        "high_temp",
+        "low_temp"
+      ],
+      "resolution_notes": "Kalshi inspected rules settle through The Weather Company CLISAN.",
+      "status": "active",
+      "trusted_primary": [],
+      "trusted_secondary": [],
+      "watch_only": [
+        "src_local_kgtv_weather"
+      ],
+      "rejected": [],
+      "updated_at": null,
+      "notes": []
+    },
+    {
+      "city_id": "louisville_ky",
+      "city": "Louisville",
+      "state": "KY",
+      "country": "US",
+      "timezone": "America/New_York",
+      "ticker_aliases": [
+        "SDF"
+      ],
+      "default_market_types": [
+        "high_temp",
+        "low_temp"
+      ],
+      "resolution_notes": "Kalshi inspected rules settle through The Weather Company CLISDF.",
+      "status": "active",
+      "trusted_primary": [],
+      "trusted_secondary": [],
+      "watch_only": [
+        "src_local_wdrb_weather"
+      ],
+      "rejected": [],
+      "updated_at": null,
+      "notes": []
+    },
+    {
+      "city_id": "trenton_nj",
+      "city": "Trenton",
+      "state": "NJ",
+      "country": "US",
+      "timezone": "America/New_York",
+      "ticker_aliases": [
+        "TTN"
+      ],
+      "default_market_types": [
+        "high_temp",
+        "low_temp"
+      ],
+      "resolution_notes": "Kalshi inspected rules settle through The Weather Company CLITTN; airport-name confirmation remains pending.",
+      "status": "active",
+      "trusted_primary": [],
+      "trusted_secondary": [],
+      "watch_only": [
+        "src_local_6abc_weather"
+      ],
+      "rejected": [],
+      "updated_at": null,
+      "notes": [
+        "Station identity is a settlement-candidate assertion pending a non-blocked authoritative airport confirmation."
+      ]
     }
   ],
   "sources": [
@@ -971,6 +1093,774 @@
       "metrics": {"accuracy": 0, "timeliness": 0, "specificity": 0, "consistency": 0, "resolution_alignment": 0, "hype_penalty": 0, "sample_size": 0},
       "last_reviewed": null,
       "notes": ["Candidate station placeholder from local CITY_NWS mapping; not fully trusted for settlement without rule review."]
+    },
+    {
+      "source_id": "src_local_wxia_weather",
+      "city_id": "atlanta_ga",
+      "name": "11Alive Weather (WXIA)",
+      "type": "local_met",
+      "role": "forecast",
+      "platform": "public_broadcast_weather_html",
+      "url": "https://www.11alive.com/weather",
+      "coverage_area": [
+        "Atlanta"
+      ],
+      "verified": false,
+      "status": "watch_only",
+      "trust_score": 0,
+      "metrics": {
+        "accuracy": 0,
+        "timeliness": 0,
+        "specificity": 0,
+        "consistency": 0,
+        "resolution_alignment": 0,
+        "hype_penalty": 0,
+        "sample_size": 0
+      },
+      "last_reviewed": "2026-08-28",
+      "collection_status": "dated_predictor_adapter_available",
+      "notes": [
+        "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
+        "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
+      ],
+      "collection_adapter": "tegna_public_html_v1",
+      "collection_blocker": null
+    },
+    {
+      "source_id": "src_local_ktbc_weather",
+      "city_id": "austin_tx",
+      "name": "FOX 7 Austin Weather (KTBC)",
+      "type": "local_met",
+      "role": "forecast",
+      "platform": "public_broadcast_weather_html",
+      "url": "https://www.fox7austin.com/weather",
+      "coverage_area": [
+        "Austin"
+      ],
+      "verified": false,
+      "status": "watch_only",
+      "trust_score": 0,
+      "metrics": {
+        "accuracy": 0,
+        "timeliness": 0,
+        "specificity": 0,
+        "consistency": 0,
+        "resolution_alignment": 0,
+        "hype_penalty": 0,
+        "sample_size": 0
+      },
+      "last_reviewed": "2026-08-28",
+      "collection_status": "dated_predictor_adapter_available",
+      "notes": [
+        "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
+        "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
+      ],
+      "collection_adapter": "fox_nuxt_daily_v1",
+      "collection_blocker": null
+    },
+    {
+      "source_id": "src_local_wfxt_weather",
+      "city_id": "boston_ma",
+      "name": "Boston 25 Weather (WFXT)",
+      "type": "local_met",
+      "role": "forecast",
+      "platform": "public_broadcast_weather_html",
+      "url": "https://www.boston25news.com/weather/",
+      "coverage_area": [
+        "Boston"
+      ],
+      "verified": false,
+      "status": "watch_only",
+      "trust_score": 0,
+      "metrics": {
+        "accuracy": 0,
+        "timeliness": 0,
+        "specificity": 0,
+        "consistency": 0,
+        "resolution_alignment": 0,
+        "hype_penalty": 0,
+        "sample_size": 0
+      },
+      "last_reviewed": "2026-08-28",
+      "collection_status": "capture_only_dated_predictor_unavailable",
+      "notes": [
+        "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
+        "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
+      ],
+      "collection_adapter": "public_page_probe_v1",
+      "collection_blocker": "source_forecast_graphic_has_no_calendar_date_or_issue_clock"
+    },
+    {
+      "source_id": "src_local_wls_weather",
+      "city_id": "chicago_il",
+      "name": "ABC7 Chicago Weather (WLS)",
+      "type": "local_met",
+      "role": "forecast",
+      "platform": "public_broadcast_weather_html",
+      "url": "https://abc7chicago.com/weather/",
+      "coverage_area": [
+        "Chicago"
+      ],
+      "verified": false,
+      "status": "watch_only",
+      "trust_score": 0,
+      "metrics": {
+        "accuracy": 0,
+        "timeliness": 0,
+        "specificity": 0,
+        "consistency": 0,
+        "resolution_alignment": 0,
+        "hype_penalty": 0,
+        "sample_size": 0
+      },
+      "last_reviewed": "2026-08-28",
+      "collection_status": "dated_predictor_adapter_available",
+      "notes": [
+        "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
+        "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
+      ],
+      "collection_adapter": "public_page_probe_v1",
+      "collection_blocker": null
+    },
+    {
+      "source_id": "src_local_kdfw_weather",
+      "city_id": "dallas_tx",
+      "name": "FOX 4 Dallas-Fort Worth Weather (KDFW)",
+      "type": "local_met",
+      "role": "forecast",
+      "platform": "public_broadcast_weather_html",
+      "url": "https://www.fox4news.com/weather",
+      "coverage_area": [
+        "Dallas"
+      ],
+      "verified": false,
+      "status": "watch_only",
+      "trust_score": 0,
+      "metrics": {
+        "accuracy": 0,
+        "timeliness": 0,
+        "specificity": 0,
+        "consistency": 0,
+        "resolution_alignment": 0,
+        "hype_penalty": 0,
+        "sample_size": 0
+      },
+      "last_reviewed": "2026-08-28",
+      "collection_status": "dated_predictor_adapter_available",
+      "notes": [
+        "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
+        "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
+      ],
+      "collection_adapter": "fox_nuxt_daily_v1",
+      "collection_blocker": null
+    },
+    {
+      "source_id": "src_local_kusa_weather",
+      "city_id": "denver_co",
+      "name": "9NEWS Weather (KUSA)",
+      "type": "local_met",
+      "role": "forecast",
+      "platform": "public_broadcast_weather_html",
+      "url": "https://www.9news.com/weather",
+      "coverage_area": [
+        "Denver"
+      ],
+      "verified": false,
+      "status": "watch_only",
+      "trust_score": 0,
+      "metrics": {
+        "accuracy": 0,
+        "timeliness": 0,
+        "specificity": 0,
+        "consistency": 0,
+        "resolution_alignment": 0,
+        "hype_penalty": 0,
+        "sample_size": 0
+      },
+      "last_reviewed": "2026-08-28",
+      "collection_status": "dated_predictor_adapter_available",
+      "notes": [
+        "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
+        "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
+      ],
+      "collection_adapter": "tegna_public_html_v1",
+      "collection_blocker": null
+    },
+    {
+      "source_id": "src_local_kriv_weather",
+      "city_id": "houston_tx",
+      "name": "FOX 26 Houston Weather (KRIV)",
+      "type": "local_met",
+      "role": "forecast",
+      "platform": "public_broadcast_weather_html",
+      "url": "https://www.fox26houston.com/weather",
+      "coverage_area": [
+        "Houston"
+      ],
+      "verified": false,
+      "status": "watch_only",
+      "trust_score": 0,
+      "metrics": {
+        "accuracy": 0,
+        "timeliness": 0,
+        "specificity": 0,
+        "consistency": 0,
+        "resolution_alignment": 0,
+        "hype_penalty": 0,
+        "sample_size": 0
+      },
+      "last_reviewed": "2026-08-28",
+      "collection_status": "dated_predictor_adapter_available",
+      "notes": [
+        "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
+        "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
+      ],
+      "collection_adapter": "fox_nuxt_daily_v1",
+      "collection_blocker": null
+    },
+    {
+      "source_id": "src_local_kvvu_weather",
+      "city_id": "las_vegas_nv",
+      "name": "FOX5 Las Vegas Weather (KVVU)",
+      "type": "local_met",
+      "role": "forecast",
+      "platform": "public_broadcast_weather_html",
+      "url": "https://www.fox5vegas.com/weather/",
+      "coverage_area": [
+        "Las Vegas"
+      ],
+      "verified": false,
+      "status": "watch_only",
+      "trust_score": 0,
+      "metrics": {
+        "accuracy": 0,
+        "timeliness": 0,
+        "specificity": 0,
+        "consistency": 0,
+        "resolution_alignment": 0,
+        "hype_penalty": 0,
+        "sample_size": 0
+      },
+      "last_reviewed": "2026-08-28",
+      "collection_status": "dated_predictor_adapter_available",
+      "notes": [
+        "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
+        "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
+      ],
+      "collection_adapter": "gray_fusion_daily_v1",
+      "collection_capability": "dated_high_and_prior_night_low_predictors"
+    },
+    {
+      "source_id": "src_local_kttv_weather",
+      "city_id": "los_angeles_ca",
+      "name": "FOX 11 Los Angeles Weather (KTTV)",
+      "type": "local_met",
+      "role": "forecast",
+      "platform": "public_broadcast_weather_html",
+      "url": "https://www.foxla.com/weather",
+      "coverage_area": [
+        "Los Angeles"
+      ],
+      "verified": false,
+      "status": "watch_only",
+      "trust_score": 0,
+      "metrics": {
+        "accuracy": 0,
+        "timeliness": 0,
+        "specificity": 0,
+        "consistency": 0,
+        "resolution_alignment": 0,
+        "hype_penalty": 0,
+        "sample_size": 0
+      },
+      "last_reviewed": "2026-08-28",
+      "collection_status": "dated_predictor_adapter_available",
+      "notes": [
+        "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
+        "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
+      ],
+      "collection_adapter": "fox_nuxt_daily_v1",
+      "collection_blocker": null
+    },
+    {
+      "source_id": "src_local_wsvn_weather",
+      "city_id": "miami_fl",
+      "name": "WSVN 7News Miami Weather",
+      "type": "local_met",
+      "role": "forecast",
+      "platform": "public_broadcast_weather_html",
+      "url": "https://wsvn.com/weather/",
+      "coverage_area": [
+        "Miami"
+      ],
+      "verified": false,
+      "status": "watch_only",
+      "trust_score": 0,
+      "metrics": {
+        "accuracy": 0,
+        "timeliness": 0,
+        "specificity": 0,
+        "consistency": 0,
+        "resolution_alignment": 0,
+        "hype_penalty": 0,
+        "sample_size": 0
+      },
+      "last_reviewed": "2026-08-28",
+      "collection_status": "capture_only_dated_predictor_unavailable",
+      "notes": [
+        "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
+        "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
+      ],
+      "collection_adapter": "public_page_probe_v1",
+      "collection_blocker": "source_miami_dated_numeric_missing_widget_requires_provider_api_key"
+    },
+    {
+      "source_id": "src_local_kmsp_tv_weather",
+      "city_id": "minneapolis_mn",
+      "name": "FOX 9 Minneapolis\u2013St. Paul Weather (KMSP-TV)",
+      "type": "local_met",
+      "role": "forecast",
+      "platform": "public_broadcast_weather_html",
+      "url": "https://www.fox9.com/weather",
+      "coverage_area": [
+        "Minneapolis"
+      ],
+      "verified": false,
+      "status": "watch_only",
+      "trust_score": 0,
+      "metrics": {
+        "accuracy": 0,
+        "timeliness": 0,
+        "specificity": 0,
+        "consistency": 0,
+        "resolution_alignment": 0,
+        "hype_penalty": 0,
+        "sample_size": 0
+      },
+      "last_reviewed": "2026-08-28",
+      "collection_status": "dated_predictor_adapter_available",
+      "notes": [
+        "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
+        "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
+      ],
+      "collection_adapter": "fox_nuxt_daily_v1",
+      "collection_blocker": null
+    },
+    {
+      "source_id": "src_local_wvue_weather",
+      "city_id": "new_orleans_la",
+      "name": "FOX 8 New Orleans Weather (WVUE)",
+      "type": "local_met",
+      "role": "forecast",
+      "platform": "public_broadcast_weather_html",
+      "url": "https://www.fox8live.com/weather/",
+      "coverage_area": [
+        "New Orleans"
+      ],
+      "verified": false,
+      "status": "watch_only",
+      "trust_score": 0,
+      "metrics": {
+        "accuracy": 0,
+        "timeliness": 0,
+        "specificity": 0,
+        "consistency": 0,
+        "resolution_alignment": 0,
+        "hype_penalty": 0,
+        "sample_size": 0
+      },
+      "last_reviewed": "2026-08-28",
+      "collection_status": "dated_predictor_adapter_available",
+      "notes": [
+        "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
+        "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
+      ],
+      "collection_adapter": "gray_fusion_daily_v1",
+      "collection_capability": "dated_high_and_prior_night_low_predictors"
+    },
+    {
+      "source_id": "src_local_wnyw_weather",
+      "city_id": "new_york_ny",
+      "name": "FOX 5 New York Weather (WNYW)",
+      "type": "local_met",
+      "role": "forecast",
+      "platform": "public_broadcast_weather_html",
+      "url": "https://www.fox5ny.com/weather",
+      "coverage_area": [
+        "New York"
+      ],
+      "verified": false,
+      "status": "watch_only",
+      "trust_score": 0,
+      "metrics": {
+        "accuracy": 0,
+        "timeliness": 0,
+        "specificity": 0,
+        "consistency": 0,
+        "resolution_alignment": 0,
+        "hype_penalty": 0,
+        "sample_size": 0
+      },
+      "last_reviewed": "2026-08-28",
+      "collection_status": "dated_predictor_adapter_available",
+      "notes": [
+        "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
+        "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
+      ],
+      "collection_adapter": "fox_nuxt_daily_v1",
+      "collection_blocker": null
+    },
+    {
+      "source_id": "src_local_kokh_weather",
+      "city_id": "oklahoma_city_ok",
+      "name": "OKC FOX 25 Weather (KOKH)",
+      "type": "local_met",
+      "role": "forecast",
+      "platform": "public_broadcast_weather_html",
+      "url": "https://okcfox.com/weather",
+      "coverage_area": [
+        "Oklahoma City"
+      ],
+      "verified": false,
+      "status": "watch_only",
+      "trust_score": 0,
+      "metrics": {
+        "accuracy": 0,
+        "timeliness": 0,
+        "specificity": 0,
+        "consistency": 0,
+        "resolution_alignment": 0,
+        "hype_penalty": 0,
+        "sample_size": 0
+      },
+      "last_reviewed": "2026-08-28",
+      "collection_status": "dated_predictor_adapter_available",
+      "notes": [
+        "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
+        "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
+      ],
+      "collection_adapter": "public_page_probe_v1",
+      "collection_blocker": null
+    },
+    {
+      "source_id": "src_local_wtxf_weather",
+      "city_id": "philadelphia_pa",
+      "name": "FOX 29 Philadelphia Weather (WTXF)",
+      "type": "local_met",
+      "role": "forecast",
+      "platform": "public_broadcast_weather_html",
+      "url": "https://www.fox29.com/weather",
+      "coverage_area": [
+        "Philadelphia"
+      ],
+      "verified": false,
+      "status": "watch_only",
+      "trust_score": 0,
+      "metrics": {
+        "accuracy": 0,
+        "timeliness": 0,
+        "specificity": 0,
+        "consistency": 0,
+        "resolution_alignment": 0,
+        "hype_penalty": 0,
+        "sample_size": 0
+      },
+      "last_reviewed": "2026-08-28",
+      "collection_status": "dated_predictor_adapter_available",
+      "notes": [
+        "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
+        "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
+      ],
+      "collection_adapter": "fox_nuxt_daily_v1",
+      "collection_blocker": null
+    },
+    {
+      "source_id": "src_local_ksaz_weather",
+      "city_id": "phoenix_az",
+      "name": "FOX 10 Phoenix Weather (KSAZ)",
+      "type": "local_met",
+      "role": "forecast",
+      "platform": "public_broadcast_weather_html",
+      "url": "https://www.fox10phoenix.com/weather",
+      "coverage_area": [
+        "Phoenix"
+      ],
+      "verified": false,
+      "status": "watch_only",
+      "trust_score": 0,
+      "metrics": {
+        "accuracy": 0,
+        "timeliness": 0,
+        "specificity": 0,
+        "consistency": 0,
+        "resolution_alignment": 0,
+        "hype_penalty": 0,
+        "sample_size": 0
+      },
+      "last_reviewed": "2026-08-28",
+      "collection_status": "dated_predictor_adapter_available",
+      "notes": [
+        "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
+        "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
+      ],
+      "collection_adapter": "fox_nuxt_daily_v1",
+      "collection_blocker": null
+    },
+    {
+      "source_id": "src_local_kens_weather",
+      "city_id": "san_antonio_tx",
+      "name": "KENS 5 San Antonio Weather",
+      "type": "local_met",
+      "role": "forecast",
+      "platform": "public_broadcast_weather_html",
+      "url": "https://www.kens5.com/weather/",
+      "coverage_area": [
+        "San Antonio"
+      ],
+      "verified": false,
+      "status": "watch_only",
+      "trust_score": 0,
+      "metrics": {
+        "accuracy": 0,
+        "timeliness": 0,
+        "specificity": 0,
+        "consistency": 0,
+        "resolution_alignment": 0,
+        "hype_penalty": 0,
+        "sample_size": 0
+      },
+      "last_reviewed": "2026-08-28",
+      "collection_status": "dated_predictor_adapter_available",
+      "notes": [
+        "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
+        "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
+      ],
+      "collection_adapter": "tegna_public_html_v1",
+      "collection_blocker": null
+    },
+    {
+      "source_id": "src_local_ktvu_weather",
+      "city_id": "san_francisco_ca",
+      "name": "KTVU FOX 2 Weather",
+      "type": "local_met",
+      "role": "forecast",
+      "platform": "public_broadcast_weather_html",
+      "url": "https://www.ktvu.com/weather",
+      "coverage_area": [
+        "San Francisco"
+      ],
+      "verified": false,
+      "status": "watch_only",
+      "trust_score": 0,
+      "metrics": {
+        "accuracy": 0,
+        "timeliness": 0,
+        "specificity": 0,
+        "consistency": 0,
+        "resolution_alignment": 0,
+        "hype_penalty": 0,
+        "sample_size": 0
+      },
+      "last_reviewed": "2026-08-28",
+      "collection_status": "dated_predictor_adapter_available",
+      "notes": [
+        "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
+        "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
+      ],
+      "collection_adapter": "fox_nuxt_daily_v1",
+      "collection_blocker": null
+    },
+    {
+      "source_id": "src_local_kcpq_weather",
+      "city_id": "seattle_wa",
+      "name": "FOX 13 Seattle Weather (KCPQ)",
+      "type": "local_met",
+      "role": "forecast",
+      "platform": "public_broadcast_weather_html",
+      "url": "https://www.fox13seattle.com/weather",
+      "coverage_area": [
+        "Seattle"
+      ],
+      "verified": false,
+      "status": "watch_only",
+      "trust_score": 0,
+      "metrics": {
+        "accuracy": 0,
+        "timeliness": 0,
+        "specificity": 0,
+        "consistency": 0,
+        "resolution_alignment": 0,
+        "hype_penalty": 0,
+        "sample_size": 0
+      },
+      "last_reviewed": "2026-08-28",
+      "collection_status": "dated_predictor_adapter_available",
+      "notes": [
+        "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
+        "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
+      ],
+      "collection_adapter": "fox_nuxt_daily_v1",
+      "collection_blocker": null
+    },
+    {
+      "source_id": "src_local_wusa_weather",
+      "city_id": "washington_dc",
+      "name": "WUSA9 Washington Weather",
+      "type": "local_met",
+      "role": "forecast",
+      "platform": "public_broadcast_weather_html",
+      "url": "https://www.wusa9.com/weather",
+      "coverage_area": [
+        "Washington"
+      ],
+      "verified": false,
+      "status": "watch_only",
+      "trust_score": 0,
+      "metrics": {
+        "accuracy": 0,
+        "timeliness": 0,
+        "specificity": 0,
+        "consistency": 0,
+        "resolution_alignment": 0,
+        "hype_penalty": 0,
+        "sample_size": 0
+      },
+      "last_reviewed": "2026-08-28",
+      "collection_status": "dated_predictor_adapter_available",
+      "notes": [
+        "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
+        "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
+      ],
+      "collection_adapter": "tegna_public_html_v1",
+      "collection_blocker": null
+    },
+    {
+      "source_id": "src_local_abc7ny_weather",
+      "city_id": "newark_nj",
+      "name": "ABC7 New York Tri-State Weather",
+      "type": "local_met",
+      "role": "forecast",
+      "platform": "public_broadcast_weather_html",
+      "url": "https://abc7ny.com/weather/",
+      "coverage_area": [
+        "Newark"
+      ],
+      "verified": false,
+      "status": "watch_only",
+      "trust_score": 0,
+      "metrics": {
+        "accuracy": 0,
+        "timeliness": 0,
+        "specificity": 0,
+        "consistency": 0,
+        "resolution_alignment": 0,
+        "hype_penalty": 0,
+        "sample_size": 0
+      },
+      "last_reviewed": "2026-08-28",
+      "collection_status": "capture_only_dated_predictor_unavailable",
+      "notes": [
+        "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
+        "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
+      ],
+      "collection_adapter": "public_page_probe_v1",
+      "collection_blocker": "source_newark_numeric_missing_only_new_york_city_article"
+    },
+    {
+      "source_id": "src_local_kgtv_weather",
+      "city_id": "san_diego_ca",
+      "name": "ABC 10News San Diego Weather (KGTV)",
+      "type": "local_met",
+      "role": "forecast",
+      "platform": "public_broadcast_weather_html",
+      "url": "https://www.10news.com/weather",
+      "coverage_area": [
+        "San Diego"
+      ],
+      "verified": false,
+      "status": "watch_only",
+      "trust_score": 0,
+      "metrics": {
+        "accuracy": 0,
+        "timeliness": 0,
+        "specificity": 0,
+        "consistency": 0,
+        "resolution_alignment": 0,
+        "hype_penalty": 0,
+        "sample_size": 0
+      },
+      "last_reviewed": "2026-08-28",
+      "collection_status": "dated_predictor_adapter_available",
+      "notes": [
+        "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
+        "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
+      ],
+      "collection_adapter": "public_page_probe_v1",
+      "collection_blocker": null
+    },
+    {
+      "source_id": "src_local_wdrb_weather",
+      "city_id": "louisville_ky",
+      "name": "WDRB Louisville Weather",
+      "type": "local_met",
+      "role": "forecast",
+      "platform": "public_broadcast_weather_html",
+      "url": "https://www.wdrb.com/weather/",
+      "coverage_area": [
+        "Louisville"
+      ],
+      "verified": false,
+      "status": "watch_only",
+      "trust_score": 0,
+      "metrics": {
+        "accuracy": 0,
+        "timeliness": 0,
+        "specificity": 0,
+        "consistency": 0,
+        "resolution_alignment": 0,
+        "hype_penalty": 0,
+        "sample_size": 0
+      },
+      "last_reviewed": "2026-08-28",
+      "collection_status": "dated_predictor_adapter_available",
+      "notes": [
+        "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
+        "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
+      ],
+      "collection_adapter": "public_page_probe_v1",
+      "collection_blocker": null
+    },
+    {
+      "source_id": "src_local_6abc_weather",
+      "city_id": "trenton_nj",
+      "name": "6abc StormTracker 6 Central New Jersey",
+      "type": "local_met",
+      "role": "forecast",
+      "platform": "public_broadcast_weather_html",
+      "url": "https://6abc.com/weather/",
+      "coverage_area": [
+        "Trenton"
+      ],
+      "verified": false,
+      "status": "watch_only",
+      "trust_score": 0,
+      "metrics": {
+        "accuracy": 0,
+        "timeliness": 0,
+        "specificity": 0,
+        "consistency": 0,
+        "resolution_alignment": 0,
+        "hype_penalty": 0,
+        "sample_size": 0
+      },
+      "last_reviewed": "2026-08-28",
+      "collection_status": "capture_only_dated_predictor_unavailable",
+      "notes": [
+        "Candidate URL imported from read-only feat/kalshi-settlement-local-sources registry; its prior verification is not numeric forecast evidence.",
+        "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
+      ],
+      "collection_adapter": "public_page_probe_v1",
+      "collection_blocker": "source_trenton_numeric_missing_only_philadelphia_article"
     }
   ]
 }

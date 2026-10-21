@@ -20,6 +20,57 @@ from dataclasses import dataclass
 logger = logging.getLogger(__name__)
 
 
+def is_temperature_question(question: str) -> bool:
+    """Require temperature semantics, not price words such as below/high/low."""
+    import re
+
+    if re.search(r'\b(?:temperature|temp|fahrenheit|celsius)\b|°',
+                 question, flags=re.IGNORECASE):
+        return True
+
+    # Bare "degrees" is ambiguous. Require a location as the measured subject,
+    # a temperature predicate, and the COMPLETE numeric measurement phrase.
+    # A unit-prefix match would misread "85 degrees awarded ..." as weather.
+    from bot.feeds.weather_pro import CITY_COORDS
+    from bot.weather.date_matcher import MONTHS
+
+    cities = '|'.join(re.escape(city) for city in CITY_COORDS)
+    extremum = r'(?:high|low|maximum|minimum)'
+    subject = (rf'(?:(?:{cities})(?:\s+{extremum})?'
+               rf'|(?:the\s+)?{extremum}\s+in\s+(?:{cities}))')
+    comparison = r'(?:above|below|over|under|at\s+(?:least|most)|more\s+than|less\s+than)'
+    predicate = (rf'(?:exceed|reach|hit|be(?:\s+{comparison})?'
+                 rf'|(?:fall|rise)\s+{comparison}'
+                 rf'|have\s+(?:a\s+)?{extremum}\s+(?:{comparison}|of))')
+    # Optional calendar/relative-time context closes the measurement phrase;
+    # arbitrary noun modifiers after "degrees" do not. This only recognizes
+    # scope: the collector still owns date validation and numerical scoring.
+    months = '|'.join(MONTHS)
+    calendar = (rf'(?:\d{{4}}(?:-\d{{2}}-\d{{2}})?'
+                rf'|(?:{months})\.?\s+\d{{1,4}}(?:st|nd|rd|th)?(?:,?\s+\d{{4}})?)')
+    temporal = rf'(?:\s+(?:(?:on|in|for)\s+)?(?:{calendar}|today|tomorrow|tonight))?'
+    return bool(re.fullmatch(
+        rf'\s*will\s+{subject}\s+{predicate}\s+'
+        rf'[+-]?\d+(?:\.\d+)?\s+degrees?{temporal}\s*[?.!]?\s*',
+        question, flags=re.IGNORECASE))
+
+
+def is_temperature_market(question: str, *, market_id: str = '', category: str = '',
+                          market_metadata: dict | None = None) -> bool:
+    """Scope collection/observer gates, not permission to manufacture odds.
+
+    Canonical daily-temperature identity also covers contracts whose question
+    shorthand the numerical scorer cannot parse. Question-only compatibility
+    requires genuine temperature terms/units, not qualifications or price words.
+    """
+    from bot.market_router import route_market
+
+    route = route_market({'id': market_id, 'question': question,
+                          'category': category, 'metadata': market_metadata or {}})
+    return (route.group == 'weather' and route.family == 'daily_temperature'
+            or is_temperature_question(question))
+
+
 def _infer_question_side(question: str) -> Optional[str]:
     q = (question or "").lower()
     if any(token in q for token in [" below ", " under ", "<", " less than "]):
@@ -890,6 +941,8 @@ class ForexFeed:
         self.http.close()
 
 
+from bot.feeds.weather_capture_store import WeatherCaptureStore
+from bot.collector_paths import collector_root
 from bot.feeds.weather_pro import ProWeatherEngine, CITY_COORDS
 
 
@@ -899,8 +952,11 @@ class LiveFeedAggregator:
     Single entry point for the strategy engine.
     """
 
-    def __init__(self):
-        self.weather = ProWeatherEngine()  # Multi-source weather engine
+    def __init__(self, *, weather_source_selection: dict | None = None,
+                 capture_store: WeatherCaptureStore | None = None):
+        self.weather_source_selection = dict(weather_source_selection or {})
+        self.capture_store = capture_store if capture_store is not None else WeatherCaptureStore(storage_root=collector_root())
+        self.weather = ProWeatherEngine(capture_store=self.capture_store)
         self.crypto = CryptoFeed()
         self.forex = ForexFeed()
 
@@ -918,10 +974,13 @@ class LiveFeedAggregator:
         q = question.lower()
 
         # Temperature markets → multi-source weather engine
-        if any(w in q for w in ["temperature", "temp", "°", "degrees", "high", "low"]):
+        if is_temperature_market(question, market_id=market_id, category=category,
+                                 market_metadata=market_metadata):
             # If no city in question, try to extract from series ticker
             # e.g., KXHIGHAUS → Austin, KXHIGHPHIL → Philadelphia, KXLOWCHI → Chicago
             score_with_context = getattr(self.weather, "score_temperature_market_with_context", None)
+            if callable(score_with_context) and self.weather_source_selection.get('enabled') is True:
+                score_with_context = self._score_contextual_weather
             if not any(c in q for c in CITY_COORDS):
                 city = self._city_from_ticker(category)
                 if city:
@@ -949,6 +1008,26 @@ class LiveFeedAggregator:
             return self.forex.score_forex_market(question, yes_price)
 
         return None
+
+    def _score_contextual_weather(self, question: str, yes_price: float, *,
+                                  category: str = '', market_metadata: dict | None = None) -> Optional[dict]:
+        from bot.weather.contextual_source_flow import select_captured_weather_source
+
+        raw = self.weather.score_temperature_market_with_context(
+            question, yes_price, category=category, market_metadata=market_metadata)
+        if raw is None:
+            return None
+        audit = select_captured_weather_source(raw, question=question, market_id=category,
+            market_metadata=market_metadata, observed_at=datetime.now(timezone.utc).isoformat(),
+            config=self.weather_source_selection)
+        result = raw
+        if audit['routeable']:
+            result = self.weather.score_temperature_market_with_context(
+                question, yes_price, category=category, market_metadata=market_metadata,
+                selected_source_id=audit['chosen_source_id'])
+        if result is not None:
+            result['data']['weather_source_selection'] = audit
+        return result
 
     def close(self):
         self.weather.close()

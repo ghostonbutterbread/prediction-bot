@@ -417,22 +417,36 @@ def select_source_for_candidate(
     min_sample_count: int = DEFAULT_MIN_SAMPLE_COUNT,
     history_cutoff: Any = None,
     history_exclusion_counts: Mapping[str, int] | None = None,
+    history_mode: str = "strict",
+    max_history_events: int | None = None,
 ) -> dict[str, Any]:
     """Choose the best prior/as-of source for a candidate slice."""
 
+    if history_mode not in {"strict", "predictive"}:
+        raise ValueError("history_mode must be strict or predictive")
+    predictive = history_mode == "predictive"
     cutoff_dt = _parse_dt(history_cutoff or candidate_edge_row.get("observed_at"))
-    slice_key = _slice_key(candidate_edge_row)
+    slice_key = _slice_key(candidate_edge_row)[:3] if predictive else _slice_key(candidate_edge_row)
     candidates: dict[str, list[dict[str, Any]]] = {}
     history_stats: Counter[str] = Counter(history_exclusion_counts or {})
     for row in history_edge_rows:
         if not isinstance(row, Mapping):
             continue
         history_stats["history_rows_seen"] += 1
-        rejection_key = source_history_target_proof_rejection_key(row)
+        if predictive:
+            if source_history_outcomes_conflict(row) or source_history_sides_conflict(row):
+                history_stats["history_rows_rejected_conflicting_outcome"] += 1
+                continue
+            from bot.weather.source_observation_ledger import is_eligible_for_predictive_history
+            if not is_eligible_for_predictive_history(row, history_cutoff or candidate_edge_row.get("observed_at")):
+                history_stats["history_rows_rejected_predictive_proof_or_chronology"] += 1
+                continue
+            row = {**row, "win": row["direction_correct"]}
+        rejection_key = None if predictive else source_history_target_proof_rejection_key(row)
         if rejection_key is not None:
             history_stats[rejection_key] += 1
             continue
-        if not source_history_correctness_eligible(row):
+        if not predictive and not source_history_correctness_eligible(row):
             continue
         history_stats["history_rows_eligible"] += 1
         settlement_dt = _parse_dt(row.get("settlement_ts"))
@@ -446,7 +460,8 @@ def select_source_for_candidate(
         if cutoff_dt is None or settlement_dt >= cutoff_dt:
             continue
         history_stats["history_rows_settled_before_cutoff"] += 1
-        if _slice_key(row) != slice_key:
+        row_slice = _slice_key(row)[:3] if predictive else _slice_key(row)
+        if row_slice != slice_key:
             continue
         history_stats["history_rows_matching_slice"] += 1
         source_id = _source_key(row.get("source_id"))
@@ -456,7 +471,12 @@ def select_source_for_candidate(
 
     independent_candidates: dict[str, list[dict[str, Any]]] = {}
     for source_id, rows in candidates.items():
-        independent_rows, collapse_stats = _collapse_selector_history(rows, source_id=source_id)
+        independent_rows, collapse_stats = _collapse_selector_history(rows, source_id=source_id, physical_weather_events=predictive)
+        if max_history_events is not None:
+            independent_rows.sort(key=lambda row: (str(row.get("market_date") or ""), _recorded_forecast_sort_key(row)), reverse=True)
+            history_stats["history_events_outside_budget"] += max(0, len(independent_rows) - max_history_events)
+            independent_rows = independent_rows[:max_history_events]
+            collapse_stats['history_independent_rows_used'] = len(independent_rows)
         independent_candidates[source_id] = independent_rows
         history_stats.update(collapse_stats)
 
@@ -475,20 +495,31 @@ def select_source_for_candidate(
         "history_rows_missing_or_invalid_settlement_ts": history_stats["history_rows_missing_or_invalid_settlement_ts"],
         "history_rows_not_observed_before_settlement": history_stats["history_rows_not_observed_before_settlement"],
         "history_rows_rejected_conflicting_outcome": history_stats["history_rows_rejected_conflicting_outcome"],
-        "history_representative_selection": "newest_recorded_forecast_observation_v1",
+        "history_rows_rejected_predictive_proof_or_chronology": history_stats["history_rows_rejected_predictive_proof_or_chronology"],
+        "history_events_outside_budget": history_stats["history_events_outside_budget"],
+        "history_events_selected": sum(len(rows) for rows in independent_candidates.values()),
+        "history_representative_selection": "earliest_recorded_forecast_observation_v1",
     }
-    ranked = [_source_stats(source_id, rows) for source_id, rows in independent_candidates.items()]
-    ranked.sort(
-        key=lambda row: (
+    def support_key(row: Mapping[str, Any]) -> tuple:
+        # Source IDs stabilize audit ordering, but provide no empirical support.
+        return (
             row["sample_count"] >= min_sample_count,
             row["win_rate"] if row["win_rate"] is not None else -1.0,
             row["avg_binary_edge_realized"] if row["avg_binary_edge_realized"] is not None else -999.0,
             row["sample_count"],
-            row["source_id"],
-        ),
-        reverse=True,
-    )
+        )
+
+    ranked = [_source_stats(source_id, rows) for source_id, rows in independent_candidates.items()]
+    ranked.sort(key=lambda row: (*support_key(row), row["source_id"]), reverse=True)
     usable = [row for row in ranked if row["sample_count"] >= min_sample_count]
+    if predictive:
+        selector_history_audit["source_scores"] = [
+            {**score, "wins": sum(row["win"] for row in independent_candidates[score["source_id"]]),
+             "losses": sum(not row["win"] for row in independent_candidates[score["source_id"]]),
+             "source_observation_ids": [row["source_observation_id"] for row in independent_candidates[score["source_id"]]],
+             "forecast_semantics": [row["forecast_semantics"] for row in independent_candidates[score["source_id"]]]}
+            for score in ranked
+        ]
     if not usable:
         return {
             "routeable": False,
@@ -505,18 +536,22 @@ def select_source_for_candidate(
             **selector_history_audit,
         }
     chosen = usable[0]
+    tied = [row["source_id"] for row in usable if support_key(row) == support_key(chosen)]
+    unresolved_tie = predictive and len(tied) > 1
+    if predictive:
+        selector_history_audit["tied_source_ids"] = sorted(tied) if unresolved_tie else []
     return {
-        "routeable": True,
+        "routeable": not unresolved_tie,
         "selection_mode": "as_of_resolved_scoreboard",
         "slice_key": "|".join(slice_key),
-        "chosen_source_id": chosen["source_id"],
-        "chosen_source_name": chosen["source_name"],
-        "chosen_source_backoff_level": "city_kind_shape_question_side",
+        "chosen_source_id": None if unresolved_tie else chosen["source_id"],
+        "chosen_source_name": None if unresolved_tie else chosen["source_name"],
+        "chosen_source_backoff_level": "city_kind_shape" if predictive else "city_kind_shape_question_side",
         "prior_sample_count": chosen["sample_count"],
         "prior_win_rate": chosen["win_rate"],
         "prior_avg_binary_edge_realized": chosen["avg_binary_edge_realized"],
         "min_sample_count": min_sample_count,
-        "blockers": [],
+        "blockers": ["unresolved_contextual_source_tie"] if unresolved_tie else [],
         "candidate_source_count": len(ranked),
         **selector_history_audit,
     }
@@ -704,6 +739,7 @@ def _collapse_selector_history(
     rows: Iterable[Mapping[str, Any]],
     *,
     source_id: str,
+    physical_weather_events: bool = False,
 ) -> tuple[list[dict[str, Any]], Counter[str]]:
     """Use one forecast observation per independent settled source outcome.
 
@@ -726,7 +762,7 @@ def _collapse_selector_history(
         return unit
 
     for row in history_rows:
-        unit, _ = _independent_source_outcome_unit(row, source_id=source_id)
+        unit, _ = _independent_source_outcome_unit(row, source_id=source_id, physical_weather_events=physical_weather_events)
         market = _normalized_identity_text(row.get("market_id"), row.get("market_ticker"), row.get("ticker"))
         contract = ("source", source_id, "contract_only", market) if market else unit
         if unit != contract:
@@ -737,7 +773,7 @@ def _collapse_selector_history(
     units: dict[tuple[str, ...], dict[str, Any]] = {}
     stats: Counter[str] = Counter()
     for row in history_rows:
-        unit, used_fallback = _independent_source_outcome_unit(row, source_id=source_id)
+        unit, used_fallback = _independent_source_outcome_unit(row, source_id=source_id, physical_weather_events=physical_weather_events)
         if used_fallback:
             stats["history_conservative_identity_fallback_rows"] += 1
         market = _normalized_identity_text(row.get("market_id"), row.get("market_ticker"), row.get("ticker"))
@@ -751,7 +787,7 @@ def _collapse_selector_history(
     return list(units.values()), stats
 
 
-def _independent_source_outcome_unit(row: Mapping[str, Any], *, source_id: str) -> tuple[tuple[str, ...], bool]:
+def _independent_source_outcome_unit(row: Mapping[str, Any], *, source_id: str, physical_weather_events: bool = False) -> tuple[tuple[str, ...], bool]:
     """Return the conservative source-outcome unit used only for selection.
 
     A physical event anchors one unit per source and contract shape even when
@@ -759,6 +795,8 @@ def _independent_source_outcome_unit(row: Mapping[str, Any], *, source_id: str) 
     market identity is explicitly contract-only; never infer an event from it.
     """
 
+    if physical_weather_events and all(row.get(key) for key in ("city_id", "market_date", "market_kind")):
+        return ("source", source_id, "city_date_kind", str(row["city_id"]).casefold(), str(row["market_date"]), str(row["market_kind"]).casefold()), False
     market_identity = _normalized_identity_text(
         row.get("market_id"), row.get("market_ticker"), row.get("ticker")
     )

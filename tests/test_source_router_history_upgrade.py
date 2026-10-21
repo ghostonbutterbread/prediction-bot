@@ -68,7 +68,11 @@ class SourceRouterHistoryUpgradeTests(unittest.TestCase):
             module = types.ModuleType("_frozen_v1_source_observation_ledger")
             with patch.dict(sys.modules, {module.__name__: module}):
                 exec(compile(source, f"{V1_REVISION}:source_observation_ledger.py", "exec"), module.__dict__)
-            materializer = module.materialize_source_observation_ledger
+            def materializer(**kwargs):
+                # The frozen V1 producer predates the optional independent
+                # knowledge receipt; keep its original bytes/behavior intact.
+                kwargs.pop('strict_resolutions_path', None)
+                return module.materialize_source_observation_ledger(**kwargs)
         else:
             materializer = promotion.materialize_source_observation_ledger
         # The unchanged publisher/collapse contract hashes genuine old ledger

@@ -19,7 +19,8 @@ import os
 
 from bot.file_ops import atomic_write_json
 from bot.forward_composed_paper import PICKER, CONTROL, _IDENTITY, _digest as forward_digest, compose_forward_rows, validate_forward_combination
-from bot.composed_lane_wallet import _timestamp
+from bot.composed_lane_wallet import _reject_outcome_fields, _timestamp
+from bot.feeds.weather_pro import project_probability_evidence
 from bot.market_router import route_market
 from bot.shared_market_runtime import shared_snapshot_is_fresh
 from bot.simulator import Simulator
@@ -99,7 +100,9 @@ def consume_persistent_composed_paper(
         intent = selected.get(decision_id)
         if pair["combined_action"] in {"BUY_YES", "BUY_NO"} and intent is None:
             raise ValueError("composed BUY lacks complete qualified intent")
-        signal = _prepare_signal(intent, pair, latest) if intent is not None else None
+        signal = _prepare_signal(intent, pair, latest, router_caps_enabled=(
+            "source_router_position_caps" in (account_config.get("risk") or {})
+        )) if intent is not None else None
         prepared.append((decision_id, pair, signal))
     if not prepared:
         raise ValueError("cohort has no composed decisions")
@@ -173,7 +176,15 @@ def consume_persistent_composed_paper(
         results = []
         for decision_id, pair, signal in prepared:
             path = journal_dir / (decision_id.removeprefix("forward-combined:") + ".json")
-            fingerprint = _digest({"pair": pair, "signal": signal})
+            fingerprint_signal = signal
+            if signal is not None and "source_router_position_caps" not in (account_config.get("risk") or {}):
+                # Provenance enrichment must not invalidate a legacy no-config
+                # journal. Keep it on the actual submitted/persisted signal,
+                # but hash the same numeric/control input shape as before.
+                fingerprint_signal = {key: value for key, value in signal.items() if key != "probability_evidence"}
+                fingerprint_signal["signals"] = {key: value for key, value in signal["signals"].items()
+                                                 if key != "probability_evidence"}
+            fingerprint = _digest({"pair": pair, "signal": fingerprint_signal})
             if path.exists():
                 entry = json.loads(path.read_text())
                 if entry.get("decision_id") != decision_id or entry.get("fingerprint") != fingerprint:
@@ -299,7 +310,8 @@ def _account_settings(config: Mapping[str, Any], root: Path) -> dict[str, Any]:
 
 
 def _prepare_signal(intent: Mapping[str, Any], pair: Mapping[str, Any],
-                    lane_rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+                    lane_rows: Sequence[Mapping[str, Any]], *, router_caps_enabled: bool = False) -> dict[str, Any]:
+    _reject_outcome_fields(intent)
     action = intent["action"]
     price = intent["entry_price"]
     probability = intent["model_probability"]
@@ -323,11 +335,22 @@ def _prepare_signal(intent: Mapping[str, Any], pair: Mapping[str, Any],
               "market_price": price, "edge": selected - price,
               "event_ticker": intent["event_key"],
               "shared_candidate_id": intent["shared_candidate_id"],
+              # Only opt-in accounts gain Router evidence on the actual signal;
+              # preserve legacy no-config signal fingerprints across restarts.
+              **{key: intent["source_context"][key]
+                 for key in ("router_selection", "router_decision_metadata")
+                 if router_caps_enabled and key in intent["source_context"]},
               "signals": {"composed_decision_id": intent["decision_id"],
                           "shared_candidate_id": intent["shared_candidate_id"],
                           "run_id": intent["run_id"], "shared_snapshot_id": intent["shared_snapshot_id"],
                           "selected_side_recorded_ask": quote, "conservative_estimate": price,
                           "quote_not_fill": True}}
+    evidence = project_probability_evidence(intent["source_context"].get("probability_evidence"), probability)
+    if evidence is not None:
+        # The root reaches the decision seam; nested signals survive SimTrade
+        # serialization. Absent evidence adds no keys to legacy fingerprints.
+        signal["probability_evidence"] = evidence
+        signal["signals"]["probability_evidence"] = evidence
     # Simulator re-routes from the market identity and question; it must agree
     # with the selected recorded route before a journal or account is created.
     if route.get("allowed") is not True or route.get("handler_id") != route_market(signal, {"scan": {

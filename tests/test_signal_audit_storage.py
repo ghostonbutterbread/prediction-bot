@@ -3,6 +3,7 @@ import json
 import os
 import tempfile
 import unittest
+from contextlib import chdir
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -15,7 +16,7 @@ from bot.strategies.signal_validator import SignalAuditLog, ValidationResult
 
 class SignalAuditStorageTests(unittest.TestCase):
     def test_enabled_strategy_audit_persists_outside_both_checkouts(self):
-        with tempfile.TemporaryDirectory() as temp:
+        with tempfile.TemporaryDirectory() as temp, chdir(Path.cwd()):
             root = Path(temp)
             storage = root / "storage"
             config = root / "config.json"

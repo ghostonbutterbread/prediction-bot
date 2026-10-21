@@ -171,6 +171,32 @@ class WeatherRegistry:
             raise KeyError(f"unknown city_id '{city_id}'")
         return [copy.deepcopy(source) for source in self._sources_by_city.get(city_id, [])]
 
+    @staticmethod
+    def collection_catalog() -> list[dict[str, Any]]:
+        """Global capabilities, including research-only and observation entries."""
+        import yaml
+
+        path = Path(__file__).with_name('source_catalog.yaml')
+        return yaml.safe_load(path.read_text(encoding='utf-8'))['sources']
+
+    def collection_sources(self, city: str) -> list[dict[str, Any]]:
+        """Local forecast candidates, not trust-selected votes or NWS aliases.
+
+        Global NWS/Open-Meteo/OWM adapters are collected once by the engine;
+        office aliases and station observations must not duplicate those votes.
+        Watch-only means unlearned, not excluded from read-only collection.
+        """
+        key = city.lower().strip()
+        for entry in self._data["cities"]:
+            aliases = [entry["city_id"], entry["city"], *entry.get("aliases", [])]
+            if key in {alias.lower() for alias in aliases}:
+                return [
+                    {**source, "city": entry["city"], "timezone": entry["timezone"]}
+                    for source in self.get_sources(entry["city_id"])
+                    if source["role"] == "forecast" and source["type"] != "official"
+                ]
+        return []
+
     def update_source_score(
         self,
         source_id: str,

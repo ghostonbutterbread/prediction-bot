@@ -14,6 +14,8 @@ Core principles:
 import json
 import logging
 import os
+from collections.abc import Mapping
+from decimal import Decimal, ROUND_DOWN
 from math import isfinite
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone, timedelta
@@ -239,6 +241,17 @@ class RiskManager:
         self.cooldown_after_losses = resolve_int("cooldown_after_losses", preset["cooldown_after_losses"])
         self.max_tradable_balance = resolve_float("max_tradable_balance_usd", config_value("max_tradable_balance", 0.0))
         self.max_position_size_usd = resolve_float("max_position_size_usd", config_value("max_position_size_usd", 0.0))
+        # Optional example research policy, not probabilities or calibrated odds.
+        # Nested-only and absent by default; never changes plain control signals.
+        self.source_router_position_caps = None
+        if "source_router_position_caps" in risk_cfg:
+            caps = risk_cfg["source_router_position_caps"]
+            if not isinstance(caps, Mapping) or not caps or set(caps) - {"weak", "strong"}:
+                raise ValueError("risk.source_router_position_caps must map weak/strong to finite fractions in [0, 1]")
+            if any(isinstance(value, bool) or not isinstance(value, (int, float))
+                   or not 0 <= value <= 1 or not isfinite(value) for value in caps.values()):
+                raise ValueError("risk.source_router_position_caps values must be finite fractions in [0, 1]")
+            self.source_router_position_caps = dict(caps)
         self.max_event_exposure_pct = resolve_float("max_event_exposure_pct", 0.10)
         self.max_event_positions = resolve_int("max_event_positions", 3)
         self.retrade_edge_premium = resolve_float("retrade_edge_premium", 0.01)
@@ -600,8 +613,58 @@ class RiskManager:
             position_size = clipped_size
             risk_score += 0.2
 
-        # Minimum position size: $1
-        position_size = max(self.min_position_size, round(position_size, 2))
+        router_cap = None
+        router_selected = "router_selection" in signal or "router_decision_metadata" in signal
+        if self.source_router_position_caps is not None and router_selected:
+            evidence = signal.get("router_decision_metadata")
+            grade = evidence.get("source_grade") if isinstance(evidence, Mapping) else None
+            strength = {"WEAK_YES": "weak", "WEAK_NO": "weak",
+                        "STRONG_YES": "strong", "STRONG_NO": "strong"}.get(grade) if isinstance(grade, str) else None
+            expected_direction = {
+                "WEAK_YES": "BUY_YES", "STRONG_YES": "BUY_YES",
+                "WEAK_NO": "BUY_NO", "STRONG_NO": "BUY_NO",
+            }.get(grade) if isinstance(grade, str) else None
+            if (strength is None or strength not in self.source_router_position_caps
+                    or signal.get("direction") != expected_direction):
+                return RiskDecision(
+                    approved=False, reason="Router source grade missing, invalid, unconfigured or inconsistent with selected direction",
+                    original_size=original_size, risk_score=1.0,
+                    metadata={"reason_code": "source_router_cap_evidence_invalid"},
+                )
+            fraction = self.source_router_position_caps[strength]
+            cap_dollars = max(Decimal(0), Decimal(str(self.state.current_balance)) * Decimal(str(fraction)))
+            cap_usd = float(cap_dollars)
+            router_cap = {"source_grade": grade, "strength": strength,
+                          "cap_fraction": fraction, "cap_usd": cap_usd,
+                          "bankroll": self.state.current_balance,
+                          "selection": signal.get("router_selection"),
+                          "requested_size": original_size}
+            # Apply last, intersect every existing limit, and round DOWN. Never
+            # raise a capped stake to the minimum (including sub-cent caps).
+            # Decimal arithmetic at this new monetary boundary avoids losing a
+            # cent to binary subtraction (40 - 39.1) without rounding a true
+            # sub-cent cap UP. Other pre-existing sizing behavior stays intact.
+            exposure_headroom = max(Decimal(0),
+                Decimal(str(self.state.current_balance)) * Decimal(str(self.max_exposure_pct))
+                - Decimal(str(self.state.total_exposure)))
+            final_limit = min(Decimal(str(value)) for value in (
+                position_size, original_size, cap_dollars, exposure_headroom,
+                effective_tradable_cash, spendable_cash))
+            if self.max_position_size_usd > 0:
+                final_limit = min(final_limit, Decimal(str(self.max_position_size_usd)))
+            position_size = float(final_limit.quantize(Decimal("0.01"), rounding=ROUND_DOWN))
+            router_cap["adjusted_size"] = position_size
+            warnings.append(f"Router {strength} source cap {fraction:.2%} of bankroll (${cap_usd:.2f}); final ${position_size:.2f}")
+            if position_size < self.min_position_size or position_size <= 0:
+                return RiskDecision(
+                    approved=False, reason="Router source cap leaves size below minimum",
+                    original_size=original_size, warnings=warnings, risk_score=1.0,
+                    metadata={"reason_code": "source_router_cap_below_minimum",
+                              "source_router_position_cap": router_cap},
+                )
+        else:
+            # Preserve historical minimum-size behavior when the policy is off.
+            position_size = max(self.min_position_size, round(position_size, 2))
         risk_score = min(1.0, risk_score)
 
         return RiskDecision(
@@ -616,6 +679,7 @@ class RiskManager:
                 "effective_tradable_cash": round(effective_tradable_cash, 2),
                 "max_position_size_usd": round(self.max_position_size_usd, 2),
                 "trading_enabled": self.state.trading_enabled,
+                **({"source_router_position_cap": router_cap} if router_cap is not None else {}),
             },
         )
 

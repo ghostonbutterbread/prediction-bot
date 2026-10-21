@@ -71,7 +71,7 @@ def auto_populate_source_router_history(
     snapshot_sha256 = hashlib.sha256(snapshot_bytes).hexdigest()
     resolution_sha256 = hashlib.sha256(resolution_bytes).hexdigest()
     generation_id = hashlib.sha256(_canonical_bytes({
-        "source_projection": "all_candidates_range_forecast_v7",
+        "source_projection": "all_candidates_predictive_forecast_v8",
         "schema_name": "auto_source_router_history_promotion",
         "schema_version": PIPELINE_SCHEMA_VERSION,
         "collector_snapshots_sha256": snapshot_sha256,
@@ -107,6 +107,7 @@ def auto_populate_source_router_history(
         observations = materialize_source_observation_ledger(
             replay_inputs_path=exported.records_path,
             finalized_outcomes_path=bound.outcomes_path,
+            strict_resolutions_path=materialized_resolutions,
             output_dir=staging_dir / "source_observations",
         )
         collapsed = materialize_strict_source_history_collapse(
@@ -135,7 +136,7 @@ def auto_populate_source_router_history(
         "schema_name": "auto_source_router_history_promotion",
         "schema_version": PIPELINE_SCHEMA_VERSION,
         "mode": "derived_only_post_resolver_source_router_history",
-        "source_projection": "all_candidates_range_forecast_v7",
+        "source_projection": "all_candidates_predictive_forecast_v8",
         "non_mutating": True,
         "network_access": False,
         "orders_wallets_or_trading_mutated": False,
@@ -223,6 +224,7 @@ def _counts(export: dict[str, Any], binding: dict[str, Any], observations: dict[
     collapse_counts = collapse.get("counts") or {}
     return {
         "pending": int(input_counts.get("pending") or 0),
+        "predictive_eligible": int(input_counts.get("predictive_history_eligible") or 0),
         "unresolved": int(binding_counts.get("unbound") or 0),
         "invalid": int(export.get("rejected_row_count") or 0) + int(binding_counts.get("invalid") or 0) + int(input_counts.get("invalid_input_records") or 0) + int(input_counts.get("invalid_outcomes") or 0),
         "eligible": int(collapse_counts.get("independent_rows") or 0),
@@ -306,7 +308,7 @@ def _result_from_manifest(manifest: dict[str, Any], manifest_path: Path, *, reus
     runtime = manifest.get("runtime_consumption") or {}
     generation_dir = manifest_path.parent.resolve()
     version = manifest.get("schema_version")
-    counts = {key: int((manifest.get("counts") or {}).get(key) or 0) for key in ("pending", "unresolved", "invalid", "eligible", "collapsed")}
+    counts = {key: int((manifest.get("counts") or {}).get(key) or 0) for key in ("pending", "unresolved", "invalid", "eligible", "collapsed", "predictive_eligible")}
     return AutoSourceRouterPromotionResult(
         status=str(manifest.get("status")), reused=reused, generation_dir=generation_dir,
         history_path=_generation_path(runtime["history_ledger_path"], generation_dir, label="runtime history_ledger_path", schema_version=version),

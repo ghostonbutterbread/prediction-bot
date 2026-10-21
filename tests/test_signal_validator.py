@@ -1,8 +1,10 @@
+import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 
 from bot.exchanges.base import Market
 from bot.feeds.weather_pro import MultiSourceForecast, NWSFeed, ProWeatherEngine, WeatherSnapshot
+from bot.feeds.weather_capture_store import WeatherCaptureStore
 from bot.strategies.signal_validator import SignalValidator
 
 
@@ -208,10 +210,15 @@ class SignalValidatorTests(unittest.TestCase):
 
     def test_nws_forecast_metadata_records_distinct_high_and_low_periods(self):
         class FakeResponse:
+            def __init__(self, payload=None):
+                self.payload = payload
+
             def raise_for_status(self):
                 return None
 
             def json(self):
+                if self.payload is not None:
+                    return self.payload
                 return {
                     "properties": {
                         "periods": [
@@ -239,16 +246,40 @@ class SignalValidatorTests(unittest.TestCase):
                     }
                 }
 
-        class FakeHttp:
-            def get(self, *args, **kwargs):
-                return FakeResponse()
+        requests = []
 
-        feed = NWSFeed()
+        class FakeHttp:
+            def get(self, url, **kwargs):
+                requests.append(url)
+                if url == "https://api.weather.gov/stations/KAUS":
+                    # Synthetic distinct station geometry, not the city centroid.
+                    return FakeResponse({
+                        "geometry": {"type": "Point", "coordinates": [-97.7, 30.2]},
+                        "properties": {"stationIdentifier": "KAUS"},
+                    })
+                if url == "https://api.weather.gov/points/30.2,-97.7":
+                    return FakeResponse({"properties": {"gridId": "EWX", "gridX": 152, "gridY": 91}})
+                if url == "https://api.weather.gov/gridpoints/EWX/152,91/forecast":
+                    return FakeResponse()
+                raise AssertionError(f"Unexpected forecast fixture request: {url}")
+
+            def close(self):
+                return None
+
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        feed = NWSFeed(capture_store=WeatherCaptureStore(storage_root=temporary.name))
+        self.addCleanup(feed.close)
+        feed.http.close()
         feed.http = FakeHttp()
-        feed._points_cache["austin"] = (datetime.now(timezone.utc), ("EWX", 152, 91))
 
         snapshot = feed.get_forecast("austin")
 
+        self.assertEqual(requests, [
+            "https://api.weather.gov/stations/KAUS",
+            "https://api.weather.gov/points/30.2,-97.7",
+            "https://api.weather.gov/gridpoints/EWX/152,91/forecast",
+        ])
         self.assertIsNotNone(snapshot)
         details = snapshot.source_details
         self.assertEqual(details["periods_used"][0]["name"], "Today")

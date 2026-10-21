@@ -57,6 +57,7 @@ class SourceObservationLedgerResult:
 
 def materialize_source_observation_ledger(
     *, replay_inputs_path: str | Path, finalized_outcomes_path: str | Path, output_dir: str | Path,
+    strict_resolutions_path: str | Path | None = None,
 ) -> SourceObservationLedgerResult:
     """Write versioned pending/settled/unusable source artifacts from derived inputs.
 
@@ -103,6 +104,8 @@ def materialize_source_observation_ledger(
                 raise SourceObservationLedgerError(f"conflicting duplicate source observation ID: {observation_id}")
 
     outcome_index, conflicting_outcomes = _outcome_index(outcomes_path, counters)
+    if strict_resolutions_path is not None:
+        _attach_resolver_knowledge(outcome_index.values(), Path(strict_resolutions_path))
     pending_rows = list(pending_by_id.values())
     settled_rows: list[dict[str, Any]] = []
     unusable_rows: list[dict[str, Any]] = []
@@ -157,9 +160,17 @@ def materialize_source_observation_ledger(
             "direction_correct": implied == outcome["official_outcome"],
             "eligible_for_reliability": True,
             "eligible_for_source_history": eligibility == _ELIGIBLE_STRICT_SOURCE_PROOF,
+            "eligible_for_predictive_history": (
+                pending["predictive_source_proof"]["status"] == "eligible_predictive_source_proof"
+                and predictive_context_supported(pending)
+                and outcome.get("resolver_knowledge_verified") is True
+            ),
+            "predictive_availability_field": "known_after",
             "availability_field": "settlement_ts",
             "settlement_ts": outcome["settlement_ts"],
-            "known_after": outcome["settlement_ts"],
+            "known_after": outcome.get("known_after") if strict_resolutions_path is not None else outcome["settlement_ts"],
+            "resolver_knowledge_verified": outcome.get("resolver_knowledge_verified", False),
+            "predictive_history_reason": outcome.get("predictive_history_reason"),
             "resolution_id": outcome["resolution_id"],
             "resolution_resolved_at": outcome.get("resolution_resolved_at"),
             "resolution_retrieved_at": outcome.get("resolution_retrieved_at"),
@@ -203,6 +214,7 @@ def materialize_source_observation_ledger(
             "pending": len(pending_rows), "settled": len(settled_rows), "unsettled_or_unusable": len(unusable_rows),
             "void_resolution": len(void_rows),
             "strict_proof_rejection_counts": dict(sorted(strict_rejection_counts.items())),
+            "predictive_history_eligible": sum(row["eligible_for_predictive_history"] for row in settled_rows),
         },
         "output_artifacts": {
             PENDING_FILENAME: {"sha256": hashlib.sha256(pending_bytes).hexdigest(), "record_count": len(pending_rows)},
@@ -234,6 +246,38 @@ def is_eligible_for_future_history(row: Mapping[str, Any], future_decision_time:
         and source <= observed < settlement < future
         and (row.get("source_fetched_at") is None or (fetched is not None and fetched <= observed))
     )
+
+
+def predictive_context_supported(row: Mapping[str, Any]) -> bool:
+    """Unknown locations must not pool unrelated physical weather events."""
+    return (row.get("city_id") not in {None, "", "unknown"}
+            and row.get("market_kind") in {"high", "low"}
+            and row.get("contract_shape") in {"tail", "range", "bucket"})
+
+
+def is_eligible_for_predictive_history(row: Mapping[str, Any], future_decision_time: str) -> bool:
+    """Admit only independently resolved predictors actually known before t."""
+    proof = row.get("predictive_source_proof") or {}
+    provenance = row.get("resolution_provenance") or {}
+    if (row.get("eligible_for_predictive_history") is not True
+            or row.get("resolver_knowledge_verified") is not True
+            or proof.get("status") != "eligible_predictive_source_proof" or proof.get("reasons") != []
+            or _decision_identity(row) is None
+            or not _SHA256_RE.fullmatch(str(provenance.get("strict_resolution_source_sha256") or ""))
+            or not _SHA256_RE.fullmatch(str(provenance.get("raw_resolution_row_sha256") or ""))
+            or row.get("official_outcome") not in {"YES", "NO"}
+            or not predictive_context_supported(row)):
+        return False
+    implied = _source_implied_outcome(row)
+    if implied is None or row.get("source_implied_outcome") != implied or row.get("direction_correct") is not (implied == row["official_outcome"]):
+        return False
+    source, observed, settlement, known = (_parse_time(row.get(key)) for key in
+        ("source_as_of", "input_observed_at", "settlement_ts", "known_after"))
+    future = _parse_time(future_decision_time)
+    fetched = _parse_time(row.get("source_fetched_at"))
+    return (source is not None and observed is not None and settlement is not None and known is not None and future is not None
+            and source <= observed < settlement <= known < future
+            and (row.get("source_fetched_at") is None or (fetched is not None and fetched <= observed)))
 
 
 def _pending_rows_for_input(row: Mapping[str, Any], identity: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -270,6 +314,12 @@ def _pending_rows_for_input(row: Mapping[str, Any], identity: Mapping[str, Any])
                 contract_shape=observation.market.contract_shape,
                 question_side=observation.market.question_side,
                 observed_at=identity["decision_key"]["observed_at_utc"],
+            )
+            predictive_proof = predictive_source_observation_proof(
+                source_record=source_record, target_proof=target_proof, strict_proof=strict_proof,
+                observed_at=identity["decision_key"]["observed_at_utc"],
+                fetched_at=_first_text(_mapping_text(source_record, "source_fetched_at", "fetched_at"),
+                                      _mapping_text(snapshot, "source_fetched_at", "fetched_at")),
             )
             eligibility = _ELIGIBLE_STRICT_SOURCE_PROOF if (
                 target_proof["status"] == _ELIGIBLE_TARGET_PROOF and strict_proof["status"] == "eligible"
@@ -320,6 +370,20 @@ def _pending_rows_for_input(row: Mapping[str, Any], identity: Mapping[str, Any])
                 "source_correctness_eligibility": eligibility,
                 "source_target_proof": target_proof,
                 "strict_source_proof": strict_proof,
+                "retained_clock_evidence": _retained_forecast_clocks(
+                    source_record, snapshot, identity["decision_key"]["observed_at_utc"])[0],
+                "predictive_source_proof": predictive_proof,
+                "forecast_semantics": {
+                    "evidence_type": source_record.get("evidence_type"),
+                    "forecast_type": source_record.get("forecast_type"),
+                    "period_name": _first_text(_mapping_text(source_record, "forecast_period_name", "period_name"), _nested_text(source_record, "source_metadata", "period_name")),
+                    "is_daytime": source_record.get("is_daytime", (source_record.get("source_metadata") or {}).get("is_daytime")),
+                    "measurement_kind": source_record.get("forecast_measurement_kind"),
+                    "period_start": _first_text(_nested_text(source_record, "target_mapping", "source_period_start"), target_identity["forecast_start"]),
+                    "period_end": _first_text(_nested_text(source_record, "target_mapping", "source_period_end"), target_identity["forecast_end"]),
+                    "target_mapping": source_record.get("target_mapping"),
+                    "measurement_equivalence": "not_asserted_predictor_only",
+                },
                 "source_provenance": {
                     "source_record_sha256": source_record_sha256,
                     "canonical_input_sha256": identity["canonical_input_sha256"],
@@ -458,6 +522,24 @@ def _source_period_target_problem(
     low_ends_on_target = bool(period_dates["end"]) and all(
         period_day == target for period_day in period_dates["end"]
     )
+    local_prior_night = source.get("forecast_type") == "local_prior_night_low_predictor"
+    if local_prior_night:
+        # The local daily-row minimum predicts the following morning. Its
+        # retained start is the prior day's row timestamp, not a fabricated
+        # nighttime boundary; the producer does not supply a period end.
+        # This explicit target mapping proves a predictor, never a daily low.
+        if not (
+            is_low and str(source.get("source_evidence_version")).strip() == "1"
+            and source.get("evidence_type") == "forecast"
+            and source.get("scoreable_forecast") is True
+            and mapping.get("mapping") == "source_local_dated_predictor"
+            and _normalized_date(mapping.get("market_target_date")) == market_date
+            and _normalized_date(mapping.get("source_target_date")) == market_date
+            and source_timezone is not None and period_dates["start"]
+            and all(day == target - timedelta(days=1) for day in period_dates["start"])
+            and (not period_dates["end"] or low_ends_on_target)
+        ):
+            return "source_period_target_mismatch"
     full_day_low = (is_low and bool(period_times["start"] and period_times["end"])
                     and all(period.date() == target and period.hour == 0 and period.minute == 0
                             and period.second == 0 and period.microsecond == 0
@@ -471,7 +553,7 @@ def _source_period_target_problem(
             day_offset = (period_day - target).days
             if day_offset == 0:
                 continue
-            if boundary == "start" and day_offset == -1 and is_low and low_ends_on_target:
+            if boundary == "start" and day_offset == -1 and is_low and (low_ends_on_target or local_prior_night):
                 continue
             if boundary == "end" and day_offset == 1 and (not is_low or full_day_low):
                 continue
@@ -534,6 +616,8 @@ def strict_source_observation_proof(
         reasons.append("missing_or_unoffset_source_as_of")
     elif observed_at_time is None or source_as_of_time > observed_at_time:
         reasons.append("source_as_of_after_immutable_observed_at")
+    _, clock_reasons = _retained_forecast_clocks(source_record, snapshot, observed_at)
+    reasons.extend(reason for reason in clock_reasons if reason not in reasons)
     source_timezone_name = _text(mapping.get("source_timezone"))
     hourly_day_end = _complete_open_meteo_hourly_day_end(source_record, mapping, _normalized_date(market_date))
     if source_as_of_time is not None:
@@ -560,19 +644,30 @@ def strict_source_observation_proof(
     ), source_timezone_name)
     target_day = _normalized_date(market_date)
     kind = (_text(source_record.get("forecast_measurement_kind")) or "").lower()
-    if source_id == "nws" and target_day and kind in {"high", "low"}:
-        # NWS /forecast returns daytime/nighttime periods, not daily extrema.
+    if target_day and kind in {"high", "low"}:
+        # Bounded daytime/nighttime periods are not daily extrema, regardless
+        # of provider (including city-specific forecasts).
         # A retained bounded period proves a daily target only when it covers
         # the entire source-local calendar day; older unbounded rows retain
         # their legacy treatment rather than inventing a missing bound.
-        partial_day = bool((period_start or period_end) and (
-            not period_start or not period_end
+        effective_period_end = hourly_day_end.astimezone(period_start.tzinfo) if hourly_day_end and period_start else period_end
+        partial_day = bool((period_start or effective_period_end) and (
+            not period_start or not effective_period_end
             or period_start.date().isoformat() != target_day
             or period_start.time().isoformat() != "00:00:00"
-            or period_end.date() != period_start.date() + timedelta(days=1)
-            or period_end.time().isoformat() != "00:00:00"
+            or effective_period_end.date() != period_start.date() + timedelta(days=1)
+            or effective_period_end.time().isoformat() != "00:00:00"
         ))
-        if partial_day or (kind == "low" and _text(mapping.get("mapping")) == "source_local_nws_night_low_proxy"):
+        metadata = source_record.get("source_metadata")
+        # Calendar-label midnight bounds are not provider measurement-interval
+        # proof. Preserve the producer's explicit non-equivalence at either
+        # recorded alias, even when those bounds resemble an entire day.
+        explicitly_non_full_day = (
+            source_record.get("full_day_measurement_equivalent") is False
+            or (isinstance(metadata, Mapping) and metadata.get("full_day_measurement_equivalent") is False)
+        )
+        if (partial_day or explicitly_non_full_day
+                or (kind == "low" and _text(mapping.get("mapping")) == "source_local_nws_night_low_proxy")):
             reasons.append(f"partial_day_{kind}_proxy_not_full_day")
     if not source_timezone_name:
         reasons.append("missing_source_timezone")
@@ -616,6 +711,108 @@ def strict_source_observation_proof(
         "contract_shape": expected["contract_shape"],
         "question_side": expected["question_side"],
     }
+
+
+def _retained_forecast_clocks(source: Mapping[str, Any], snapshot: Mapping[str, Any],
+                              observed_at: Any) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    """Validate retained aliases at their source or aggregate clock boundary.
+
+    Provider issue clocks cannot follow their own or enclosing capture. The
+    completed snapshot's as-of clock can legitimately follow provider captures;
+    compare it only with the snapshot capture, never with an earlier provider.
+    """
+    groups = {
+        "source_issue": (source, ("source_as_of", "as_of", "observed_at")),
+        "snapshot_issue": (snapshot, ("source_as_of", "as_of", "source_timestamp")),
+        "source_capture": (source, ("source_fetched_at", "fetched_at")),
+        "snapshot_capture": (snapshot, ("source_fetched_at", "fetched_at")),
+    }
+    evidence = {name: {key: record[key] for key in keys if key in record and record[key] is not None}
+                for name, (record, keys) in groups.items()}
+    reasons: list[str] = []
+    observed = _parse_time(observed_at)
+    clock_times: dict[str, list[datetime]] = {}
+    for name, values in evidence.items():
+        parsed = [_parse_time(value) for value in values.values()]
+        if any(value is None for value in parsed):
+            reasons.append("invalid_retained_source_clock")
+        valid = [value for value in parsed if value is not None]
+        if len(set(valid)) > 1:
+            reasons.append("conflicting_retained_source_clock_aliases")
+        if any(observed is None or value > observed for value in valid):
+            reasons.append("retained_source_clock_after_immutable_observed_at")
+        clock_times[name] = valid
+    for issue_group, capture_groups in (
+        ("source_issue", ("source_capture", "snapshot_capture")),
+        ("snapshot_issue", ("snapshot_capture",)),
+    ):
+        issues = clock_times[issue_group]
+        captures = [value for group in capture_groups for value in clock_times[group]]
+        if issues and captures and max(issues) > min(captures):
+            reasons.append("source_issue_after_declared_capture")
+    return evidence, list(dict.fromkeys(reasons))
+
+def predictive_source_observation_proof(
+    *, source_record: Mapping[str, Any], target_proof: Mapping[str, Any], strict_proof: Mapping[str, Any],
+    observed_at: str, fetched_at: str | None = None,
+) -> dict[str, Any]:
+    """Prove a labelled predictor, without claiming daily-extremum equivalence.
+
+    Date, location, kind, contract and capture-clock checks remain identical.
+    The only strict-proof exclusions relaxed here are partial day/night proxy
+    semantics. These rows never gain the strict full-day marker.
+    """
+    reasons = [reason for reason in strict_proof.get("reasons", ())
+               if reason not in {"partial_day_high_proxy_not_full_day", "partial_day_low_proxy_not_full_day"}]
+    if target_proof.get("status") != _ELIGIBLE_TARGET_PROOF:
+        reasons.append(str(target_proof.get("status") or "source_target_unproven"))
+    if source_record.get("evidence_type") != "forecast" or source_record.get("scoreable_forecast") is not True:
+        reasons.append("source_not_explicit_scoreable_forecast")
+    if fetched_at is not None:
+        fetched, observed = _parse_time(fetched_at), _parse_time(observed_at)
+        if fetched is None:
+            reasons.append("missing_or_unoffset_source_fetched_at")
+        elif observed is None or fetched > observed:
+            reasons.append("source_fetched_at_after_immutable_observed_at")
+    return {**strict_proof, "status": "eligible_predictive_source_proof" if not reasons else "unusable_predictive_source_proof",
+            "reasons": reasons, "measurement_equivalence": "not_asserted_predictor_only"}
+
+
+def _attach_resolver_knowledge(outcomes: Iterable[dict[str, Any]], path: Path) -> None:
+    """Recover clocks only from the exact independently bound resolver receipt.
+
+    The legacy outcome binder projects away knowledge clocks. Re-read its
+    hash-pinned original, never use the exchange settlement time as knowledge.
+    """
+    from bot.replay_outcome_binding import _normalize_strict_resolution
+
+    raw_bytes = path.read_bytes()
+    digest = hashlib.sha256(raw_bytes).hexdigest()
+    lines = raw_bytes.splitlines()
+    for outcome in outcomes:
+        provenance = outcome.get("provenance") or {}
+        line = provenance.get("strict_resolution_source_line_number")
+        if (provenance.get("strict_resolution_source_sha256") != digest
+                or type(line) is not int or line < 1 or line > len(lines)
+                or hashlib.sha256(lines[line - 1]).hexdigest() != provenance.get("raw_resolution_row_sha256")):
+            raise SourceObservationLedgerError("independent resolver receipt mismatch")
+        raw = json.loads(lines[line - 1])
+        normalized = _normalize_strict_resolution(raw, outcome["market_id"])
+        if normalized is None or any(normalized[key] != outcome[key] for key in ("official_outcome", "settlement_ts", "resolution_id")):
+            raise SourceObservationLedgerError("independent resolver identity/outcome mismatch")
+        resolution = raw.get("resolution") if isinstance(raw.get("resolution"), Mapping) else {}
+        clocks = [value for value in (raw.get("known_after"), raw.get("resolved_at"), raw.get("retrieved_at"),
+                                      resolution.get("resolved_at"), resolution.get("retrieved_at")) if value is not None]
+        parsed = [_parse_time(value) for value in clocks]
+        valid_times = [value for value in parsed if value is not None]
+        known = max(valid_times) if valid_times and len(valid_times) == len(parsed) else None
+        settlement = _parse_time(outcome["settlement_ts"])
+        verified = known is not None and settlement is not None and known >= settlement
+        outcome.update(known_after=known.isoformat() if verified and known is not None else None,
+                       resolver_knowledge_verified=verified,
+                       predictive_history_reason=None if verified else "missing_or_invalid_resolver_knowledge",
+                       resolution_resolved_at=resolution.get("resolved_at") or raw.get("resolved_at"),
+                       resolution_retrieved_at=resolution.get("retrieved_at") or raw.get("retrieved_at"))
 
 
 def _normalized_city(value: Any) -> str | None:
