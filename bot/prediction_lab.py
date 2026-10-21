@@ -80,8 +80,15 @@ class PredictionLab:
         from bot.collector_paths import collector_root
         from bot.feeds.weather_capture_store import WeatherCaptureStore
 
+        capture_cfg = self.lab_cfg.get('weather_capture_storage', {})
+        if not isinstance(capture_cfg, dict):
+            raise ValueError('prediction_lab.weather_capture_storage must be a mapping')
+        default_limited = (self.mode == 'collector' and self.observer_mode
+                           and bool(self.lab_cfg.get('enabled', True)))
         self.capture_store = WeatherCaptureStore(storage_root=collector_root(
-            (self.config.get('runtime') or {}).get('storage_root')))
+            (self.config.get('runtime') or {}).get('storage_root')),
+            max_bytes=capture_cfg.get('max_bytes', 2147483648 if default_limited else None),
+            min_free_bytes=capture_cfg.get('min_free_bytes', 10737418240 if default_limited else None))
         self.strategy = EnhancedStrategyEngine(strategy_cfg, capture_store=self.capture_store)
         self.groups = [str(group).strip().lower() for group in (self.lab_cfg.get("groups") or ["weather"]) if str(group).strip()]
         self.max_markets_per_run = int(self.lab_cfg.get("max_markets_per_run", 500) or 500)
@@ -1962,6 +1969,7 @@ class PredictionLab:
             "warning_threshold_pct": warning_threshold_pct,
             "warning_threshold_reached": bool(pct_of_cap is not None and pct_of_cap >= warning_threshold_pct),
             "over_cap": bool(cap_bytes > 0 and total_bytes >= cap_bytes),
+            "weather_capture": self.capture_store.usage(),
         }
 
     def update_runtime_state(self, **updates: Any) -> None:
@@ -1980,6 +1988,8 @@ class PredictionLab:
             "last_storage_check_at": None,
             "storage_usage_bytes": 0,
             "storage_usage_gb": 0.0,
+            "weather_capture_storage": {"bytes": None, "max_bytes": self.capture_store.max_bytes,
+                                        "min_free_bytes": self.capture_store.min_free_bytes, "free_bytes": None},
             "warning_emitted": False,
             "open_prediction_count": 0,
             "resolved_prediction_count": 0,

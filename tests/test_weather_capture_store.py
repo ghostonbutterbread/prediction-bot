@@ -1,9 +1,12 @@
 """Raw transport evidence is immutable and compact at the producer boundary."""
 import hashlib
 import json
+import shutil
 from pathlib import Path
 import tempfile
 import unittest
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from unittest.mock import patch
 from types import SimpleNamespace
 import httpx
 
@@ -15,7 +18,136 @@ from tests.test_weather_broad_collection import gray_page
 from bot.feeds import weather_pro
 
 
+def _process_receipt(root, index):
+    from bot.feeds.weather_capture_store import WeatherCaptureStore, CaptureRetentionError
+    try:
+        WeatherCaptureStore(storage_root=root, max_bytes=20000, min_free_bytes=0).retain_receipt(
+            {'index': index, 'payload': 'x' * 1000})
+        return True
+    except CaptureRetentionError:
+        return False
+
+
 class CaptureStoreTests(unittest.TestCase):
+    def test_process_writers_share_one_account_and_do_not_overspend(self):
+        from bot.feeds.weather_capture_store import WeatherCaptureStore
+        with tempfile.TemporaryDirectory() as root:
+            with ProcessPoolExecutor(max_workers=4) as pool:
+                results = list(pool.map(_process_receipt, [root] * 12, range(12)))
+            self.assertTrue(any(results))
+            self.assertTrue(any(not value for value in results))
+            store = WeatherCaptureStore(storage_root=root, max_bytes=20000, min_free_bytes=0)
+            receipts = list((Path(root) / 'data/weather_captures/receipts').iterdir())
+            self.assertEqual(len(receipts), sum(results))
+            self.assertEqual(store.usage()['bytes'], sum(path.stat().st_size for path in receipts))
+
+    def test_capped_store_counts_distinct_receipts_and_shared_blob(self):
+        from bot.feeds.weather_capture_store import WeatherCaptureStore, CaptureRetentionError
+        with tempfile.TemporaryDirectory() as root:
+            store = WeatherCaptureStore(storage_root=root, max_bytes=30000, min_free_bytes=0)
+            first = store.retain(b'a' * 100, metadata={'city': 'austin'})
+            second = WeatherCaptureStore(storage_root=root, max_bytes=30000, min_free_bytes=0).retain(
+                b'a' * 100, metadata={'city': 'vegas'})
+            store.retain_receipt({'collection': 'attempt'})
+            self.assertEqual(store.read_verified(first), b'a' * 100)
+            self.assertEqual(store.read_verified(second), b'a' * 100)
+            self.assertEqual(store.usage()['bytes'], 100 + sum(p.stat().st_size for p in
+                (Path(root) / 'data/weather_captures/receipts').iterdir()))
+            self.assertEqual(len(list((Path(root) / 'data/weather_captures/blobs').rglob('*.bin'))), 1)
+            with self.assertRaisesRegex(CaptureRetentionError, 'max_bytes'):
+                store.retain(b'b' * 29000, metadata={})
+
+    def test_capped_concurrent_stores_serialize_and_failures_retry(self):
+        from bot.feeds.weather_capture_store import WeatherCaptureStore, CaptureRetentionError
+        with tempfile.TemporaryDirectory() as root:
+            stores = [WeatherCaptureStore(storage_root=root, max_bytes=21000, min_free_bytes=0) for _ in range(8)]
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                results = list(pool.map(lambda item: self._try_receipt(*item), enumerate(stores)))
+            self.assertTrue(any(results))
+            self.assertEqual(stores[0].usage()['bytes'], sum(p.stat().st_size for p in
+                (Path(root) / 'data/weather_captures/receipts').iterdir()))
+            with patch.object(stores[0], '_write_object', side_effect=OSError('fixture')):
+                with self.assertRaises(CaptureRetentionError):
+                    stores[0].retain_receipt({'failed': True})
+            stores[1].retain_receipt({'retry': True})
+
+    @staticmethod
+    def _try_receipt(index, store):
+        try:
+            store.retain_receipt({'index': index, 'payload': 'a' * 1000})
+            return True
+        except Exception as exc:
+            from bot.feeds.weather_capture_store import CaptureRetentionError
+            if not isinstance(exc, CaptureRetentionError):
+                raise
+            return False
+
+    def test_existing_unaccounted_root_fails_closed(self):
+        from bot.feeds.weather_capture_store import WeatherCaptureStore, CaptureRetentionError
+        with tempfile.TemporaryDirectory() as root:
+            WeatherCaptureStore(storage_root=root).retain(b'old', metadata={})
+            capped = WeatherCaptureStore(storage_root=root, max_bytes=30000, min_free_bytes=0)
+            with self.assertRaisesRegex(CaptureRetentionError, 'accounting'):
+                capped.retain(b'new', metadata={})
+
+    def test_reserve_and_actual_lab_configuration(self):
+        from bot.feeds.weather_capture_store import CaptureRetentionError
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as root:
+            config = {'runtime': {'storage_root': root, 'base_dir': 'lab'},
+                      'prediction_lab': {'mode': 'collector', 'observer_mode': True,
+                                         'weather_capture_storage': {'max_bytes': 30000, 'min_free_bytes': 10}}}
+            lab = PredictionLab(config)
+            self.assertEqual(lab.capture_store.max_bytes, 30000)
+            self.assertEqual(lab.capture_store.min_free_bytes, 10)
+            with patch('bot.feeds.weather_capture_store.shutil.disk_usage', return_value=shutil._ntuple_diskusage(100000, 99995, 5)):
+                with self.assertRaisesRegex(CaptureRetentionError, 'min_free_bytes'):
+                    lab.capture_store.retain(b'new', metadata={})
+            self.assertEqual(lab.capture_store.usage()['bytes'], 0)
+            self.assertEqual(lab.capture_store.retain(b'new', metadata={})['payload_bytes'], 3)
+            self.assertEqual(lab.capture_store.usage()['bytes'], lab.storage_usage()['weather_capture']['bytes'])
+
+    def test_boundary_receipt_and_interrupted_publication_retry(self):
+        from bot.feeds.weather_capture_store import WeatherCaptureStore, CaptureRetentionError
+        with tempfile.TemporaryDirectory() as root:
+            encoded = b'{"test":1}'
+            store = WeatherCaptureStore(storage_root=root, max_bytes=16384 + 2 * len(encoded), min_free_bytes=0)
+            store.retain_receipt({'test': 1})
+            self.assertEqual(store.usage()['bytes'], len(encoded))
+            with self.assertRaisesRegex(CaptureRetentionError, 'max_bytes'):
+                store.retain_receipt({'test': 2})
+            receipt_root = Path(root) / 'data/weather_captures/receipts'
+            self.assertEqual(len(list(receipt_root.iterdir())), 1)
+        with tempfile.TemporaryDirectory() as root:
+            store = WeatherCaptureStore(storage_root=root, max_bytes=30000, min_free_bytes=0)
+            with patch('bot.feeds.weather_capture_store.os.link', side_effect=OSError('fixture')):
+                with self.assertRaises(CaptureRetentionError):
+                    store.retain_receipt({'test': 1})
+            self.assertEqual(store.usage()['bytes'], 0)
+            self.assertEqual(list((Path(root) / 'data/weather_captures/receipts').iterdir()), [])
+            store.retain_receipt({'test': 1})
+            self.assertEqual(store.usage()['bytes'], len(encoded))
+
+    def test_default_scope_validation_and_untrusted_accounting(self):
+        from bot.feeds.weather_capture_store import WeatherCaptureStore, CaptureRetentionError
+        with tempfile.TemporaryDirectory() as root:
+            base = {'runtime': {'storage_root': root, 'base_dir': 'lab'}}
+            limited = PredictionLab({**base, 'prediction_lab': {'mode': 'collector', 'observer_mode': True}})
+            self.assertEqual((limited.capture_store.max_bytes, limited.capture_store.min_free_bytes),
+                             (2147483648, 10737418240))
+            legacy = PredictionLab({**base, 'prediction_lab': {'mode': 'seed_and_watch'}})
+            self.assertIsNone(legacy.capture_store.max_bytes)
+            self.assertIsNone(legacy.capture_store.min_free_bytes)
+            with self.assertRaises(ValueError):
+                PredictionLab({**base, 'prediction_lab': {'weather_capture_storage': {'max_bytes': True}}})
+            with self.assertRaises(ValueError):
+                PredictionLab({**base, 'prediction_lab': {'weather_capture_storage': {'min_free_bytes': -1}}})
+            limited.capture_store.retain_receipt({'city': 'austin'})
+            with self.assertRaisesRegex(CaptureRetentionError, 'configure limits'):
+                legacy.capture_store.retain(b'uncapped writer', metadata={})
+            (Path(root) / 'data/weather_captures/accounting.json').write_text('{}')
+            with self.assertRaisesRegex(CaptureRetentionError, 'accounting untrusted'):
+                limited.capture_store.retain_receipt({'city': 'vegas'})
     def test_verified_capture_binds_metadata_to_the_immutable_attempt_receipt(self):
         from bot.feeds.weather_capture_store import WeatherCaptureStore, CaptureRetentionError
         with tempfile.TemporaryDirectory() as root:
