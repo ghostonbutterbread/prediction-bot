@@ -715,10 +715,11 @@ def strict_source_observation_proof(
 
 def _retained_forecast_clocks(source: Mapping[str, Any], snapshot: Mapping[str, Any],
                               observed_at: Any) -> tuple[dict[str, dict[str, Any]], list[str]]:
-    """Validate all retained issue/capture aliases without replacing originals.
+    """Validate retained aliases at their source or aggregate clock boundary.
 
-    Source and snapshot captures can differ; aliases within one object assert
-    the same clock. An issue can precede but cannot follow its earliest capture.
+    Provider issue clocks cannot follow their own or enclosing capture. The
+    completed snapshot's as-of clock can legitimately follow provider captures;
+    compare it only with the snapshot capture, never with an earlier provider.
     """
     groups = {
         "source_issue": (source, ("source_as_of", "as_of", "observed_at")),
@@ -730,8 +731,7 @@ def _retained_forecast_clocks(source: Mapping[str, Any], snapshot: Mapping[str, 
                 for name, (record, keys) in groups.items()}
     reasons: list[str] = []
     observed = _parse_time(observed_at)
-    issue_times: list[datetime] = []
-    capture_times: list[datetime] = []
+    clock_times: dict[str, list[datetime]] = {}
     for name, values in evidence.items():
         parsed = [_parse_time(value) for value in values.values()]
         if any(value is None for value in parsed):
@@ -741,9 +741,15 @@ def _retained_forecast_clocks(source: Mapping[str, Any], snapshot: Mapping[str, 
             reasons.append("conflicting_retained_source_clock_aliases")
         if any(observed is None or value > observed for value in valid):
             reasons.append("retained_source_clock_after_immutable_observed_at")
-        (capture_times if name.endswith("capture") else issue_times).extend(valid)
-    if issue_times and capture_times and max(issue_times) > min(capture_times):
-        reasons.append("source_issue_after_declared_capture")
+        clock_times[name] = valid
+    for issue_group, capture_groups in (
+        ("source_issue", ("source_capture", "snapshot_capture")),
+        ("snapshot_issue", ("snapshot_capture",)),
+    ):
+        issues = clock_times[issue_group]
+        captures = [value for group in capture_groups for value in clock_times[group]]
+        if issues and captures and max(issues) > min(captures):
+            reasons.append("source_issue_after_declared_capture")
     return evidence, list(dict.fromkeys(reasons))
 
 def predictive_source_observation_proof(
