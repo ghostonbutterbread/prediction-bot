@@ -3,7 +3,7 @@
 **Status:** implementation candidate; release and collector activation verification in progress.
 **Owner:** Prediction Bot / Hermes; canonical specification is this file.
 **Supersedes:** the opt-in-only deployment description in earlier revisions of this file.
-**Implementation:** inherited collection/selection checkpoint `4b7ee3e4fadc4855faa4564dabb8ad64ecbf82a6`; collector-default continuation pending commit.
+**Implementation:** inherited collection/selection checkpoint `4b7ee3e4fadc4855faa4564dabb8ad64ecbf82a6`; collector-default checkpoint `3e0b7d3dbcccbffd1bc33ad03fd8ecf4635a9f99` (not yet release-approved or active).
 
 ## Required default workflow
 
