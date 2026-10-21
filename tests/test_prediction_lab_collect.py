@@ -293,6 +293,8 @@ class PredictionLabCollectorTests(unittest.TestCase):
         path.write_text(
             "\n".join(
                 [
+                    "runtime:",
+                    f"  storage_root: {data_dir}",
                     f"data_dir: {data_dir}",
                     "prediction_lab:",
                     f"  enabled: {'true' if enabled else 'false'}",
@@ -2480,6 +2482,24 @@ class PredictionLabCollectorTests(unittest.TestCase):
             self.assertTrue(state["observer_mode"])
             self.assertFalse(state["trading_enabled"])
             self.assertFalse(state["order_execution_enabled"])
+
+    def test_capture_accounting_failure_pauses_collector_with_named_reason(self):
+        from bot.feeds.weather_capture_store import CaptureRetentionError
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / 'config.yaml'
+            self._write_config(config_path, data_dir=root)
+            daemon = PredictionLabCollectorDaemon(
+                config_path, config_loader=load_config,
+                exchange_builder=lambda config, demo=False: (_FakeBot(), SimpleNamespace(get_markets=lambda limit=0: [])),
+                sleep_fn=lambda _: None)
+            with patch.object(PredictionLab, 'storage_usage', side_effect=CaptureRetentionError('accounting untrusted')):
+                with self.assertRaisesRegex(CaptureRetentionError, 'accounting untrusted'):
+                    daemon.run(max_cycles=1, idle_sleep_seconds=0)
+            state = json.loads((self._runtime_prediction_lab_dir(root) / 'state.json').read_text())
+            self.assertEqual(state['run_state'], 'paused')
+            self.assertEqual(state['pause_reason'], 'weather_capture_storage')
+            self.assertIn('accounting untrusted', state['last_error'])
 
     def test_prediction_lab_collect_cli_observer_flag_sets_config_patch(self):
         class _DaemonStub:

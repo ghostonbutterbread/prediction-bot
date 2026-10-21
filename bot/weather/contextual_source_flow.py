@@ -16,6 +16,7 @@ from bot.replay_decision_input import build_replay_decision_input_v1
 from bot.weather.predictive_source_history import (
     load_predictive_source_history, select_contextual_weather_source,
 )
+from bot.weather.source_router_direct_predictive import load_direct_predictive_source_history
 
 
 def recorded_forecast_type(source: dict[str, Any]) -> Any:
@@ -41,7 +42,7 @@ def select_captured_weather_source(
     signal: dict[str, Any], *, question: str, market_id: str,
     market_metadata: dict[str, Any] | None, observed_at: str, config: dict[str, Any],
 ) -> dict[str, Any]:
-    """Load the materialized history and return only a bounded selection receipt."""
+    """Read qualified collector history or an explicit compatibility generation."""
     minimum = config.get('min_sample_count', 30)
     cap = config.get('max_history_events', 100)
     audit = dict(routeable=False, chosen_source_id=None, selected_forecast_temp_f=None,
@@ -70,21 +71,37 @@ def select_captured_weather_source(
         return {**audit, 'blockers':['invalid_current_decision_input']}
     audit.update(current_input_sha256=current.record['canonical_input_sha256'],
                  current_projection_sha256=current.record['decision_key']['raw_row_sha256'])
-    path = config.get('history_metadata_path')
-    if not isinstance(path, (str, Path)) or not str(path):
-        return {**audit, 'blockers':['missing_predictive_history_metadata_path']}
-    try:
-        metadata_bytes = Path(path).read_bytes()
-        history = load_predictive_source_history(path)
-        if Path(path).read_bytes() != metadata_bytes:
-            return {**audit, 'blockers':['predictive_history_generation_changed']}
-        generation = hashlib.sha256(metadata_bytes).hexdigest()
-    except FileNotFoundError:
-        return {**audit, 'blockers':['missing_predictive_history']}
-    except OSError:
-        return {**audit, 'blockers':['unreadable_predictive_history']}
-    except (ValueError, TypeError, AttributeError):
-        return {**audit, 'blockers':['corrupt_predictive_history']}
+    direct_keys = ('collector_replay_index_path', 'collector_replay_manifest_path', 'strict_resolutions_path')
+    direct = any(config.get(key) is not None for key in direct_keys) or config.get('collector_replay_archives') is not None
+    if direct:
+        try:
+            result = load_direct_predictive_source_history(
+                **({'archive_sources': config['collector_replay_archives']}
+                   if config.get('collector_replay_archives') is not None else {
+                       'index_path': config.get(direct_keys[0]),
+                       'manifest_path': config.get(direct_keys[1]),
+                       'strict_resolutions_path': config.get(direct_keys[2])}),
+                accepted_limit=cap, as_of_decision_time=observed_at)
+            history, generation = result.rows, result.generation_sha256
+            audit['history_input_kind'] = 'committed_index_direct_read'
+        except (ValueError, TypeError, AttributeError, OSError):
+            return {**audit, 'blockers':['unverified_direct_predictive_history']}
+    else:
+        path = config.get('history_metadata_path')
+        if not isinstance(path, (str, Path)) or not str(path):
+            return {**audit, 'blockers':['missing_predictive_history_metadata_path']}
+        try:
+            metadata_bytes = Path(path).read_bytes()
+            history = load_predictive_source_history(path)
+            if Path(path).read_bytes() != metadata_bytes:
+                return {**audit, 'blockers':['predictive_history_generation_changed']}
+            generation = hashlib.sha256(metadata_bytes).hexdigest()
+        except FileNotFoundError:
+            return {**audit, 'blockers':['missing_predictive_history']}
+        except OSError:
+            return {**audit, 'blockers':['unreadable_predictive_history']}
+        except (ValueError, TypeError, AttributeError):
+            return {**audit, 'blockers':['corrupt_predictive_history']}
     audit['history_generation_sha256'] = generation
     try:
         choice = select_contextual_weather_source(current.record, history,

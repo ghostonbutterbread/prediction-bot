@@ -396,6 +396,7 @@ class PredictionLabCollectorDaemon:
                         last_storage_check_at=timestamp,
                         storage_usage_bytes=storage["bytes"],
                         storage_usage_gb=storage["gb"],
+                        weather_capture_storage=storage["weather_capture"],
                         warning_emitted=warning_emitted,
                         active_group=lab.groups[0] if lab.groups else None,
                         experiment_id=lab.experiment_id,
@@ -471,6 +472,7 @@ class PredictionLabCollectorDaemon:
                             last_storage_check_at=self._iso_now(),
                             storage_usage_bytes=storage["bytes"],
                             storage_usage_gb=storage["gb"],
+                            weather_capture_storage=storage["weather_capture"],
                             warning_emitted=bool(warning_emitted or storage["warning_threshold_reached"]),
                             seed_complete=lab.mode == "seed_and_watch",
                             last_error=None,
@@ -501,7 +503,13 @@ class PredictionLabCollectorDaemon:
                     self.sleep_fn(idle_sleep_seconds)
             except Exception as exc:
                 logger.exception('collector: fatal error: %s', exc)
-                lab.update_runtime_state(run_state="errored", last_error=str(exc))
+                from bot.feeds.weather_capture_store import CaptureRetentionError
+                if isinstance(exc, CaptureRetentionError):
+                    lab.update_runtime_state(run_state="paused", paused=True,
+                                             pause_reason="weather_capture_storage", last_error=str(exc))
+                    self.status.pause_reason = "weather_capture_storage"
+                else:
+                    lab.update_runtime_state(run_state="errored", last_error=str(exc))
                 raise
             finally:
                 if shared_market_manager is not None and shared_market_attached and shared_market_instance_id is not None:

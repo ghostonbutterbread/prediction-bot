@@ -800,19 +800,23 @@ def _attach_resolver_knowledge(outcomes: Iterable[dict[str, Any]], path: Path) -
         normalized = _normalize_strict_resolution(raw, outcome["market_id"])
         if normalized is None or any(normalized[key] != outcome[key] for key in ("official_outcome", "settlement_ts", "resolution_id")):
             raise SourceObservationLedgerError("independent resolver identity/outcome mismatch")
-        resolution = raw.get("resolution") if isinstance(raw.get("resolution"), Mapping) else {}
-        clocks = [value for value in (raw.get("known_after"), raw.get("resolved_at"), raw.get("retrieved_at"),
-                                      resolution.get("resolved_at"), resolution.get("retrieved_at")) if value is not None]
-        parsed = [_parse_time(value) for value in clocks]
-        valid_times = [value for value in parsed if value is not None]
-        known = max(valid_times) if valid_times and len(valid_times) == len(parsed) else None
-        settlement = _parse_time(outcome["settlement_ts"])
-        verified = known is not None and settlement is not None and known >= settlement
-        outcome.update(known_after=known.isoformat() if verified and known is not None else None,
-                       resolver_knowledge_verified=verified,
-                       predictive_history_reason=None if verified else "missing_or_invalid_resolver_knowledge",
-                       resolution_resolved_at=resolution.get("resolved_at") or raw.get("resolved_at"),
-                       resolution_retrieved_at=resolution.get("retrieved_at") or raw.get("retrieved_at"))
+        outcome.update(_resolver_knowledge_fields(raw, outcome))
+
+def _resolver_knowledge_fields(raw: Mapping[str, Any], outcome: Mapping[str, Any]) -> dict[str, Any]:
+    """One clock contract for materialized and direct predictive consumers."""
+    resolution = (raw.get("resolution") if isinstance(raw.get("resolution"), Mapping) else {}) or {}
+    clocks = [value for value in (raw.get("known_after"), raw.get("resolved_at"), raw.get("retrieved_at"),
+                                  resolution.get("resolved_at"), resolution.get("retrieved_at")) if value is not None]
+    parsed = [_parse_time(value) for value in clocks]
+    valid_times = [value for value in parsed if value is not None]
+    known = max(valid_times) if valid_times and len(valid_times) == len(parsed) else None
+    settlement = _parse_time(outcome["settlement_ts"])
+    verified = known is not None and settlement is not None and known >= settlement
+    return dict(known_after=known.isoformat() if verified and known is not None else None,
+                resolver_knowledge_verified=verified,
+                predictive_history_reason=None if verified else "missing_or_invalid_resolver_knowledge",
+                resolution_resolved_at=resolution.get("resolved_at") or raw.get("resolved_at"),
+                resolution_retrieved_at=resolution.get("retrieved_at") or raw.get("retrieved_at"))
 
 
 def _normalized_city(value: Any) -> str | None:

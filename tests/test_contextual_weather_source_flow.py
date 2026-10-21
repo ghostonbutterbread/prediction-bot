@@ -259,6 +259,48 @@ class ContextualWeatherSourceFlowTests(unittest.TestCase):
         self.assertEqual(wallet['open_positions'],[])
         self.assertEqual(wallet['decision_rows'][0]['reason_code'],'entry_price_above_cap')
 
+    def test_direct_collector_index_selects_forecast_and_preserves_wallet_gate(self):
+        from bot.collector_replay_index import build_collector_replay_index
+        from bot.forward_composed_paper import evaluate_forward_composition
+        from bot.strategies.enhanced import KellySizer
+        from bot.risk import RiskManager
+        from test_weather_probability_evidence import WeatherProbabilityEvidenceTests
+        self.history()
+        sealed = [json.loads(line) for line in (self.root / 'inputs.jsonl').read_text().splitlines()]
+        raw = []
+        for record in sealed:
+            raw.append({'observed_at': record['observed_at'], 'market_id': record['market_id'],
+                'question': record['market']['question'],
+                'shared_snapshot_id': record['decision_key']['shared_snapshot_id'],
+                'decision_artifact': {'source_context': {'source': 'captured_weather', 'data': {
+                    'market_metadata': record['market']['market_metadata'],
+                    'weather_source_snapshot': record['source_inputs']['source_context']['data']['weather_source_snapshot']}}}})
+        archive, index, manifest = (self.root / name for name in ('snapshots.jsonl', 'index.jsonl', 'index.manifest.json'))
+        _write_jsonl(archive, raw)
+        build_collector_replay_index(archive, index, manifest)
+        config = {'enabled': True, 'collector_replay_index_path': str(index),
+                  'collector_replay_manifest_path': str(manifest),
+                  'strict_resolutions_path': str(self.root / 'resolutions.jsonl')}
+        strategy = self.strategy(config)
+        signal, trace = self.analyze(strategy)
+        self.assertIsNotNone(signal, trace.skip_reason_code)
+        live = trace.raw_signals['live']
+        receipt = live['data']['weather_source_selection']
+        self.assertTrue(receipt['routeable'], receipt)
+        self.assertEqual(receipt['history_input_kind'], 'committed_index_direct_read')
+        self.assertEqual((receipt['chosen_source_id'], receipt['selected_forecast_temp_f'], receipt['prior_sample_count']),
+                         (LOCAL, 80, 30))
+        self.assertEqual(live['predicted_prob'], .10)
+        rows = WeatherProbabilityEvidenceTests().rows(signal)
+        for row in rows:
+            row.update(question=QUESTION, event_ticker='KXHIGHLV-26OCT19')
+        wallet = evaluate_forward_composition(rows, [], starting_balance_usd=100,
+            kelly_sizer=KellySizer(kelly_fraction=.5,max_bet_pct=.1),
+            risk_policy=RiskManager({'starting_balance':100,'data_dir':str(self.root / 'risk')}),
+            min_edge=.01,min_confidence=.5,max_entry_price=.3)['combined_wallet']
+        self.assertEqual(wallet['open_positions'], [])
+        self.assertEqual(wallet['decision_rows'][0]['reason_code'], 'entry_price_above_cap')
+
     def test_stable_open_meteo_selection_reaches_hyphenated_engine_provider(self):
         history, _ = self.history(local_id='open_meteo')
         strategy = self.strategy({'enabled':True,'history_metadata_path':str(history.metadata_path)})
