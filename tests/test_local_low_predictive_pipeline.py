@@ -340,9 +340,31 @@ class LocalLowPredictivePipelineTests(unittest.TestCase):
                     source = _sources(raw)[0]
                     for key, value in changes.items():
                         (source['target_mapping'] if key in mapping_fields else source)[key] = value
+                    if name == 'wrong-city':
+                        # A contradictory provider assertion is not a mere
+                        # derived-label typo backed by the correct raw city.
+                        source['source_metadata']['source_reported_location']['city'] = 'Miami'
                     _, history = self.publish(raw)
                     self.assertFalse(any(row['eligible_for_predictive_history'] for row in history), history)
                     self.assertFalse(self.select(original, history)['routeable'])
+
+    def test_captured_city_label_only_error_is_repaired_without_promoting_partial_period(self):
+        for city in CAPTURES:
+            with self.subTest(city=city):
+                raw = captured_low(city)
+                source = _sources(raw)[0]
+                source['source_location_city'] = 'Miami'
+                before = json.dumps(raw, sort_keys=True)
+                _, history = self.publish(raw)
+                self.assertEqual(json.dumps(raw, sort_keys=True), before)
+                self.assertEqual(len(history), 1)
+                row = history[0]
+                self.assertTrue(row['eligible_for_predictive_history'])
+                self.assertFalse(row['eligible_for_source_history'])
+                self.assertIn('partial_day_low_proxy_not_full_day', row['strict_source_proof']['reasons'])
+                self.assertEqual(row['weather_identity_reconciliation']['status'], 'repaired_source_location_label')
+                self.assertNotEqual(row['source_provenance']['source_record_sha256'],
+                                    row['source_provenance']['projected_source_record_sha256'])
 
     def test_captured_prior_night_aliases_reconcile_in_source_local_time(self):
         for city in CAPTURES:

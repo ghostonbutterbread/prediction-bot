@@ -83,15 +83,19 @@ class _WeatherBoundary:
         self.future_source_ids = set(future_source_ids)
         self.calls = []
 
-    def score_temperature_market_with_context(self, question, yes_price, *, category, market_metadata=None):
-        market = self.markets[category]
-        self.calls.append(category)
+    def score_temperature_market_with_context(self, question, yes_price, *, category, market_metadata=None,
+                                              market_id='', city=None, measurement_kind=None):
+        market_id = market_id or category
+        market = self.markets[market_id]
+        assert question.startswith('Will Seattle high temperature be above ')
+        assert city == 'seattle' and measurement_kind == 'high'
+        self.calls.append(market_id)
         target = market.metadata["market_date"]
         threshold = market.metadata["threshold"]
         fetched = (_Clock.current - timedelta(minutes=1)).isoformat()
         source_as_of = (
             _Clock.current + timedelta(minutes=1)
-            if category in self.future_source_ids
+            if market_id in self.future_source_ids
             else _Clock.current - timedelta(minutes=1)
         ).isoformat()
         source = {

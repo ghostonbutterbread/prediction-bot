@@ -176,7 +176,7 @@ class WeatherMarketCityMapperTests(unittest.TestCase):
         self.assertEqual(context.primary_source_id, "src_nws_okx")
 
     def test_resolves_city_from_series_ticker_when_question_is_generic(self):
-        context = self.mapper.resolve("Will the high temp be above 88°?", "KXHIGHAUSMIA")
+        context = self.mapper.resolve("Will the high temp be above 88°?", "KXHIGHMIA")
 
         self.assertIsNotNone(context)
         self.assertEqual(context.city_id, "miami_fl")

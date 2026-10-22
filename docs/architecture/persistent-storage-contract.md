@@ -112,6 +112,28 @@ normal 100-event reliability floor are distinct and unchanged. Code merged,
 paths configured, and recent output proving use are three separate states; this
 contract does not activate any of them.
 
+### Weather identity and safe historical attribution
+
+Official retained contract location/rules and original series/market identifiers
+establish the intended market. Normalize supported locations through the shared
+registry-backed resolver; never append a guessed city to the question or derive
+daily HIGH/LOW from above/below contract-tail direction. Keep intended settlement
+identity, actual provider-query geography and settlement authority distinct.
+Historical qualification must also use that conflict-aware HIGH/LOW resolver on
+original identifiers, question and official rules; a corrected city cannot make
+contradictory daily-measurement identity usable. Derived `market_kind` labels are
+not original authority and may only be replaced in the in-memory projection.
+
+Historical attribution corrections belong in the existing reader's derived
+view, not rewritten raw records or a new published forecast dataset. Resolve the
+intended location independently of the old derived city labels; repair only
+proven label/join errors, preserve original provenance and hashes, and exclude
+actual wrong-location source/market associations. Apply this per source so a bad
+sibling does not discard valid evidence. Missing or conflicting geography remains
+unqualified; correcting a location never manufactures target-date, period,
+chronology or independent-outcome proof. Audit reports describe corrections and
+limits, but must not become an extra prerequisite to reading the same dataset.
+
 Existing materializers, V2 generation readers, `auto_source_router_promotion`
 and disabled generated-scorecard configs are **legacy compatibility only**.
 They are not pending SourceWriter scope, a mandatory post-resolver stage, or a

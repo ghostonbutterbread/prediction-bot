@@ -553,7 +553,10 @@ class SourceObservationLedgerTests(unittest.TestCase):
                     record = _input(market_id=f"KX{kind.upper()}SEA-26AUG03-T70")
                     side = "below" if kind == "low" else "above"
                     record["market"]["question"] = f"Will Seattle {kind} temperature be {side} 70°?"
-                    record["market"]["market_metadata"].update({"city": "Seattle", "market_kind": kind, "contract_shape": "tail"})
+                    record["market"]["market_metadata"].update({
+                        "city": "Seattle", "market_kind": kind, "contract_shape": "tail",
+                        "event_ticker": f"KX{kind.upper()}SEA-26AUG03",
+                    })
                     snapshot = record["source_inputs"]["source_context"]["data"]["weather_source_snapshot"]
                     snapshot["question"] = record["market"]["question"]
                     snapshot["sources"] = [{
@@ -574,7 +577,7 @@ class SourceObservationLedgerTests(unittest.TestCase):
                     _, artifacts = self._run([record], [_outcome(record, outcome="NO")], name=f"-{kind}-{zone.replace('/', '-')}")
                     [settled] = artifacts["settled_source_correctness"]
                     self.assertEqual(settled["source_target_proof"]["status"], "eligible_exact_target_proof")
-                    self.assertEqual(settled["strict_source_proof"]["status"], "eligible")
+                    self.assertEqual(settled["strict_source_proof"]["status"], "eligible", settled["strict_source_proof"])
                     self.assertTrue(settled["eligible_for_source_history"])
 
     def test_period_alias_conflict_and_post_period_source_time_are_not_exact_proof(self) -> None:

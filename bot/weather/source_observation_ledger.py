@@ -19,6 +19,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from bot.replay_decision_input import verify_replay_decision_input_record_v1
 from bot.weather.source_scoreboard import extract_source_forecast_observations
+from bot.weather.identity_reconciliation import classify_city_label, reconcile_weather_identity
+from bot.weather.market_mapping import resolve_weather_measurement_kind
 from bot.weather.thresholds import (
     infer_direction_from_value, infer_predicted_outcome,
     extract_forecast_interval, infer_range_forecast_outcome,
@@ -284,8 +286,16 @@ def _pending_rows_for_input(row: Mapping[str, Any], identity: Mapping[str, Any])
     snapshot = _weather_snapshot(row)
     if not snapshot:
         return []
-    market = row.get("market") if isinstance(row.get("market"), Mapping) else {}
-    metadata = market.get("market_metadata") if isinstance(market.get("market_metadata"), Mapping) else {}
+    recorded_market = row.get('market')
+    market: Mapping[str, Any] = recorded_market if isinstance(recorded_market, Mapping) else {}
+    recorded_metadata = market.get('market_metadata')
+    metadata: Mapping[str, Any] = recorded_metadata if isinstance(recorded_metadata, Mapping) else {}
+    # Derived market_kind labels may share the original collector's bad guess.
+    # Resolve the contract from original IDs/question/rules, as collection does.
+    measurement_kind = resolve_weather_measurement_kind(
+        market.get('question') or '', market_id=identity['market_id'],
+        market_metadata={key: value for key, value in metadata.items() if key in
+                         {'rules_primary', 'rules_secondary', 'series_ticker', 'event_ticker'}})
     context_row = {
         "market_id": identity["market_id"],
         "question": market.get("question"),
@@ -299,22 +309,43 @@ def _pending_rows_for_input(row: Mapping[str, Any], identity: Mapping[str, Any])
         # Normalize each recorded source payload through the shared extractor,
         # one at a time. This preserves distinct target records that a
         # scoreboard aggregate would otherwise collapse for the same source.
-        source_snapshot = _snapshot_with_only_source(snapshot, source_record)
-        observations = extract_source_forecast_observations({**context_row, "weather_source_snapshot": source_snapshot})
+        reconciled = reconcile_weather_identity(
+            market_id=identity['market_id'], question=market.get('question') or '',
+            market_metadata=metadata, source_record=source_record)
+        projected_metadata: dict[str, Any] = dict(metadata)
+        projected_metadata['market_kind'] = measurement_kind or 'unknown'
+        projected_metadata.update(city_id=reconciled.market.city_id if reconciled.market else 'unknown',
+                                  city=reconciled.market.city if reconciled.market else 'unknown')
+        label_states = [classify_city_label(value, reconciled.market, canonical=expected)
+                        for value, expected in (
+                            (metadata.get('city_id'), projected_metadata['city_id']),
+                            (_nested_text(snapshot, 'station_resolution', 'city_id'), projected_metadata['city_id']),
+                            (metadata.get('city'), projected_metadata['city']),
+                            (_nested_text(snapshot, 'station_resolution', 'city'), projected_metadata['city']))]
+        projected_source = reconciled.source_record
+        source_snapshot = _snapshot_with_only_source(snapshot, projected_source)
+        observations = extract_source_forecast_observations({**context_row, 'market': projected_metadata,
+                                                            'weather_source_snapshot': source_snapshot})
         for observation in observations:
             target_proof = source_correctness_target_proof(
                 source_record=source_record, snapshot=snapshot, market_date=observation.market.market_date,
             )
             strict_proof = strict_source_observation_proof(
-                source_record=source_record,
+                source_record=projected_source,
                 snapshot=snapshot,
-                market_metadata=metadata,
+                market_metadata=projected_metadata,
                 market_date=observation.market.market_date,
                 market_kind=observation.market.market_kind,
                 contract_shape=observation.market.contract_shape,
                 question_side=observation.market.question_side,
                 observed_at=identity["decision_key"]["observed_at_utc"],
             )
+            identity_reasons = list(reconciled.reasons)
+            if measurement_kind is None:
+                identity_reasons.append('unproven_or_conflicting_original_market_measurement_kind')
+            if identity_reasons:
+                strict_proof['reasons'] = list(dict.fromkeys([*strict_proof['reasons'], *identity_reasons]))
+                strict_proof['status'] = 'unusable_strict_source_proof'
             predictive_proof = predictive_source_observation_proof(
                 source_record=source_record, target_proof=target_proof, strict_proof=strict_proof,
                 observed_at=identity["decision_key"]["observed_at_utc"],
@@ -384,8 +415,18 @@ def _pending_rows_for_input(row: Mapping[str, Any], identity: Mapping[str, Any])
                     "target_mapping": source_record.get("target_mapping"),
                     "measurement_equivalence": "not_asserted_predictor_only",
                 },
+                'weather_identity_reconciliation': {
+                    'status': reconciled.status,
+                    'reasons': list(reconciled.reasons),
+                    'intended_city_id': reconciled.market.city_id if reconciled.market else None,
+                    'intended_city': reconciled.market.city if reconciled.market else None,
+                    'market_city_label_repaired': 'conflicting' in label_states,
+                    'market_city_label_normalized': 'normalized' in label_states,
+                    'market_city_unproven_label_replaced': bool(reconciled.market and 'unproven' in label_states),
+                },
                 "source_provenance": {
                     "source_record_sha256": source_record_sha256,
+                    'projected_source_record_sha256': hashlib.sha256(_canonical_bytes(projected_source)).hexdigest(),
                     "canonical_input_sha256": identity["canonical_input_sha256"],
                 },
                 "forecast_temp_f": observation.forecast_temp_f, "threshold": observation.market.threshold,

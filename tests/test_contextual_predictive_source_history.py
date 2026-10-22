@@ -16,7 +16,8 @@ def predictor_input(day='2026-08-03', *, raw_hash='a' * 64, kind='high'):
     record = _input(market_id=f'KX{kind.upper()}SEA-{token}-T70', raw_hash=raw_hash)
     question = f"Will Seattle {kind} temperature be {'above' if kind == 'high' else 'below'} 70°?"
     record['market']['question'] = question
-    record['market']['market_metadata'].update(city='Seattle', city_id='seattle_wa', market_kind=kind)
+    record['market']['market_metadata'].update(city='Seattle', city_id='seattle_wa', market_kind=kind,
+                                              event_ticker=f'KX{kind.upper()}SEA-{token}')
     snapshot = record['source_inputs']['source_context']['data']['weather_source_snapshot']
     snapshot.update(question=question, market_date=day)
     start = day + 'T06:00:00-07:00' if kind == 'high' else (date.fromisoformat(day) - timedelta(days=1)).isoformat() + 'T18:00:00-07:00'

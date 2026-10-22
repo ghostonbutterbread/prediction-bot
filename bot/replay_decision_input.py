@@ -267,6 +267,7 @@ _MARKET_ROUTE_V1 = {
     },
 }
 _MARKET_METADATA_V1 = {
+    'custom_strike': {'City': _SCALAR},
     "strike_type": _SCALAR, "floor_strike": _SCALAR, "cap_strike": _SCALAR,
     "rules_primary": _SCALAR, "rules_secondary": _SCALAR,
     "subtitle": _SCALAR, "market_subtitle": _SCALAR, "yes_subtitle": _SCALAR, "no_subtitle": _SCALAR,

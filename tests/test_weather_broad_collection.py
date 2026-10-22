@@ -534,7 +534,9 @@ class CollectionRegistryTests(unittest.TestCase):
     def test_registry_retains_every_local_candidate_without_nws_alias_votes(self):
         registry = WeatherRegistry.from_file()
         data = registry.as_dict()
-        self.assertEqual(len(data['cities']), 24)
+        # Five previously supported global-only provider locations now share
+        # the registry; local/source definitions and their trust are unchanged.
+        self.assertEqual(len(data['cities']), 29)
         self.assertEqual(len(data['sources']), 62)
         self.assertEqual(len({s['source_id'] for s in data['sources']}), 62)
         candidates = registry.collection_sources('Las Vegas')

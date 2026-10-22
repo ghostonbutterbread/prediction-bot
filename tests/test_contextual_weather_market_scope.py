@@ -111,7 +111,10 @@ class ContextualWeatherMarketScopeTests(unittest.TestCase):
                         self.assertEqual(control['model_probability'], .9)
                         self.assertIsNone(actual)
                         self.assertTrue(is_temperature_question(question))
-                self.assertEqual(weather.call_count, 2)
+                # Classification still gates both APIs. A question-only request
+                # without daily high/low must not silently query low.
+                identified = any(f' {kind} ' in question.lower() for kind in ('high', 'low'))
+                self.assertEqual(weather.call_count, 2 if identified else 0)
             self.assertEqual(fixture.requests, [])
 
     def question_only_api_probe(self, question, category=''):
@@ -182,8 +185,9 @@ class ContextualWeatherMarketScopeTests(unittest.TestCase):
             for traced, _, actual, trace in results:
                 with self.subTest(question=question, traced=traced):
                     self.assertTrue(is_temperature_question(question))
-                    self.assertEqual((control_calls, enabled_calls), (2, 2))
-                    self.assertTrue(requests)
+                    identified = any(f' {kind} ' in question.lower() for kind in ('high', 'low', 'minimum'))
+                    self.assertEqual((control_calls, enabled_calls), (2, 2) if identified else (0, 0))
+                    self.assertEqual(bool(requests), identified)
                     self.assertIsNone(actual)
                     if traced:
                         self.assertIn(trace.skip_reason_code,
@@ -300,7 +304,9 @@ class ContextualWeatherMarketScopeTests(unittest.TestCase):
                     self.assertIsNone(actual)
                     self.assertEqual(trace.skip_reason_code, 'contextual_weather_observer_only')
                     self.assertIsNone(fixture.analyze(strategy, price=price, traced=False))
-                    self.assertEqual(weather.call_count, 2)
+                    # The fixture is a HIGH contract: explicit LOW wording is a
+                    # conflict, not permission to fetch LOW data.
+                    self.assertEqual(weather.call_count, 0 if ' low ' in question.lower() else 2)
                 self.assertEqual(fixture.requests, [])
 
     def test_below_crypto_question_keeps_price_signal_in_both_strategy_paths(self):
