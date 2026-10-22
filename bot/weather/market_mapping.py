@@ -87,7 +87,13 @@ def resolve_weather_measurement_kind(question: str, category: str = "", *,
                 kinds.add('high')
             elif series.startswith(('KXLOW', 'KXMINTEMP')):
                 kinds.add('low')
-    for value in (question, metadata.get('rules_primary'), metadata.get('rules_secondary'),
+    # Secondary rules use this paired family description for both HIGH and LOW.
+    # It asserts neither kind; retain every other word, including contradictions.
+    secondary_rules = metadata.get('rules_secondary')
+    if isinstance(secondary_rules, str):
+        secondary_rules = re.sub(r'\bmaximum\s*/\s*minimum\s+temperature\b',
+                                 'temperature', secondary_rules, flags=re.IGNORECASE)
+    for value in (question, metadata.get('rules_primary'), secondary_rules,
                   metadata.get('market_kind')):
         if not isinstance(value, str):
             continue

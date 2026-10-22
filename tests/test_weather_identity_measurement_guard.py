@@ -10,6 +10,7 @@ import unittest
 
 from bot.collector_replay_index import build_collector_replay_index
 from bot.replay_decision_input import build_replay_decision_input_v1
+from bot.weather.market_mapping import resolve_weather_measurement_kind
 from bot.weather.source_observation_ledger import _decision_identity, _pending_rows_for_input
 from bot.weather.source_router_direct_history import load_direct_strict_source_history
 from bot.weather.source_router_direct_predictive import load_direct_predictive_source_history
@@ -97,6 +98,16 @@ class HistoricalMeasurementIdentityTests(unittest.TestCase):
                               'strict': ['nws', 'seattle_local'], 'cli_predictive': 2, 'cli_strict': 2})
         self.assertTrue(all(REASON not in row['strict_source_proof']['reasons'] for row in pending))
 
+    def test_secondary_maximum_minimum_template_preserves_high_history(self):
+        raw = raw_from_input(bad_labels_record(full_day=True))
+        raw['decision_artifact']['source_context']['data']['market_metadata']['rules_secondary'] = (
+            'The official and final value used to determine this market is the '
+            'maximum/minimum temperature as reported by the Weather Company.')
+        got, pending, _ = self.exercise(raw)
+        self.assertEqual(got, {'predictive': ['nws', 'seattle_local'],
+                              'strict': ['nws', 'seattle_local'], 'cli_predictive': 2, 'cli_strict': 2})
+        self.assertTrue(all(REASON not in row['strict_source_proof']['reasons'] for row in pending))
+
     def low_raw(self, *, minimum_series=False):
         row = predictor_input(kind='low')
         if minimum_series:
@@ -117,6 +128,38 @@ class HistoricalMeasurementIdentityTests(unittest.TestCase):
         self.assertEqual(got, {'predictive': ['nws', 'seattle_local'],
                               'strict': ['nws', 'seattle_local'], 'cli_predictive': 2, 'cli_strict': 2})
         self.assertEqual({row['market_kind'] for row in pending}, {'low'})
+
+    def test_secondary_maximum_minimum_template_preserves_low_history(self):
+        raw = self.low_raw()
+        raw['decision_artifact']['source_context']['data']['market_metadata']['rules_secondary'] = (
+            'The official and final value used to determine this market is the '
+            'maximum/minimum temperature as reported by the Weather Company.')
+        got, pending, _ = self.exercise(raw)
+        self.assertEqual(got, {'predictive': ['nws', 'seattle_local'],
+                              'strict': ['nws', 'seattle_local'], 'cli_predictive': 2, 'cli_strict': 2})
+        self.assertEqual({row['market_kind'] for row in pending}, {'low'})
+
+    def test_secondary_pair_cannot_hide_a_specific_contradictory_minimum_rule(self):
+        raw = raw_from_input(bad_labels_record(full_day=True))
+        raw['decision_artifact']['source_context']['data']['market_metadata']['rules_secondary'] = (
+            'The maximum/minimum temperature is reported by the Weather Company. '
+            'This contract settles using the minimum temperature recorded at Seattle.')
+        self.assert_conflict_rejected(raw)
+
+    def test_secondary_pair_is_neutral_not_an_original_kind_or_primary_rule_override(self):
+        pair = 'maximum/minimum temperature'
+        high_id = 'KXHIGHSEA-26AUG03-T70'
+        cases = (
+            ('Daily temperature', '', {'rules_secondary': pair}),
+            (pair, high_id, {}),
+            ('Daily temperature', high_id, {'rules_primary': pair}),
+            ('Daily temperature', high_id, {
+                'rules_secondary': 'Both the maximum and minimum temperature determine this contract.'}),
+        )
+        for question, market_id, metadata in cases:
+            with self.subTest(question=question, metadata=metadata):
+                self.assertIsNone(resolve_weather_measurement_kind(
+                    question, market_id=market_id, market_metadata=metadata))
 
     def test_minimum_series_generic_question_still_uses_low_forecasts(self):
         got, pending, _ = self.exercise(self.low_raw(minimum_series=True))

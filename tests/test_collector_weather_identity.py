@@ -137,6 +137,18 @@ class CollectorRequestIdentityTests(unittest.TestCase):
                     if enabled:
                         self.assertFalse(signal['data']['weather_source_selection']['routeable'])
 
+    def test_secondary_maximum_minimum_template_keeps_actual_provider_kind(self):
+        metadata = {'rules_secondary': (
+            'The official and final value used to determine this market is the '
+            'maximum/minimum temperature as reported by the Weather Company.')}
+        for family, kind in (('KXHIGHT', 'high'), ('KXLOWT', 'low')):
+            for enabled in (False, True):
+                with self.subTest(kind=kind, selection=enabled):
+                    signal, call, _ = self.fetch(family=family, metadata=metadata, enabled=enabled)
+                    self.assertEqual(call.args[0], 'san diego')
+                    self.assertEqual(call.kwargs['measurement_kind'], kind)
+                    self.assert_retained(signal, 'san diego', kind)
+
     def test_unresolved_or_conflicting_identity_never_reaches_provider(self):
         strategy = self.strategy()
         cases = (
