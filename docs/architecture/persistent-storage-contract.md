@@ -119,6 +119,10 @@ establish the intended market. Normalize supported locations through the shared
 registry-backed resolver; never append a guessed city to the question or derive
 daily HIGH/LOW from above/below contract-tail direction. Keep intended settlement
 identity, actual provider-query geography and settlement authority distinct.
+Historical qualification must also use that conflict-aware HIGH/LOW resolver on
+original identifiers, question and official rules; a corrected city cannot make
+contradictory daily-measurement identity usable. Derived `market_kind` labels are
+not original authority and may only be replaced in the in-memory projection.
 
 Historical attribution corrections belong in the existing reader's derived
 view, not rewritten raw records or a new published forecast dataset. Resolve the

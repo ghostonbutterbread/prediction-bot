@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from bot.replay_decision_input import verify_replay_decision_input_record_v1
 from bot.weather.source_scoreboard import extract_source_forecast_observations
 from bot.weather.identity_reconciliation import classify_city_label, reconcile_weather_identity
+from bot.weather.market_mapping import resolve_weather_measurement_kind
 from bot.weather.thresholds import (
     infer_direction_from_value, infer_predicted_outcome,
     extract_forecast_interval, infer_range_forecast_outcome,
@@ -289,6 +290,12 @@ def _pending_rows_for_input(row: Mapping[str, Any], identity: Mapping[str, Any])
     market: Mapping[str, Any] = recorded_market if isinstance(recorded_market, Mapping) else {}
     recorded_metadata = market.get('market_metadata')
     metadata: Mapping[str, Any] = recorded_metadata if isinstance(recorded_metadata, Mapping) else {}
+    # Derived market_kind labels may share the original collector's bad guess.
+    # Resolve the contract from original IDs/question/rules, as collection does.
+    measurement_kind = resolve_weather_measurement_kind(
+        market.get('question') or '', market_id=identity['market_id'],
+        market_metadata={key: value for key, value in metadata.items() if key in
+                         {'rules_primary', 'rules_secondary', 'series_ticker', 'event_ticker'}})
     context_row = {
         "market_id": identity["market_id"],
         "question": market.get("question"),
@@ -306,6 +313,7 @@ def _pending_rows_for_input(row: Mapping[str, Any], identity: Mapping[str, Any])
             market_id=identity['market_id'], question=market.get('question') or '',
             market_metadata=metadata, source_record=source_record)
         projected_metadata: dict[str, Any] = dict(metadata)
+        projected_metadata['market_kind'] = measurement_kind or 'unknown'
         projected_metadata.update(city_id=reconciled.market.city_id if reconciled.market else 'unknown',
                                   city=reconciled.market.city if reconciled.market else 'unknown')
         label_states = [classify_city_label(value, reconciled.market, canonical=expected)
@@ -332,8 +340,11 @@ def _pending_rows_for_input(row: Mapping[str, Any], identity: Mapping[str, Any])
                 question_side=observation.market.question_side,
                 observed_at=identity["decision_key"]["observed_at_utc"],
             )
-            if reconciled.reasons:
-                strict_proof['reasons'] = list(dict.fromkeys([*strict_proof['reasons'], *reconciled.reasons]))
+            identity_reasons = list(reconciled.reasons)
+            if measurement_kind is None:
+                identity_reasons.append('unproven_or_conflicting_original_market_measurement_kind')
+            if identity_reasons:
+                strict_proof['reasons'] = list(dict.fromkeys([*strict_proof['reasons'], *identity_reasons]))
                 strict_proof['status'] = 'unusable_strict_source_proof'
             predictive_proof = predictive_source_observation_proof(
                 source_record=source_record, target_proof=target_proof, strict_proof=strict_proof,

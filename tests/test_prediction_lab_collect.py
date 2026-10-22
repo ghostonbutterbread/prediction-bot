@@ -1104,7 +1104,9 @@ class PredictionLabCollectorTests(unittest.TestCase):
             )
             exchange = SimpleNamespace(get_markets_direct=lambda **kwargs: [market])
 
-            result = lab.run(exchange)
+            # Exercise observer recording, not external weather collection.
+            with patch.object(lab.strategy.live_feeds, "get_signal", return_value=None):
+                result = lab.run(exchange)
             rows = load_jsonl(lab.predictions_path)
 
             self.assertEqual(result.recorded_predictions, 1)
@@ -2352,8 +2354,9 @@ class PredictionLabCollectorTests(unittest.TestCase):
             )
             exchange = SimpleNamespace(get_markets_direct=lambda **kwargs: [market])
 
-            lab.run(exchange)
-            lab.run(exchange)
+            with patch.object(lab.strategy.live_feeds, "get_signal", return_value=None):
+                lab.run(exchange)
+                lab.run(exchange)
 
             rows = load_jsonl(lab.market_snapshots_path)
 
@@ -2409,8 +2412,9 @@ class PredictionLabCollectorTests(unittest.TestCase):
             exchange.get_markets = _get_markets
             exchange.get_markets_direct = _get_markets_direct
 
-            first = lab.run(exchange)
-            second = lab.run(exchange)
+            with patch.object(lab.strategy.live_feeds, "get_signal", return_value=None):
+                first = lab.run(exchange)
+                second = lab.run(exchange)
             prediction_rows = load_jsonl(lab.predictions_path)
             snapshot_rows = load_jsonl(lab.market_snapshots_path)
             state = json.loads(lab.state_path.read_text())
