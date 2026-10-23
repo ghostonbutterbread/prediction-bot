@@ -92,7 +92,7 @@ Task-local probe: `/home/ryushe/.hermes/cache/scratch/kalshi-pagination-t_d694df
 
 ## Interruption / resume handoff and decision gates
 
-- **Implementation checkpoint:** `2eec119aa5cf1e34f8185a4ccba72d1e3a7e9995` (verified commit, ancestor of the feature tip). Later dossier-only handoff changes do not alter executable code or tests.
+- **Implementation checkpoint:** `70ba66e011f2ec614f0f06668d831ece7825cb68` (initial pagination implementation `2eec119aa5cf1e34f8185a4ccba72d1e3a7e9995` plus the cursor correction). This checkpoint includes code, regression and the activation hold. A later dossier-only handoff commit pins this immutable ID; executable code/tests are unchanged by that handoff.
 - **Exact resume point:** parent independently reviews `bot/exchanges/kalshi.py` and `tests/test_kalshi_direct.py`, reruns the declared offline gate, and decides whether broad-suite evidence is required. Review focus: lazy stop at accepted quota, freshness-before-quota, continuation encoding, cycle/failure semantics and unchanged generic bounds.
 - **Expected working-tree state at handoff:** clean after implementation plus dossier-only checkpoint commit.
 - **Integration:** parent-owned review required before any beta merge; remove this temporary dossier from the integration target if accepted, preserving branch history.
