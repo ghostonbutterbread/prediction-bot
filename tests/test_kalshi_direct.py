@@ -2,15 +2,18 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlsplit
 
-from bot.exchanges.kalshi import KalshiExchange
+import httpx
+
+from bot.exchanges.kalshi import DirectMarketFetchUnavailable, KalshiExchange
 
 
 _FUTURE_YYMMDD = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%y%m%d")
 
 
 class _FakeResponse:
-    def __init__(self, status_code: int, payload: dict):
+    def __init__(self, status_code: int, payload: dict | list):
         self.status_code = status_code
         self._payload = payload
 
@@ -184,6 +187,204 @@ class KalshiDirectMarketTests(unittest.TestCase):
             markets = exchange.get_markets_direct(limit=1, page_size=50, max_pages=1)
 
         self.assertEqual(markets, [])
+
+    def test_series_pagination_exhausts_more_than_ten_pages_below_global_limit(self):
+        exchange = self._exchange()
+        exchange._daily_series_tickers = ["KXHIGHNY"]
+        rows = [
+            _raw_market(_future_ticker("KXHIGHNY", f"T{degree}"),
+                        f"Will the high temperature in New York exceed {degree} degrees?",
+                        series_ticker="KXHIGHNY")
+            for degree in range(60, 87)
+        ]
+        queries = []
+
+        def fake_http_get(url, headers, throttle=None, timeout=0):
+            query = parse_qs(urlsplit(url).query)
+            queries.append(query)
+            if "series_ticker" not in query:
+                return _FakeResponse(200, {"markets": []})
+            offset = int(query.get("cursor", ["0"])[0])
+            size = int(query["limit"][0])
+            stop = offset + size
+            return _FakeResponse(200, {"markets": rows[offset:stop],
+                                       "cursor": str(stop) if stop < len(rows) else ""})
+
+        with patch("bot.exchanges.kalshi.http_get_with_retry", side_effect=fake_http_get):
+            markets = exchange.get_markets_direct(limit=100, page_size=2, max_pages=1)
+
+        self.assertEqual({market.id for market in markets}, {row["ticker"] for row in rows})
+        series_queries = [q for q in queries if "series_ticker" in q]
+        self.assertEqual(len(series_queries), 14)
+        self.assertEqual([q.get("cursor", ["0"])[0] for q in series_queries],
+                         [str(offset) for offset in range(0, 27, 2)])
+        self.assertEqual(len(queries), 15)  # Generic fallback still has its own bound.
+        self.assertTrue(all(q["limit"] == ["2"] for q in queries))
+
+    def test_rejected_and_duplicate_rows_do_not_consume_global_quota(self):
+        for series_pass in (True, False):
+            with self.subTest(series_pass=series_pass):
+                exchange = self._exchange()
+                exchange._daily_series_tickers = ["KXHIGHNY", "KXHIGHMIA"] if series_pass else []
+
+                def row(suffix):
+                    return _raw_market(_future_ticker("KXHIGHNY", suffix),
+                                       "Will the high temperature in New York exceed 72 degrees?",
+                                       series_ticker="KXHIGHNY")
+
+                closed = {**row("CLOSED"), "close_time": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()}
+                missing_close = {**row("MISSING"), "close_time": None}
+                stale_date = (datetime.now(timezone.utc) - timedelta(days=4)).strftime("%y%m%d")
+                stale = {**row("STALE"), "ticker": f"KXHIGHNY-{stale_date}-T71"}
+                no_quote = {**row("NOQUOTE"), "yes_ask_dollars": 0}
+                wrong_group = _raw_market("MVE-NBA-COMBO", "Will the Knicks win tonight?", series_ticker="MVE")
+                first, second = row("T72"), row("T73")
+                pages = [[closed, missing_close], [stale, no_quote], [wrong_group, None],
+                         [first, first], [first, second]]
+                queries = []
+
+                def fake_http_get(url, headers, throttle=None, timeout=0):
+                    query = parse_qs(urlsplit(url).query)
+                    queries.append(query)
+                    offset = int(query.get("cursor", ["0"])[0])
+                    self.assertLess(offset, len(pages), "requested another page after accepted quota")
+                    if series_pass:
+                        self.assertEqual(query.get("series_ticker"), ["KXHIGHNY"])
+                    return _FakeResponse(200, {"markets": pages[offset], "cursor": str(offset + 1)})
+
+                with patch("bot.exchanges.kalshi.http_get_with_retry", side_effect=fake_http_get):
+                    markets = exchange.get_markets_direct(limit=2, page_size=2, max_pages=10)
+
+                self.assertEqual([market.id for market in markets], [first["ticker"], second["ticker"]])
+                self.assertEqual(len(queries), 5)
+
+    def test_series_pagination_failure_reports_incomplete_instead_of_partial_success(self):
+        invalid_json = _FakeResponse(200, {})
+        failures = [None, _FakeResponse(503, {}), _FakeResponse(200, []),
+                    _FakeResponse(200, {"markets": {}}),
+                    _FakeResponse(200, {"markets": [], "cursor": {"bad": "cursor"}}), invalid_json,
+                    TimeoutError("transport failed")]
+        for failure in failures:
+            for after_first_page in (False, True):
+                with self.subTest(failure=failure, after_first_page=after_first_page):
+                    exchange = self._exchange()
+                    exchange._daily_series_tickers = ["KXHIGHNY"]
+                    first = _raw_market(_future_ticker("KXHIGHNY", "T72"),
+                                        "Will the high temperature in New York exceed 72 degrees?",
+                                        series_ticker="KXHIGHNY")
+                    responses = [_FakeResponse(200, {"markets": [first], "cursor": "next"})] if after_first_page else []
+                    responses += [failure, _FakeResponse(200, {"markets": []})]
+                    page, fetched = (2, 1) if after_first_page else (1, 0)
+                    diagnostic = rf"incomplete.*series=KXHIGHNY.*page={page}.*fetched={fetched}"
+                    with patch.object(invalid_json, "json", side_effect=ValueError("bad json")), \
+                         patch("bot.exchanges.kalshi.http_get_with_retry", side_effect=responses) as fetch, \
+                         self.assertLogs("bot.exchanges.kalshi", level="WARNING") as logs:
+                        with self.assertRaisesRegex(DirectMarketFetchUnavailable, diagnostic) as error:
+                            exchange.get_markets_direct(limit=10)
+                    self.assertEqual(fetch.call_count, page)
+                    self.assertIsNotNone(error.exception.__cause__)
+                    self.assertIn(f"accepted={int(after_first_page)}", logs.output[0])
+
+    def test_series_pagination_rejects_repeated_and_cycling_cursors(self):
+        for cursors in (["same", "same"], ["a", "b", "a"]):
+            with self.subTest(cursors=cursors):
+                exchange = self._exchange()
+                exchange._daily_series_tickers = ["KXHIGHNY"]
+                responses = [_FakeResponse(200, {"markets": [], "cursor": cursor}) for cursor in cursors]
+                responses += [_FakeResponse(200, {"markets": []})]
+                with patch("bot.exchanges.kalshi.http_get_with_retry", side_effect=responses) as fetch, \
+                     self.assertLogs("bot.exchanges.kalshi", level="WARNING"):
+                    with self.assertRaisesRegex(DirectMarketFetchUnavailable, "incomplete.*nonadvancing cursor"):
+                        exchange.get_markets_direct(limit=10, max_pages=0)
+                self.assertEqual(fetch.call_count, len(cursors))
+
+    def test_series_empty_page_and_opaque_cursor_preserve_cross_pass_deduplication(self):
+        exchange = self._exchange()
+        exchange._daily_series_tickers = ["KXHIGHNY", "KXHIGHMIA"]
+        opaque = "opaque +/=&?%#"
+        rows = [
+            _raw_market(_future_ticker("KXHIGHNY", f"T{degree}"),
+                        f"Will the high temperature in New York exceed {degree} degrees?",
+                        series_ticker="KXHIGHNY")
+            for degree in range(70, 74)
+        ]
+        queries = []
+
+        def fake_http_get(url, headers, throttle=None, timeout=0):
+            query = parse_qs(urlsplit(url).query)
+            queries.append(query)
+            series = query.get("series_ticker", [None])[0]
+            cursor = query.get("cursor", [None])[0]
+            if series == "KXHIGHNY" and cursor is None:
+                return _FakeResponse(200, {"markets": [], "cursor": opaque})
+            if series == "KXHIGHNY":
+                self.assertEqual(cursor, opaque)
+                return _FakeResponse(200, {"markets": [rows[0], rows[0]]})
+            if series == "KXHIGHMIA":
+                return _FakeResponse(200, {"markets": [rows[0], rows[1]]})
+            if cursor is None:
+                return _FakeResponse(200, {"markets": [rows[1], rows[2]], "cursor": "generic-next"})
+            self.assertEqual(cursor, "generic-next")
+            return _FakeResponse(200, {"markets": [rows[2], rows[3]]})
+
+        with patch("bot.exchanges.kalshi.http_get_with_retry", side_effect=fake_http_get):
+            markets = exchange.get_markets_direct(limit=10, page_size=2, max_pages=2)
+
+        self.assertEqual([market.id for market in markets], [row["ticker"] for row in rows])
+        self.assertEqual(len(queries), 5)
+        self.assertEqual([market.metadata["source"] for market in markets],
+                         ["direct_series", "direct_series", "direct_paginated", "direct_paginated"])
+
+    def test_series_continuation_retries_same_page_without_duplicate_results(self):
+        exchange = self._exchange()
+        exchange._daily_series_tickers = ["KXHIGHNY"]
+        first, second = [
+            _raw_market(_future_ticker("KXHIGHNY", f"T{degree}"),
+                        f"Will the high temperature in New York exceed {degree} degrees?",
+                        series_ticker="KXHIGHNY")
+            for degree in (71, 72)
+        ]
+        responses = [httpx.Response(200, json={"markets": [first], "cursor": "next"}),
+                     httpx.Response(429, headers={"Retry-After": "0"}),
+                     httpx.ReadTimeout("synthetic timeout"),
+                     httpx.Response(200, json={"markets": [first, second], "cursor": "unused"})]
+        with patch("bot.http_rate_limit.httpx.get", side_effect=responses) as fetch, \
+             patch("bot.http_rate_limit.time.sleep") as sleep, \
+             patch.object(exchange._throttle, "wait") as throttle:
+            markets = exchange.get_markets_direct(limit=2, page_size=2)
+
+        self.assertEqual([market.id for market in markets], [first["ticker"], second["ticker"]])
+        self.assertEqual(fetch.call_count, 4)
+        self.assertEqual(throttle.call_count, 4)
+        self.assertEqual(sleep.call_count, 2)
+        urls = [call.args[0] for call in fetch.call_args_list]
+        self.assertEqual(urls[1:], [urls[1]] * 3)
+        self.assertEqual(parse_qs(urlsplit(urls[1]).query)["cursor"], ["next"])
+
+    def test_series_continuation_transport_retry_exhaustion_is_not_partial_success(self):
+        exchange = self._exchange()
+        exchange._daily_series_tickers = ["KXHIGHNY"]
+        first = _raw_market(_future_ticker("KXHIGHNY", "T71"),
+                            "Will the high temperature in New York exceed 71 degrees?", series_ticker="KXHIGHNY")
+        responses = [httpx.Response(200, json={"markets": [first], "cursor": "next"})]
+        responses += [httpx.ReadTimeout("synthetic timeout") for _ in range(3)]
+        with patch("bot.http_rate_limit.httpx.get", side_effect=responses) as fetch, \
+             patch("bot.http_rate_limit.time.sleep"), patch.object(exchange._throttle, "wait"), \
+             self.assertLogs("bot.exchanges.kalshi", level="WARNING") as logs:
+            with self.assertRaisesRegex(DirectMarketFetchUnavailable, "page=2.*fetched=1.*unavailable after retries"):
+                exchange.get_markets_direct(limit=2)
+        self.assertEqual(fetch.call_count, 4)
+        self.assertIn("accepted=1", logs.output[0])
+
+    def test_generic_pagination_keeps_its_explicit_page_bound(self):
+        exchange = self._exchange()
+        row = _raw_market(_future_ticker("KXHIGHNY", "T71"),
+                          "Will the high temperature in New York exceed 71 degrees?", series_ticker="KXHIGHNY")
+        with patch("bot.exchanges.kalshi.http_get_with_retry",
+                   return_value=_FakeResponse(200, {"markets": [row], "cursor": "still-more"})) as fetch:
+            markets = exchange.get_markets_direct(limit=100, max_pages=2)
+        self.assertEqual(len(markets), 1)
+        self.assertEqual(fetch.call_count, 2)
 
     def test_weather_series_filter_rejects_broad_wind_energy_series(self):
         self.assertFalse(KalshiExchange._is_weather_series_ticker("KXPRIMEENGCONSUMPTION-30-WIND"))

@@ -3,7 +3,8 @@
 import os
 import logging
 import httpx
-from typing import Optional
+from typing import Iterator, Optional
+from urllib.parse import urlencode
 from datetime import datetime, timezone, timedelta
 
 from kalshi_python_sync import Configuration, KalshiClient
@@ -21,7 +22,7 @@ KALSHI_PROD = "https://api.elections.kalshi.com/trade-api/v2"
 
 
 class DirectMarketFetchUnavailable(RuntimeError):
-    """Raised when a direct market request exhausts its transport retries."""
+    """Raised when direct discovery cannot complete (request or cursor failure)."""
 
 
 class KalshiExchange(BaseExchange):
@@ -176,8 +177,8 @@ class KalshiExchange(BaseExchange):
             return False
 
     def get_markets_direct(self, limit: int = 50, page_size: int = 200, max_pages: int = 10) -> list[Market]:
+        markets: list[Market] = []
         try:
-            markets = []
             seen_market_ids: set[str] = set()
             cursor = None
             pages = 0
@@ -193,10 +194,12 @@ class KalshiExchange(BaseExchange):
                     raw_series_markets = self._fetch_direct_series_markets(
                         auth_headers,
                         series_ticker,
-                        limit=min(10, max(1, limit - len(markets))),
+                        limit=min(page_size, max(1, limit - len(markets))),
                     )
                     accepted = 0
+                    fetched = 0
                     for raw_market in raw_series_markets:
+                        fetched += 1
                         market = self._market_from_direct_listing(
                             raw_market,
                             source='direct_series',
@@ -204,7 +207,10 @@ class KalshiExchange(BaseExchange):
                         )
                         if market is None or market.id in seen_market_ids:
                             continue
-                        if self._market_allowed(market):
+                        # Freshness must pass before this row consumes accepted quota.
+                        if self._market_allowed(market) and self._dedupe_and_filter_markets(
+                            [market], now=datetime.now(timezone.utc)
+                        ):
                             markets.append(market)
                             seen_market_ids.add(market.id)
                             accepted += 1
@@ -213,7 +219,7 @@ class KalshiExchange(BaseExchange):
                     logger.info(
                         'Kalshi direct weather series pull: series=%s fetched=%s accepted=%s total=%s',
                         series_ticker,
-                        len(raw_series_markets),
+                        fetched,
                         accepted,
                         len(markets),
                     )
@@ -239,7 +245,9 @@ class KalshiExchange(BaseExchange):
                     market = self._market_from_direct_listing(m, source='direct_paginated')
                     if market is None or market.id in seen_market_ids:
                         continue
-                    if self._market_allowed(market):
+                    if self._market_allowed(market) and self._dedupe_and_filter_markets(
+                        [market], now=datetime.now(timezone.utc)
+                    ):
                         markets.append(market)
                         seen_market_ids.add(market.id)
                         page_added += 1
@@ -252,7 +260,8 @@ class KalshiExchange(BaseExchange):
             deduped = self._dedupe_and_filter_markets(markets, now=datetime.now(timezone.utc))
             logger.info('Kalshi direct market pull complete: pages=%s accepted=%s deduped=%s returning=%s', pages, len(markets), len(deduped), min(len(deduped), limit))
             return deduped[:limit]
-        except DirectMarketFetchUnavailable:
+        except DirectMarketFetchUnavailable as e:
+            logger.warning('Kalshi direct market pull incomplete: accepted=%s error=%s', len(markets), e)
             raise
         except Exception as e:
             logger.error(f'Error fetching direct markets: {e}')
@@ -278,22 +287,43 @@ class KalshiExchange(BaseExchange):
         weather_prefixes = ('kxhigh', 'kxhight', 'kxlow', 'kxlowt', 'kxmintemp')
         return normalized.startswith(weather_prefixes)
 
-    def _fetch_direct_series_markets(self, auth_headers: dict[str, str], series_ticker: str, *, limit: int) -> list[dict]:
+    def _fetch_direct_series_markets(self, auth_headers: dict[str, str], series_ticker: str, *, limit: int) -> Iterator[dict]:
+        """Yield series listings lazily until cursor exhaustion or caller quota."""
+        cursor = None
+        seen_cursors: set[str] = set()
+        pages = 0
+        fetched = 0
         try:
-            url = f'{self.host}/markets?status=open&limit={max(1, min(limit, 50))}&series_ticker={series_ticker}'
-            resp = http_get_with_retry(url, auth_headers, throttle=self._throttle, timeout=8)
-            if resp is None:
-                raise DirectMarketFetchUnavailable('direct market pull unavailable after retries')
-            if not resp or resp.status_code != 200:
-                return []
-            data = resp.json()
-            markets = data.get('markets', [])
-            return markets if isinstance(markets, list) else []
-        except DirectMarketFetchUnavailable:
-            raise
+            while True:
+                pages += 1
+                params = {'status': 'open', 'limit': max(1, min(limit, 1000)), 'series_ticker': series_ticker}
+                if cursor:
+                    params['cursor'] = cursor
+                url = f'{self.host}/markets?{urlencode(params)}'
+                resp = http_get_with_retry(url, auth_headers, throttle=self._throttle, timeout=8)
+                if resp is None:
+                    raise DirectMarketFetchUnavailable('direct market pull unavailable after retries')
+                if not resp or resp.status_code != 200:
+                    raise DirectMarketFetchUnavailable(f'HTTP status={getattr(resp, "status_code", None)}')
+                data = resp.json()
+                if not isinstance(data, dict) or not isinstance(data.get('markets'), list):
+                    raise DirectMarketFetchUnavailable('invalid markets payload')
+                markets = data['markets']
+                fetched += len(markets)
+                yield from markets
+                cursor = data.get('cursor')
+                if not cursor:
+                    return
+                if not isinstance(cursor, str):
+                    raise DirectMarketFetchUnavailable('invalid cursor payload')
+                if cursor in seen_cursors:
+                    raise DirectMarketFetchUnavailable('nonadvancing cursor')
+                seen_cursors.add(cursor)
         except Exception as e:
-            logger.debug('Kalshi direct series fetch failed for %s: %s', series_ticker, e)
-            return []
+            reason = str(e) if isinstance(e, DirectMarketFetchUnavailable) else type(e).__name__
+            raise DirectMarketFetchUnavailable(
+                f'direct series market pull incomplete: series={series_ticker} page={pages} fetched={fetched} reason={reason}'
+            ) from e
 
     def _market_from_direct_listing(self, data: dict, *, source: str, series_ticker: str | None = None) -> Optional[Market]:
         if not isinstance(data, dict):
