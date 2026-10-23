@@ -312,10 +312,12 @@ class KalshiExchange(BaseExchange):
                 fetched += len(markets)
                 yield from markets
                 cursor = data.get('cursor')
-                if not cursor:
+                if cursor is None:
                     return
                 if not isinstance(cursor, str):
                     raise DirectMarketFetchUnavailable('invalid cursor payload')
+                if cursor == '':
+                    return
                 if cursor in seen_cursors:
                     raise DirectMarketFetchUnavailable('nonadvancing cursor')
                 seen_cursors.add(cursor)

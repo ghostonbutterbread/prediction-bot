@@ -1,13 +1,13 @@
 # Kalshi per-series pagination integration dossier
 
-- **Status:** local verification complete; awaiting parent independent review.
+- **Status:** first independent review approved with a low-priority cursor finding; correction verified locally, awaiting exact-candidate re-review. Integration is held at the runtime boundary below.
 - **Owner:** parent reviewer, Kanban `t_d694dfa0`; implementation subagent owns only this worktree.
 - **Canonical path:** `docs/integrations/kalshi-series-pagination.md` (temporary branch-local handoff).
 - **Branch / owning ref:** `fix/kalshi-series-pagination-t_d694dfa0`.
 - **Worktree:** `/home/ryushe/worktrees/prediction-bot-kalshi-pagination-t_d694dfa0`.
 - **Base commit:** `46806cf736917d3c6106c4766aa5e94f35f66a8d`.
 - **Intended integration target:** `beta`, observed at the base above, also matching `origin/beta` when inspected.
-- **Latest immutable recovery checkpoint / implementation commit:** `2eec119aa5cf1e34f8185a4ccba72d1e3a7e9995`. The branch tip additionally contains a later dossier-only checkpoint commit; reconcile it with `git log` before review.
+- **Initial implementation commit:** `2eec119aa5cf1e34f8185a4ccba72d1e3a7e9995`. The initial reviewed tip was `b1d64a7e4a2ed3bd898a3d66dd99410ddb4e95ed`; the cursor-correction checkpoint is pinned in the follow-up handoff below.
 - **Last updated:** 2026-10-22 PDT (2026-10-23 UTC).
 - **Inspiration:** user requirement to follow collector pagination; retained public-catalog validation showing 84 quote-eligible contracts beyond the first ten per series.
 - **Supersedes / successor:** no earlier pagination implementation dossier; parent independent review is the next gate. No activation or stable promotion is authorized.
@@ -86,9 +86,7 @@ Task-local probe: `/home/ryushe/.hermes/cache/scratch/kalshi-pagination-t_d694df
 
 ## Deferred checks and residuals
 
-- **Full suite:** not claimed. Bubblewrap prerequisites failed before any suite execution: network namespace setup reported `Failed RTM_NEWADDR: Operation not permitted`; read-only namespace setup without network isolation reported `setting up uid map: Permission denied`. The successful focused audit guard forbids subprocesses, whereas the full suite includes subprocess/CLI and archive probes. Do not run the broad suite unguarded against real collector storage merely to obtain a green count.
-  - **Command:** `PYTHONPATH="$PWD:$PWD/tests" "$PY" -B -m unittest discover -s tests` in an offline sandbox with all writable storage scoped away from production/raw inputs.
-  - **Trigger / owner:** parent independent-review or integration environment supplies safe subprocess/storage isolation. This is missing broad regression evidence, not a known failing pagination case; the parent decides whether it blocks integration. It does not authorize activation.
+- **Full suite on initial reviewed tip:** parent supplied the existing frozen-source Landlock/seccomp runner after Bubblewrap namespace admission failed. Exact `b1d64a7e4a2ed3bd898a3d66dd99410ddb4e95ed`, tree `99df1d389e7b58b36884b9c229c4cf35fec00ef1`: 1,836 unique tests ran, zero failures/errors, runtime-local config checks skipped and one real-archive smoke deliberately excluded. All 478 tracked source files remained unchanged; kernel source-write/connect/sendto denial probes passed. Receipts: `/mnt/data-collection/prediction-bot/data/derived_reports/weather_identity_repair_t_ca47d502/pagination_t_d694dfa0_feature/{verification.json,full-receipt.json}`. This supersedes the initial missing broad-regression evidence, not the activation boundary. The corrected candidate needs its own full-suite receipt.
 - No live acceptance test was performed or authorized. Parent review must reconcile the exact candidate range; station/provider availability and completeness of the discovered startup series remain out of scope.
 - Series traversal intentionally has no arbitrary page cap: it stops at quota, exhaustion, repeated cursor or request failure. An API returning indefinitely unique continuation tokens remains bounded only by those operational conditions, not `max_pages` (which continues to govern generic fallback only).
 
@@ -104,3 +102,11 @@ Task-local probe: `/home/ryushe/.hermes/cache/scratch/kalshi-pagination-t_d694df
 ## Decision record
 
 - 2026-10-22 PDT — Implemented and locally exercised only direct per-series pagination and its accepted-quota boundary. Await parent independent review; no merge, push, restart or activation.
+
+## Parent review follow-up and activation hold
+
+- Independent review `deleg_691e70fa` approved the initial exact range, conditional on the parent's full gate; that gate passed as recorded above. Independent reviewer reran 136 focused tests and found no blocking pagination defect.
+- Parent elected to correct the low-priority finding rather than narrow the malformed-cursor contract: absent/null/empty-string cursor means exhaustion; falsy non-string values `0`, `False`, `[]`, `{}` now raise incomplete-discovery error. The added regression first failed in all four invalid subtests with no errors, then the corrected 137-test focused suite passed with zero failures/errors/skips. Durable logs: `current_market_validation_t_1de472a9/pagination_parent/{cursor-red.log,focused-cursor-fixed.log}` beneath the derived weather-identity report root. No quote, station, metadata or forecast-safeguard changes were added.
+- Initial review's clock-movement residual remains: accepted contracts may close before the final freshness pass, so returning fewer than the requested quota is not proof of missing cursor traversal; no final-quota guarantee under advancing time is claimed.
+- **Activation hold:** service readback shows `Restart=on-failure` and automatic retries with an accounting-integrity failure. Its configured `PROJECT_ROOT` is `/home/ryushe/projects/prediction-bot-beta-integration`, the actual beta integration worktree. A merge there could be loaded by an automatic retry even without a manual restart. Do not merge into that execution path until the operator authorizes quiescing/rollout or it is independently proven nonexecuting. This task has not stopped/restarted the unit or modified populated accounting, raw data, unit or configs. The separate integrity failure is `capture directory changed outside accounting lock`, not a pagination failure.
+- Resume: fresh read-only review of the committed cursor correction plus exact corrected-candidate full gate; then operator decision on the shared beta execution/activation boundary before any merge, push or cleanup.

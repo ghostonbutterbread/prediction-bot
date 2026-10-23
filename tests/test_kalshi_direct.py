@@ -285,6 +285,25 @@ class KalshiDirectMarketTests(unittest.TestCase):
                     self.assertIsNotNone(error.exception.__cause__)
                     self.assertIn(f"accepted={int(after_first_page)}", logs.output[0])
 
+    def test_series_cursor_types_distinguish_exhaustion_from_malformed_values(self):
+        for cursor in (0, False, [], {}):
+            with self.subTest(invalid_cursor=cursor):
+                exchange = self._exchange()
+                exchange._daily_series_tickers = ["KXHIGHNY"]
+                response = _FakeResponse(200, {"markets": [], "cursor": cursor})
+                with patch("bot.exchanges.kalshi.http_get_with_retry", return_value=response), \
+                     self.assertLogs("bot.exchanges.kalshi", level="WARNING"):
+                    with self.assertRaisesRegex(DirectMarketFetchUnavailable, "invalid cursor payload"):
+                        exchange.get_markets_direct(limit=10, max_pages=0)
+
+        for payload in ({"markets": []}, {"markets": [], "cursor": None}, {"markets": [], "cursor": ""}):
+            with self.subTest(valid_exhaustion=payload):
+                exchange = self._exchange()
+                exchange._daily_series_tickers = ["KXHIGHNY"]
+                with patch("bot.exchanges.kalshi.http_get_with_retry", return_value=_FakeResponse(200, payload)) as fetch:
+                    self.assertEqual(exchange.get_markets_direct(limit=10, max_pages=0), [])
+                self.assertEqual(fetch.call_count, 1)
+
     def test_series_pagination_rejects_repeated_and_cycling_cursors(self):
         for cursors in (["same", "same"], ["a", "b", "a"]):
             with self.subTest(cursors=cursors):
