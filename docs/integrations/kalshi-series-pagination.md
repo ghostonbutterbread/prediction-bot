@@ -7,7 +7,7 @@
 - **Worktree:** `/home/ryushe/worktrees/prediction-bot-kalshi-pagination-t_d694dfa0`.
 - **Base commit:** `46806cf736917d3c6106c4766aa5e94f35f66a8d`.
 - **Intended integration target:** `beta`, observed at the base above, also matching `origin/beta` when inspected.
-- **Latest immutable recovery checkpoint / implementation commit:** pending initial implementation commit; a dossier-only follow-up will record it before handoff.
+- **Latest immutable recovery checkpoint / implementation commit:** `2eec119aa5cf1e34f8185a4ccba72d1e3a7e9995`. The branch tip additionally contains a later dossier-only checkpoint commit; reconcile it with `git log` before review.
 - **Last updated:** 2026-10-22 PDT (2026-10-23 UTC).
 - **Inspiration:** user requirement to follow collector pagination; retained public-catalog validation showing 84 quote-eligible contracts beyond the first ten per series.
 - **Supersedes / successor:** no earlier pagination implementation dossier; parent independent review is the next gate. No activation or stable promotion is authorized.
@@ -55,11 +55,11 @@ Receipts:
 - **RED, before quota-order change:** `test_rejected_and_duplicate_rows_do_not_consume_global_quota` failed in both series and generic subtests, returning zero instead of two later eligible IDs. Both now pass, covering closed/missing-close/stale/quote-ineligible/noneligible rows, duplicate rows and immediate stop at the global quota.
 - **RED, before failure/cursor repair:** first/later-page failure diagnostics and repeated/cycling-cursor tests failed as expected (14 failing subtests in that original iteration). They now pass; coverage additionally checks malformed cursor types, causal exceptions and accepted-count logs.
 - **Final direct/continuation/retry tests:** 15 passed, zero failures/errors.
-- **Final focused collector/quote/identity/router suite:** 136 passed, zero failures/errors/skips, 11.178 seconds under a task-local Python audit guard forbidding sockets and subprocesses and restricting writes to the owned worktree and scratch directory. Expected synthetic fault logs are emitted by existing failure-path tests.
+- **Final focused collector/quote/identity/router suite:** 136 passed, zero failures/errors/skips, 12.897 seconds under a task-local Python audit guard forbidding sockets and subprocesses and restricting writes to the owned worktree and scratch directory. Expected synthetic fault logs are emitted by existing failure-path tests.
 - Initial guarded suite invocation included a nonexistent `test_market_classification` module and failed import; removing that runner-only typo yielded the full declared 136-test green receipt. No product change was made for it.
 - `git diff --check` passed.
 
-Task-local guard/receipt (not product files): `/home/ryushe/.hermes/cache/scratch/kalshi-pagination-t_d694dfa0/verify_offline.py` and `focused.log`. Scratch can expire; the committed tests and commands above are the durable verification surface.
+Task-local guard/receipt (not product files): `/home/ryushe/.hermes/cache/scratch/kalshi-pagination-t_d694dfa0/verify_offline.py` and `focused-final.log`. Scratch can expire; the committed tests and commands above are the durable verification surface.
 
 ### Recoverable RED reproduction
 
@@ -94,7 +94,7 @@ Task-local probe: `/home/ryushe/.hermes/cache/scratch/kalshi-pagination-t_d694df
 
 ## Interruption / resume handoff and decision gates
 
-- **Implementation checkpoint:** pending initial implementation commit, to be replaced with its verified SHA in a dossier-only commit.
+- **Implementation checkpoint:** `2eec119aa5cf1e34f8185a4ccba72d1e3a7e9995` (verified commit, ancestor of the feature tip). Later dossier-only handoff changes do not alter executable code or tests.
 - **Exact resume point:** parent independently reviews `bot/exchanges/kalshi.py` and `tests/test_kalshi_direct.py`, reruns the declared offline gate, and decides whether broad-suite evidence is required. Review focus: lazy stop at accepted quota, freshness-before-quota, continuation encoding, cycle/failure semantics and unchanged generic bounds.
 - **Expected working-tree state at handoff:** clean after implementation plus dossier-only checkpoint commit.
 - **Integration:** parent-owned review required before any beta merge; remove this temporary dossier from the integration target if accepted, preserving branch history.
