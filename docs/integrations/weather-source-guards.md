@@ -3,7 +3,7 @@
 - **Owner / branch:** source-guards subtask of parent `t_d694dfa0`, `fix/weather-source-guards-t_d694dfa0`.
 - **Base:** `fec68a30e3e66a5bfcb51dff40d2f22536329200` (reviewed pagination inherited unchanged).
 - **Target:** `beta`, explicitly directed by the parent; not `main` and not deployment.
-- **Implementation commits:** `fd029e03d58a8cbdaf1832e3b52cbc0fa065c78e`, then correction/checkpoint `c8ba6a121b6c96054253eeba18380140f2fdc0fd`.
+- **Implementation commits:** `fd029e03d58a8cbdaf1832e3b52cbc0fa065c78e`, correction/checkpoint `c8ba6a121b6c96054253eeba18380140f2fdc0fd`, and independently requested repair checkpoint `f959fcb4b387b9aa5bee5b492d0301809e08191c` (95 focused tests passed; fresh full/independent review pending).
 - **State:** locally verified; parent owns fresh independent review and integration. Current feature tip adds only this dossier handoff after the tested checkpoint. No nested reviewer, merge, push, service or production-data changes.
 
 ## Implemented contract
