@@ -1039,7 +1039,9 @@ def _contract_metadata(data) -> dict:
     """Preserve returned decision-time contract fields, including zero strikes."""
     fields = ("strike_type", "floor_strike", "cap_strike", "rules_primary",
               "rules_secondary", "subtitle", "yes_subtitle", "no_subtitle",
-              "custom_strike", "ticker", "series_ticker", "event_ticker")
+              "custom_strike", "ticker", "series_ticker", "event_ticker",
+              "city", "city_id", "market_kind", "market_date", "event_date",
+              "target_date", "weather_date")
     if isinstance(data, dict):
         return {key: data[key] for key in fields if key in data}
     return {key: getattr(data, key) for key in fields if hasattr(data, key)}

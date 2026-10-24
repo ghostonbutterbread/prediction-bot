@@ -8,6 +8,18 @@ from typing import Any, Mapping
 from .registry import WeatherRegistry
 
 
+# CLI labels identify reporting locations, not the settlement data vendor.
+# These five bindings were checked against NWS CLI reports AND physical station
+# metadata; never synthesize an ICAO identifier by prefixing an arbitrary CLI.
+# Evidence and reproducible URLs: docs/integrations/weather-source-guards.md.
+VERIFIED_CLI_STATIONS = {
+    "SAN": ("KSAN", "san_diego_ca"),
+    "DCA": ("KDCA", "washington_dc"),
+    "SDF": ("KSDF", "louisville_ky"),
+    "EWR": ("KEWR", "newark_nj"),
+    "TTN": ("KTTN", "trenton_nj"),
+}
+
 WEATHER_SERIES_PREFIXES = ("KXLOWT", "KXHIGHT", "KXHIGH", "KXLOW")
 STATION_ID_PATTERN = re.compile(r"\b(K[A-Z0-9]{3,4})\b")
 STATION_CLI_PATTERN = re.compile(r"\bCLI([A-Z0-9]{3,4})\b")
@@ -402,7 +414,16 @@ def _station_lookup() -> dict[str, dict[str, str]]:
         lookup[station_id] = entry
         if station_id.startswith("K"):
             lookup[station_id[1:]] = entry
+    for cli, (station_id, city_id) in VERIFIED_CLI_STATIONS.items():
+        entry = {**cities_by_id[city_id], "station_id": station_id}
+        lookup[cli] = lookup[station_id] = entry
     return lookup
+
+
+def station_city_conflicts(station_id: str | None, city_id: str) -> bool:
+    """Reject a known foreign owner; an unknown station is not a guessed city."""
+    owner = _station_lookup().get(str(station_id or "").upper())
+    return bool(owner and owner["city_id"] != city_id)
 
 
 __all__ = [
