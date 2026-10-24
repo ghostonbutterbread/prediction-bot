@@ -44,6 +44,45 @@ Interpreter: `/home/ryushe/projects/prediction-bot-beta-integration/.venv/bin/py
 
 Durable evidence root: `/mnt/data-collection/prediction-bot/data/derived_reports/weather_identity_repair_t_ca47d502/finish_e2e_t_d694dfa0/source_guards/` (`regressions-red.log`, `regressions-green.log`, `focused-green.log`, `catalog-validation.json`, reproducible `validate_catalog.py`, `stations/bindings.json`). Committed bounded fixtures: `tests/fixtures/weather_source_guard_contracts.json`, snapshot SHA-256 `fc554bc5f03072169f04bbefdeabe22802f6ece147a2d87dd6209f49b49f4062`.
 
+## Independent review corrections
+
+Review `deleg_880cdcb0` blocked source checkpoint
+`1ddb4c9c8c0eaaf61694f39b5277d9bdf717ef86` and combined checkpoint
+`ec6eca0dc4368c2b796d3b21e96e3816f9e48562`: supported emphasis could hide an
+explicit unsupported post-metric city. It also reproduced original date
+contradictions in both historical readers and a returned-snapshot city that
+could self-authorize against a different requested city. The latter two were
+inherited boundary gaps, not evidence of normal HTTP-adapter production misuse.
+All three are within this task's city/date/source-correctness acceptance scope.
+
+- Added five committed collection/actual-history regression cases. Before the
+  correction they produced **37 failed assertions, zero errors**; the full RED
+  log is `review-corrections-red.log` in the existing derived source-guards root.
+- Strip balanced supported star/underscore emphasis before location extraction,
+  preserving punctuation, station tokens and identifier-internal underscores.
+  Matching-city, generic and station-only positives remain accepted.
+- Pass the actual requested city to the shared live geography guard at both
+  call sites. Returned snapshot labels remain independent assertions; rejected
+  numeric values, city labels and receipt evidence are not rewritten.
+- Apply the existing original-date resolver at the shared pending-observation
+  qualification seam used by both direct historical readers. Only recognized
+  contradictions add `conflicting_original_market_dates` to strict/predictive
+  proof rejection; missing optional dates stay neutral. No clocks or raw records
+  are changed, and no materializer/publication worker is enabled.
+- Corrected focused gate: **95 tests, zero failures/errors/skips**, including
+  collection/geography, both history readers, shared source ledger and predictive
+  history controls (`review-corrections-green.log`, 18.816 seconds).
+- Reference-impact check: both live `_guard_source_geography` call sites now pass
+  the requested city; no legacy self-label-only call remains.
+
+The corrected source must be propagated by merge into the isolated parent
+accounting candidate, then receive a new combined full gate and fresh independent
+review. The earlier 1,854-test combined pass does not approve this correction.
+Production remains on execution-approval hold: the accounting repair request
+expired without running. Do not retry that operation, alter the existing unit,
+merge into the beta execution checkout, or start the collector until the user
+explicitly responds. No production repair or live end-to-end success is claimed.
+
 ## Boundaries / review handoff
 
 No capture-accounting implementation edits. No production captures, raw ledgers, service/runtime/config, beta checkout, wallet or trading actions. Public HTTP was station evidence retrieval only. Tests use disposable synthetic stores and mocked HTTP; catalog-wide validation proves operands, not live availability. Parent must independently review this exact commit range, combine with accounting, run its end-to-end stopped-writer/production integration gate, and authorize activation separately. Bounded startup fallback redesign and operational restart are outside this branch. Existing inherited pagination dossier is untouched; parent removes it only at final integration.
