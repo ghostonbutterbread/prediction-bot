@@ -106,10 +106,17 @@ Markdown could hide an explicit unsupported city. The source-owning feature
 repairs that gap and the reproduced historical-date / requested-versus-returned
 city gaps at checkpoint `f959fcb4b387b9aa5bee5b492d0301809e08191c`.
 Five added tests first produced 37 failed assertions with zero errors; the
-corrected 95-test focused gate passed. Propagate the source repair by merge into
-this existing parent candidate, then run a fresh full gate and independent
-review. Earlier approvals/full-gate counts do not approve this corrected tree.
-The source dossier and derived `review-corrections-{red,green}.log` retain details.
+corrected 95-test focused gate passed. They were propagated to combined checkpoint
+`ed4b1d6752e5f65ad33a85795c9876681c5bf05d`, whose full gate ran 1,859 tests
+with 25 failed assertions and zero errors. Twenty-four failures exposed original
+calendar fixtures changing the question month without changing August identity,
+forecast and resolution evidence; one expected a numeric-plausibility reason for
+an unproven requested city. The source-owning feature corrects only those fixtures,
+keeps all original counterexample guards/assertions, and reruns the full combined
+gate. Its 47-test fixture/negative-control rerun passed without failures/errors.
+Fresh independent review must cover these fixture changes; no RED gate is waived.
+Earlier approvals/full-gate counts do not approve the corrected tree.
+The source dossier and durable review logs retain the complete attempt history.
 Production execution remains held; no operation retry is authorized by review
 notifications. Once explicitly authorized, pin the then-reviewed clean imported
 source and helper hashes rather than blindly replaying a stale HEAD-pinned call.
