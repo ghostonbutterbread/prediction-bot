@@ -117,6 +117,18 @@ gate. Its 47-test fixture/negative-control rerun passed without failures/errors.
 Fresh independent review must cover these fixture changes; no RED gate is waived.
 Earlier approvals/full-gate counts do not approve the corrected tree.
 The source dossier and durable review logs retain the complete attempt history.
+The fixture-aligned combined checkpoint
+`3e5a748bcd5ba66f574bb506f61a13e343e72ec3` subsequently passed **1,859 tests,
+zero failures/errors**, with the same seven runtime-config skip entries and one
+archive exclusion. However, independent `deleg_4f9fd97a` found nested balanced
+emphasis still hid unsupported cities in the unchanged parser; this BLOCK also
+applies to that fixture-only successor. The source-owning feature adds actual
+HIGH/LOW, both-history-reader and emphasis-composition controls (8-method RED,
+516 failed assertions, zero errors), then fixes delimiter-run normalization to
+reach a fixed point at source checkpoint
+`e3c26337579aa71cb63a2ddb26f1d47ef2d743fe`. Its corrected **68-test focused
+gate passes**. Propagate that new source checkpoint and require a fresh exact
+combined full gate and verdict; no prior pass waives this reviewer blocker.
 Production execution remains held; no operation retry is authorized by review
 notifications. Once explicitly authorized, pin the then-reviewed clean imported
 source and helper hashes rather than blindly replaying a stale HEAD-pinned call.
