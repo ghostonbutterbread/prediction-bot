@@ -3,8 +3,8 @@
 - **Owner / branch:** source-guards subtask of parent `t_d694dfa0`, `fix/weather-source-guards-t_d694dfa0`.
 - **Base:** `fec68a30e3e66a5bfcb51dff40d2f22536329200` (reviewed pagination inherited unchanged).
 - **Target:** `beta`, explicitly directed by the parent; not `main` and not deployment.
-- **Implementation commits:** original `fd029e03d58a8cbdaf1832e3b52cbc0fa065c78e` / `c8ba6a121b6c96054253eeba18380140f2fdc0fd`, review corrections `f959fcb4b387b9aa5bee5b492d0301809e08191c`, fixture reconciliation `59e92cac9c43744b52cb36766961eecfd09a0301`, and current nested-normalization checkpoint **`e3c26337579aa71cb63a2ddb26f1d47ef2d743fe`** (68 focused tests passed; final full/independent verdict pending). Current tip may add only this dossier pointer after that tested checkpoint.
-- **State:** fixture-aligned combined `3e5a748` passed its 1,859-test full gate, but the nested-emphasis review blocker below still applies. The new nested correction passes 68 focused tests; a fresh exact-candidate full gate and independent verdict remain mandatory. No release, merge into beta, push, service or production-data changes.
+- **Implementation commits:** original `fd029e03d58a8cbdaf1832e3b52cbc0fa065c78e` / `c8ba6a121b6c96054253eeba18380140f2fdc0fd`, review corrections `f959fcb4b387b9aa5bee5b492d0301809e08191c`, fixture reconciliation `59e92cac9c43744b52cb36766961eecfd09a0301`, and current nested-normalization checkpoint **`e3c26337579aa71cb63a2ddb26f1d47ef2d743fe`** (68 focused tests passed; combined 1,862-test pass independently BLOCKED for the different-span case below). Later commits are dossier-only handoff updates.
+- **State:** independently **BLOCKED** on combined `283a04b26cd5477da8f13ad5db7fb09124f60070` despite its 1,862-test full pass. Nested different-span emphasis still defeats the regex (see architectural pause below). No fourth regex patch: a structural-parser replacement requires an operator decision before implementation. No release, merge into beta, push, service or production-data changes.
 
 ## Implemented contract
 
@@ -151,5 +151,39 @@ Only the city parser, regression tests and this branch-local dossier change in
 this checkpoint. Merge it into the existing isolated owning parent and obtain
 a new full frozen gate plus an independent verdict on that exact combined tree.
 The original independent nested acceptance fixture remains unchanged for review.
+
+### Architectural pause after the third Markdown review blocker
+
+Final review `deleg_95fedb83` independently blocks source `e3c2633` and combined
+`283a04b26cd5477da8f13ad5db7fb09124f60070` on balanced emphasis spanning
+separately decorated metric/location text:
+
+- `***high temperature** **in Sacramento***`
+- `___high temperature_ _in Sacramento___`
+
+The greedy delimiter-run removal leaves `** **` or `_ _` between the metric
+and location. The loop terminates but its matching semantics are wrong. Actual
+HIGH/LOW collection and both direct history readers reproduce **eight failed
+assertions in two independent methods**, with matching-city positives intact.
+The exact full gate passes 1,862 unique tests, but this BLOCK takes precedence.
+The review root is `source_guards/independent_review_283a04/` beneath the durable
+evidence root above; it contains the unchanged new reproducer and retained inputs.
+
+Stop iterative regex repairs and obtain an operator decision on replacing this
+presentation-normalization boundary with structural CommonMark parsing. The
+verified project interpreter already provides `markdown-it-py==4.2.0`; root
+`requirements.txt` does not directly declare it. A read-only diagnostic using
+its inline token stream produces the intended visible text on both new
+counterexamples and on matching `San_Diego` / `CLISAN (KSAN)` controls: **four
+diagnostic cases passed**, not collection/history acceptance. Official package
+documentation confirms CommonMark parsing and inline child tokens. No install,
+dependency declaration, product code or test has changed under this proposal.
+
+Proposed bounded replacement: make that existing parser an explicit root
+dependency, use one structural presentation view at the owning city boundary,
+preserve original text and identifier/punctuation semantics, then exercise all
+unchanged reviewer reproducers, actual HIGH/LOW collection, both history readers,
+the full isolated suite and a fresh exact-candidate review. No production
+reconciliation, beta activation or live acceptance is authorized by that decision.
 
 No capture-accounting implementation edits. No production captures, raw ledgers, service/runtime/config, beta checkout, wallet or trading actions. Public HTTP was station evidence retrieval only. Tests use disposable synthetic stores and mocked HTTP; catalog-wide validation proves operands, not live availability. Parent must independently review this exact commit range, combine with accounting, run its end-to-end stopped-writer/production integration gate, and authorize activation separately. Bounded startup fallback redesign and operational restart are outside this branch. Existing inherited pagination dossier is untouched; parent removes it only at final integration.
