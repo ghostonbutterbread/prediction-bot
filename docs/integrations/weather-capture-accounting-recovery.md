@@ -99,5 +99,19 @@ offline compatibility with source-guards checkpoint
 `1ddb4c9c8c0eaaf61694f39b5277d9bdf717ef86`. This is not a beta/runtime activation.
 Fresh independent source/combined review, combined full gate, verified metadata
 repair, effective unit drop-in and deliberate activation are still required.
+
+Independent review `deleg_880cdcb0` subsequently **blocked** combined checkpoint
+`ec6eca0dc4368c2b796d3b21e96e3816f9e48562` despite its 1,854-test full pass:
+Markdown could hide an explicit unsupported city. The source-owning feature
+repairs that gap and the reproduced historical-date / requested-versus-returned
+city gaps at checkpoint `f959fcb4b387b9aa5bee5b492d0301809e08191c`.
+Five added tests first produced 37 failed assertions with zero errors; the
+corrected 95-test focused gate passed. Propagate the source repair by merge into
+this existing parent candidate, then run a fresh full gate and independent
+review. Earlier approvals/full-gate counts do not approve this corrected tree.
+The source dossier and derived `review-corrections-{red,green}.log` retain details.
+Production execution remains held; no operation retry is authorized by review
+notifications. Once explicitly authorized, pin the then-reviewed clean imported
+source and helper hashes rather than blindly replaying a stale HEAD-pinned call.
 A fresh complete collection-cycle audit (catalog pages, identities, geography,
 captures/integrity and replay publication) is the final acceptance gate.
