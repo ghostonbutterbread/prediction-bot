@@ -19,9 +19,10 @@ class CaptureRetentionError(RuntimeError):
     """Evidence could not be durably retained or its identity did not verify."""
 
 
-# Upper bound for the small accounting record, lock, and atomic replacement temps.
-# Publication reserves a full second copy of a new body until its temp is removed.
-_ACCOUNT_OVERHEAD = 16384
+# Reserve both copies of the bounded accounting record during atomic replacement.
+# All 256 shard mtimes plus a pending publication must fit the half-size limit.
+# Publication additionally reserves a full second copy of each new body.
+_ACCOUNT_OVERHEAD = 32768
 
 
 class WeatherCaptureStore:
@@ -210,12 +211,13 @@ class WeatherCaptureStore:
                     raise CaptureRetentionError('weather capture max_bytes exhausted; pause collection or increase validated budget')
                 if self.min_free_bytes is not None and shutil.disk_usage(self.capture_root).free < self.min_free_bytes + extra:
                     raise CaptureRetentionError('weather capture min_free_bytes reserve reached; pause collection or free storage')
-                target.parent.mkdir(parents=True, exist_ok=True)
                 temporary_name = '.capture-' + uuid.uuid4().hex
                 state['pending'] = {'locator': relative, 'size': len(raw),
                                     'sha256': hashlib.sha256(raw).hexdigest(), 'temporary': temporary_name}
                 self._save_state(state)
                 try:
+                    # Parent creation belongs after the durable pending record:
+                    # a rejected reservation must not leave an unaccounted shard.
                     self._write_object(relative, raw, temporary_name=temporary_name)
                 except Exception:
                     # Recover only this one reserved publication, including a linked object.

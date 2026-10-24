@@ -16,12 +16,13 @@ from bot.weather.registry import WeatherRegistry
 from tests.test_weather_broad_collection import gray_page
 
 from bot.feeds import weather_pro
+from bot.feeds.weather_capture_store import _ACCOUNT_OVERHEAD
 
 
 def _process_receipt(root, index):
     from bot.feeds.weather_capture_store import WeatherCaptureStore, CaptureRetentionError
     try:
-        WeatherCaptureStore(storage_root=root, max_bytes=20000, min_free_bytes=0).retain_receipt(
+        WeatherCaptureStore(storage_root=root, max_bytes=_ACCOUNT_OVERHEAD + 3616, min_free_bytes=0).retain_receipt(
             {'index': index, 'payload': 'x' * 1000})
         return True
     except CaptureRetentionError:
@@ -36,7 +37,7 @@ class CaptureStoreTests(unittest.TestCase):
                 results = list(pool.map(_process_receipt, [root] * 12, range(12)))
             self.assertTrue(any(results))
             self.assertTrue(any(not value for value in results))
-            store = WeatherCaptureStore(storage_root=root, max_bytes=20000, min_free_bytes=0)
+            store = WeatherCaptureStore(storage_root=root, max_bytes=_ACCOUNT_OVERHEAD + 3616, min_free_bytes=0)
             receipts = list((Path(root) / 'data/weather_captures/receipts').iterdir())
             self.assertEqual(len(receipts), sum(results))
             self.assertEqual(store.usage()['bytes'], sum(path.stat().st_size for path in receipts))
@@ -44,9 +45,9 @@ class CaptureStoreTests(unittest.TestCase):
     def test_capped_store_counts_distinct_receipts_and_shared_blob(self):
         from bot.feeds.weather_capture_store import WeatherCaptureStore, CaptureRetentionError
         with tempfile.TemporaryDirectory() as root:
-            store = WeatherCaptureStore(storage_root=root, max_bytes=30000, min_free_bytes=0)
+            store = WeatherCaptureStore(storage_root=root, max_bytes=(_ACCOUNT_OVERHEAD + 13616), min_free_bytes=0)
             first = store.retain(b'a' * 100, metadata={'city': 'austin'})
-            second = WeatherCaptureStore(storage_root=root, max_bytes=30000, min_free_bytes=0).retain(
+            second = WeatherCaptureStore(storage_root=root, max_bytes=(_ACCOUNT_OVERHEAD + 13616), min_free_bytes=0).retain(
                 b'a' * 100, metadata={'city': 'vegas'})
             store.retain_receipt({'collection': 'attempt'})
             self.assertEqual(store.read_verified(first), b'a' * 100)
@@ -60,7 +61,7 @@ class CaptureStoreTests(unittest.TestCase):
     def test_capped_concurrent_stores_serialize_and_failures_retry(self):
         from bot.feeds.weather_capture_store import WeatherCaptureStore, CaptureRetentionError
         with tempfile.TemporaryDirectory() as root:
-            stores = [WeatherCaptureStore(storage_root=root, max_bytes=21000, min_free_bytes=0) for _ in range(8)]
+            stores = [WeatherCaptureStore(storage_root=root, max_bytes=_ACCOUNT_OVERHEAD + 4616, min_free_bytes=0) for _ in range(8)]
             with ThreadPoolExecutor(max_workers=8) as pool:
                 results = list(pool.map(lambda item: self._try_receipt(*item), enumerate(stores)))
             self.assertTrue(any(results))
@@ -86,7 +87,7 @@ class CaptureStoreTests(unittest.TestCase):
         from bot.feeds.weather_capture_store import WeatherCaptureStore, CaptureRetentionError
         with tempfile.TemporaryDirectory() as root:
             WeatherCaptureStore(storage_root=root).retain(b'old', metadata={})
-            capped = WeatherCaptureStore(storage_root=root, max_bytes=30000, min_free_bytes=0)
+            capped = WeatherCaptureStore(storage_root=root, max_bytes=(_ACCOUNT_OVERHEAD + 13616), min_free_bytes=0)
             with self.assertRaisesRegex(CaptureRetentionError, 'accounting'):
                 capped.retain(b'new', metadata={})
 
@@ -96,9 +97,9 @@ class CaptureStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             config = {'runtime': {'storage_root': root, 'base_dir': 'lab'},
                       'prediction_lab': {'mode': 'collector', 'observer_mode': True,
-                                         'weather_capture_storage': {'max_bytes': 30000, 'min_free_bytes': 10}}}
+                                         'weather_capture_storage': {'max_bytes': (_ACCOUNT_OVERHEAD + 13616), 'min_free_bytes': 10}}}
             lab = PredictionLab(config)
-            self.assertEqual(lab.capture_store.max_bytes, 30000)
+            self.assertEqual(lab.capture_store.max_bytes, (_ACCOUNT_OVERHEAD + 13616))
             self.assertEqual(lab.capture_store.min_free_bytes, 10)
             with patch('bot.feeds.weather_capture_store.shutil.disk_usage', return_value=shutil._ntuple_diskusage(100000, 99995, 5)):
                 with self.assertRaisesRegex(CaptureRetentionError, 'min_free_bytes'):
@@ -111,7 +112,7 @@ class CaptureStoreTests(unittest.TestCase):
         from bot.feeds.weather_capture_store import WeatherCaptureStore, CaptureRetentionError
         with tempfile.TemporaryDirectory() as root:
             encoded = b'{"test":1}'
-            store = WeatherCaptureStore(storage_root=root, max_bytes=16384 + 2 * len(encoded), min_free_bytes=0)
+            store = WeatherCaptureStore(storage_root=root, max_bytes=_ACCOUNT_OVERHEAD + 2 * len(encoded), min_free_bytes=0)
             store.retain_receipt({'test': 1})
             self.assertEqual(store.usage()['bytes'], len(encoded))
             with self.assertRaisesRegex(CaptureRetentionError, 'max_bytes'):
@@ -119,7 +120,7 @@ class CaptureStoreTests(unittest.TestCase):
             receipt_root = Path(root) / 'data/weather_captures/receipts'
             self.assertEqual(len(list(receipt_root.iterdir())), 1)
         with tempfile.TemporaryDirectory() as root:
-            store = WeatherCaptureStore(storage_root=root, max_bytes=30000, min_free_bytes=0)
+            store = WeatherCaptureStore(storage_root=root, max_bytes=(_ACCOUNT_OVERHEAD + 13616), min_free_bytes=0)
             with patch('bot.feeds.weather_capture_store.os.link', side_effect=OSError('fixture')):
                 with self.assertRaises(CaptureRetentionError):
                     store.retain_receipt({'test': 1})

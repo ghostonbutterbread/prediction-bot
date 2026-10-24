@@ -13,6 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from bot.prediction_lab_collect import PredictionLabCollectorDaemon
+from bot.feeds.weather_capture_store import CaptureRetentionError
 
 
 def main() -> int:
@@ -55,13 +56,19 @@ def main() -> int:
             'trading_enabled': False,
         }
 
-    daemon = PredictionLabCollectorDaemon(
-        PROJECT_ROOT / args.config,
-        demo=args.demo,
-        verbose=args.verbose,
-        config_patch=config_patch,
-    )
-    status = daemon.run(max_cycles=args.max_cycles, idle_sleep_seconds=args.idle_sleep_seconds)
+    try:
+        daemon = PredictionLabCollectorDaemon(
+            PROJECT_ROOT / args.config,
+            demo=args.demo,
+            verbose=args.verbose,
+            config_patch=config_patch,
+        )
+        status = daemon.run(max_cycles=args.max_cycles, idle_sleep_seconds=args.idle_sleep_seconds)
+    except CaptureRetentionError as exc:
+        logging.getLogger(__name__).error('collector paused: %s; inspect retention/accounting offline before restart', exc)
+        # Managed collectors use RestartPreventExitStatus=78 for this terminal
+        # storage-integrity/capacity condition; retries cannot repair it.
+        return 78
     print({
         'collect_runs': status.collect_runs,
         'resolve_runs': status.resolve_runs,
