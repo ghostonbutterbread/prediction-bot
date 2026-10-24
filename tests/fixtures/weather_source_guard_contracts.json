@@ -1,0 +1,279 @@
+{
+  "purpose": "Retained official identity fields, not current prices or forecast payloads. Transport tests use separately labelled synthetic weather.",
+  "source_snapshot_sha256": "fc554bc5f03072169f04bbefdeabe22802f6ece147a2d87dd6209f49b49f4062",
+  "source_snapshot": "current_market_validation_t_1de472a9/market_observations.jsonl",
+  "markets": [
+    {
+      "requested_series": "KXHIGHTSAN",
+      "fetched_at": "2026-10-23T03:36:34.046384+00:00",
+      "kind": "high",
+      "raw": {
+        "ticker": "KXHIGHTSAN-26OCT23-T75",
+        "event_ticker": "KXHIGHTSAN-26OCT23",
+        "title": "Will the maximum temperature be >75\u00b0 on Oct 23, 2026?",
+        "custom_strike": {
+          "City": "San Diego"
+        },
+        "rules_primary": "If the maximum temperature recorded at San Diego (CLISAN) for Oct 23, 2026, is greater than 75\u00b0 fahrenheit according to The Weather Company, then the market resolves to Yes.",
+        "rules_secondary": "Not all weather data is the same. While checking a source like AccuWeather or Google Weather may help guide your decision, the official and final value used to determine this market is the maximum/minimum temperature as reported by the Weather Company.\n\nReading weather data\nPreliminary Weather Company data may be subject to rounding and conversion differences from the final reported value.\nUse caution when interpreting preliminary Weather Company readings.\n\nIf it is determined in the sole discretion of the Exchange that there is a material error in the initial non-preliminary publication, Expiration may be held until the publication of a non-materially-erroneous data revision or until the Expiration Date, whichever comes first. If no data is available at the end of this period, all markets will resolve to the last fair price determined by Kalshi. Please note, a status of \"Final\" on weather.com/kalshi is provided for convenience only, and does not guarantee data to be error-free and thus exempt from the above.",
+        "floor_strike": 75,
+        "strike_type": "greater",
+        "yes_ask_dollars": "0.0200",
+        "no_ask_dollars": "1.0000"
+      }
+    },
+    {
+      "requested_series": "KXLOWTSAN",
+      "fetched_at": "2026-10-23T03:36:35.422788+00:00",
+      "kind": "low",
+      "raw": {
+        "ticker": "KXLOWTSAN-26OCT23-T61",
+        "event_ticker": "KXLOWTSAN-26OCT23",
+        "title": "Will the minimum temperature be >61\u00b0 on Oct 23, 2026?",
+        "custom_strike": {
+          "City": "San Diego"
+        },
+        "rules_primary": "If the minimum temperature recorded at San Diego (CLISAN) for Oct 23, 2026, is greater than 61\u00b0 fahrenheit according to The Weather Company, then the market resolves to Yes.",
+        "rules_secondary": "Not all weather data is the same. While checking a source like AccuWeather or Google Weather may help guide your decision, the official and final value used to determine this market is the maximum/minimum temperature as reported by the Weather Company.\n\nReading weather data\nPreliminary Weather Company data may be subject to rounding and conversion differences from the final reported value.\nUse caution when interpreting preliminary Weather Company readings.\n\nIf it is determined in the sole discretion of the Exchange that there is a material error in the initial non-preliminary publication, Expiration may be held until the publication of a non-materially-erroneous data revision or until the Expiration Date, whichever comes first. If no data is available at the end of this period, all markets will resolve to the last fair price determined by Kalshi. Please note, a status of \"Final\" on weather.com/kalshi is provided for convenience only, and does not guarantee data to be error-free and thus exempt from the above.",
+        "floor_strike": 61,
+        "strike_type": "greater",
+        "yes_ask_dollars": "0.5100",
+        "no_ask_dollars": "0.6800"
+      }
+    },
+    {
+      "requested_series": "KXHIGHTDC",
+      "fetched_at": "2026-10-23T03:37:40.527066+00:00",
+      "kind": "high",
+      "raw": {
+        "ticker": "KXHIGHTDC-26OCT23-T69",
+        "event_ticker": "KXHIGHTDC-26OCT23",
+        "title": "Will the maximum temperature be >69\u00b0 on Oct 23, 2026?",
+        "custom_strike": {
+          "City": "Washington DC"
+        },
+        "rules_primary": "If the maximum temperature recorded at Washington DC (CLIDCA) for Oct 23, 2026, is greater than 69\u00b0 fahrenheit according to The Weather Company, then the market resolves to Yes.",
+        "rules_secondary": "Not all weather data is the same. While checking a source like AccuWeather or Google Weather may help guide your decision, the official and final value used to determine this market is the maximum/minimum temperature as reported by the Weather Company.\n\nReading weather data\nPreliminary Weather Company data may be subject to rounding and conversion differences from the final reported value.\nUse caution when interpreting preliminary Weather Company readings.\n\nIf it is determined in the sole discretion of the Exchange that there is a material error in the initial non-preliminary publication, Expiration may be held until the publication of a non-materially-erroneous data revision or until the Expiration Date, whichever comes first. If no data is available at the end of this period, all markets will resolve to the last fair price determined by Kalshi. Please note, a status of \"Final\" on weather.com/kalshi is provided for convenience only, and does not guarantee data to be error-free and thus exempt from the above.",
+        "floor_strike": 69,
+        "strike_type": "greater",
+        "yes_ask_dollars": "0.0100",
+        "no_ask_dollars": "1.0000"
+      }
+    },
+    {
+      "requested_series": "KXLOWTDC",
+      "fetched_at": "2026-10-23T03:36:40.320103+00:00",
+      "kind": "low",
+      "raw": {
+        "ticker": "KXLOWTDC-26OCT23-T48",
+        "event_ticker": "KXLOWTDC-26OCT23",
+        "title": "Will the minimum temperature be >48\u00b0 on Oct 23, 2026?",
+        "custom_strike": {
+          "City": "Washington DC"
+        },
+        "rules_primary": "If the minimum temperature recorded at Washington DC (CLIDCA) for Oct 23, 2026, is greater than 48\u00b0 fahrenheit according to The Weather Company, then the market resolves to Yes.",
+        "rules_secondary": "Not all weather data is the same. While checking a source like AccuWeather or Google Weather may help guide your decision, the official and final value used to determine this market is the maximum/minimum temperature as reported by the Weather Company.\n\nReading weather data\nPreliminary Weather Company data may be subject to rounding and conversion differences from the final reported value.\nUse caution when interpreting preliminary Weather Company readings.\n\nIf it is determined in the sole discretion of the Exchange that there is a material error in the initial non-preliminary publication, Expiration may be held until the publication of a non-materially-erroneous data revision or until the Expiration Date, whichever comes first. If no data is available at the end of this period, all markets will resolve to the last fair price determined by Kalshi. Please note, a status of \"Final\" on weather.com/kalshi is provided for convenience only, and does not guarantee data to be error-free and thus exempt from the above.",
+        "floor_strike": 48,
+        "strike_type": "greater",
+        "yes_ask_dollars": "0.5300",
+        "no_ask_dollars": "0.5800"
+      }
+    },
+    {
+      "requested_series": "KXHIGHTSDF",
+      "fetched_at": "2026-10-23T03:37:23.021664+00:00",
+      "kind": "high",
+      "raw": {
+        "ticker": "KXHIGHTSDF-26OCT23-T77",
+        "event_ticker": "KXHIGHTSDF-26OCT23",
+        "title": "Will the maximum temperature be >77\u00b0 on Oct 23, 2026?",
+        "custom_strike": {
+          "City": "Louisville"
+        },
+        "rules_primary": "If the maximum temperature recorded at Louisville (CLISDF) for Oct 23, 2026, is greater than 77\u00b0 fahrenheit according to The Weather Company, then the market resolves to Yes.",
+        "rules_secondary": "Not all weather data is the same. While checking a source like AccuWeather or Google Weather may help guide your decision, the official and final value used to determine this market is the maximum/minimum temperature as reported by the Weather Company.\n\nReading weather data\nPreliminary Weather Company data may be subject to rounding and conversion differences from the final reported value.\nUse caution when interpreting preliminary Weather Company readings.\n\nIf it is determined in the sole discretion of the Exchange that there is a material error in the initial non-preliminary publication, Expiration may be held until the publication of a non-materially-erroneous data revision or until the Expiration Date, whichever comes first. If no data is available at the end of this period, all markets will resolve to the last fair price determined by Kalshi. Please note, a status of \"Final\" on weather.com/kalshi is provided for convenience only, and does not guarantee data to be error-free and thus exempt from the above.",
+        "floor_strike": 77,
+        "strike_type": "greater",
+        "yes_ask_dollars": "0.0200",
+        "no_ask_dollars": "0.9900"
+      }
+    },
+    {
+      "requested_series": "KXLOWTSDF",
+      "fetched_at": "2026-10-23T03:37:02.725328+00:00",
+      "kind": "low",
+      "raw": {
+        "ticker": "KXLOWTSDF-26OCT23-T46",
+        "event_ticker": "KXLOWTSDF-26OCT23",
+        "title": "Will the minimum temperature be >46\u00b0 on Oct 23, 2026?",
+        "custom_strike": {
+          "City": "Louisville"
+        },
+        "rules_primary": "If the minimum temperature recorded at Louisville (CLISDF) for Oct 23, 2026, is greater than 46\u00b0 fahrenheit according to The Weather Company, then the market resolves to Yes.",
+        "rules_secondary": "Not all weather data is the same. While checking a source like AccuWeather or Google Weather may help guide your decision, the official and final value used to determine this market is the maximum/minimum temperature as reported by the Weather Company.\n\nReading weather data\nPreliminary Weather Company data may be subject to rounding and conversion differences from the final reported value.\nUse caution when interpreting preliminary Weather Company readings.\n\nIf it is determined in the sole discretion of the Exchange that there is a material error in the initial non-preliminary publication, Expiration may be held until the publication of a non-materially-erroneous data revision or until the Expiration Date, whichever comes first. If no data is available at the end of this period, all markets will resolve to the last fair price determined by Kalshi. Please note, a status of \"Final\" on weather.com/kalshi is provided for convenience only, and does not guarantee data to be error-free and thus exempt from the above.",
+        "floor_strike": 46,
+        "strike_type": "greater",
+        "yes_ask_dollars": "0.5900",
+        "no_ask_dollars": "0.6100"
+      }
+    },
+    {
+      "requested_series": "KXHIGHTEWR",
+      "fetched_at": "2026-10-23T03:37:11.818442+00:00",
+      "kind": "high",
+      "raw": {
+        "ticker": "KXHIGHTEWR-26OCT23-T64",
+        "event_ticker": "KXHIGHTEWR-26OCT23",
+        "title": "Will the maximum temperature be >64\u00b0 on Oct 23, 2026?",
+        "custom_strike": {
+          "City": "Newark"
+        },
+        "rules_primary": "If the maximum temperature recorded at Newark (CLIEWR) for Oct 23, 2026, is greater than 64\u00b0 fahrenheit according to The Weather Company, then the market resolves to Yes.",
+        "rules_secondary": "Not all weather data is the same. While checking a source like AccuWeather or Google Weather may help guide your decision, the official and final value used to determine this market is the maximum/minimum temperature as reported by the Weather Company.\n\nReading weather data\nPreliminary Weather Company data may be subject to rounding and conversion differences from the final reported value.\nUse caution when interpreting preliminary Weather Company readings.\n\nIf it is determined in the sole discretion of the Exchange that there is a material error in the initial non-preliminary publication, Expiration may be held until the publication of a non-materially-erroneous data revision or until the Expiration Date, whichever comes first. If no data is available at the end of this period, all markets will resolve to the last fair price determined by Kalshi. Please note, a status of \"Final\" on weather.com/kalshi is provided for convenience only, and does not guarantee data to be error-free and thus exempt from the above.",
+        "floor_strike": 64,
+        "strike_type": "greater",
+        "yes_ask_dollars": "0.0200",
+        "no_ask_dollars": "0.9900"
+      }
+    },
+    {
+      "requested_series": "KXLOWTEWR",
+      "fetched_at": "2026-10-23T03:37:08.319192+00:00",
+      "kind": "low",
+      "raw": {
+        "ticker": "KXLOWTEWR-26OCT23-T45",
+        "event_ticker": "KXLOWTEWR-26OCT23",
+        "title": "Will the minimum temperature be >45\u00b0 on Oct 23, 2026?",
+        "custom_strike": {
+          "City": "Newark"
+        },
+        "rules_primary": "If the minimum temperature recorded at Newark (CLIEWR) for Oct 23, 2026, is greater than 45\u00b0 fahrenheit according to The Weather Company, then the market resolves to Yes.",
+        "rules_secondary": "Not all weather data is the same. While checking a source like AccuWeather or Google Weather may help guide your decision, the official and final value used to determine this market is the maximum/minimum temperature as reported by the Weather Company.\n\nReading weather data\nPreliminary Weather Company data may be subject to rounding and conversion differences from the final reported value.\nUse caution when interpreting preliminary Weather Company readings.\n\nIf it is determined in the sole discretion of the Exchange that there is a material error in the initial non-preliminary publication, Expiration may be held until the publication of a non-materially-erroneous data revision or until the Expiration Date, whichever comes first. If no data is available at the end of this period, all markets will resolve to the last fair price determined by Kalshi. Please note, a status of \"Final\" on weather.com/kalshi is provided for convenience only, and does not guarantee data to be error-free and thus exempt from the above.",
+        "floor_strike": 45,
+        "strike_type": "greater",
+        "yes_ask_dollars": "0.5400",
+        "no_ask_dollars": "0.5500"
+      }
+    },
+    {
+      "requested_series": "KXHIGHTTTN",
+      "fetched_at": "2026-10-23T03:37:25.123460+00:00",
+      "kind": "high",
+      "raw": {
+        "ticker": "KXHIGHTTTN-26OCT23-T65",
+        "event_ticker": "KXHIGHTTTN-26OCT23",
+        "title": "Will the maximum temperature be >65\u00b0 on Oct 23, 2026?",
+        "custom_strike": {
+          "City": "Trenton"
+        },
+        "rules_primary": "If the maximum temperature recorded at Trenton (CLITTN) for Oct 23, 2026, is greater than 65\u00b0 fahrenheit according to The Weather Company, then the market resolves to Yes.",
+        "rules_secondary": "Not all weather data is the same. While checking a source like AccuWeather or Google Weather may help guide your decision, the official and final value used to determine this market is the maximum/minimum temperature as reported by the Weather Company.\n\nReading weather data\nPreliminary Weather Company data may be subject to rounding and conversion differences from the final reported value.\nUse caution when interpreting preliminary Weather Company readings.\n\nIf it is determined in the sole discretion of the Exchange that there is a material error in the initial non-preliminary publication, Expiration may be held until the publication of a non-materially-erroneous data revision or until the Expiration Date, whichever comes first. If no data is available at the end of this period, all markets will resolve to the last fair price determined by Kalshi. Please note, a status of \"Final\" on weather.com/kalshi is provided for convenience only, and does not guarantee data to be error-free and thus exempt from the above.",
+        "floor_strike": 65,
+        "strike_type": "greater",
+        "yes_ask_dollars": "0.0200",
+        "no_ask_dollars": "1.0000"
+      }
+    },
+    {
+      "requested_series": "KXLOWTTTN",
+      "fetched_at": "2026-10-23T03:37:27.225784+00:00",
+      "kind": "low",
+      "raw": {
+        "ticker": "KXLOWTTTN-26OCT23-T41",
+        "event_ticker": "KXLOWTTTN-26OCT23",
+        "title": "Will the minimum temperature be >41\u00b0 on Oct 23, 2026?",
+        "custom_strike": {
+          "City": "Trenton"
+        },
+        "rules_primary": "If the minimum temperature recorded at Trenton (CLITTN) for Oct 23, 2026, is greater than 41\u00b0 fahrenheit according to The Weather Company, then the market resolves to Yes.",
+        "rules_secondary": "Not all weather data is the same. While checking a source like AccuWeather or Google Weather may help guide your decision, the official and final value used to determine this market is the maximum/minimum temperature as reported by the Weather Company.\n\nReading weather data\nPreliminary Weather Company data may be subject to rounding and conversion differences from the final reported value.\nUse caution when interpreting preliminary Weather Company readings.\n\nIf it is determined in the sole discretion of the Exchange that there is a material error in the initial non-preliminary publication, Expiration may be held until the publication of a non-materially-erroneous data revision or until the Expiration Date, whichever comes first. If no data is available at the end of this period, all markets will resolve to the last fair price determined by Kalshi. Please note, a status of \"Final\" on weather.com/kalshi is provided for convenience only, and does not guarantee data to be error-free and thus exempt from the above.",
+        "floor_strike": 41,
+        "strike_type": "greater",
+        "yes_ask_dollars": "0.2500",
+        "no_ask_dollars": "0.9400"
+      }
+    }
+  ],
+  "stations": {
+    "KSAN": {
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -117.18306,
+          32.73361
+        ]
+      },
+      "properties": {
+        "stationIdentifier": "KSAN",
+        "name": "San Diego International Airport"
+      },
+      "source_url": "https://api.weather.gov/stations/KSAN",
+      "source_sha256": "afef7a87c692cd593276a3a4b6382e1e9fd6ae13a6be31d3cd1639ba36995aa6",
+      "fetched_at": "2026-10-24T20:21:40.199733Z"
+    },
+    "KDCA": {
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -77.03417,
+          38.84833
+        ]
+      },
+      "properties": {
+        "stationIdentifier": "KDCA",
+        "name": "Washington/Reagan National Airport, DC"
+      },
+      "source_url": "https://api.weather.gov/stations/KDCA",
+      "source_sha256": "3d6c2afc3db6e6bf5479ce4afb95bd27b5895d65e6794acdbe48d6f8503f3373",
+      "fetched_at": "2026-10-24T20:21:42.280690Z"
+    },
+    "KSDF": {
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -85.7365,
+          38.17406
+        ]
+      },
+      "properties": {
+        "stationIdentifier": "KSDF",
+        "name": "Louisville Muhammad Ali International Airport"
+      },
+      "source_url": "https://api.weather.gov/stations/KSDF",
+      "source_sha256": "945f98de88725adc0f4fc3f77c8536d3b1aa5fd01aa8617a41e55e372d6596e2",
+      "fetched_at": "2026-10-24T20:21:44.770466Z"
+    },
+    "KEWR": {
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -74.16944,
+          40.6825
+        ]
+      },
+      "properties": {
+        "stationIdentifier": "KEWR",
+        "name": "Newark, Newark International Airport"
+      },
+      "source_url": "https://api.weather.gov/stations/KEWR",
+      "source_sha256": "afdb8902881c506f1dd0754b2f64ad74df8a6772423a4976f2551c95083ccce3",
+      "fetched_at": "2026-10-24T20:21:46.537079Z"
+    },
+    "KTTN": {
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -74.81639,
+          40.27639
+        ]
+      },
+      "properties": {
+        "stationIdentifier": "KTTN",
+        "name": "Trenton-Mercer Airport"
+      },
+      "source_url": "https://api.weather.gov/stations/KTTN",
+      "source_sha256": "4e65813dae598dbe1809558685f413ca830e3426af5dd598dccfc8c08ae89290",
+      "fetched_at": "2026-10-24T20:21:48.325375Z"
+    }
+  }
+}

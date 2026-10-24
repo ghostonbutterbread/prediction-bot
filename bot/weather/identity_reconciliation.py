@@ -61,6 +61,9 @@ def reconcile_weather_identity(*, market_id: str, question: str,
     location = location if isinstance(location, Mapping) else {}
     query_city_value = location.get('city')
     query_city = _city(query_city_value)
+    from bot.weather.station_mapping import station_city_conflicts
+    if station_city_conflicts(location.get('station_id'), intended.city_id):
+        reasons.append('source_station_city_conflicts_with_original_market')
     unknown_query_city = bool(query_city_value) and query_city is None
     query_pairs, invalid_query_coordinates = _query_coordinates(metadata)
     if invalid_query_coordinates:
@@ -82,13 +85,19 @@ def reconcile_weather_identity(*, market_id: str, question: str,
         provider_values.append(selected.get('city'))
     provider_cities = {city.city_id for value in provider_values if (city := _city(value)) is not None}
     response = {'latitude': metadata.get('response_latitude'), 'longitude': metadata.get('response_longitude')}
-    for coordinates in (provider, response):
+    for coordinates in (provider, response, selected if isinstance(selected, Mapping) else {}):
         if any(coordinates.get(key) is not None for key in ('latitude', 'longitude')):
             pair = _pair(coordinates)
             if pair is None:
                 reasons.append('invalid_retained_provider_coordinates')
             elif (provider_coordinate_city := _coordinate_cities().get(pair)):
                 provider_cities.add(provider_coordinate_city)
+    # Reuse the live local-provider semantics, including every state alias and
+    # the selected period. Absence is neutral; contradictory assertions are not.
+    from bot.feeds.weather_local import local_geography_reason
+    provider_reason = local_geography_reason(dict(provider), city=intended.city, city_id=intended.city_id)
+    if provider_reason:
+        reasons.append(provider_reason)
     unknown_provider_city = any(isinstance(value, str) and value.strip() and _city(value) is None
                                 for value in provider_values)
     if provider_cities - {intended.city_id}:
@@ -172,10 +181,19 @@ def _query_coordinates(metadata: Mapping[str, Any]) -> tuple[list[tuple[float, f
             urls.extend((reference.get('retrieval_url'), reference.get('url')))
     for url in urls:
         if isinstance(url, str):
-            params = parse_qs(urlsplit(url).query)
-            pair = _pair({key: values[0] for key, values in params.items() if len(values) == 1})
+            params = parse_qs(urlsplit(url).query, keep_blank_values=True)
+            coordinate_values = {key: set(params.get(key, [])) for key in ('latitude', 'longitude')}
+            if any(coordinate_values.values()):
+                # Identical repetitions are harmless. Multiple distinct values
+                # (or an incomplete pair) are explicit ambiguity, not absence.
+                if any(len(values) != 1 for values in coordinate_values.values()):
+                    invalid = True
+                    continue
+            pair = _pair({key: next(iter(values)) for key, values in coordinate_values.items() if values})
             if pair:
                 pairs.append(pair)
+            elif any(coordinate_values.values()):
+                invalid = True
             match = re.search(r'/points/(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)', urlsplit(url).path)
             if match:
                 pair = _pair(dict(latitude=match[1], longitude=match[2]))
