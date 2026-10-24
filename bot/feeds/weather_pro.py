@@ -318,14 +318,14 @@ def _market_target_date(question: str, *, category: str = "", market_id: str = "
                                "metadata": market_metadata or {}}).isoformat
 
 
-def _guard_source_geography(snapshot: WeatherSnapshot) -> WeatherSnapshot:
+def _guard_source_geography(snapshot: WeatherSnapshot, *, requested_city: str) -> WeatherSnapshot:
     """Use retained query/provider assertions before admitting a live forecast.
 
     Keep original numeric values, capture and metadata even when use is refused.
     Unknown nearby provider grid coordinates are not treated as contradictions.
     """
     from bot.weather.identity_reconciliation import reconcile_weather_identity
-    result = reconcile_weather_identity(market_id="", question=snapshot.city, market_metadata={},
+    result = reconcile_weather_identity(market_id="", question=requested_city, market_metadata={},
         source_record={"source_location_city": snapshot.city, "source_metadata": snapshot.source_details})
     if result.reasons:
         snapshot.scoreable_forecast = False
@@ -533,7 +533,7 @@ class OpenMeteoFeed:
                     "current_time": current.get("time"),
                     "forecast_times_used": list(selected_times),
                 },
-            ))
+            ), requested_city=city)
         except CaptureRetentionError:
             raise
         except Exception as e:
@@ -1147,7 +1147,7 @@ class ProWeatherEngine:
                                                  reason='source_returned_no_forecast')
             snapshot.source_details.setdefault('source_id', source.replace('-', '_').replace(' ', '_'))
             if snapshot.scoreable_forecast:
-                _guard_source_geography(snapshot)
+                _guard_source_geography(snapshot, requested_city=city_lower)
             if snapshot.scoreable_forecast and not self._snapshot_is_plausible(snapshot, measurement_kind):
                 snapshot.scoreable_forecast = False
                 snapshot.availability_reason = 'implausible_or_missing_requested_forecast'

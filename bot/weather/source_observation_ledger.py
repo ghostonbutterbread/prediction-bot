@@ -21,6 +21,7 @@ from bot.replay_decision_input import verify_replay_decision_input_record_v1
 from bot.weather.source_scoreboard import extract_source_forecast_observations
 from bot.weather.identity_reconciliation import classify_city_label, reconcile_weather_identity
 from bot.weather.market_mapping import resolve_weather_measurement_kind
+from bot.weather.date_matcher import derive_market_date
 from bot.weather.thresholds import (
     infer_direction_from_value, infer_predicted_outcome,
     extract_forecast_interval, infer_range_forecast_outcome,
@@ -296,6 +297,8 @@ def _pending_rows_for_input(row: Mapping[str, Any], identity: Mapping[str, Any])
         market.get('question') or '', market_id=identity['market_id'],
         market_metadata={key: value for key, value in metadata.items() if key in
                          {'rules_primary', 'rules_secondary', 'series_ticker', 'event_ticker'}})
+    original_date = derive_market_date({'market_id': identity['market_id'],
+                                       'question': market.get('question'), 'metadata': metadata})
     context_row = {
         "market_id": identity["market_id"],
         "question": market.get("question"),
@@ -341,6 +344,8 @@ def _pending_rows_for_input(row: Mapping[str, Any], identity: Mapping[str, Any])
                 observed_at=identity["decision_key"]["observed_at_utc"],
             )
             identity_reasons = list(reconciled.reasons)
+            if original_date.source == 'conflicting_market_dates':
+                identity_reasons.append('conflicting_original_market_dates')
             if measurement_kind is None:
                 identity_reasons.append('unproven_or_conflicting_original_market_measurement_kind')
             if identity_reasons:

@@ -166,6 +166,9 @@ class WeatherMarketCityMapper:
             official.add(metadata['city_id'])
         for text in (question, metadata.get('rules_primary'), metadata.get('rules_secondary')):
             if isinstance(text, str):
+                # Remove balanced emphasis before parsing location syntax; keep
+                # punctuation, station tokens and identifier-internal underscores.
+                text = re.sub(r'(?<!\w)(\*{1,3}|_{1,3})(?=\S)(.+?)(?<=\S)\1(?!\w)', r'\2', text)
                 official.update(self._text_city_ids(text))
                 for location in re.finditer(
                     r'\b(?:temperature|temp)\s+(?:(?:recorded|measured)\s+)?(?:at|in)\s+'
