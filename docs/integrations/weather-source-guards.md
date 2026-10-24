@@ -4,7 +4,7 @@
 - **Base:** `fec68a30e3e66a5bfcb51dff40d2f22536329200` (reviewed pagination inherited unchanged).
 - **Target:** `beta`, explicitly directed by the parent; not `main` and not deployment.
 - **Implementation commits:** `fd029e03d58a8cbdaf1832e3b52cbc0fa065c78e`, correction/checkpoint `c8ba6a121b6c96054253eeba18380140f2fdc0fd`, and independently requested repair checkpoint `f959fcb4b387b9aa5bee5b492d0301809e08191c` (95 focused tests passed; fresh full/independent review pending).
-- **State:** locally verified; parent owns fresh independent review and integration. Current feature tip adds only this dossier handoff after the tested checkpoint. No nested reviewer, merge, push, service or production-data changes.
+- **State:** original source repair locally verified; correction full gate `ed4b1d6` is RED pending fixture corrections below and a fresh exact-candidate full run/review. No release, merge into beta, push, service or production-data changes.
 
 ## Implemented contract
 
@@ -74,6 +74,36 @@ All three are within this task's city/date/source-correctness acceptance scope.
   history controls (`review-corrections-green.log`, 18.816 seconds).
 - Reference-impact check: both live `_guard_source_geography` call sites now pass
   the requested city; no legacy self-label-only call remains.
+
+## Full-suite fixture reconciliation
+
+The first combined correction gate, `ed4b1d6752e5f65ad33a85795c9876681c5bf05d`,
+ran **1,859 tests with 25 failed assertions and zero errors** (seven runtime-config
+skip entries and the inherited archive exclusion). Its RED receipts remain in
+`weather_identity_repair_t_ca47d502/combined_t_d694dfa0_review_corrected/`.
+
+- Twenty-four assertions came from calendar range fixtures changing the question
+  month but leaving August market/event IDs, market date, forecast target and
+  chronology. They were contradictory originals, not valid monthly positives.
+  Calendar variants now move the entire synthetic identity, observation/source
+  clocks, independent resolution timestamps and reader cutoff together. Parser
+  expectations, consumer counts, input immutability and writer/direct parity
+  assertions remain unchanged.
+- The remaining fixture injected an Austin snapshot for `not a city` and expected
+  the later numeric-plausibility reason. It now separately verifies a matching
+  Austin request fails plausibility and an unknown request fails original-city
+  proof; both retain the original 999-degree value as unscoreable. Local-provider
+  I/O for the newly valid city is explicitly mocked.
+- No production code or guard was changed in this fixture-only correction. The
+  original contradictory-date, formatted-city and wrong-returned-city regression
+  controls remain green.
+- Corrected focused gate: **47 tests, zero failures/errors/skips**,
+  `review-fixture-alignment-green-v2.log` (42.717 seconds). The first attempted
+  focused run hit the accounting-only harness's incorrect relative-symlink audit;
+  its log is preserved. The new source-review fixture runner checks only a
+  symlink's mutated destination while retaining write/network/subprocess guards.
+  The reviewed accounting/recovery helper was not modified. The full frozen
+  kernel gate remains mandatory; this focused runner is not a substitute.
 
 The corrected source must be propagated by merge into the isolated parent
 accounting candidate, then receive a new combined full gate and fresh independent
