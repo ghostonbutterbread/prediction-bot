@@ -180,7 +180,7 @@ class WeatherMarketCityMapper:
                 # Questions also put the named location before the metric.
                 before_metric = re.search(
                     r'^\s*Will\s+(?:the\s+)?(.+?)\s+(?:(?:high|highest|low|lowest|maximum|minimum)\s+)?(?:temperature|temp)\b',
-                    text, re.I)
+                    _normalize_text(text), re.I)
                 if before_metric:
                     name = before_metric.group(1).strip()
                     if not re.fullmatch(r'(?:the\s+)?(?:daily\s+)?(?:high|highest|low|lowest|maximum|minimum)?|the', name, re.I):

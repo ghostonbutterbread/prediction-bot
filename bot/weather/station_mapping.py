@@ -11,7 +11,7 @@ from .registry import WeatherRegistry
 # CLI labels identify reporting locations, not the settlement data vendor.
 # These five bindings were checked against NWS CLI reports AND physical station
 # metadata; never synthesize an ICAO identifier by prefixing an arbitrary CLI.
-# Evidence and reproducible URLs: docs/integrations/weather-source-guards.md.
+# Bounded source metadata/URLs: tests/fixtures/weather_source_guard_contracts.json.
 VERIFIED_CLI_STATIONS = {
     "SAN": ("KSAN", "san_diego_ca"),
     "DCA": ("KDCA", "washington_dc"),

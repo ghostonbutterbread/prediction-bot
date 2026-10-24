@@ -209,6 +209,7 @@ class SourceBoundaryTests(unittest.TestCase):
             {'market_id': 'KXHIGHTSAN-26OCT22-T75', 'event_ticker': 'KXHIGHTSAN-26OCT23'},
             {'market_id': 'KXHIGHTSAN-26OCT22-T75', 'question': 'Temperature on October 23, 2026?'},
             {'market_date': '2026-10-22', 'metadata': {'market_date': '2026-10-23'}},
+            {'market_id': 'KXHIGHTSAN-26OCT22-T75', 'question': 'Temperature on October 22, 2026 or October 23, 2026?'},
         ):
             with self.subTest(market=market):
                 self.assertIsNone(derive_market_date(market).value)
@@ -226,6 +227,7 @@ class SourceBoundaryTests(unittest.TestCase):
                 self.assertIsNone(strategy._live_data_signal(market))
                 fetch.assert_not_called()
         self.assertIsNotNone(WeatherMarketCityMapper().resolve('Will high temperature be above 75°?', 'KXHIGHTSAN'))
+        self.assertIsNotNone(WeatherMarketCityMapper().resolve('Will the **high temp in NYC** be <51°?', 'KXHIGHNY'))
 
     def test_conditional_original_identity_fields_survive_all_exchange_constructors(self):
         raw = {'ticker': 'KXHIGHTSAN-26OCT22-T75', 'series_ticker': 'KXHIGHTSAN',

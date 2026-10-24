@@ -3,7 +3,7 @@
 - **Owner / branch:** source-guards subtask of parent `t_d694dfa0`, `fix/weather-source-guards-t_d694dfa0`.
 - **Base:** `fec68a30e3e66a5bfcb51dff40d2f22536329200` (reviewed pagination inherited unchanged).
 - **Target:** `beta`, explicitly directed by the parent; not `main` and not deployment.
-- **Checkpoint:** implementation commit to be recorded in the final dossier-only handoff.
+- **Checkpoint:** initial implementation `fd029e03d58a8cbdaf1832e3b52cbc0fa065c78e`; correction commit and final gate to be recorded in the dossier-only handoff.
 - **State:** local implementation; parent owns fresh independent review and integration. No nested reviewer, merge, push, service or production-data changes.
 
 ## Implemented contract
@@ -12,7 +12,7 @@
 2. Reject known other-city station ownership before forecast transport, and matching-ID geometry at exact configured other-city coordinates before caching/querying. Unknown nearby station/grid coordinates remain valid; no invented radius/equality requirement.
 3. Apply shared retained query/provider geography checks before admitting a live Open-Meteo forecast (also inside the direct adapter) or aggregated source. Keep rejected numeric values and captured forecast bytes. Historical strict and predictive readers reuse the same reconciliation owner, now checking every provider state alias/selected-period assertion and ambiguous repeated URL coordinate parameters. Identical URL repetitions remain valid.
 4. Treat highest/lowest as daily high/low identity. Contrary original question/ticker/rule assertions fail closed; the real paired `maximum/minimum temperature` secondary-rule template stays nondiscriminating.
-5. Reconcile all explicit market date fields, original IDs (including metadata-only event ticker) and dated question. A recognized contradictory date cannot be hidden by first-field precedence. The wrapper preserves metadata-only date evidence and refuses conflicts before transport.
+5. Reconcile all explicit market date fields, original IDs (including metadata-only event ticker) and every recognized date inside the question. A recognized contradictory date cannot be hidden by first-field precedence. The wrapper preserves metadata-only date evidence and refuses conflicts before transport.
 6. Distinguish unsupported explicitly named question locations from absent location text. Preserve conditionally returned top-level city/date/kind metadata through all three exchange constructors. Do not redefine quote eligibility or guessed aliases.
 
 ## Station evidence
@@ -35,6 +35,7 @@ Interpreter: `/home/ryushe/projects/prediction-bot-beta-integration/.venv/bin/py
 
 - `python -m unittest test_weather_source_guards -v`: **14 tests passed**. Initial test-first receipt: 13 tests, 33 failed subassertions and 3 erroring counterexamples before implementation. The later retained-catalog case adds ten unchanged official HIGH/LOW identities through actual strategy/adapters, byte-verified synthetic captures and physical-station metadata fixtures.
 - Earlier combined focused gate (before adding the catalog case): **40 tests passed**, including identity, date and geography suites. Final full frozen-source gate pending below.
+- Initial frozen candidate `fd029e0`: focused **379 passed**; full **1851 run, 2 failures / 1 error**, all due to treating Markdown-wrapped `**high temp` as an unsupported city prefix. Corrected by using the existing text normalizer before the prefix check; no unsupported-city relaxation. Added the exact Markdown positive and an additional failing-first within-question contradictory-date control. Local corrected checks: **28 passed** (source guards/date/analysis) and **11 passed** (replay/source validation). The initial failed full receipt remains preserved; final corrected full gate is pending.
 - `validate_catalog.py --repo <worktree> --catalog <retained-catalog-root> --output <derived-output>`: **576/576** retained daily contracts resolve/route the correct city, kind, date and station; all retain Weather Company authority. **24 cities, 288 HIGH / 288 LOW**; zero real provider HTTP. All 539 listing-eligible plus 37 quote-excluded diagnostic records remain in the denominator, without changing production quote gates.
 - Actual strict/predictive history readers reject duplicate-coordinate ambiguity, provider-state/selected-state contradictions, foreign station owners and highest/lowest conflicts; identical coordinate repetitions, nearby provider geometry and matching states remain usable. Retained source/index/resolution fixtures are unchanged by reads.
 - `git diff --check` passed at the focused checkpoint.
