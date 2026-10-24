@@ -3,7 +3,7 @@
 - **Owner / branch:** source-guards subtask of parent `t_d694dfa0`, `fix/weather-source-guards-t_d694dfa0`.
 - **Base:** `fec68a30e3e66a5bfcb51dff40d2f22536329200` (reviewed pagination inherited unchanged).
 - **Target:** `beta`, explicitly directed by the parent; not `main` and not deployment.
-- **Implementation commits:** `fd029e03d58a8cbdaf1832e3b52cbc0fa065c78e`, correction/checkpoint `c8ba6a121b6c96054253eeba18380140f2fdc0fd`, and independently requested repair checkpoint `f959fcb4b387b9aa5bee5b492d0301809e08191c` (95 focused tests passed; fresh full/independent review pending).
+- **Implementation commits:** original `fd029e03d58a8cbdaf1832e3b52cbc0fa065c78e` / `c8ba6a121b6c96054253eeba18380140f2fdc0fd`, review corrections `f959fcb4b387b9aa5bee5b492d0301809e08191c`, fixture reconciliation `59e92cac9c43744b52cb36766961eecfd09a0301`, and current nested-normalization checkpoint **`e3c26337579aa71cb63a2ddb26f1d47ef2d743fe`** (68 focused tests passed; final full/independent verdict pending). Current tip may add only this dossier pointer after that tested checkpoint.
 - **State:** fixture-aligned combined `3e5a748` passed its 1,859-test full gate, but the nested-emphasis review blocker below still applies. The new nested correction passes 68 focused tests; a fresh exact-candidate full gate and independent verdict remain mandatory. No release, merge into beta, push, service or production-data changes.
 
 ## Implemented contract
