@@ -129,6 +129,19 @@ reach a fixed point at source checkpoint
 `e3c26337579aa71cb63a2ddb26f1d47ef2d743fe`. Its corrected **68-test focused
 gate passes**. Propagate that new source checkpoint and require a fresh exact
 combined full gate and verdict; no prior pass waives this reviewer blocker.
+
+Final exact review `deleg_95fedb83` **BLOCKED** combined
+`283a04b26cd5477da8f13ad5db7fb09124f60070` despite its independently verified
+1,862-test full pass. Balanced emphasis over separate metric/location spans,
+`***high temperature** **in Sacramento***` and
+`___high temperature_ _in Sacramento___`, leaves stranded delimiter text and
+still fetches/scores the wrong city. Two independent methods produce eight
+failed assertions through actual HIGH/LOW and both historical readers. Accounting,
+pagination and stations remain unchanged. The source-owning feature records an
+architectural pause rather than a fourth regex patch. A structural Markdown
+parser is already installed; the operator is being asked to authorize replacing
+the normalization boundary and declaring the dependency explicitly. No product
+code or dependency change has been made under that proposal.
 Production execution remains held; no operation retry is authorized by review
 notifications. Once explicitly authorized, pin the then-reviewed clean imported
 source and helper hashes rather than blindly replaying a stale HEAD-pinned call.
