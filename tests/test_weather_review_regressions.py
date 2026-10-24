@@ -1,6 +1,7 @@
 """Review regressions at collection and both immutable direct-history readers."""
 import copy
 import json
+from itertools import product
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -80,6 +81,75 @@ class WeatherReviewRegressionTests(unittest.TestCase):
                         result = fixture.history(row, strict=strict)
                         self.assertEqual([item['source_id'] for item in getattr(result,
                             'scorecard_rows' if strict else 'rows')], [])
+
+    def test_nested_emphasis_keeps_city_assertions_at_actual_collection_boundary(self):
+        for family, word, value in (('KXHIGHT', 'high', 84), ('KXLOWT', 'low', 56)):
+            for city in ('Sacramento', 'San Diego'):
+                for assertion in (
+                    f'**_{word} temperature_** in {city}',
+                    f'_**{word} temperature**_ in {city}',
+                    f'**{word} temperature _in {city}_**',
+                ):
+                    with self.subTest(family=family, assertion=assertion):
+                        signal, fixture = self.collect(
+                            f'Will the {assertion} be above 75° on Oct 22, 2026?', family)
+                        if city == 'Sacramento':
+                            self.assertIsNone(signal)
+                            self.assertEqual(fixture.requests, [])
+                        else:
+                            assert signal is not None
+                            self.assertEqual(signal['data']['predicted_temp'], value)
+                            self.assertTrue(fixture.requests)
+
+    def test_nested_emphasis_rejects_unsupported_city_in_both_actual_history_readers(self):
+        for city in ('Sacramento', 'Seattle'):
+            for assertion in (
+                f'**_high temperature_** in {city}',
+                f'_**high temperature**_ in {city}',
+                f'**high temperature _in {city}_**',
+            ):
+                fixture = history.WeatherIdentityReconciliationTests(methodName='runTest')
+                fixture.setUp()
+                self.addCleanup(fixture.doCleanups)
+                row = history.bad_labels_record(full_day=True)
+                row['market']['question'] = f'Will the {assertion} be above 70°?'
+                row = _seal(row)
+                original = copy.deepcopy(row)
+                expected = set() if city == 'Sacramento' else {'nws', 'seattle_local'}
+                for strict in (False, True):
+                    with self.subTest(assertion=assertion, strict=strict):
+                        result = fixture.history(row, strict=strict)
+                        self.assertEqual({item['source_id'] for item in getattr(result,
+                            'scorecard_rows' if strict else 'rows')}, expected)
+                self.assertEqual(row, original)
+
+    def test_emphasis_compositions_preserve_location_and_station_operands(self):
+        mapper = WeatherMarketCityMapper()
+        for depth in (1, 2, 3):
+            for markers in product(('**', '__', '*', '_'), repeat=depth):
+                def decorate(value):
+                    for marker in markers:
+                        value = marker + value + marker
+                    return value
+                for city in ('Sacramento', 'San_Diego'):
+                    for assertion in (
+                        f'{decorate("high temperature")} in {city}',
+                        f'high temperature {decorate("in " + city)}',
+                        decorate(f'high temperature in {city}'),
+                    ):
+                        text = f'Will the {assertion} be above 75°?'
+                        for origin in ('question', 'rules_primary', 'rules_secondary'):
+                            with self.subTest(markers=markers, assertion=assertion, origin=origin):
+                                context = mapper.resolve(text if origin == 'question' else
+                                    'Will high temperature be above 75°?', 'KXHIGHTSAN',
+                                    market_metadata={} if origin == 'question' else {origin: text})
+                                self.assertEqual(context.city_id if context else None,
+                                    None if city == 'Sacramento' else 'san_diego_ca')
+                for text in (f'Will the {decorate("high temperature")} be above 75°?',
+                             f'Will high temperature at {decorate("CLISAN")} be above 75°?'):
+                    with self.subTest(markers=markers, positive=text):
+                        context = mapper.resolve(text, 'KXHIGHTSAN')
+                        self.assertEqual(context.city_id if context else None, 'san_diego_ca')
 
     def test_original_date_conflicts_are_rejected_without_changing_history_inputs(self):
         for case in ('baseline', 'matching_event', 'matching_question', 'conflicting_event',

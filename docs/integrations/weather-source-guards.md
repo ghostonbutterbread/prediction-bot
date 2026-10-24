@@ -3,8 +3,8 @@
 - **Owner / branch:** source-guards subtask of parent `t_d694dfa0`, `fix/weather-source-guards-t_d694dfa0`.
 - **Base:** `fec68a30e3e66a5bfcb51dff40d2f22536329200` (reviewed pagination inherited unchanged).
 - **Target:** `beta`, explicitly directed by the parent; not `main` and not deployment.
-- **Implementation commits:** `fd029e03d58a8cbdaf1832e3b52cbc0fa065c78e`, correction/checkpoint `c8ba6a121b6c96054253eeba18380140f2fdc0fd`, and independently requested repair checkpoint `f959fcb4b387b9aa5bee5b492d0301809e08191c` (95 focused tests passed; fresh full/independent review pending).
-- **State:** original source repair locally verified; correction full gate `ed4b1d6` is RED pending fixture corrections below and a fresh exact-candidate full run/review. No release, merge into beta, push, service or production-data changes.
+- **Implementation commits:** original `fd029e03d58a8cbdaf1832e3b52cbc0fa065c78e` / `c8ba6a121b6c96054253eeba18380140f2fdc0fd`, review corrections `f959fcb4b387b9aa5bee5b492d0301809e08191c`, fixture reconciliation `59e92cac9c43744b52cb36766961eecfd09a0301`, and current nested-normalization checkpoint **`e3c26337579aa71cb63a2ddb26f1d47ef2d743fe`** (68 focused tests passed; final full/independent verdict pending). Current tip may add only this dossier pointer after that tested checkpoint.
+- **State:** fixture-aligned combined `3e5a748` passed its 1,859-test full gate, but the nested-emphasis review blocker below still applies. The new nested correction passes 68 focused tests; a fresh exact-candidate full gate and independent verdict remain mandatory. No release, merge into beta, push, service or production-data changes.
 
 ## Implemented contract
 
@@ -114,5 +114,42 @@ merge into the beta execution checkout, or start the collector until the user
 explicitly responds. No production repair or live end-to-end success is claimed.
 
 ## Boundaries / review handoff
+
+### Nested-emphasis review correction
+
+Independent review `deleg_4f9fd97a` blocked source checkpoint `f959fcb` and
+combined `ed4b1d6`: one-layer normalization still hid Sacramento in nested
+`**_high temperature_**`, `_**high temperature**_`, or
+`**high temperature _in Sacramento_**`. Both actual direct historical readers
+also admitted those contradictory originals. The fixture-only successor
+`59e92cac9c43744b52cb36766961eecfd09a0301` / combined
+`3e5a748bcd5ba66f574bb506f61a13e343e72ec3` retained that same code, so its
+**1,859-test full pass** is compatibility evidence, not release approval.
+Its seven runtime-config skip entries and single real-archive exclusion remain.
+
+- Added actual HIGH/LOW collection and both-reader positive/negative controls,
+  plus composed emphasis tests across questions and both rule fields. They keep
+  generic, matching-city, station-only and identifier-underscore positives.
+- Test-first receipt `nested-emphasis-red.log`: **8 methods, 516 failed
+  assertions, zero errors/skips**. Three newly added methods exposed the gap.
+- The owning city parser now removes matched emphasis delimiter runs until the
+  text stops changing. Each replacement strictly removes delimiters, so the loop
+  terminates without a nesting-depth cap. Adjacent same-kind wrappers can merge
+  into runs longer than three characters; matching the whole balanced run avoids
+  leaving an artificial unmatched delimiter. No blanket punctuation stripping,
+  source relabelling, transport bypass or input mutation is introduced.
+- The first attempted GREEN retained four assertions for six-star location/station
+  runs and a separate missing-test-module import error
+  (`nested-emphasis-green.log`). Both
+  causes were diagnosed; the actual geography suite is
+  `test_weather_identity_geography_guard`, not the guessed module name.
+- Corrected focused gate `nested-emphasis-green-v2.log`: **68 tests, zero
+  failures/errors/skips**, 52.325 seconds, including the fixture-aligned range
+  consumers, broad collection, original-date/source-city and new nested controls.
+
+Only the city parser, regression tests and this branch-local dossier change in
+this checkpoint. Merge it into the existing isolated owning parent and obtain
+a new full frozen gate plus an independent verdict on that exact combined tree.
+The original independent nested acceptance fixture remains unchanged for review.
 
 No capture-accounting implementation edits. No production captures, raw ledgers, service/runtime/config, beta checkout, wallet or trading actions. Public HTTP was station evidence retrieval only. Tests use disposable synthetic stores and mocked HTTP; catalog-wide validation proves operands, not live availability. Parent must independently review this exact commit range, combine with accounting, run its end-to-end stopped-writer/production integration gate, and authorize activation separately. Bounded startup fallback redesign and operational restart are outside this branch. Existing inherited pagination dossier is untouched; parent removes it only at final integration.
