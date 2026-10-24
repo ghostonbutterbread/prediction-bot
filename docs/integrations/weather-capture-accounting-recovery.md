@@ -1,6 +1,6 @@
 # Weather capture accounting capacity and verified recovery
 
-Task: `t_d694dfa0`. Dependent base: `fec68a3bf059fb71ef257e451c2799802f1c04abb`
+Task: `t_d694dfa0`. Dependent base: `fec68a30e3e66a5bfcb51dff40d2f22536329200`
 (the independently reviewed Kalshi pagination feature). Target: beta; no main promotion.
 
 ## Diagnosed failure
@@ -74,7 +74,30 @@ It reads back canonical state and hashes every original evidence file again.
 There is no reset, checksum-only retrofit, integrity bypass, evidence removal,
 or automatic service start. Any unexpected condition leaves the service stopped.
 
-Independent code and operation review, integration/full gate, verified metadata
-repair, effective unit drop-in and deliberate activation are all still required.
+Implementation checkpoint: `0b3ebee1e12eaefcbb4bc9e5417cf6333a636297`.
+Independent review `deleg_64a0efbd` approved that exact code, the narrowly pinned
+metadata-only recovery and the existing-unit exit-78 override. Its strict frozen
+fixture gate passed **87 tests with zero failures/errors/skips**; the parent's
+exact-candidate full gate ran **1,840 tests, zero failures/errors**, with seven
+runtime-config skip entries and the same single real-archive exclusion.
+Review receipts are under `independent_final_review_0b3ebee/`; full receipts are
+under `weather_identity_repair_t_ca47d502/accounting_t_d694dfa0_feature/`.
+
+The incorrect base identifier in the original dossier was corrected using Git
+and the independent review; no source behavior changed in this handoff update.
+Before application, verify the reviewed helper hashes and the imported source
+bytes as well as clean Git status. Regular Git modes 100644 and 100755 are both
+valid; symlinks or mismatching blobs must still refuse.
+
+**Production hold:** the corrected execution request expired at the approval
+gate and did not run. Readback confirms the original sidecar digest and stopped
+service are unchanged. Do not retry or rephrase that operation until the user
+responds. No metadata repair, unit override, beta merge/push or startup occurred.
+
+The isolated parent accounting feature is also the owning candidate for combined
+offline compatibility with source-guards checkpoint
+`1ddb4c9c8c0eaaf61694f39b5277d9bdf717ef86`. This is not a beta/runtime activation.
+Fresh independent source/combined review, combined full gate, verified metadata
+repair, effective unit drop-in and deliberate activation are still required.
 A fresh complete collection-cycle audit (catalog pages, identities, geography,
 captures/integrity and replay publication) is the final acceptance gate.
