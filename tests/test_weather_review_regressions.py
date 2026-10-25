@@ -10,7 +10,7 @@ import test_collector_weather_identity as live
 import test_weather_identity_reconciliation as history
 from test_source_observation_ledger import _seal
 from bot.feeds.weather_pro import CITY_COORDS, WeatherSnapshot
-from bot.weather.market_mapping import WeatherMarketCityMapper
+from bot.weather.market_mapping import WeatherMarketCityMapper, _assertion_plaintext
 from bot.weather.source_observation_ledger import _decision_identity, _pending_rows_for_input
 
 
@@ -122,6 +122,75 @@ class WeatherReviewRegressionTests(unittest.TestCase):
                         self.assertEqual({item['source_id'] for item in getattr(result,
                             'scorecard_rows' if strict else 'rows')}, expected)
                 self.assertEqual(row, original)
+
+    def test_separately_emphasized_metric_and_location_reject_before_transport(self):
+        for outer, inner in (('*', '**'), ('__', '_')):
+            for family, word, value in (('KXHIGHT', 'high', 84), ('KXLOWT', 'low', 56)):
+                for city in ('Sacramento', 'San Diego'):
+                    assertion = f'{outer}{inner}{word} temperature{inner} {inner}in {city}{inner}{outer}'
+                    with self.subTest(family=family, assertion=assertion):
+                        signal, fixture = self.collect(
+                            f'Will the {assertion} be above 75° on Oct 22, 2026?', family)
+                        if city == 'Sacramento':
+                            self.assertIsNone(signal)
+                            self.assertEqual(fixture.requests, [])
+                        else:
+                            assert signal is not None
+                            self.assertEqual(signal['data']['predicted_temp'], value)
+                            self.assertTrue(fixture.requests)
+
+    def test_separately_emphasized_original_location_rejects_in_both_readers(self):
+        for outer, inner in (('*', '**'), ('__', '_')):
+            for city in ('Sacramento', 'Seattle'):
+                fixture = history.WeatherIdentityReconciliationTests(methodName='runTest')
+                fixture.setUp()
+                self.addCleanup(fixture.doCleanups)
+                assertion = f'{outer}{inner}high temperature{inner} {inner}in {city}{inner}{outer}'
+                row = history.bad_labels_record(full_day=True)
+                row['market']['question'] = f'Will the {assertion} be above 70°?'
+                row = _seal(row)
+                original = copy.deepcopy(row)
+                for strict in (False, True):
+                    with self.subTest(assertion=assertion, strict=strict):
+                        result = fixture.history(row, strict=strict)
+                        self.assertEqual({item['source_id'] for item in getattr(result,
+                            'scorecard_rows' if strict else 'rows')},
+                            set() if city == 'Sacramento' else {'nws', 'seattle_local'})
+                self.assertEqual(row, original)
+
+    def test_separately_decorated_span_compositions_preserve_city_operands(self):
+        mapper = WeatherMarketCityMapper()
+        markers = ('*', '**', '***', '_', '__', '___')
+        for word, family in (('high', 'KXHIGHTSAN'), ('low', 'KXLOWTSAN')):
+            for metric, location, outer in product(markers, markers, ('', '*', '__')):
+                for city in ('Sacramento', 'San_Diego'):
+                    text = f'{outer}{metric}{word} temperature{metric} {location}in {city}{location}{outer}'
+                    for origin in ('question', 'rules_primary', 'rules_secondary'):
+                        metadata = {} if origin == 'question' else {origin: text}
+                        original = copy.deepcopy(metadata)
+                        with self.subTest(text=text, origin=origin, family=family):
+                            context = mapper.resolve(text if origin == 'question' else
+                                f'Will {word} temperature be above 75°?', family, market_metadata=metadata)
+                            self.assertEqual(context.city_id if context else None,
+                                None if city == 'Sacramento' else 'san_diego_ca')
+                            self.assertEqual(metadata, original)
+
+    def test_structural_presentation_preserves_literal_identity_and_punctuation(self):
+        cases = (
+            ('***high temperature** **in Sacramento***', 'high temperature in Sacramento'),
+            ('___high temperature_ _in Sacramento___', 'high temperature in Sacramento'),
+            ('**_CLISAN_** (KSAN; San_Diego, -1.5°F)', 'CLISAN (KSAN; San_Diego, -1.5°F)'),
+            ('`CLISAN` / `San_Diego`', 'CLISAN / San_Diego'),
+            ('high temperature\nin Sacramento', 'high temperature in Sacramento'),
+            ('high temperature  \nin Sacramento', 'high temperature in Sacramento'),
+            ('high temperature [in Sacramento](https://example.invalid/station)',
+             'high temperature in Sacramento'),
+            ('![**in Sacramento**](https://example.invalid/plot)', 'in Sacramento'),
+            ('<span>San_Diego</span>', '<span>San_Diego</span>'),
+        )
+        for original, expected in cases:
+            with self.subTest(original=original):
+                self.assertEqual(_assertion_plaintext(original), expected)
 
     def test_emphasis_compositions_preserve_location_and_station_operands(self):
         mapper = WeatherMarketCityMapper()

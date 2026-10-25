@@ -3,8 +3,8 @@
 - **Owner / branch:** source-guards subtask of parent `t_d694dfa0`, `fix/weather-source-guards-t_d694dfa0`.
 - **Base:** `fec68a30e3e66a5bfcb51dff40d2f22536329200` (reviewed pagination inherited unchanged).
 - **Target:** `beta`, explicitly directed by the parent; not `main` and not deployment.
-- **Implementation commits:** original `fd029e03d58a8cbdaf1832e3b52cbc0fa065c78e` / `c8ba6a121b6c96054253eeba18380140f2fdc0fd`, review corrections `f959fcb4b387b9aa5bee5b492d0301809e08191c`, fixture reconciliation `59e92cac9c43744b52cb36766961eecfd09a0301`, and current nested-normalization checkpoint **`e3c26337579aa71cb63a2ddb26f1d47ef2d743fe`** (68 focused tests passed; combined 1,862-test pass independently BLOCKED for the different-span case below). Later commits are dossier-only handoff updates.
-- **State:** independently **BLOCKED** on combined `283a04b26cd5477da8f13ad5db7fb09124f60070` despite its 1,862-test full pass. Nested different-span emphasis still defeats the regex (see architectural pause below). No fourth regex patch: a structural-parser replacement requires an operator decision before implementation. No release, merge into beta, push, service or production-data changes.
+- **Implementation commits:** original `fd029e03d58a8cbdaf1832e3b52cbc0fa065c78e` / `c8ba6a121b6c96054253eeba18380140f2fdc0fd`, review corrections `f959fcb4b387b9aa5bee5b492d0301809e08191c`, fixture reconciliation `59e92cac9c43744b52cb36766961eecfd09a0301`, and prior nested-normalization checkpoint **`e3c26337579aa71cb63a2ddb26f1d47ef2d743fe`** (68 focused tests passed; combined 1,862-test pass independently BLOCKED for the different-span case below). The current source checkpoint replaces that regex with the operator-approved structural projection described under implementation card `t_272d07dc`.
+- **State:** operator-approved structural replacement implemented and locally exercised: 72 focused tests pass. Earlier combined `283a04b26cd5477da8f13ad5db7fb09124f60070` remains independently BLOCKED; its full pass does not approve this new parser. A new exact combined full gate and independent verdict are required. No release, merge into beta, push, service or production-data changes.
 
 ## Implemented contract
 
@@ -185,5 +185,45 @@ preserve original text and identifier/punctuation semantics, then exercise all
 unchanged reviewer reproducers, actual HIGH/LOW collection, both history readers,
 the full isolated suite and a fresh exact-candidate review. No production
 reconciliation, beta activation or live acceptance is authorized by that decision.
+
+### Approved structural replacement — implementation card t_272d07dc
+
+After message `1563733679921172501`, the reissued clarification explicitly asked
+permission to replace regex-based formatting normalization with the installed
+CommonMark parser, declare its dependency, and rerun collection/history/full tests
+plus independent review. Actual operator response: **Use the structural parser**.
+Decision card `t_94f25761` records that approval; baseline audit `t_4dea3a00` is
+complete. Neither approval authorizes production operations.
+
+- Added exact actual HIGH/LOW collection and both-reader different-span controls
+  before changing product code. `structural-parser-red.log`: **two methods,
+  eight failed assertions, zero errors/skips**, 2.987 seconds.
+- Replaced the delimiter loop with one owning `_assertion_plaintext()` projection
+  over CommonMark inline tokens. It reads nested children in original order,
+  retains text and inline-code contents, maps line breaks to spaces, and discards
+  formatting tokens rather than guessing delimiter pairs. HTML, linkification and
+  typographic rewriting are disabled; no renderer or URL fetching is invoked.
+  Original questions, metadata and retained history inputs are not rewritten.
+- Root `requirements.txt` now directly declares `markdown-it-py==4.2.0`.
+  The verified project interpreter already satisfies that exact version; no
+  install, upgrade or environment mutation was needed.
+- Retained all earlier regressions and added independently decorated metric /
+  location / outer spans across HIGH/LOW and both rule fields, plus literal
+  station/identifier/punctuation, inline-code, line-break, link-label, image-label
+  and disabled-HTML projection controls.
+- `structural-parser-green.log`: **70 tests, zero failures/errors/skips**.
+  Expanded `structural-parser-green-v2.log`: **72 tests, zero
+  failures/errors/skips**, 58.488 seconds. The reviewer-owned different-span and
+  other original acceptance scripts remain unchanged for fresh independent use.
+- New verification must use the existing `run_frozen_beta_gates.py` launcher,
+  whose Git source is the real beta repository. The audit's separate older
+  `run_frozen_gates.py` locator is stale and its baseline helper pins old
+  `283a04b`; neither is a new-parser gate. Preserve confinement and exact-candidate
+  identity, and do not import production data or runtime-local configurations.
+
+Next: commit this source checkpoint, propagate once into the existing isolated
+owning accounting feature for combined verification, run its full frozen gate,
+and obtain a fresh independent verdict. This is not a beta execution-checkout
+merge. The separately expired accounting-repair execution approval remains held.
 
 No capture-accounting implementation edits. No production captures, raw ledgers, service/runtime/config, beta checkout, wallet or trading actions. Public HTTP was station evidence retrieval only. Tests use disposable synthetic stores and mocked HTTP; catalog-wide validation proves operands, not live availability. Parent must independently review this exact commit range, combine with accounting, run its end-to-end stopped-writer/production integration gate, and authorize activation separately. Bounded startup fallback redesign and operational restart are outside this branch. Existing inherited pagination dossier is untouched; parent removes it only at final integration.
