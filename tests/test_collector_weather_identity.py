@@ -168,7 +168,7 @@ class CollectorRequestIdentityTests(unittest.TestCase):
             forecast.assert_not_called()
         self.assertEqual(self.requests, [])
 
-    def test_official_san_rules_preserve_unknown_station_and_weather_company_authority(self):
+    def test_official_san_rules_resolve_verified_station_and_keep_weather_company_authority(self):
         metadata = {'custom_strike':{'City':'San Diego'},
                     'rules_primary':'If the maximum temperature recorded at San Diego (CLISAN) for Oct 22, 2026 is above 75° according to The Weather Company.'}
         signal, call, _ = self.fetch(metadata=metadata)
@@ -176,16 +176,16 @@ class CollectorRequestIdentityTests(unittest.TestCase):
         self.assertEqual(call.kwargs['measurement_kind'], 'high')
         station = call.kwargs['station_resolution']
         self.assertEqual(station['station_origin'], 'market_explicit')
-        self.assertEqual(station['station_mapping'], 'unknown')
-        self.assertIsNone(station['station_id'])
-        self.assertTrue(signal['collection_only'])
-        self.assertNotIn('predicted_prob', signal)
+        self.assertEqual(station['station_mapping'], 'exact')
+        self.assertEqual(station['station_id'], 'KSAN')
+        self.assertEqual(signal['data']['predicted_temp'], 84)
         receipt = json.loads(self.store.read_receipt_verified(signal['data']['collection_receipt']))
         self.assertEqual(receipt['city'], 'san diego')
         self.assertEqual(receipt['forecast_measurement_kind'], 'high')
-        # CLISAN is not permission to fabricate an exact KSAN settlement mapping.
-        self.assertFalse(any((r.url.path.startswith('/stations/') and not r.url.path.endswith('/observations/latest'))
-                             or r.url.path.startswith('/points/') for r in self.requests))
+        # Verified physical station geometry is not a change of settlement vendor.
+        self.assertTrue(any(r.url.path == '/stations/KSAN' for r in self.requests))
+        self.assertTrue(any(r.url.path.startswith('/points/') for r in self.requests))
+        self.assertEqual(signal['data']['settlement_source'], 'the_weather_company')
         from bot.feeds.weather_pro import _settlement_authority
         self.assertEqual(_settlement_authority(metadata)['source'], 'the_weather_company')
 

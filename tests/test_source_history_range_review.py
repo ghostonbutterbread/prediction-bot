@@ -1,6 +1,7 @@
 """Independent-review regressions through parser and both history consumers."""
 import hashlib
 import json
+import calendar
 from pathlib import Path
 import tempfile
 import unittest
@@ -165,6 +166,15 @@ class ReviewRangeTests(unittest.TestCase):
             with self.subTest(case=name), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 row = range_row()
+                month = '08'
+                if name.startswith('calendar_'):
+                    # Vary the entire synthetic contract, not only its question:
+                    # a January question with an August ticker is a real conflict.
+                    abbreviation = name.split('_')[1][:3].upper()
+                    month = f'{list(calendar.month_abbr).index(abbreviation.title()):02d}'
+                    row = json.loads(json.dumps(row)
+                        .replace('26AUG03', f'26{abbreviation}03')
+                        .replace('2026-08-', f'2026-{month}-'))
                 row['question'] = question
                 data = row['decision_artifact']['source_context']['data']
                 data['market_metadata'].update(metadata)
@@ -172,7 +182,10 @@ class ReviewRangeTests(unittest.TestCase):
                 data['weather_source_snapshot']['sources'][0]['forecast_high'] = forecast
                 raw, resolutions = root/'raw.jsonl', root/'resolutions.jsonl'
                 _write_jsonl(raw, [row])
-                _write_jsonl(resolutions, [_strict_resolution(row['market_id'])])
+                resolution = _strict_resolution(row['market_id'])
+                for field in ('settlement_ts', 'resolved_at'):
+                    resolution[field] = resolution[field].replace('2026-08-', f'2026-{month}-')
+                _write_jsonl(resolutions, [resolution])
                 before = raw.read_bytes(), resolutions.read_bytes()
                 writer = auto_populate_source_router_history(collector_snapshots_path=raw,
                     strict_resolutions_path=resolutions, output_root=root/'data/derived_reports/history', storage_root=root)
@@ -203,7 +216,7 @@ class ReviewRangeTests(unittest.TestCase):
                 index, manifest = root/'index.jsonl', root/'manifest.json'
                 build_collector_replay_index(raw, index, manifest)
                 direct = load_direct_strict_source_history(index_path=index, manifest_path=manifest,
-                    strict_resolutions_path=resolutions, as_of_decision_time='2026-08-06T00:00:00Z')
+                    strict_resolutions_path=resolutions, as_of_decision_time=f'2026-{month}-06T00:00:00Z')
                 self.assertEqual(sum(r['sample_count'] for r in direct.scorecard_rows), expected_count)
                 def semantic(items):
                     items = json.loads(json.dumps(items))

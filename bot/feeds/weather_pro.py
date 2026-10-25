@@ -169,12 +169,17 @@ def _forecast_station_selection(city: str, metadata: dict | None = None) -> dict
     if candidates:
         identities = {resolved.station_id or f"CLI{resolved.station_cli}" for resolved, _ in candidates}
         resolved, field_name = candidates[0]
+        from bot.weather.market_mapping import WeatherMarketCityMapper
+        context = WeatherMarketCityMapper().resolve(city)
+        foreign_owner = context and any(candidate.city_id and candidate.city_id != context.city_id
+                                        for candidate, _ in candidates)
         return {"station_id": resolved.station_id if len(identities) == 1 else None,
                 "station_cli": resolved.station_cli if len(identities) == 1 else None,
                 "station_origin": "market_explicit",
                 "station_mapping": "conflicting" if len(identities) > 1 else "exact" if resolved.station_id else "unknown",
                 "station_evidence_field": field_name,
-                **({"availability_reason": "conflicting_explicit_stations"} if len(identities) > 1 else {})}
+                **({"availability_reason": "conflicting_explicit_stations"} if len(identities) > 1 else
+                   {"availability_reason": "station_city_conflicts_with_market"} if foreign_owner else {})}
     return _configured_forecast_station(city)
 
 
@@ -184,6 +189,11 @@ def _resolve_forecast_location(city: str, http: httpx.Client, cache: dict, stati
     station_id = station.get("station_id")
     if station.get("availability_reason"):
         return {**location, "basis": "station"}
+    from bot.weather.identity_reconciliation import _city, _coordinate_cities
+    from bot.weather.station_mapping import station_city_conflicts
+    context = _city(city)
+    if context and station_city_conflicts(station_id, context.city_id):
+        return {**location, "basis": "station", "availability_reason": "station_city_conflicts_with_market"}
     if not station_id and station.get("station_origin") == "market_explicit":
         return {**location, "basis": "station", "availability_reason": "explicit_station_unresolved"}
     if not station_id:
@@ -214,6 +224,9 @@ def _resolve_forecast_location(city: str, http: httpx.Client, cache: dict, stati
                 or not math.isfinite(lat) or not math.isfinite(lon)
                 or not -90 <= lat <= 90 or not -180 <= lon <= 180):
             raise ValueError("invalid station coordinates")
+        owner = _coordinate_cities().get((lat, lon))
+        if context and owner and owner != context.city_id:
+            return {**location, "availability_reason": "station_geometry_city_conflicts_with_market"}
         coordinates = {"latitude": lat, "longitude": lon, "coordinates_fetched_at": now.isoformat()}
         cache[station_id] = (now, coordinates)
         return {**location, **coordinates}
@@ -295,12 +308,31 @@ def _target_date_text(target_date: str | None) -> str | None:
         return None
 
 
-def _market_target_date(question: str, *, category: str = "") -> str | None:
+def _market_target_date(question: str, *, category: str = "", market_id: str = "",
+                        market_metadata: dict | None = None) -> str | None:
     # Keep this import lazy: bot.weather's package initializer imports the
     # historical provider, which in turn reuses this feed's constants.
     from bot.weather.date_matcher import derive_market_date
 
-    return derive_market_date({"question": question, "market_ticker": category, "market_id": category}).isoformat
+    return derive_market_date({"question": question, "market_ticker": category, "market_id": market_id,
+                               "metadata": market_metadata or {}}).isoformat
+
+
+def _guard_source_geography(snapshot: WeatherSnapshot, *, requested_city: str) -> WeatherSnapshot:
+    """Use retained query/provider assertions before admitting a live forecast.
+
+    Keep original numeric values, capture and metadata even when use is refused.
+    Unknown nearby provider grid coordinates are not treated as contradictions.
+    """
+    from bot.weather.identity_reconciliation import reconcile_weather_identity
+    result = reconcile_weather_identity(market_id="", question=requested_city, market_metadata={},
+        source_record={"source_location_city": snapshot.city, "source_metadata": snapshot.source_details})
+    if result.reasons:
+        snapshot.scoreable_forecast = False
+        snapshot.availability_reason = result.reasons[0]
+        snapshot.source_details.update(forecast_availability="unavailable",
+            availability_reason=snapshot.availability_reason, source_geography_reasons=list(result.reasons))
+    return snapshot
 
 
 def _unavailable_snapshot(
@@ -462,7 +494,7 @@ class OpenMeteoFeed:
             forecast_start = selected_times[0]
             forecast_end = selected_times[-1]
 
-            return WeatherSnapshot(
+            return _guard_source_geography(WeatherSnapshot(
                 city=city.lower(),
                 high_temp_f=max(selected_temps),
                 low_temp_f=min(selected_temps),
@@ -501,7 +533,7 @@ class OpenMeteoFeed:
                     "current_time": current.get("time"),
                     "forecast_times_used": list(selected_times),
                 },
-            )
+            ), requested_city=city)
         except CaptureRetentionError:
             raise
         except Exception as e:
@@ -1114,6 +1146,8 @@ class ProWeatherEngine:
                 snapshot = _unavailable_snapshot(city=city_lower, source=source, target_date=target,
                                                  reason='source_returned_no_forecast')
             snapshot.source_details.setdefault('source_id', source.replace('-', '_').replace(' ', '_'))
+            if snapshot.scoreable_forecast:
+                _guard_source_geography(snapshot, requested_city=city_lower)
             if snapshot.scoreable_forecast and not self._snapshot_is_plausible(snapshot, measurement_kind):
                 snapshot.scoreable_forecast = False
                 snapshot.availability_reason = 'implausible_or_missing_requested_forecast'
@@ -1323,7 +1357,12 @@ class ProWeatherEngine:
                                                                   market_metadata=market_metadata)
         if measurement_kind not in ('high', 'low'):
             return None
-        market_date = _market_target_date(question, category=market_id or category)
+        from bot.weather.date_matcher import derive_market_date
+        derived = derive_market_date({"question": question, "market_ticker": category,
+                                      "market_id": market_id, "metadata": market_metadata or {}})
+        if derived.source == "conflicting_market_dates":
+            return None
+        market_date = derived.isoformat
         return self._score_temperature_market(question, yes_price, market_date=market_date,
             market_metadata=market_metadata, selected_source_id=selected_source_id,
             city=city, measurement_kind=measurement_kind)

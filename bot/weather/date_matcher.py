@@ -45,6 +45,7 @@ TICKER_FIELDS = (
     "ticker",
     "id",
     "market_id",
+    "event_ticker",
 )
 QUESTION_FIELDS = (
     "question",
@@ -104,6 +105,10 @@ def validate_weather_date_match(
     market_derivation = derive_market_date(market)
     weather_derivation = derive_weather_date(weather_data, weather_date=weather_date)
 
+    if market_derivation.source == "conflicting_market_dates":
+        return DateMatchValidationResult(False, "conflicting_market_dates", None,
+                                         weather_derivation.isoformat, market_derivation.source)
+
     if market_derivation.value is None and weather_derivation.value is None:
         return DateMatchValidationResult(
             ok=False,
@@ -146,25 +151,36 @@ def validate_weather_date_match(
 
 
 def derive_market_date(market: Any) -> DateDerivation:
-    for field in MARKET_DATE_FIELDS:
-        value, matched_field = _lookup_with_source(market, field)
-        parsed = _parse_date_value(value)
-        if parsed is not None:
-            return DateDerivation(parsed, f"field:{matched_field}")
+    """Resolve agreeing original dates; precedence cannot erase a contradiction."""
+    candidates = []
+    for fields, parser, prefix in ((MARKET_DATE_FIELDS, _parse_date_value, "field"),
+                                   (TICKER_FIELDS, _parse_kalshi_weather_ticker_date, "ticker"),
+                                   (QUESTION_FIELDS, _parse_question_date, "question")):
+        for field in fields:
+            for value, matched_field in _market_field_values(market, field):
+                parsed_dates = _parse_question_dates(value) if prefix == "question" else [parser(value)]
+                for parsed in parsed_dates:
+                    if parsed is not None:
+                        candidates.append(DateDerivation(parsed, f"{prefix}:{matched_field}"))
+    if len({candidate.value for candidate in candidates}) > 1:
+        return DateDerivation(None, "conflicting_market_dates")
+    return candidates[0] if candidates else DateDerivation(None, None)
 
-    for field in TICKER_FIELDS:
-        value, matched_field = _lookup_with_source(market, field)
-        parsed = _parse_kalshi_weather_ticker_date(value)
-        if parsed is not None:
-            return DateDerivation(parsed, f"ticker:{matched_field}")
 
-    for field in QUESTION_FIELDS:
-        value, matched_field = _lookup_with_source(market, field)
-        parsed = _parse_question_date(value)
-        if parsed is not None:
-            return DateDerivation(parsed, f"question:{matched_field}")
-
-    return DateDerivation(None, None)
+def _market_field_values(item: Any, field: str):
+    # Inspect top-level AND metadata assertions, even when they use the same key.
+    if isinstance(item, Mapping):
+        for key, value in item.items():
+            if str(key).lower() == field.lower():
+                yield value, str(key)
+        metadata = item.get("metadata")
+    else:
+        value = getattr(item, field, None)
+        if value is not None:
+            yield value, field
+        metadata = getattr(item, "metadata", None)
+    if isinstance(metadata, Mapping):
+        yield from _market_field_values(metadata, field)
 
 
 def derive_weather_date(weather_data: Any | None = None, *, weather_date: Any | None = None) -> DateDerivation:
@@ -235,40 +251,33 @@ def _parse_kalshi_weather_ticker_date(value: Any) -> date | None:
 
 
 def _parse_question_date(value: Any) -> date | None:
-    if value is None:
-        return None
-    rendered = str(value)
+    return next(iter(_parse_question_dates(value)), None)
 
-    parsed = _parse_date_value(rendered)
-    if parsed is not None:
-        return parsed
+
+def _parse_question_dates(value: Any):
+    if value is None:
+        return
+    rendered = str(value)
+    for match in re.finditer(r"\b\d{4}-\d{2}-\d{2}\b", rendered):
+        parsed = _parse_date_value(match.group())
+        if parsed is not None:
+            yield parsed
 
     month_names = "|".join(sorted(MONTHS, key=len, reverse=True))
-    month_first = re.search(
+    for match in re.finditer(
         rf"\b({month_names})\.?\s+(\d{{1,2}})(?:st|nd|rd|th)?(?:,)?\s+(\d{{4}})\b",
-        rendered,
-        flags=re.IGNORECASE,
-    )
-    if month_first:
-        return _safe_date(
-            int(month_first.group(3)),
-            MONTHS[month_first.group(1).upper().rstrip(".")],
-            int(month_first.group(2)),
-        )
-
-    day_first = re.search(
+        rendered, flags=re.IGNORECASE,
+    ):
+        parsed = _safe_date(int(match.group(3)), MONTHS[match.group(1).upper().rstrip(".")], int(match.group(2)))
+        if parsed is not None:
+            yield parsed
+    for match in re.finditer(
         rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+({month_names})\.?(?:,)?\s+(\d{{4}})\b",
-        rendered,
-        flags=re.IGNORECASE,
-    )
-    if day_first:
-        return _safe_date(
-            int(day_first.group(3)),
-            MONTHS[day_first.group(2).upper().rstrip(".")],
-            int(day_first.group(1)),
-        )
-
-    return None
+        rendered, flags=re.IGNORECASE,
+    ):
+        parsed = _safe_date(int(match.group(3)), MONTHS[match.group(2).upper().rstrip(".")], int(match.group(1)))
+        if parsed is not None:
+            yield parsed
 
 
 def _safe_date(year: int, month: int, day: int) -> date | None:

@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from markdown_it import MarkdownIt
+
 from .registry import WeatherRegistry
 
 
@@ -49,6 +51,24 @@ class WeatherMarketContext:
 
 def _normalize_text(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (value or "").lower()).strip()
+
+
+_ASSERTION_MARKDOWN = MarkdownIt('commonmark', {'html': False, 'linkify': False, 'typographer': False})
+
+
+def _assertion_plaintext(value: str) -> str:
+    """Read inline presentation structurally without changing original evidence."""
+    pending = list(reversed(_ASSERTION_MARKDOWN.parseInline(value)))
+    parts = []
+    while pending:
+        token = pending.pop()
+        if token.children is not None:
+            pending.extend(reversed(token.children))
+        elif token.type in {'text', 'code_inline'}:
+            parts.append(token.content)
+        elif token.type in {'softbreak', 'hardbreak'}:
+            parts.append(' ')
+    return ''.join(parts)
 
 
 def _normalize_ticker_fragment(value: str) -> str:
@@ -98,9 +118,9 @@ def resolve_weather_measurement_kind(question: str, category: str = "", *,
         if not isinstance(value, str):
             continue
         normalized = _normalize_text(value)
-        if re.search(r'\b(?:high|maximum|max)\b', normalized):
+        if re.search(r'\b(?:high|highest|maximum|max)\b', normalized):
             kinds.add('high')
-        if re.search(r'\b(?:low|minimum|min)\b', normalized):
+        if re.search(r'\b(?:low|lowest|minimum|min)\b', normalized):
             kinds.add('low')
     return next(iter(kinds)) if len(kinds) == 1 else None
 
@@ -164,18 +184,29 @@ class WeatherMarketCityMapper:
             if metadata['city_id'] not in self._cities:
                 return None
             official.add(metadata['city_id'])
-        for field in ('rules_primary', 'rules_secondary'):
-            text = metadata.get(field)
+        for text in (question, metadata.get('rules_primary'), metadata.get('rules_secondary')):
             if isinstance(text, str):
+                # CommonMark resolves coalesced outer/inner delimiter runs across
+                # separate metric/location spans; regex stripping cannot do that.
+                text = _assertion_plaintext(text)
                 official.update(self._text_city_ids(text))
                 for location in re.finditer(
                     r'\b(?:temperature|temp)\s+(?:(?:recorded|measured)\s+)?(?:at|in)\s+'
-                    r'(.+?)(?=\s*\(|\s+(?:for|on|is|will|according)\b|[.,;]|$)', text, re.I,
+                    r'(.+?)(?=\s*\(|\s+(?:for|on|is|will|be|according)\b|[.,;?]|$)', text, re.I,
                 ):
                     name = location.group(1).strip()
                     # Station-only assertions remain the independent station
                     # resolver's responsibility, not inferred city aliases.
                     if not re.fullmatch(r'(?:CLI[A-Z0-9]{3,4}|K[A-Z0-9]{3,4})', name):
+                        if not self._text_city_ids(name):
+                            return None
+                # Questions also put the named location before the metric.
+                before_metric = re.search(
+                    r'^\s*Will\s+(?:the\s+)?(.+?)\s+(?:(?:high|highest|low|lowest|maximum|minimum)\s+)?(?:temperature|temp)\b',
+                    _normalize_text(text), re.I)
+                if before_metric:
+                    name = before_metric.group(1).strip()
+                    if not re.fullmatch(r'(?:the\s+)?(?:daily\s+)?(?:high|highest|low|lowest|maximum|minimum)?|the', name, re.I):
                         if not self._text_city_ids(name):
                             return None
         matches.update(official)

@@ -494,19 +494,27 @@ class EngineCollectionTests(_CaptureTestCase):
 
     def test_implausible_original_forecast_is_retained_as_unusable_not_silently_dropped(self):
         now = datetime.now(timezone.utc)
-        bad = weather_pro.WeatherSnapshot(city='austin', source='nws', high_temp_f=999,
-            low_temp_f=60,current_temp_f=70,fetched_at=now,forecast_hours_ahead=2,confidence=.8)
         engine = weather_pro.ProWeatherEngine()
         self.addCleanup(engine.close)
-        engine.nws.get_forecast = lambda *args, **kwargs: bad
         engine.nws.get_station_observation = lambda *args: None
         engine.open_meteo.get_forecast = lambda *args, **kwargs: None
-        result = engine.get_forecast('not a city',target_date='2026-10-19',measurement_kind='high')
-        self.assertFalse(result.sources_used)
-        details = {s['source_id']:s for s in engine._source_contribution_details(result)}
-        self.assertEqual(details['nws']['forecast_high'],999)
-        self.assertFalse(details['nws']['scoreable_forecast'])
-        self.assertEqual(details['nws']['availability_reason'],'implausible_or_missing_requested_forecast')
+        for city, reason in (
+            ('austin', 'implausible_or_missing_requested_forecast'),
+            ('not a city', 'unproven_original_market_city'),
+        ):
+            with self.subTest(requested_city=city):
+                bad = weather_pro.WeatherSnapshot(city='austin', source='nws', high_temp_f=999,
+                    low_temp_f=60,current_temp_f=70,fetched_at=now,forecast_hours_ahead=2,confidence=.8)
+                engine.nws.get_forecast = lambda *args, **kwargs: bad
+                # A known city also selects local candidates; keep all I/O mocked.
+                with patch.object(weather_pro.LocalForecastFeed, 'get_forecast', return_value=None):
+                    result = engine.get_forecast(city,target_date='2026-10-19',measurement_kind='high')
+                assert result is not None
+                self.assertFalse(result.sources_used)
+                details = {s['source_id']:s for s in engine._source_contribution_details(result)}
+                self.assertEqual(details['nws']['forecast_high'],999)
+                self.assertFalse(details['nws']['scoreable_forecast'])
+                self.assertEqual(details['nws']['availability_reason'],reason)
 
 
     def test_global_access_failure_retains_response_and_exact_http_status(self):
