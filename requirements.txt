@@ -9,3 +9,4 @@ pyarrow>=18.0.0
 pytz>=2026.1
 requests>=2.32
 rich>=13
+markdown-it-py==4.2.0

@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from markdown_it import MarkdownIt
+
 from .registry import WeatherRegistry
 
 
@@ -49,6 +51,24 @@ class WeatherMarketContext:
 
 def _normalize_text(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (value or "").lower()).strip()
+
+
+_ASSERTION_MARKDOWN = MarkdownIt('commonmark', {'html': False, 'linkify': False, 'typographer': False})
+
+
+def _assertion_plaintext(value: str) -> str:
+    """Read inline presentation structurally without changing original evidence."""
+    pending = list(reversed(_ASSERTION_MARKDOWN.parseInline(value)))
+    parts = []
+    while pending:
+        token = pending.pop()
+        if token.children is not None:
+            pending.extend(reversed(token.children))
+        elif token.type in {'text', 'code_inline'}:
+            parts.append(token.content)
+        elif token.type in {'softbreak', 'hardbreak'}:
+            parts.append(' ')
+    return ''.join(parts)
 
 
 def _normalize_ticker_fragment(value: str) -> str:
@@ -166,15 +186,9 @@ class WeatherMarketCityMapper:
             official.add(metadata['city_id'])
         for text in (question, metadata.get('rules_primary'), metadata.get('rules_secondary')):
             if isinstance(text, str):
-                # Remove balanced emphasis to a fixed point: stripping an outer
-                # layer can expose an inner delimiter beside the location syntax.
-                # Every change removes delimiters, so no nesting-depth cap is needed.
-                # Keep punctuation, station tokens and identifier-internal underscores.
-                while True:
-                    plain = re.sub(r'(?<!\w)(\*+|_+)(?=\S)(.+?)(?<=\S)\1(?!\w)', r'\2', text)
-                    if plain == text:
-                        break
-                    text = plain
+                # CommonMark resolves coalesced outer/inner delimiter runs across
+                # separate metric/location spans; regex stripping cannot do that.
+                text = _assertion_plaintext(text)
                 official.update(self._text_city_ids(text))
                 for location in re.finditer(
                     r'\b(?:temperature|temp)\s+(?:(?:recorded|measured)\s+)?(?:at|in)\s+'
