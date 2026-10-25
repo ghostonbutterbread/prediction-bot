@@ -3,6 +3,42 @@
 Task: `t_d694dfa0`. Dependent base: `fec68a30e3e66a5bfcb51dff40d2f22536329200`
 (the independently reviewed Kalshi pagination feature). Target: beta; no main promotion.
 
+## Accepted integration decision — supersedes historical holds below
+
+Exact source `1c86e778077d816f5a07fb54e3972dc2baa5fb88` and combined
+`645826103dca7673fb28bd2c2ac1e9e30c7111eb` / tree
+`1a451cfb36a45611cd47f22bf561b8b1a340e47d` received independent APPROVE
+from `deleg_1afa4044`. Combined full gate: 1,866 unique executed IDs, 1,864
+successful IDs, zero failures/errors, seven runtime-config skip entries and
+one inherited real-archive exclusion. All 484 hashes match. Earlier blocked
+regex checkpoints remain historical BLOCKs. The retained supplemental's 48
+string-spy failures per candidate were individually reconciled as visible literal
+CommonMark characters, not suppressed or described as a green diagnostic.
+
+User message `1563768870861406211` now authorizes beta integration and restarting
+the existing observer. Fresh locked inventory and all original helper/source
+pins matched the reviewed discrepancy. The approved metadata-only reconciliation
+was actually applied and independently read back: 2,873 evidence files /
+104,000,180 bytes unchanged; original sidecar preserved; new sidecar SHA-256
+`331386f56f17d741bb9774a9227e399833b97507588dd2d921278afe794ebde6`.
+Receipt: `accounting_parent/production_reconcile_1563768870861406211/result.json`
+under the existing finish-e2e report root. No raw blob/receipt was rewritten or
+deleted. Service is still stopped at this checkpoint.
+
+The effective service interpreter is the storage-root `.venv` (Python 3.14),
+not the source-checkout `.venv` used for prior frozen tests. Runtime dependency
+preflight found only the new parser pin mismatched; the installer dependency
+step was applied to that existing interpreter using the reviewed root manifest.
+All runtime requirements now verify, including markdown-it-py 4.2.0. No source
+root, cohort, limits or trading setting changed. Next: integrate beta excluding
+these three branch-local dossiers, prove all other blobs equal the approved
+combined candidate, run the exact merged tree with the actual runtime interpreter,
+apply/read back the reviewed existing-unit exit-78 override and start exactly one
+existing observer, then verify fresh complete-cycle geography and retained/index
+integrity against the new public catalog. Fresh live acceptance is not yet proven.
+Remove this dossier from beta in the integration commit; retain this accepted
+decision in feature history. Do not promote main.
+
 ## Diagnosed failure
 
 The previous 8 KiB accounting-sidecar ceiling was insufficient as the fixed
