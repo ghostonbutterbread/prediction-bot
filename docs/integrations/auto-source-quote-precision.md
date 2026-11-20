@@ -4,7 +4,7 @@
 - **Owner / branch:** delegated child, `fix/auto-learning-quote-precision-t_2f4bb125`.
 - **Base:** `efbe5fb3f1c2e050b6c84867155ba2c0831bc264`.
 - **Intended integration target:** `feat/auto-learning-loop-t_2f4bb125`; subsequent beta integration is the parent owner's decision. Do not merge or push from this child.
-- **Prior immutable implementation/recovery checkpoint:** `22f1dcfbc4c624f6d32919e6cf82e015a466e55a`. The overflow follow-up is included in this dossier's commit; the next handoff-only commit will identify the resulting implementation checkpoint.
+- **Latest immutable implementation/recovery checkpoint:** `30021512cbe6332d781d4ce6be46c626b4a8abb7`. This dossier is in a later dossier-only handoff commit; inspect that commit and the final branch tip as well. Earlier precision checkpoint: `22f1dcfbc4c624f6d32919e6cf82e015a466e55a`.
 - **Inspiration:** independent review identified two price-rounding defects on the parent; this child is scoped to the source replay builder and resolver only.
 
 ## Contract and compatibility
