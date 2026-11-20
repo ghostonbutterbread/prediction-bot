@@ -707,8 +707,8 @@ class CollectorSourceRouterReplayTests(unittest.TestCase):
 
         self.assertEqual(report["summary"]["exactly_resolved_decisions"], len(control) + len(candidate))
         self.assertTrue(all("official_outcome" in row for row in report["resolved_decisions"]))
-        self.assertTrue(all("executable_pnl_usd" in row for row in report["resolved_decisions"]))
-        self.assertTrue(all("reference_price_proxy_pnl_usd" in row for row in report["resolved_decisions"]))
+        self.assertTrue(all("hypothetical_ask_quote_pnl_usd" in row for row in report["resolved_decisions"]))
+        self.assertTrue(all("hypothetical_reference_price_pnl_usd" in row for row in report["resolved_decisions"]))
 
         mismatched = [dict(row) for row in outcomes]
         mismatched[0] = {**mismatched[0], "canonical_input_sha256": "f" * 64}
@@ -733,7 +733,7 @@ class CollectorSourceRouterReplayTests(unittest.TestCase):
                 report = resolve_sealed_source_probability_decisions(control + candidate, [outcome])
                 self.assertEqual(report["summary"]["outcome_ledger"].get("invalid_rows", 0), 1)
                 self.assertEqual(report["summary"]["exactly_resolved_decisions"], 0)
-                self.assertEqual(report["summary"]["executable_pnl_decisions"], 0)
+                self.assertEqual(report["summary"]["hypothetical_ask_quote_pnl_decisions"], 0)
                 self.assertEqual(report["source_correctness"]["total_routeable_resolved_selected_source_observations"], 0)
 
     def test_final_outcome_must_settle_after_decision_before_correctness_or_pnl(self):
@@ -752,7 +752,7 @@ class CollectorSourceRouterReplayTests(unittest.TestCase):
                 outcome = finalized_outcome(record, outcome="YES", settlement_ts=settlement)
                 report = resolve_sealed_source_probability_decisions(control + candidate, [outcome])
                 self.assertEqual(report["summary"]["exactly_resolved_decisions"], 0)
-                self.assertEqual(report["summary"]["executable_pnl_decisions"], 0)
+                self.assertEqual(report["summary"]["hypothetical_ask_quote_pnl_decisions"], 0)
                 self.assertEqual(report["source_correctness"]["total_routeable_resolved_selected_source_observations"], 0)
                 self.assertEqual(report["summary"]["unresolved_decisions"], 2)
                 self.assertTrue(all(row["resolution_status"] == "unresolved_settlement_not_after_decision"
@@ -760,7 +760,7 @@ class CollectorSourceRouterReplayTests(unittest.TestCase):
         valid = finalized_outcome(record, outcome="YES", settlement_ts="2026-01-04T00:00:00+00:00")
         report = resolve_sealed_source_probability_decisions(control + candidate, [valid])
         self.assertEqual(report["summary"]["exactly_resolved_decisions"], 2)
-        self.assertEqual(report["summary"]["executable_pnl_decisions"], 2)
+        self.assertEqual(report["summary"]["hypothetical_ask_quote_pnl_decisions"], 2)
         self.assertEqual(report["source_correctness"]["correct"], 1)
 
     def test_source_selection_correctness_counts_edge_skips_but_not_unroutable_candidates(self):
@@ -862,15 +862,15 @@ class CollectorSourceRouterReplayTests(unittest.TestCase):
         report = resolve_sealed_source_probability_decisions(control, outcomes)
         self.assertEqual(report["promotion_requirement"], "forward_paper_required_before_promotion")
         resolved = {row["market_id"]: row for row in report["resolved_decisions"]}
-        self.assertEqual(resolved["KXREFERENCE"]["pnl_category"], "reference_price_proxy_pnl")
-        self.assertIsNone(resolved["KXREFERENCE"]["executable_pnl_usd"])
-        self.assertEqual(resolved["KXREFERENCE"]["reference_price_proxy_pnl_usd"], 0.6)
-        self.assertEqual(resolved["KXEXECUTABLE"]["pnl_category"], "executable_pnl")
-        self.assertEqual(resolved["KXEXECUTABLE"]["executable_pnl_usd"], 0.6)
-        self.assertIsNone(resolved["KXEXECUTABLE"]["reference_price_proxy_pnl_usd"])
+        self.assertEqual(resolved["KXREFERENCE"]["pnl_category"], "hypothetical_reference_price_pnl")
+        self.assertIsNone(resolved["KXREFERENCE"]["hypothetical_ask_quote_pnl_usd"])
+        self.assertEqual(resolved["KXREFERENCE"]["hypothetical_reference_price_pnl_usd"], 1.5)
+        self.assertEqual(resolved["KXEXECUTABLE"]["pnl_category"], "hypothetical_ask_quote_pnl")
+        self.assertEqual(resolved["KXEXECUTABLE"]["hypothetical_ask_quote_pnl_usd"], 1.5)
+        self.assertIsNone(resolved["KXEXECUTABLE"]["hypothetical_reference_price_pnl_usd"])
         self.assertIsNone(resolved["KXMISSING"]["pnl_category"])
-        self.assertEqual(report["summary"]["executable_pnl_decisions"], 1)
-        self.assertEqual(report["summary"]["reference_price_proxy_pnl_decisions"], 1)
+        self.assertEqual(report["summary"]["hypothetical_ask_quote_pnl_decisions"], 1)
+        self.assertEqual(report["summary"]["hypothetical_reference_price_pnl_decisions"], 1)
 
     def test_run_and_cli_write_separate_labeled_artifacts(self):
         records, outcomes = self._records_and_outcomes()

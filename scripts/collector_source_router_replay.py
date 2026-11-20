@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Run the offline source-only control/source-router replay slice."""
+"""Run offline source-only replay; price P&L is hypothetical, not fills.
+
+Resolution schema v5 replaces v3's incorrectly calculated executable P&L with
+hypothetical quote/reference proxies. Source timing remains unverified.
+"""
 
 from __future__ import annotations
 
