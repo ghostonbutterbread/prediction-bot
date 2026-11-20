@@ -72,7 +72,9 @@ def main() -> int:
     run.add_argument('--outcomes', type=Path, required=True, help='separate finalized-outcome JSONL')
     run.add_argument('--idea', required=True)
     run.add_argument('--min-sample-count', type=int, default=5)
-    run.add_argument('--max-rows', type=int, default=None)
+    run.add_argument('--max-rows', type=int, default=None, help='maximum selected input object rows, not an I/O bound')
+    run.add_argument('--max-input-bytes', type=int, required=True, help='maximum complete input file size to hash and read')
+    run.add_argument('--max-outcome-bytes', type=int, required=True, help='maximum complete outcome file size to hash and load')
     queue = sub.add_parser('queue', help='record a manual-review handoff, never activate')
     queue.add_argument('--store', type=Path, required=True)
     queue.add_argument('--experiment', required=True)
@@ -101,6 +103,8 @@ def main() -> int:
         summaries, identities = [], []
         for experiment_id, row in zip(args.experiments, rows):
             result, directory = json.loads(row[4]), Path(row[5])
+            if result.get('economic_status') != 'excluded_quote_only':
+                raise ValueError('legacy economic results are ineligible; rerun in a new output directory')
             for artifact, expected_hash in result['artifacts'].items():
                 if sha256(directory / artifact) != expected_hash:
                     raise ValueError('artifact hash mismatch')
@@ -125,19 +129,31 @@ def main() -> int:
                 lanes[label]['resolved'] = sum(row['decision_id'] in lane_ids[label] for row in report['resolved_decisions'])
                 lanes[label]['unresolved'] = sum(row['decision_id'] in lane_ids[label] for row in report['unresolved_decisions'])
             identities.append(lane_keys[0])
+            stats = result['decision_stats']
+            coverage = {key: stats[key] for key in ('input_records_seen', 'input_records_invalid_identity',
+                                                       'sealed_control_decisions', 'sealed_candidate_decisions')}
             summaries.append({'experiment_id': experiment_id, 'git_commit': row[0],
-                              'lanes': lanes})
+                              'lanes': lanes, 'coverage': coverage})
         if identities[0] != identities[1]:
             raise ValueError('experiment decision identities differ')
-        print(json.dumps({'matched_inputs_and_settings': True, 'matched_decisions': len(identities[0]),
-                          'runs': summaries, 'warning': 'asks are quotes, not proven fills; historical replay is not promotion evidence'}))
+        matched = bool(identities[0]) and all(
+            run['coverage']['input_records_invalid_identity'] == 0
+            and run['coverage']['input_records_seen'] == len(identities[0])
+            for run in summaries
+        )
+        print(json.dumps({'matched_inputs_and_settings': False, 'selected_rows_matched': matched,
+                          'matched_decisions': len(identities[0]),
+                          'diagnostic_eligible': False,
+                          'coverage_scope': 'selected input rows only; no independent opportunity roster',
+                          'runs': summaries, 'warning': 'source availability unverified; asks are quotes, not fills; not promotion evidence'}))
         return 0
     if args.command == 'queue':
         if not (store / 'experiments.sqlite3').is_file():
             raise ValueError('experiment store does not exist')
         with database(store) as db:
             db.execute('INSERT INTO candidate_queue VALUES (?, ?, ?)', (args.experiment, now(), args.note))
-        print(json.dumps({'queued': args.experiment, 'activation': 'manual_review_only'}))
+        print(json.dumps({'queued': args.experiment, 'activation': 'manual_review_only',
+                          'diagnostic_eligible': False, 'warning': 'source availability unverified'}))
         return 0
 
     if git('rev-parse', '--show-toplevel') != str(ROOT):
@@ -150,6 +166,12 @@ def main() -> int:
         raise ValueError('distinct existing replay inputs and outcomes files are required')
     if args.min_sample_count < 1 or (args.max_rows is not None and args.max_rows < 1):
         raise ValueError('min-sample-count and max-rows must be positive')
+    if args.max_input_bytes < 1 or args.max_outcome_bytes < 1:
+        raise ValueError('byte limits must be positive')
+    for name, path, limit, option in (('inputs', inputs, args.max_input_bytes, '--max-input-bytes'),
+                                       ('outcomes', outcomes, args.max_outcome_bytes, '--max-outcome-bytes')):
+        if path.stat().st_size > limit:
+            raise ValueError(f'{name} exceeds {option} ({limit} bytes)')
     input_hash, outcome_hash = sha256(inputs), sha256(outcomes)
     # A self-consistent digest does not prove a caller actually projected away
     # outcomes or recorded decisions. Screen the supplied rows with the same
@@ -169,6 +191,8 @@ def main() -> int:
                 if errors:
                     raise ValueError(f'forbidden replay field at line {number}: {errors[0].path}')
     config = {'min_sample_count': args.min_sample_count, 'max_rows': args.max_rows,
+              'max_input_bytes': args.max_input_bytes, 'max_outcome_bytes': args.max_outcome_bytes,
+              'resource_scope': 'whole input and outcome files; stable immutable regular files required',
               'history': None, 'cohort_per_shape_target': 30, 'python': sys.version,
               'inputs_path': str(inputs), 'outcomes_path': str(outcomes)}
     experiment_id = uuid.uuid4().hex
@@ -177,15 +201,17 @@ def main() -> int:
     from bot.weather.collector_source_router_replay import run_collector_source_router_replay
     result = run_collector_source_router_replay(
         replay_inputs_path=inputs, finalized_outcomes_path=outcomes, output_dir=output_dir,
-        min_sample_count=args.min_sample_count, max_rows=args.max_rows)
+        min_sample_count=args.min_sample_count, max_rows=args.max_rows, directional_only=True)
     if (sha256(inputs), sha256(outcomes)) != (input_hash, outcome_hash):
         raise ValueError('input changed during replay; artifacts are incomplete and not registered')
     if git('status', '--porcelain', '--untracked-files=all') or git('rev-parse', 'HEAD') != commit:
         raise ValueError('checkout changed during replay; artifacts are incomplete and not registered')
-    result_data = {'decision_stats': result.metadata['decision_stats'],
+    result_data = {'diagnostic_eligible': False, 'source_time_status': 'unverified',
+                   'economic_status': 'excluded_quote_only',
+                   'decision_stats': result.metadata['decision_stats'],
                    'resolution_summary': result.metadata['resolution_summary'],
                    'artifacts': {path.name: sha256(path) for path in sorted(output_dir.iterdir()) if path.is_file()},
-                   'interpretation': 'source-only fixed-stake replay; recorded asks are quotes, not proven fills'}
+                   'interpretation': 'source-only directional research; source availability unverified; economics excluded'}
     store.mkdir(parents=True, exist_ok=True)
     with database(store) as db:
         db.execute('INSERT INTO experiments VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',

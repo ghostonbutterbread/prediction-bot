@@ -105,6 +105,7 @@ def build_sealed_source_probability_decisions(
 
 def resolve_sealed_source_probability_decisions(
     decisions: Iterable[Mapping[str, Any]], finalized_outcomes: Iterable[Mapping[str, Any]],
+    *, directional_only: bool = False,
 ) -> dict[str, Any]:
     """Join sealed decisions to explicit outcomes by the complete input identity."""
     outcome_index, outcome_stats = _strict_outcome_index(finalized_outcomes)
@@ -154,7 +155,7 @@ def resolve_sealed_source_probability_decisions(
         pnl_category = _pnl_category(action, side, price, stake, decision.get("price_basis"))
         calculable = pnl_category is not None
         won = side == official_outcome if calculable else None
-        pnl = round(stake * ((1.0 - price) if won else -price), 6) if calculable and won is not None else None
+        pnl = round(stake * ((1.0 - price) if won else -price), 6) if not directional_only and calculable and won is not None else None
         resolved.append({
             **base,
             "resolution_status": "resolved_exact_identity",
@@ -169,7 +170,7 @@ def resolve_sealed_source_probability_decisions(
 
     executable_pnl_rows = [row for row in resolved if row.get("executable_pnl_usd") is not None]
     reference_price_proxy_rows = [row for row in resolved if row.get("reference_price_proxy_pnl_usd") is not None]
-    return {
+    result = {
         "schema_name": "source_probability_resolution_report",
         "schema_version": 3,
         "research_status": "offline_source_only_research",
@@ -197,6 +198,20 @@ def resolve_sealed_source_probability_decisions(
         "resolved_decisions": resolved,
         "unresolved_decisions": unresolved,
     }
+    if directional_only:
+        result["schema_version"] = 4
+        result["economic_status"] = "excluded_quote_only"
+        result["diagnostic_eligible"] = False
+        result["source_time_status"] = "unverified"
+        result.pop("pnl_semantics")
+        result.pop("fixed_stake_policy")
+        for key in list(result["summary"]):
+            if "pnl" in key:
+                del result["summary"][key]
+        for row in resolved:
+            for key in ("pnl_category", "executable_pnl_usd", "reference_price_proxy_pnl_usd"):
+                row.pop(key)
+    return result
 
 
 def _source_selection_correctness_observation(
@@ -302,6 +317,7 @@ def run_collector_source_router_replay(
     history_manifest_path: str | Path | None = None,
     history_ledger_path: str | Path | None = None,
     cohort_per_shape_target: int = DEFAULT_PER_SHAPE_TARGET,
+    directional_only: bool = False,
 ) -> CollectorSourceRouterReplayResult:
     """Run the complete offline slice and write only new derived artifacts."""
     if max_rows is not None and max_rows < 0:
@@ -326,7 +342,7 @@ def run_collector_source_router_replay(
     control, candidate, decision_stats = build_sealed_source_probability_decisions(
         records, outcomes, history_ledger=history_ledger, min_sample_count=min_sample_count,
     )
-    report = resolve_sealed_source_probability_decisions(control + candidate, outcomes)
+    report = resolve_sealed_source_probability_decisions(control + candidate, outcomes, directional_only=directional_only)
     report["source_correctness"]["historical_source_quality"] = {
         "interpretation": decision_stats["selector_history"]["source_quality_interpretation"],
         "target_proof_rejections": {
@@ -403,6 +419,10 @@ def run_collector_source_router_replay(
             cohort_path.name: {"sha256": hashlib.sha256(cohort_bytes).hexdigest()},
         },
     }
+    if directional_only:
+        metadata.update({"diagnostic_eligible": False, "source_time_status": "unverified",
+                         "economic_status": "excluded_quote_only",
+                         "quote_notice": "recorded_executable_ask is a quote, not evidence of a fill"})
     metadata_path.write_bytes(_canonical_json_bytes(metadata))
     return CollectorSourceRouterReplayResult(
         output_dir=target_dir,
