@@ -116,6 +116,7 @@ def resolve_sealed_source_probability_decisions(
     source_correctness_observations: list[dict[str, Any]] = []
     quote_pnl_values: list[float] = []
     reference_pnl_values: list[float] = []
+    noncalculable: Counter[str] = Counter()
     for decision in decisions:
         if not isinstance(decision, Mapping):
             continue
@@ -135,6 +136,10 @@ def resolve_sealed_source_probability_decisions(
             "action_label": decision.get("action_label"),
             "fixed_stake_usd": decision.get("fixed_stake_usd"),
         }
+        for field in ("entry_price", "fixed_stake_usd"):
+            value = base[field]
+            if isinstance(value, float) and not math.isfinite(value):
+                base[field] = None
         if outcome is None:
             unresolved.append({**base, "resolution_status": "unresolved_exact_identity_required"})
             continue
@@ -160,15 +165,20 @@ def resolve_sealed_source_probability_decisions(
         calculable = pnl_category is not None
         won = side == official_outcome if calculable else None
         pnl = None
+        pnl_status = "not_eligible"
         if not directional_only and calculable and price is not None and stake is not None:
             # Dollar entry cost, fractional contracts, binary payout, zero fees.
             modeled_pnl = stake / price - stake if won else -stake
             if math.isfinite(modeled_pnl):
                 pnl = round(modeled_pnl, 6)
+                pnl_status = "calculated"
                 if pnl_category == "hypothetical_ask_quote_pnl":
                     quote_pnl_values.append(modeled_pnl)
                 else:
                     reference_pnl_values.append(modeled_pnl)
+            else:
+                pnl_status = "noncalculable_nonfinite"
+                noncalculable[pnl_category] += 1
         resolved.append({
             **base,
             "resolution_status": "resolved_exact_identity",
@@ -177,13 +187,30 @@ def resolve_sealed_source_probability_decisions(
             "resolution_id": outcome.get("resolution_id"),
             "won": won,
             "pnl_category": pnl_category,
+            "pnl_calculation_status": pnl_status,
             "hypothetical_ask_quote_pnl_usd": pnl if pnl_category == "hypothetical_ask_quote_pnl" else None,
             "hypothetical_reference_price_pnl_usd": pnl if pnl_category == "hypothetical_reference_price_pnl" else None,
         })
 
+    def pnl_summary(category: str, values: list[float]) -> dict[str, Any]:
+        missing = noncalculable[category]
+        total = sum(values)
+        if missing:
+            status, total = "unavailable_noncalculable_positions", None
+        elif not math.isfinite(total):
+            status, total = "unavailable_nonfinite_aggregate", None
+        else:
+            status, total = ("complete" if values else "empty"), round(total, 6)
+        return {
+            category + "_decisions": len(values),
+            category + "_noncalculable_decisions": missing,
+            category + "_total_usd": total,
+            category + "_total_status": status,
+        }
+
     result = {
         "schema_name": "source_probability_resolution_report",
-        "schema_version": 5,
+        "schema_version": 6,
         "research_status": "offline_source_only_research",
         "non_mutating": True,
         "promotion_requirement": "forward_paper_required_before_promotion",
@@ -200,15 +227,14 @@ def resolve_sealed_source_probability_decisions(
             "hypothetical_ask_quote_pnl": "hypothetical price proxy from a recorded ask quote, not a fill or realized P&L",
             "hypothetical_reference_price_pnl": "hypothetical price proxy from a recorded market reference, not a fill or realized P&L",
             "calculation": "fractional contracts = dollar stake / selected-side price; binary $1 payout per winning contract; zero fees; no liquidity or slippage model",
+            "numeric_reporting": "binary floating-point proxies; row and complete aggregate values rounded to six decimal places; unavailable totals are null, not partial sums",
         },
         "summary": {
             "sealed_decisions_seen": len(resolved) + len(unresolved),
             "exactly_resolved_decisions": len(resolved),
             "unresolved_decisions": len(unresolved),
-            "hypothetical_ask_quote_pnl_decisions": len(quote_pnl_values),
-            "hypothetical_ask_quote_pnl_total_usd": round(sum(quote_pnl_values), 6),
-            "hypothetical_reference_price_pnl_decisions": len(reference_pnl_values),
-            "hypothetical_reference_price_pnl_total_usd": round(sum(reference_pnl_values), 6),
+            **pnl_summary("hypothetical_ask_quote_pnl", quote_pnl_values),
+            **pnl_summary("hypothetical_reference_price_pnl", reference_pnl_values),
             "outcome_ledger": outcome_stats,
         },
         "source_correctness": _source_selection_correctness_report(source_correctness_observations),
@@ -226,7 +252,7 @@ def resolve_sealed_source_probability_decisions(
             if "pnl" in key:
                 del result["summary"][key]
         for row in resolved:
-            for key in ("pnl_category", "hypothetical_ask_quote_pnl_usd", "hypothetical_reference_price_pnl_usd"):
+            for key in ("pnl_category", "pnl_calculation_status", "hypothetical_ask_quote_pnl_usd", "hypothetical_reference_price_pnl_usd"):
                 row.pop(key)
     return result
 
@@ -391,7 +417,7 @@ def run_collector_source_router_replay(
     cohort_path.write_bytes(cohort_bytes)
     metadata = {
         "schema_name": "collector_source_router_replay_run",
-        "schema_version": 3 if directional_only else 4,
+        "schema_version": 3 if directional_only else 5,
         "research_status": "offline_source_only_research",
         "offline": True,
         "network_access": False,
@@ -975,7 +1001,7 @@ def _round(value: float | None) -> float | None:
 
 
 def _canonical_json_bytes(value: Any) -> bytes:
-    return (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
+    return (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
 
 
 def _jsonl_bytes(rows: Iterable[Mapping[str, Any]]) -> bytes:
