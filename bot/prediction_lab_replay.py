@@ -29,7 +29,7 @@ from bot.hidden_gem_evidence import (
     summarize_hidden_gem_evidence_cards,
 )
 from bot.prediction_lab_shadow_delta import summarize_shadow_delta_rows
-from bot.replay_decision_input import _field_name_is_forbidden
+from bot.replay_decision_input import _field_name_is_forbidden, _normalized_field_name
 from bot.shared_market_feed import (
     shared_candidate_from_market_snapshot_row,
     shared_candidate_id_from_row,
@@ -1268,7 +1268,8 @@ def _has_outcome_leakage(value: Any) -> bool:
     leakage_keys = {"resolution", "outcome", "actual_outcome", "settled_outcome", "market_result"}
     if isinstance(value, dict):
         for key, item in value.items():
-            if str(key).lower() in leakage_keys and _outcome_leakage_value_present(item):
+            is_leakage_key = str(key).lower() in leakage_keys or _normalized_field_name(str(key)) == "winning_side"
+            if is_leakage_key and _outcome_leakage_value_present(item):
                 return True
             if _has_outcome_leakage(item):
                 return True
@@ -1290,10 +1291,24 @@ def _outcome_leakage_value_present(value: Any) -> bool:
 
 
 def _strip_inline_outcomes(row: dict[str, Any]) -> dict[str, Any]:
-    replay_row = dict(row)
+    replay_row = _strip_inline_winning_side(row)
     for key in ("resolution", "outcome", "actual_outcome", "settled_outcome", "market_result", "result"):
         replay_row.pop(key, None)
     return replay_row
+
+
+def _strip_inline_winning_side(value: Any) -> Any:
+    # The reporting row is not an evaluator artifact: screen only this known
+    # alias, preserving empty fields and unrelated decision-time information.
+    if isinstance(value, dict):
+        return {
+            key: _strip_inline_winning_side(item)
+            for key, item in value.items()
+            if not (_normalized_field_name(str(key)) == "winning_side" and _outcome_leakage_value_present(item))
+        }
+    if isinstance(value, list):
+        return [_strip_inline_winning_side(item) for item in value]
+    return value
 
 
 def _strip_artifact_outcomes(value: Any) -> dict[str, Any]:

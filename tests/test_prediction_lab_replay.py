@@ -21,6 +21,7 @@ from bot.prediction_lab_replay import (
     replay_recorded_artifacts,
     validate_prediction_lab_tables,
 )
+from bot.prediction_lab_shadow_delta import summarize_shadow_delta_rows
 from bot.risk import RiskDecision
 from bot.strategies.enhanced import StrategyTrace
 from bot.strategies.signal_validator import SignalValidator
@@ -1751,6 +1752,76 @@ class PredictionLabReplayTests(unittest.TestCase):
 
         self.assertEqual(result.summary["input_total"], 1)
         self.assertEqual(result.all_rows[0].source_mode, "recorded_as_of")
+
+    def test_loaded_replay_row_strips_nonempty_winning_side_without_mutating_inputs(self):
+        row = _row()
+        row.update({"winning_side": "YES", "Winning-Side": "NO", "settlement_source": "NWS",
+                    "expected_net_profit_usd": 3.5, "confidence_slow_profit": {"enabled": True},
+                    "future_forecast_config": {"enabled": True}, "winningSide": ""})
+        row["shared_candidate"] = {"market": {"winningSide": "NO", "settlement_source": "NWS"},
+                                   "evidence": [{"Winning-Side": "YES"}, {"winning_side": None}]}
+        row["shadow_delta"] = {"status": "complete", "changed": False}
+        before = copy.deepcopy(row)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "snapshot.jsonl"
+            clean = _row()
+            path.write_text(json.dumps(clean) + "\n", encoding="utf-8")
+            self.assertEqual(load_replay_artifacts([path])[0].row, clean)
+            path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+            loaded = load_replay_artifacts([path])[0]
+            self.assertNotIn("winning_side", loaded.row)
+            self.assertNotIn("Winning-Side", loaded.row)
+            self.assertEqual(loaded.row["winningSide"], "")
+            self.assertEqual(loaded.row["shared_candidate"]["market"], {"settlement_source": "NWS"})
+            self.assertEqual(loaded.row["shared_candidate"]["evidence"], [{}, {"winning_side": None}])
+            for key in ("settlement_source", "expected_net_profit_usd", "confidence_slow_profit", "future_forecast_config"):
+                self.assertEqual(loaded.row[key], row[key])
+            for record in (row, ReplayArtifactInput(row=row, artifact=row["decision_artifact"]), loaded):
+                with patch("bot.prediction_lab_replay.summarize_shadow_delta_rows", wraps=summarize_shadow_delta_rows) as summary:
+                    report = replay_recorded_artifacts([record], evaluator=self._evaluator(FixedSignalStrategy(_signal()))).to_dict()
+                summary_row = summary.call_args.args[0][0]
+                self.assertNotIn("winning_side", summary_row)
+                self.assertNotIn("Winning-Side", summary_row)
+                self.assertEqual(summary_row["winningSide"], "")
+                self.assertEqual(summary_row["shared_candidate"]["evidence"], [{}, {"winning_side": None}])
+                self.assertEqual(report["summary"]["shadow_delta"]["total_shadow_delta_rows"], 1)
+                self.assertNotIn('"winning_side"', json.dumps(report))
+                self.assertNotIn('"winningSide"', json.dumps(report))
+                self.assertNotIn('"Winning-Side"', json.dumps(report))
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), before)
+        self.assertEqual(row, before)
+
+    def test_prediction_lab_validator_flags_normalized_winning_side_only_when_nonempty(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "snapshot.jsonl"
+            for name in ("winning_side", "winningSide", "Winning-Side", "WINNING_SIDE"):
+                for value in ("YES", "NO", {"value": "YES"}, [None, "NO"]):
+                    with self.subTest(name=name, value=value):
+                        row = _row()
+                        row["decision_artifact"]["source_context"]["data"]["market_metadata"]["extra"] = [{name: value}]
+                        path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+                        result = validate_prediction_lab_tables([path]).to_dict()
+                        self.assertFalse(result["ok"])
+                        self.assertEqual(result["issue_counts"].get("outcome_leakage"), 1)
+
+            for value in (None, "", "   ", [], {}, [None, ""], {"value": " "}):
+                with self.subTest(empty=value):
+                    row = _row()
+                    row["decision_artifact"]["source_context"]["data"]["market_metadata"]["extra"] = [{"winningSide": value}]
+                    path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+                    result = validate_prediction_lab_tables([path]).to_dict()
+                    self.assertTrue(result["ok"])
+                    self.assertNotIn("outcome_leakage", result["issue_counts"])
+
+            row = _row()
+            row["decision_artifact"]["source_context"]["data"]["market_metadata"].update({
+                "settlement_source": "NWS", "expected_net_profit_usd": 3.5,
+                "confidence_slow_profit": {"enabled": True}, "future_forecast_config": {"enabled": True},
+            })
+            path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+            result = validate_prediction_lab_tables([path]).to_dict()
+            self.assertTrue(result["ok"])
+            self.assertNotIn("outcome_leakage", result["issue_counts"])
 
     def test_prediction_lab_validator_flags_duplicates_and_outcome_leakage(self):
         with tempfile.TemporaryDirectory() as tmpdir:
