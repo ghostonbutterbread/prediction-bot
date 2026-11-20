@@ -185,11 +185,12 @@ def main() -> int:
             if not line.strip():
                 continue
             payload = json.loads(line)
-            if isinstance(payload, dict):
-                accepted_rows += 1
-                errors = _copied_subtree_forbidden_errors(payload, 'input')
-                if errors:
-                    raise ValueError(f'forbidden replay field at line {number}: {errors[0].path}')
+            if not isinstance(payload, dict):
+                raise ValueError(f'non-object replay input at line {number}; selected coverage would be incomplete')
+            accepted_rows += 1
+            errors = _copied_subtree_forbidden_errors(payload, 'input')
+            if errors:
+                raise ValueError(f'forbidden replay field at line {number}: {errors[0].path}')
     config = {'min_sample_count': args.min_sample_count, 'max_rows': args.max_rows,
               'max_input_bytes': args.max_input_bytes, 'max_outcome_bytes': args.max_outcome_bytes,
               'resource_scope': 'whole input and outcome files; stable immutable regular files required',

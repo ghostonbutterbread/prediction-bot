@@ -66,6 +66,13 @@ class AutoResearchCLITest(unittest.TestCase):
             self.assertIn('outcomes exceeds --max-outcome-bytes', oversized.stderr)
             self.assertFalse(store.exists())
             run_cmd = cmd + ['run', '--max-input-bytes', '65536', '--max-outcome-bytes', '65536']
+            nonobject_inputs = root / 'nonobject.jsonl'
+            nonobject_inputs.write_text('null\n' + json.dumps(record) + '\n')
+            nonobject_store = root / 'collector/data/derived_reports/nonobject'
+            nonobject = subprocess.run(run_cmd + ['--store', str(nonobject_store), '--inputs', str(nonobject_inputs), '--outcomes', str(outcomes), '--idea', 'invalid row coverage'], cwd=repo, env=env, capture_output=True, text=True)
+            self.assertNotEqual(nonobject.returncode, 0, 'non-object selected rows must not silently disappear')
+            self.assertIn('non-object', nonobject.stderr)
+            self.assertFalse(nonobject_store.exists())
             run = subprocess.run(run_cmd + ['--store', str(store), '--inputs', str(inputs), '--outcomes', str(outcomes), '--idea', 'synthetic idea'], cwd=repo, env=env, capture_output=True, text=True)
             self.assertEqual(run.returncode, 0, run.stderr)
             receipt = json.loads(run.stdout)
