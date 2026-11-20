@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Run offline source-only replay; price P&L is hypothetical, not fills.
 
-Resolution schema v5 replaces v3's incorrectly calculated executable P&L with
-hypothetical quote/reference proxies. Source timing remains unverified.
+Resolution schema v6 reports hypothetical quote/reference proxies, not fills;
+nonfinite economics are explicitly unavailable. Source timing is unverified.
 """
 
 from __future__ import annotations
