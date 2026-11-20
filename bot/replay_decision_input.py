@@ -1012,6 +1012,8 @@ def _field_name_is_forbidden(name: str) -> bool:
     normalized = _normalized_field_name(name)
     if normalized in _SAFE_PROVENANCE_FIELD_NAMES:
         return False
+    if normalized == "winning_side":
+        return True
     return bool(set(_field_tokens(name)) & _FORBIDDEN_INPUT_TOKENS)
 
 

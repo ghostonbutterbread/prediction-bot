@@ -3,7 +3,7 @@ import json
 import unittest
 from pathlib import Path
 
-from bot.replay_decision_input import build_replay_decision_input_v1, verify_replay_decision_input_v1
+from bot.replay_decision_input import _field_name_is_forbidden, build_replay_decision_input_v1, verify_replay_decision_input_v1
 
 
 def _sha256(seed: str) -> str:
@@ -120,6 +120,18 @@ def _snapshot_row(*, patch: dict | None = None) -> dict:
 
 
 class ReplayDecisionInputTests(unittest.TestCase):
+    def test_classifier_recognizes_winning_side_without_weakening_provenance(self):
+        for name in ("winning_side", "winningSide", "Winning-Side"):
+            with self.subTest(name=name):
+                self.assertTrue(_field_name_is_forbidden(name))
+        for name in ("settlement_source", "settlement_authority", "station_resolution", "actual_temp_used"):
+            with self.subTest(name=name):
+                self.assertFalse(_field_name_is_forbidden(name))
+        # Economics remain forbidden in canonical projection; only the legacy
+        # evaluator's local screen makes a narrow compatibility exception.
+        for name in ("expected_net_profit_usd", "confidence_slow_profit"):
+            self.assertTrue(_field_name_is_forbidden(name))
+
     def test_v2_collector_row_requires_recorded_shared_identity(self):
         row = _snapshot_row(patch={"collector_artifact_schema_version": 2})
         del row["shared_snapshot_id"]
@@ -232,6 +244,7 @@ class ReplayDecisionInputTests(unittest.TestCase):
             ("decision_artifact.source_snapshots[0]", "settlementTimestamp"),
             ("replay_derived_features.values", "finalOutcome"),
             ("decision_artifact.source_context.data.market_metadata", "resolvedAt"),
+            ("decision_artifact.source_context.data.market_metadata", "winningSide"),
         )
         for path, field in cases:
             with self.subTest(path=path, field=field):
@@ -385,7 +398,7 @@ class ReplayDecisionInputTests(unittest.TestCase):
         row = _snapshot_row()
         row["main_decision"] = {"action": "BUY_YES", "model_probability": 0.99, "position_size": 12}
         row["decision_artifact"]["source_context"]["data"]["market_metadata"].update(
-            {"outcome": "YES", "result": "YES", "status": "closed"}
+            {"outcome": "YES", "result": "YES", "winning_side": "NO", "status": "closed"}
         )
         row["decision_artifact"]["source_context"]["data"]["weather_source_snapshot"]["veto"] = {
             "final_action": "BUY_YES"
@@ -402,6 +415,10 @@ class ReplayDecisionInputTests(unittest.TestCase):
         self.assertIn({"path": "main_decision", "category": "recorded_decision"}, omitted)
         self.assertIn(
             {"path": "decision_artifact.source_context.data.market_metadata.outcome", "category": "outcome_or_future"},
+            omitted,
+        )
+        self.assertIn(
+            {"path": "decision_artifact.source_context.data.market_metadata.winning_side", "category": "outcome_or_future"},
             omitted,
         )
         self.assertIn(
