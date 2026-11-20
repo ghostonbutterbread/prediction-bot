@@ -114,6 +114,8 @@ def resolve_sealed_source_probability_decisions(
     resolved: list[dict[str, Any]] = []
     unresolved: list[dict[str, Any]] = []
     source_correctness_observations: list[dict[str, Any]] = []
+    quote_pnl_values: list[float] = []
+    reference_pnl_values: list[float] = []
     for decision in decisions:
         if not isinstance(decision, Mapping):
             continue
@@ -163,6 +165,10 @@ def resolve_sealed_source_probability_decisions(
             modeled_pnl = stake / price - stake if won else -stake
             if math.isfinite(modeled_pnl):
                 pnl = round(modeled_pnl, 6)
+                if pnl_category == "hypothetical_ask_quote_pnl":
+                    quote_pnl_values.append(modeled_pnl)
+                else:
+                    reference_pnl_values.append(modeled_pnl)
         resolved.append({
             **base,
             "resolution_status": "resolved_exact_identity",
@@ -175,8 +181,6 @@ def resolve_sealed_source_probability_decisions(
             "hypothetical_reference_price_pnl_usd": pnl if pnl_category == "hypothetical_reference_price_pnl" else None,
         })
 
-    quote_pnl_rows = [row for row in resolved if row.get("hypothetical_ask_quote_pnl_usd") is not None]
-    reference_pnl_rows = [row for row in resolved if row.get("hypothetical_reference_price_pnl_usd") is not None]
     result = {
         "schema_name": "source_probability_resolution_report",
         "schema_version": 5,
@@ -201,12 +205,10 @@ def resolve_sealed_source_probability_decisions(
             "sealed_decisions_seen": len(resolved) + len(unresolved),
             "exactly_resolved_decisions": len(resolved),
             "unresolved_decisions": len(unresolved),
-            "hypothetical_ask_quote_pnl_decisions": len(quote_pnl_rows),
-            "hypothetical_ask_quote_pnl_total_usd": round(sum(float(row["hypothetical_ask_quote_pnl_usd"]) for row in quote_pnl_rows), 6),
-            "hypothetical_reference_price_pnl_decisions": len(reference_pnl_rows),
-            "hypothetical_reference_price_pnl_total_usd": round(
-                sum(float(row["hypothetical_reference_price_pnl_usd"]) for row in reference_pnl_rows), 6,
-            ),
+            "hypothetical_ask_quote_pnl_decisions": len(quote_pnl_values),
+            "hypothetical_ask_quote_pnl_total_usd": round(sum(quote_pnl_values), 6),
+            "hypothetical_reference_price_pnl_decisions": len(reference_pnl_values),
+            "hypothetical_reference_price_pnl_total_usd": round(sum(reference_pnl_values), 6),
             "outcome_ledger": outcome_stats,
         },
         "source_correctness": _source_selection_correctness_report(source_correctness_observations),
@@ -525,7 +527,8 @@ def _sealed_decision(
         "probability": _round(probability),
         "side": side,
         "action": action,
-        "entry_price": _round(entry_price),
+        # Preserve the selected input price used for the decision and later P&L.
+        "entry_price": entry_price,
         "price_basis": price_basis,
         "action_label": "reference_price_diagnostic" if action != SKIP and price_basis == "recorded_market_reference" else None,
         "fixed_stake_usd": FIXED_STAKE_USD,
