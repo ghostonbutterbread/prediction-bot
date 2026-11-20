@@ -29,6 +29,7 @@ from bot.hidden_gem_evidence import (
     summarize_hidden_gem_evidence_cards,
 )
 from bot.prediction_lab_shadow_delta import summarize_shadow_delta_rows
+from bot.replay_decision_input import _field_name_is_forbidden
 from bot.shared_market_feed import (
     shared_candidate_from_market_snapshot_row,
     shared_candidate_id_from_row,
@@ -1301,12 +1302,11 @@ def _strip_artifact_outcomes(value: Any) -> dict[str, Any]:
 
 
 def _strip_artifact_outcomes_inner(value: Any) -> Any:
-    leakage_keys = {"resolution", "outcome", "actual_outcome", "settled_outcome", "market_result"}
     if isinstance(value, dict):
         return {
             key: _strip_artifact_outcomes_inner(item)
             for key, item in value.items()
-            if str(key).lower() not in leakage_keys
+            if not _field_name_is_forbidden(str(key))
         }
     if isinstance(value, list):
         return [_strip_artifact_outcomes_inner(item) for item in value]
@@ -1325,8 +1325,10 @@ def _legacy_artifact_from_row(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _market_from_record(record: ReplayArtifactInput) -> Any:
-    row = record.row
-    artifact = record.artifact
+    # Shared-candidate values can also feed the market namespace. Detach and
+    # screen that input without changing the reporting row or the caller's data.
+    row = _strip_artifact_outcomes(record.row)
+    artifact = _strip_artifact_outcomes(record.artifact)
     signal = artifact.get("strategy_signal") if isinstance(artifact.get("strategy_signal"), dict) else {}
     source_context = artifact.get("source_context") if isinstance(artifact.get("source_context"), dict) else {}
     source_data = source_context.get("data") if isinstance(source_context.get("data"), dict) else {}

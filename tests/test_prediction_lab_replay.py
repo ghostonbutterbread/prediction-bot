@@ -1,3 +1,4 @@
+import copy
 import json
 import tempfile
 import unittest
@@ -1443,6 +1444,59 @@ class PredictionLabReplayTests(unittest.TestCase):
         self.assertEqual(classify_source_mode(row["decision_artifact"], row), "missing")
         self.assertEqual(result.rows[0].source_mode, "missing")
         self.assertIn("source_mode_missing_for_historical_replay", result.rows[0].warnings)
+
+    def test_nested_outcomes_never_reach_real_evaluator_inputs(self):
+        class InspectingStrategy(RecordedLiveSourceStrategy):
+            def analyze_market_with_trace(self, market, order_book=None):
+                self.recorded_signal = copy.deepcopy(self._live_data_signal(market))
+                return super().analyze_market_with_trace(market, order_book)
+
+        for record_type in ("row", "artifact_input"):
+            with self.subTest(record_type=record_type):
+                row = _row(artifact_patch={"source_snapshots": [{
+                    "mode": "recorded_as_of", "source": "weather",
+                    "signal": {"signal_type": "weather", "predicted_prob": 0.82,
+                               "confidence": 0.92, "data": {"forecast_high": 84.0}},
+                }]})
+                artifact = row["decision_artifact"]
+                metadata = artifact["source_context"]["data"]["market_metadata"]
+                metadata.update({"settlement_source": "NWS", "station_resolution": {"station_id": "KNYC"},
+                                 "nested": [{"label": "keep"}]})
+                control = copy.deepcopy(row)
+                control_result = replay_recorded_artifacts(
+                    [control], evaluator=self._evaluator(RecordedLiveSourceStrategy()), require_recorded_source=True,
+                )
+                metadata.update({"winner": "LEAK_WINNER", "marketResult": "LEAK_RESULT"})
+                metadata["station_resolution"]["result"] = "LEAK_STATION"
+                metadata["nested"][0]["payout"] = "LEAK_PAYOUT"
+                artifact["source_snapshots"][0]["signal"]["data"]["winner"] = "LEAK_SIGNAL"
+                artifact["strategy_signal"]["nested"] = {"resolvedOutcome": "LEAK_STRATEGY"}
+                artifact["pre_logic_order_book_snapshot"]["data"]["winner"] = "LEAK_BOOK"
+                row["nested"] = {"result": "LEAK_ROW"}
+                record = row if record_type == "row" else ReplayArtifactInput(row=row, artifact=artifact)
+                before = copy.deepcopy(record)
+                strategy = InspectingStrategy()
+                evaluator = self._evaluator(strategy)
+                evaluate = evaluator.evaluate
+                captured = {}
+
+                def capture(market, **kwargs):
+                    captured.update(market=copy.deepcopy(vars(market)), kwargs=copy.deepcopy(kwargs))
+                    return evaluate(market, **kwargs)
+
+                with patch.object(evaluator, "evaluate", side_effect=capture):
+                    result = replay_recorded_artifacts([record], evaluator=evaluator, require_recorded_source=True)
+
+                self.assertEqual(record, before)
+                self.assertEqual(result.rows[0].replayed_action, "BUY_YES")
+                self.assertEqual(result.rows[0].replayed_action, control_result.rows[0].replayed_action)
+                self.assertEqual(result.rows[0].replayed_reason_code, control_result.rows[0].replayed_reason_code)
+                self.assertEqual(captured["market"]["metadata"]["settlement_source"], "NWS")
+                self.assertEqual(captured["market"]["metadata"]["station_resolution"], {"station_id": "KNYC"})
+                self.assertEqual(captured["market"]["metadata"]["nested"], [{"label": "keep"}])
+                self.assertEqual(strategy.recorded_signal["predicted_prob"], 0.82)
+                for observed in (captured, strategy.recorded_signal, result.to_dict()):
+                    self.assertNotIn("LEAK_", json.dumps(observed, default=str))
 
     def test_recorded_source_snapshot_changes_replayed_behavior_without_live_calls(self):
         strategy = RecordedLiveSourceStrategy()
