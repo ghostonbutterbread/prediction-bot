@@ -1561,6 +1561,73 @@ class PredictionLabReplayTests(unittest.TestCase):
         self.assertEqual(safe_lane, lane)
         self.assertNotIn("REMOVE_ME", json.dumps(screened.to_dict(), default=str))
 
+    def test_recorded_station_identifiers_survive_evaluator_screen(self):
+        from bot.shared_core.weather_risk import build_weather_source_confidence_evidence
+
+        class ForwardRecordedStationStrategy(RecordedLiveSourceStrategy):
+            def analyze_market_with_trace(self, market, order_book=None):
+                source = self._live_data_signal(market)
+                self.seen_source = copy.deepcopy(source)
+                with patch.object(self, "_live_data_signal", return_value=source):
+                    signal, trace = super().analyze_market_with_trace(market, order_book)
+                signal["data"] = copy.deepcopy(source["data"])
+                return signal, trace
+
+        for field in ("station_id", "settlement_station", "resolution_station", None):
+            for record_type in ("row", "artifact_input"):
+                with self.subTest(field=field, record_type=record_type):
+                    data: dict = {"forecast_high": 84.0}
+                    if field:
+                        data[field] = "KSEA"
+                    row = _row(artifact_patch={"source_snapshots": [{
+                        "mode": "recorded_as_of", "source": "weather",
+                        "signal": {"signal_type": "weather", "predicted_prob": 0.82,
+                                   "confidence": 0.92, "data": data},
+                    }]})
+                    record = row if record_type == "row" else ReplayArtifactInput(row=row, artifact=row["decision_artifact"])
+                    before = copy.deepcopy(record)
+                    strategy = ForwardRecordedStationStrategy()
+                    with patch("bot.shared_core.decision.build_weather_source_confidence_evidence",
+                               wraps=build_weather_source_confidence_evidence) as weather_evidence:
+                        result = replay_recorded_artifacts([record], evaluator=self._evaluator(strategy),
+                                                           require_recorded_source=True)
+                    self.assertEqual(record, before)
+                    self.assertEqual(result.rows[0].replayed_action, "BUY_YES")
+                    seen = strategy.seen_source["data"]
+                    self.assertEqual(weather_evidence.call_count, 1)
+                    actual = build_weather_source_confidence_evidence(weather_evidence.call_args.args[0])
+                    station = actual["weather_station_resolution"]
+                    self.assertEqual(station["station_id"], "KSEA" if field else "KNYC")
+                    self.assertEqual(station["source"], "explicit_station_field" if field else "static_baseline_station_cache")
+                    if field:
+                        self.assertEqual(seen.get(field), "KSEA")
+
+    def test_retained_station_fields_still_screen_nested_outcomes(self):
+        class InspectingStrategy(RecordedLiveSourceStrategy):
+            def analyze_market_with_trace(self, market, order_book=None):
+                self.seen_source = copy.deepcopy(self._live_data_signal(market))
+                return super().analyze_market_with_trace(market, order_book)
+
+        for field in ("settlement_station", "resolution_station"):
+            with self.subTest(field=field):
+                row = _row(artifact_patch={"source_snapshots": [{
+                    "mode": "recorded_as_of", "source": "weather",
+                    "signal": {"signal_type": "weather", "predicted_prob": 0.82,
+                               "confidence": 0.92, "data": {field: {
+                                   "label": "keep", "result": "LEAK_RESULT",
+                                   "nested": [{"winner": "LEAK_WINNER", "label": "keep"}],
+                               }}},
+                }]})
+                before = copy.deepcopy(row)
+                strategy = InspectingStrategy()
+                result = replay_recorded_artifacts([row], evaluator=self._evaluator(strategy),
+                                                   require_recorded_source=True)
+                self.assertEqual(row, before)
+                self.assertEqual(strategy.seen_source["data"].get(field), {
+                    "label": "keep", "nested": [{"label": "keep"}],
+                })
+                self.assertNotIn("LEAK_", json.dumps(result.rows[0].original_artifact))
+
     def test_nested_outcomes_never_reach_real_evaluator_inputs(self):
         class InspectingStrategy(RecordedLiveSourceStrategy):
             def analyze_market_with_trace(self, market, order_book=None):

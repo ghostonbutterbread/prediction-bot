@@ -1318,10 +1318,13 @@ def _strip_artifact_outcomes(value: Any) -> dict[str, Any]:
 
 def _strip_artifact_outcomes_inner(value: Any) -> Any:
     if isinstance(value, dict):
-        # These exact legacy decision-time fields are legitimate economics and
-        # lane configuration, not realized profit. Keep the canonical screen
-        # for every other key and still recursively screen their children.
-        decision_time_fields = {"expected_net_profit_usd", "confidence_slow_profit"}
+        # These exact legacy decision-time economics, lane and station fields
+        # are not realized outcomes. Keep the canonical screen for every other
+        # key and still recursively screen their children.
+        decision_time_fields = {
+            "expected_net_profit_usd", "confidence_slow_profit",
+            "settlement_station", "resolution_station",
+        }
         return {
             key: _strip_artifact_outcomes_inner(item)
             for key, item in value.items()
