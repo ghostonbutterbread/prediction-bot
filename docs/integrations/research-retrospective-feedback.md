@@ -4,7 +4,8 @@
 - **Owner/task:** prediction-bot `t_2f4bb125`.
 - **Branch:** `feat/auto-learning-feedback-t_2f4bb125`; worktree `/home/ryushe/worktrees/prediction-bot-auto-learning-feedback-t_2f4bb125`.
 - **Base:** `99216cdd33117200f2e049fcf82b0b2aa88d05fd`; merge-back target `feat/auto-learning-loop-t_2f4bb125`, then beta only after combined verification.
-- **Immutable prior checkpoints:** initial `2a3055030fb7f3e0ac0b6669d6e42c8bca2886e0`; first review-blocker correction `83a273cb5cefffd51007b7af040acfa5f91ae9fc`; re-review at `116f46380da1ab9d6d7124443b9934bb98d542f1` blocked two remaining issues. Latest correction and separate-store implementation are subject to a new independent review; no activation is authorized.
+- **Immutable prior checkpoints:** initial `2a3055030fb7f3e0ac0b6669d6e42c8bca2886e0`; first review-blocker correction `83a273cb5cefffd51007b7af040acfa5f91ae9fc`; re-review at `116f46380da1ab9d6d7124443b9934bb98d542f1` blocked two remaining issues.
+- **Latest implementation/recovery checkpoint:** `46fe23ff881ae6a5e37070861d1cb11a3ab3a0c8`. This later dossier-only update records that checkpoint; resume by independently reviewing that implementation and the dossier tip before parent integration. No activation is authorized.
 - **Intent:** close the immediate loop between an agent's sealed source-only experiments and later resolved directional feedback without executing candidate code against outcomes. This is not a full-strategy, paper, live, or promotion implementation.
 
 ## Contract
