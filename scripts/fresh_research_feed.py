@@ -61,6 +61,14 @@ class ReadCounter:
         return data
 
 
+def sync_directory(path):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--index', type=Path, required=True)
@@ -68,6 +76,7 @@ def main():
     parser.add_argument('--output-root', type=Path, required=True)
     parser.add_argument('--protected-root', type=Path, action='append', required=True)
     parser.add_argument('--previous', type=Path)
+    parser.add_argument('--resume', type=Path, help='incomplete page receipt from this frozen delta')
     parser.add_argument('--max-index-bytes', type=int, required=True)
     parser.add_argument('--max-inspected-rows', type=int, required=True)
     parser.add_argument('--max-raw-row-bytes', type=int, required=True)
@@ -92,9 +101,36 @@ def main():
         manifest_bytes = manifest_file.read(1024 * 1024 + 1)
     if len(manifest_bytes) > 1024 * 1024:
         raise ValueError('manifest exceeds one MiB')
+    producer_manifest = json.loads(manifest_bytes)
+    _validate_manifest(producer_manifest)
+    resume = None
+    resume_bytes = None
+    if args.resume is not None:
+        resume_path = args.resume.resolve()
+        if args.previous is None or resume_path.name != 'receipt.json' or resume_path.parent.parent != output:
+            raise ValueError('resume requires previous checkpoint and a page under output root')
+        resume_bytes = resume_path.read_bytes()
+        if resume_path.parent.name != digest(resume_bytes):
+            raise ValueError('resume receipt bytes changed')
+        resume = json.loads(resume_bytes)
+        if not isinstance(resume, dict) or resume.get('schema_name') != 'fresh_research_feed' or resume.get('complete') is not False:
+            raise ValueError('resume receipt is not an incomplete feed page')
+        page = resume_path.parent
+        manifest_bytes = (page / 'manifest.json').read_bytes()
+        if len(manifest_bytes) > 1024 * 1024 or digest(manifest_bytes) != resume.get('manifest_sha256'):
+            raise ValueError('resume pinned manifest missing or changed')
+        for name, key in (('inputs.jsonl', 'inputs_sha256'), ('outcomes.jsonl', 'outcomes_sha256')):
+            if digest((page / name).read_bytes()) != resume.get(key):
+                raise ValueError('resume page snapshot changed')
     manifest_hash = digest(manifest_bytes)
     manifest = json.loads(manifest_bytes)
     _validate_manifest(manifest)
+    if resume and (producer_manifest.get('archive_identity') != manifest.get('archive_identity') or
+                   producer_manifest.get('source_path') != manifest.get('source_path') or
+                   producer_manifest.get('committed_index_bytes', -1) < manifest.get('committed_index_bytes', 0) or
+                   (producer_manifest.get('committed_index_bytes') == manifest.get('committed_index_bytes') and
+                    producer_manifest.get('index_sha256') != manifest.get('index_sha256'))):
+        raise ValueError('new_generation: producer snapshot changed or truncated')
     if manifest['schema_version'] != 2:
         raise ValueError('legacy replay index does not support reverse committed reads')
     extent = manifest['committed_index_bytes']
@@ -102,6 +138,8 @@ def main():
         raise ValueError('index extent exceeds configured maximum before scan')
     index_path = args.index.resolve()
     _verify_index_path(index_path, manifest)
+    if resume:
+        _verify_index_path(index_path, producer_manifest)
     source_path = Path(str(manifest.get('source_path') or '')).resolve()
     if not all(any(p == x or p in x.parents for p in protected) for x in (source_path, index_path, args.manifest.resolve())):
         raise ValueError('all source files must be within a protected root')
@@ -117,6 +155,18 @@ def main():
             raise ValueError('new_generation: prior index extent truncated')
     else:
         old_extent = 0
+    cursor = 0
+    if resume:
+        if resume.get('previous_receipt_sha256') != digest(previous_bytes):
+            raise ValueError('resume previous checkpoint changed')
+        if resume.get('index_path') != str(index_path) or resume.get('archive_identity') != manifest.get('archive_identity'):
+            raise ValueError('resume snapshot identity changed')
+        start = resume.get('page_start_index_bytes')
+        cursor = resume.get('next_index_bytes')
+        if type(start) is not int or type(cursor) is not int or not old_extent <= cursor < start <= extent:
+            raise ValueError('invalid resume cursor')
+    else:
+        start = extent
     rows, provenance, rejected = [], [], {}
     raw_bytes = reverse_bytes = inspected = 0
     exhausted = True
@@ -128,14 +178,31 @@ def main():
             prior_bytes = old_extent
             if prefix_digest(index, old_extent) != previous['index_sha256']:
                 raise ValueError('new_generation: prior committed prefix changed')
-        if previous and previous['manifest_sha256'] == manifest_hash:
+        if previous and not resume and previous['manifest_sha256'] == manifest_hash:
             print(json.dumps({'status': 'unchanged', 'manifest_sha256': manifest_hash,
                               'whole_index_digest_bytes': extent, 'whole_index_structure_bytes': extent,
                               'prior_prefix_digest_bytes': prior_bytes}, sort_keys=True))
             return
         counter = ReadCounter(index)
-        iterator = iter(_iter_committed_index_lines_reverse(counter, extent))
-        position = extent
+        if resume:
+            checked = start
+            entries = resume.get('row_provenance')
+            if not isinstance(entries, list) or len(entries) != resume.get('inspected_rows') or not entries:
+                raise ValueError('invalid resume page provenance')
+            check = iter(_iter_committed_index_lines_reverse(counter, start))
+            for item in reversed(entries):
+                line = next(check, None)
+                if line is None:
+                    raise ValueError('resume cursor outside pinned index')
+                checked -= len(line)
+                entry = json.loads(line)
+                if any(entry.get(k) != item.get(k) for k in ('row_number', 'byte_offset', 'byte_length')) or entry.get('payload_sha256') != item.get('raw_payload_sha256'):
+                    raise ValueError('resume page provenance differs from pinned index')
+            if checked != cursor:
+                raise ValueError('resume cursor does not match page provenance')
+            start = cursor
+        iterator = iter(_iter_committed_index_lines_reverse(counter, start))
+        position = start
         while position > old_extent and inspected < args.max_inspected_rows:
             try:
                 line = next(iterator)
@@ -179,16 +246,13 @@ def main():
               'initial' if not previous else
               'new_indexed_data' if inspected else 'manifest_changed_no_new_indexed_data')
     inputs = b''.join(rows)
-    key = digest(encoded({'manifest': manifest_hash, 'previous': digest(previous_bytes) if previous_bytes else None,
-                          'max_inspected_rows': args.max_inspected_rows, 'max_raw_row_bytes': args.max_raw_row_bytes,
-                          'max_index_bytes': args.max_index_bytes, 'max_wall_seconds': args.max_wall_seconds,
-                          'max_memory_bytes': args.max_memory_bytes}))
-    directory = output / key
     receipt = {'schema_name': 'fresh_research_feed', 'schema_version': 1, 'status': status,
                'complete': exhausted, 'checkpoint_eligible': exhausted or previous is None,
                'manifest_sha256': manifest_hash, 'index_sha256': manifest['index_sha256'],
                'index_path': str(index_path), 'source_path': str(source_path), 'archive_identity': manifest['archive_identity'],
                'committed_index_bytes': extent, 'indexed_source_bytes': manifest['indexed_source_bytes'],
+               'page_start_index_bytes': start, 'next_index_bytes': position,
+               'resume_receipt_sha256': digest(resume_bytes) if resume_bytes else None,
                'whole_index_digest_bytes': extent, 'whole_index_structure_bytes': extent,
                'prior_prefix_digest_bytes': prior_bytes, 'reverse_index_read_bytes': reverse_bytes,
                'raw_payload_read_bytes': raw_bytes, 'inspected_rows': inspected, 'accepted_rows': len(rows),
@@ -200,6 +264,7 @@ def main():
                'previous_receipt_sha256': digest(previous_bytes) if previous_bytes else None,
                'integrity_scope': 'whole committed index; selected raw payloads only',
                'qualification': 'research only; no independent events or outcomes asserted'}
+    directory = output / digest(encoded(receipt))
     output.mkdir(parents=True, exist_ok=True)
     if directory.exists():
         old = json.loads((directory / 'receipt.json').read_bytes())
@@ -213,20 +278,15 @@ def main():
                     f.write(data)
                     f.flush()
                     os.fsync(f.fileno())
-            fd = os.open(stage, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(fd)
-            finally:
-                os.close(fd)
+            sync_directory(stage)
             os.rename(stage, directory)
-            fd = os.open(output, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(fd)
-            finally:
-                os.close(fd)
         finally:
             if stage.exists():
                 shutil.rmtree(stage)
+    # Also sync on reuse: a prior rename (or newly created output-root ancestor)
+    # may have succeeded immediately before a failed directory fsync.
+    for parent in (output, *output.parents):
+        sync_directory(parent)
     print(json.dumps({'status': status, 'directory': str(directory)}, sort_keys=True))
 
 
