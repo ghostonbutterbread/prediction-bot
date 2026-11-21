@@ -2,7 +2,7 @@
 
 - **Status:** review corrections implemented on the integrated parent; independent re-review pending. No scheduling or activation.
 - **Task:** prediction-bot `t_2f4bb125`; branch `feat/auto-learning-page-ack-t_2f4bb125`; worktree `/home/ryushe/worktrees/prediction-bot-auto-learning-page-ack-t_2f4bb125`.
-- **Base:** fresh-feed correction `a10543d98f32eec561e69c8f771378d4b2939a25`; target parent `feat/auto-learning-loop-t_2f4bb125` after its feed dependency is accepted. Immutable implementation checkpoint `f1dd953009b1a00770c766a2a6367099c2502247`; this dossier is recorded in a later commit.
+- **Base:** fresh-feed correction `a10543d98f32eec561e69c8f771378d4b2939a25`; target parent `feat/auto-learning-loop-t_2f4bb125`. Original implementation checkpoint `f1dd953009b1a00770c766a2a6367099c2502247`; review-correction implementation checkpoint `2551a488e4b5a9d5e87d50e88e04fe3885b8b20d`. A later dossier-only commit records this handoff; review that tip as well.
 
 ## Intent and contract
 
