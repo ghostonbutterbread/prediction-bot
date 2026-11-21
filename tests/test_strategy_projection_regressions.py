@@ -142,6 +142,22 @@ class StrategyProjectionRegressionTests(unittest.TestCase):
         self.assertIn({'path': 'decision_artifact.order_book', 'category': 'post_logic_book'},
                       projected['sanitization']['omitted_fields'])
 
+    def test_direct_book_matching_post_logic_with_extra_raw_fields_is_not_projected(self):
+        from bot.prediction_lab_replay import _recorded_order_book
+        for direct_ask in (.44, '0.44'):
+            with self.subTest(direct_ask=direct_ask):
+                row = _snapshot_row()
+                row['decision_artifact']['post_logic_order_book_snapshot'] = {
+                    'source': 'book', 'data': {'best_yes_ask': .44, 'spread_pct': 3, 'best_yes_ask_size': 12}}
+                row['decision_artifact']['order_book'] = {
+                    'best_yes_ask': direct_ask, 'spread_pct': '3', 'best_yes_ask_size': 12}
+                candidate(row)
+                projected = project(row)
+                self.assertNotIn('order_book', projected['market'])
+                self.assertNotEqual((_recorded_order_book(projected['market']) or {}).get('best_yes_ask'), .44)
+                self.assertIn({'path': 'decision_artifact.order_book', 'category': 'post_logic_book'},
+                              projected['sanitization']['omitted_fields'])
+
     def test_post_logic_books_never_enter_usable_projection(self):
         from bot.prediction_lab_replay import _recorded_order_book
         for explicit_stage in (True, False):

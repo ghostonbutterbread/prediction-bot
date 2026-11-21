@@ -730,8 +730,9 @@ def _build_replay_decision_input_sanitized_v1(
         shared_evidence = shared.get("evidence") if isinstance(shared, Mapping) else None
         post_snapshots = (_field(artifact, "post_logic_order_book_snapshot"),
                           shared_evidence.get("post_logic_order_book_snapshot") if isinstance(shared_evidence, Mapping) else None)
-        direct_data = {key: value for key, value in raw_direct_book.items() if key in _ORDER_BOOK_DATA_V1} if isinstance(raw_direct_book, Mapping) else {}
-        post_data = [post.get("data") for post in post_snapshots if isinstance(post, Mapping)]
+        direct_data = artifact_books["order_book"]
+        post_data = [_sanitized_allowlisted_mapping(post["data"], _ORDER_BOOK_DATA_V1, "post_logic_book", [])
+                     for post in post_snapshots if isinstance(post, Mapping) and isinstance(post.get("data"), Mapping)]
         if (isinstance(raw_direct_book, Mapping) and raw_direct_book.get("stage") == "post_logic") or (
                 direct_data and any(isinstance(data, Mapping) and direct_data == data for data in post_data)):
             _add_omitted_field(omitted_fields, "decision_artifact.order_book", "post_logic_book")
