@@ -2,7 +2,7 @@
 
 - **Status:** synthetic CLI implemented and exercised; independent review and real-data preflight remain open. Not merged, pushed, scheduled, or activated.
 - **Branch:** `feat/auto-learning-feed-t_2f4bb125`; delegated base `fea1339347e91fbe6f74cac22f49a2b871eea016`; parent target `feat/auto-learning-loop-t_2f4bb125` (parent owns integration; no merge authorized).
-- **Implementation checkpoint:** recorded in the subsequent dossier handoff commit; review the branch tip and complete diff too.
+- **Implementation checkpoint:** `b77379b2c5254e993407bfa787a86116c713dba3`; this subsequent dossier-only commit records it. Review the branch tip and complete diff too.
 
 ## Contract
 
