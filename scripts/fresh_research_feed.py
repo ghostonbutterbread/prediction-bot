@@ -264,16 +264,17 @@ def main():
                'previous_receipt_sha256': digest(previous_bytes) if previous_bytes else None,
                'integrity_scope': 'whole committed index; selected raw payloads only',
                'qualification': 'research only; no independent events or outcomes asserted'}
-    directory = output / digest(encoded(receipt))
+    receipt_bytes = encoded(receipt)
+    directory = output / digest(receipt_bytes)
     output.mkdir(parents=True, exist_ok=True)
     if directory.exists():
-        old = json.loads((directory / 'receipt.json').read_bytes())
-        if old != receipt or digest((directory / 'manifest.json').read_bytes()) != manifest_hash or digest((directory / 'inputs.jsonl').read_bytes()) != receipt['inputs_sha256'] or digest((directory / 'outcomes.jsonl').read_bytes()) != receipt['outcomes_sha256']:
+        existing_receipt_bytes = (directory / 'receipt.json').read_bytes()
+        if existing_receipt_bytes != receipt_bytes or digest(existing_receipt_bytes) != directory.name or digest((directory / 'manifest.json').read_bytes()) != manifest_hash or digest((directory / 'inputs.jsonl').read_bytes()) != receipt['inputs_sha256'] or digest((directory / 'outcomes.jsonl').read_bytes()) != receipt['outcomes_sha256']:
             raise ValueError('existing feed generation differs from expected completion')
     else:
         stage = Path(tempfile.mkdtemp(prefix='.fresh-', dir=output))
         try:
-            for name, data in [('inputs.jsonl', inputs), ('outcomes.jsonl', b''), ('manifest.json', manifest_bytes), ('receipt.json', encoded(receipt))]:
+            for name, data in [('inputs.jsonl', inputs), ('outcomes.jsonl', b''), ('manifest.json', manifest_bytes), ('receipt.json', receipt_bytes)]:
                 with (stage / name).open('xb') as f:
                     f.write(data)
                     f.flush()

@@ -263,6 +263,45 @@ runpy.run_path(sys.argv[0], run_name='__main__')
         self.assertEqual(Path(json.loads(retry.stdout)['directory']), published.pop())
         self.assertEqual(previous.read_bytes(), old_bytes)
 
+    def test_retry_rejects_byte_changed_receipt_without_replacing_anything(self):
+        baseline = self.run_cli()
+        self.assertEqual(baseline.returncode, 0, baseline.stderr)
+        previous = Path(json.loads(baseline.stdout)['directory']) / 'receipt.json'
+        with self.raw.open('a') as f:
+            for n in range(3):
+                row = _legacy_collector_row()
+                row['run_id'] = f'byte-integrity-{n}'
+                f.write(json.dumps(row) + '\n')
+        update_collector_replay_index(self.raw, self.index, self.manifest)
+        args = ('--previous', previous, '--max-inspected-rows', '1')
+        first = self.run_cli(*args)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        page = Path(json.loads(first.stdout)['directory'])
+        receipt = page / 'receipt.json'
+        original = receipt.read_bytes()
+        self.assertFalse(json.loads(original)['complete'])
+        self.assertEqual(hashlib.sha256(original).hexdigest(), page.name)
+        valid_retry = self.run_cli(*args)
+        self.assertEqual(valid_retry.returncode, 0, valid_retry.stderr)
+        self.assertEqual(json.loads(valid_retry.stdout)['directory'], str(page))
+        receipt.write_bytes(original + b' ')
+        self.assertEqual(json.loads(receipt.read_bytes()), json.loads(original))
+        self.assertNotEqual(hashlib.sha256(receipt.read_bytes()).hexdigest(), page.name)
+
+        def snapshot(root):
+            return {str(p.relative_to(root)): (p.lstat().st_ino, p.lstat().st_mtime_ns,
+                    p.read_bytes() if p.is_file() else None)
+                    for p in [root, *root.rglob('*')]}
+
+        before_output = snapshot(self.out)
+        before_source = snapshot(self.source)
+        retry = self.run_cli(*args)
+        self.assertNotEqual(retry.returncode, 0, retry.stdout)
+        self.assertIn('existing feed generation differs', retry.stderr)
+        self.assertEqual(retry.stdout, '')
+        self.assertEqual(snapshot(self.out), before_output)
+        self.assertEqual(snapshot(self.source), before_source)
+
     def test_resume_retry_is_idempotent_and_rejects_new_generation(self):
         baseline = self.run_cli()
         previous = Path(json.loads(baseline.stdout)['directory']) / 'receipt.json'
