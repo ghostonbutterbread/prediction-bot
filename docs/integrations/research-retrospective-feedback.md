@@ -1,0 +1,25 @@
+# Retrospective research feedback — integration dossier
+
+- **Status:** implemented, synthetic- and retained-data-tested; independent review and parent integration pending. No schedule or runtime activation.
+- **Owner/task:** prediction-bot `t_2f4bb125`.
+- **Branch:** `feat/auto-learning-feedback-t_2f4bb125`; worktree `/home/ryushe/worktrees/prediction-bot-auto-learning-feedback-t_2f4bb125`.
+- **Base:** `99216cdd33117200f2e049fcf82b0b2aa88d05fd`; merge-back target `feat/auto-learning-loop-t_2f4bb125`, then beta only after combined verification.
+- **Immutable implementation/recovery checkpoint:** `2a3055030fb7f3e0ac0b6669d6e42c8bca2886e0`. This dossier is recorded by a later commit.
+- **Intent:** close the immediate loop between an agent's sealed source-only experiments and later resolved directional feedback without executing candidate code against outcomes. This is not a full-strategy, paper, live, or promotion implementation.
+
+## Contract
+
+`scripts/research_feedback.py` loads two records from the existing experiment store read-only, requires identical input hash and replay settings, verifies each sealed control artifact against its recorded digest, requires both original supplied outcome hashes to be empty, checks nonempty matching decision identities, then independently calls the existing exact-identity resolution function on a bounded and caller-hash-pinned separate outcome file. It emits directional BUY/SKIP/correct/incorrect/unresolved and transition counts, flags inconsistent BUY action/side, and creates a new immutable-by-convention derived report without overwriting. Empty or ambiguous outcomes remain unresolved. `docs/research-feedback.md` explains invocation and provenance limits.
+
+The scorer runs trusted checkout code, not the candidate version; proper container mounts and trusted store ownership remain the operator's responsibility. A hash and matching selected decisions prove only byte and subset identity, not outcome producer authority, complete opportunity coverage, full blindness, unique physical events, causal source availability, out-of-sample return, or profitability. It does not itself discover/build qualified final outcomes; there is no scheduled caller or fresh-data catalog integration yet.
+
+## Verification
+
+- TDD first run: 3 test methods failed because the requested CLI did not exist. After implementation, 3 passed. Two additional compatibility controls covered identity mismatch and empty outcomes. A distinct BUY_YES/NO-side mismatch regression then failed: the implementation counted one incorrect-sided row as a BUY; fixed by checking action-side consistency, and all 6 named synthetic tests passed on the feature worktree with `PYTHONPATH` selecting it. The synthetic tests use isolated temporary roots and a subprocess entry point; no wallet runner, blocked source-clock test, real account, service, network or raw data.
+- `env PYTHONPATH="$PWD" PYTHONDONTWRITEBYTECODE=1 /home/ryushe/projects/prediction-bot-beta-integration/.venv/bin/python -B -m unittest discover -s tests -p test_research_feedback.py -v` — **6 passed**; `git diff --check` passed.
+- Actual CLI in a task-owned `--network none`, read-only-root, read-only-store/outcome container with image `sha256:49b70739d2e8b4206fabf8b089f88337db73f8edaccb93e64b0836694ef10a03`, 1 GiB RAM, 1 CPU and 120s shell timeout: used existing previously sealed experiments `6de7f28a05204408850df4ca9d0c7c6b` and `14920c6fde9f422696fcd260c2f5620b` and preexisting 68-row outcome artifact pinned to `c2d6802942b812de6689188b1ed0c454c3f2007fd282cfe27333f49de3c7ae60`. Actual report `/home/ryushe/worktrees/prediction-bot-auto-learning-research-canary-t_2f4bb125/state/feedback-cli-20261120-v2/result.json`, SHA-256 `da1ae521e1a2195ae24c044c333fcbb9640dc800aadf6ba02722b0a51d29766f`: 68 matched resolutions, 43 unresolved per run; baseline 7 correct/21 incorrect resolved BUY rows, candidate 6/12; 9 incorrect and 1 correct baseline BUYs were skipped. These are previously inspected retrospective rows, not a holdout or independent physical-event count. The outcome ledger hash was unchanged after execution; the named container was absent.
+- The prior v1 CLI smoke was run before the side-consistency correction; retain it as historical, do not substitute it for v2. No prohibited chronological wallet-runner or future-source-clock probe or equivalent was run.
+
+## Next and release boundaries
+
+Independent reviewer: examine artifact/SQLite/path and input/config integrity, outcome blindness claims, action/side classification, output crash/overwrite behavior, and actual CLI on exact `2a3055030fb7f3e0ac0b6669d6e42c8bca2886e0`; run named synthetic tests only. Fix blockers and re-review before parent integration. To close the larger learning loop, connect the reviewed fresh-input and independent-outcome adapters, agent/scheduler and separately verified paper behavior; never mark a candidate promotion-ready from this report. Keep the previously approval-blocked wallet/source-clock probes blocked; do not reproduce or substitute them.
