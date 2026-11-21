@@ -13,16 +13,19 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import subprocess
 import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from bot.collector_paths import derived_reports_root
+from bot.weather import collector_source_router_replay as resolver
 from bot.weather.collector_source_router_replay import resolve_sealed_source_probability_decisions
 
 EMPTY_SHA256 = hashlib.sha256(b'').hexdigest()
 ARTIFACT = 'sealed_control_decisions.jsonl'
+REPLAY_SETTINGS = ('min_sample_count', 'max_rows', 'history', 'cohort_per_shape_target')
 
 
 def read_bounded(path: Path, maximum: int) -> bytes:
@@ -76,9 +79,29 @@ def load_run(db: sqlite3.Connection, store: Path, experiment: str, maximum: int)
     identities = [identity(decision) for decision in decisions]
     if not decisions or len(identities) != len(set(identities)) or any(d.get('sealed') is not True for d in decisions):
         raise ValueError('empty, duplicate, or unsealed decision artifacts')
+    for decision in decisions:
+        content = dict(decision)
+        claimed = content.pop('decision_id', None)
+        expected = 'sha256:' + hashlib.sha256(resolver._canonical_json_bytes(content)).hexdigest()
+        if claimed != expected:
+            raise ValueError('decision seal mismatch')
+    stats = result.get('decision_stats')
+    names = ('input_records_seen', 'input_records_invalid_identity', 'sealed_control_decisions', 'sealed_candidate_decisions')
+    if not isinstance(stats, dict) or any(type(stats.get(k)) is not int or stats[k] < 0 for k in names):
+        coverage = {'status': 'unknown', 'reason': 'missing or invalid producer decision_stats'}
+    else:
+        seen, invalid, produced = (stats[k] for k in names[:3])
+        complete = invalid == 0 and seen == produced == len(decisions)
+        coverage = {'status': 'complete_for_producer_seen_rows' if complete else 'incomplete',
+                    'input_records_seen': seen, 'input_records_invalid_identity': invalid,
+                    'produced_control_decisions': produced,
+                    'produced_candidate_decisions': stats['sealed_candidate_decisions'],
+                    'artifact_control_decisions': len(decisions),
+                    'counts_reconcile': seen == invalid + produced and produced == len(decisions)}
     return {'experiment_id': experiment, 'git_commit': commit, 'input_sha256': input_hash,
             'original_outcome_sha256': old_outcome_hash, 'config': config,
-            'sealed_decisions_sha256': observed_hash, 'decisions': decisions, 'identities': set(identities)}
+            'selected_coverage': coverage, 'sealed_decisions_sha256': observed_hash,
+            'decisions': decisions, 'identities': set(identities)}
 
 
 def valid_buy(row: dict) -> bool:
@@ -91,6 +114,7 @@ def summarize(run: dict, outcomes: list[dict]) -> tuple[dict, dict]:
     scored = [r for r in resolved if valid_buy(r) and r['official_outcome'] in ('YES', 'NO')]
     counts = Counter('correct' if r['side'] == r['official_outcome'] else 'incorrect' for r in scored)
     result = {key: run[key] for key in ('experiment_id', 'git_commit', 'input_sha256', 'original_outcome_sha256', 'sealed_decisions_sha256')}
+    result['selected_coverage'] = run['selected_coverage']
     result.update({'selected_rows': len(run['decisions']), 'resolved_rows': len(resolved),
                    'unresolved_rows': len(report['unresolved_decisions']),
                    'resolved_unique_market_ids': len({r['market_id'] for r in resolved}),
@@ -100,6 +124,22 @@ def summarize(run: dict, outcomes: list[dict]) -> tuple[dict, dict]:
                    'resolved_skip_rows': sum(r['action'] == 'SKIP' for r in resolved),
                    'outcome_ledger_counts': report['summary']['outcome_ledger']})
     return result, {identity(row): row for row in resolved}
+
+
+def scorer_identity() -> dict:
+    # Git may be unavailable in a read-only source mount. File hashes bind the
+    # named source files, not every imported dependency or the code in memory.
+    try:
+        commit = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], stderr=subprocess.DEVNULL, text=True, timeout=5).strip()
+        status = subprocess.check_output(['git', '-C', str(ROOT), 'status', '--porcelain', '--untracked-files=all'], stderr=subprocess.DEVNULL, text=True, timeout=5)
+        dirty = bool(status.strip())
+    except (OSError, subprocess.SubprocessError):
+        commit, dirty = None, None
+    return {'scorer_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            'resolver_sha256': hashlib.sha256(Path(resolver.__file__).read_bytes()).hexdigest(),
+            'scorer_path': str(Path(__file__).resolve()), 'resolver_path': str(Path(resolver.__file__).resolve()),
+            'git_commit': commit, 'tracked_or_untracked_dirty': dirty, 'python': sys.version,
+            'limitations': 'File hashes are not producer authentication or proof of loaded code; Git status excludes ignored files and hashes do not bind other imports, installed dependencies, or runtime state.'}
 
 
 def run(args: argparse.Namespace) -> dict:
@@ -124,8 +164,7 @@ def run(args: argparse.Namespace) -> dict:
     with sqlite3.connect(dbpath.as_uri() + '?mode=ro', uri=True) as db:
         left = load_run(db, store, args.baseline, args.max_decision_bytes)
         right = load_run(db, store, args.candidate, args.max_decision_bytes)
-    keys = ('min_sample_count', 'max_rows', 'history', 'cohort_per_shape_target')
-    if left['input_sha256'] != right['input_sha256'] or any(left['config'].get(k) != right['config'].get(k) for k in keys):
+    if left['input_sha256'] != right['input_sha256'] or any(left['config'].get(k) != right['config'].get(k) for k in REPLAY_SETTINGS):
         raise ValueError('experiments have different input or replay settings')
     if left['identities'] != right['identities']:
         raise ValueError('selected decision identities differ')
@@ -146,6 +185,9 @@ def run(args: argparse.Namespace) -> dict:
               'outcome_authority': 'caller-pinned bytes; producer and clock unverified',
               'outcome_sha256': outcome_hash, 'outcome_rows': len(outcomes),
               'sealed_decision_identities_matched': True, 'independent_opportunity_roster': False,
+              'producer_coverage_counts_match': (left['selected_coverage'] == right['selected_coverage']
+                  if all(r['selected_coverage']['status'] != 'unknown' for r in (left, right)) else None),
+              'reproducibility': {**scorer_identity(), 'compared_replay_settings': {k: left['config'].get(k) for k in REPLAY_SETTINGS}},
               'runs': [a, b], 'changed_resolved_decisions': [
                   {'from': old, 'to': new, 'baseline_direction': direction, 'count': count}
                   for (old, new, direction), count in sorted(changes.items())],
