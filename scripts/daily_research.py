@@ -34,6 +34,17 @@ def sync_directory(path):
         os.close(fd)
 
 
+def validate_started_at(value):
+    try:
+        if not isinstance(value, str) or 'T' not in value:
+            raise ValueError('timestamp must be an ISO datetime')
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError('timestamp must include a timezone')
+    except ValueError as exc:
+        raise ValueError('invalid claim started_at; operator reconciliation required') from exc
+
+
 def ownership(args):
     work = Path(args.work).resolve(strict=True)
     if not work.is_dir() or not args.owner.strip():
@@ -49,6 +60,7 @@ def ownership(args):
             sync_directory(work)
             record = {'owner': args.owner, 'claim_id': uuid.uuid4().hex,
                       'started_at': datetime.now(timezone.utc).isoformat()}
+            validate_started_at(record['started_at'])
             with (active / 'claim.json').open('x') as stream:
                 json.dump(record, stream, sort_keys=True)
                 stream.flush()
@@ -59,6 +71,7 @@ def ownership(args):
         claim_id = record.get('claim_id') if isinstance(record, dict) else None
         if not isinstance(record, dict) or record.get('owner') != args.owner or not isinstance(claim_id, str) or len(claim_id) != 32 or any(c not in '0123456789abcdef' for c in claim_id):
             raise ValueError('claim owner or identity mismatch; operator reconciliation required')
+        validate_started_at(record.get('started_at'))
         history = work / 'claim-history'
         history.mkdir(exist_ok=True)
         sync_directory(work)

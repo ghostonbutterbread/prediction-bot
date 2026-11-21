@@ -11,6 +11,87 @@ SCRIPT = Path(__file__).resolve().parents[1] / 'scripts/daily_research.py'
 GUARD = SCRIPT.parent / 'daily_research_guard.sh'
 
 class DailyResearchTest(unittest.TestCase):
+    def test_runbook_failure_response_starts_with_standalone_marker(self):
+        runbook = (SCRIPT.parent.parent / 'docs/daily-research-agent.md').read_text()
+        self.assertIn('standalone first line', runbook)
+        example = runbook.split('Example failure response:\n\n```text\n', 1)[1].split('\n```', 1)[0]
+        self.assertEqual(example.splitlines()[0], '[CRON_FAILURE]')
+        self.assertTrue(example.splitlines()[1].strip())
+
+    def test_runbook_failed_completion_preserves_claim_and_fails(self):
+        runbook = (SCRIPT.parent.parent / 'docs/daily-research-agent.md').read_text()
+        sequence = runbook.split('A successful actual compare and two genuine receipts are required before:\n\n```sh\n', 1)[1].split('\n```', 1)[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            claim = subprocess.run([sys.executable, str(SCRIPT), 'claim', '--work', tmp, '--owner', 'test'], capture_output=True, text=True)
+            self.assertEqual(claim.returncode, 0, claim.stderr)
+            claim_file = root / '.daily-claim' / 'claim.json'
+            original = claim_file.read_bytes()
+            env = dict(os.environ, TRUSTED=str(SCRIPT.parent.parent), WORK=tmp, OWNER='test',
+                       D=str(root / 'missing'), INPUT_BYTES='1000', OUTCOME_BYTES='1000')
+            result = subprocess.run(['sh', '-c', sequence], env=env, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertEqual(claim_file.read_bytes(), original)
+            self.assertFalse((root / 'claim-history').exists())
+
+    def test_runbook_successful_completion_then_finishes_claim(self):
+        runbook = (SCRIPT.parent.parent / 'docs/daily-research-agent.md').read_text()
+        sequence = runbook.split('A successful actual compare and two genuine receipts are required before:\n\n```sh\n', 1)[1].split('\n```', 1)[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            inputs = root / 'inputs'; inputs.write_text('synthetic input')
+            outcomes = root / 'outcomes'; outcomes.write_text('')
+            catalog = root / 'catalog'; catalog.write_text(json.dumps([{'inputs': str(inputs), 'outcomes': str(outcomes)}]))
+            limits = ['--max-input-bytes', '1000', '--max-outcome-bytes', '1000']
+            selected = subprocess.run([sys.executable, str(SCRIPT), 'select', '--catalog', str(catalog), '--state', str(root / 'state'), *limits], capture_output=True, text=True, check=True)
+            selection = json.loads(selected.stdout)
+            directory = Path(selection['directory'])
+            receipts = [{'experiment_id': 'a', 'git_commit': 'base'}, {'experiment_id': 'b', 'git_commit': 'candidate'}]
+            for name, receipt in zip(('baseline.json', 'candidate.json'), receipts):
+                (directory / name).write_text(json.dumps(receipt))
+            (directory / 'comparison.json').write_text(json.dumps({
+                'runs': receipts, 'selected_rows_matched': True, 'diagnostic_eligible': False,
+                'input_sha256': selection['input_sha256'], 'outcome_sha256': hashlib.sha256(b'').hexdigest()}))
+            claim = subprocess.run([sys.executable, str(SCRIPT), 'claim', '--work', tmp, '--owner', 'test'], capture_output=True, text=True, check=True)
+            claim_id = json.loads(claim.stdout)['claim_id']
+            env = dict(os.environ, TRUSTED=str(SCRIPT.parent.parent), WORK=tmp, OWNER='test',
+                       D=str(directory), INPUT_BYTES='1000', OUTCOME_BYTES='1000')
+            result = subprocess.run(['sh', '-c', sequence], env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue((directory / 'complete.json').is_file())
+            self.assertFalse((root / '.daily-claim').exists())
+            self.assertTrue((root / 'claim-history' / claim_id / 'claim.json').is_file())
+
+    def test_finish_rejects_missing_or_malformed_started_at(self):
+        cases = [('missing', False, None), ('null', True, None)] + [
+            (repr(value), True, value) for value in ('', 'garbage', '2026-02-30T01:02:03+00:00',
+                                                    '2026-01-01', '2026-01-01T01:02:03', 42, [])]
+        for label, present, value in cases:
+            with self.subTest(started_at=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                claim = [sys.executable, str(SCRIPT), 'claim', '--work', tmp, '--owner', 'test']
+                finish = [sys.executable, str(SCRIPT), 'finish', '--work', tmp, '--owner', 'test']
+                result = subprocess.run(claim, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                claim_file = root / '.daily-claim' / 'claim.json'
+                original = json.loads(claim_file.read_text())
+                record = dict(original)
+                if not present:
+                    record.pop('started_at')
+                else:
+                    record['started_at'] = value
+                claim_file.write_text(json.dumps(record))
+                before = claim_file.read_bytes()
+                result = subprocess.run(finish, capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn('[CRON_FAILURE]', result.stderr)
+                self.assertEqual(claim_file.read_bytes(), before)
+                self.assertFalse((root / 'claim-history').exists())
+                claim_file.write_text(json.dumps(original))
+                result = subprocess.run(finish, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout)['started_at'], original['started_at'])
+
     def test_concurrent_native_claims_have_one_owner(self):
         with tempfile.TemporaryDirectory() as tmp:
             commands = [[sys.executable, str(SCRIPT), 'claim', '--work', tmp, '--owner', owner] for owner in ('first', 'second')]

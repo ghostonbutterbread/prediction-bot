@@ -13,7 +13,14 @@ OWNER="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
 python3 "$TRUSTED/scripts/daily_research.py" claim --work "$WORK" --owner "$OWNER"
 ```
 
-Journal the claim receipt and owner ID. A pre-existing claim, including a partial, stale or unknown one, is a failure: report `[CRON_FAILURE]`, preserve it and stop. Do not infer safety from the scheduler's status or automatically steal or clear it. An operator must establish all model/tool/container processes are stopped, reconcile partial evidence and exact owned containers, preserve the claim and record the decision before manually moving it aside. The short `flock` serializes claim/finish operations; the durable claim spans independent tool calls. It only coordinates cooperating jobs with the same stable trusted work root and filesystem; it does not prevent arbitrary agent code bypassing the protocol. Never unlink its lock. On a clean terminal result, after all containers are stopped and artifacts journaled, call `finish --work "$WORK" --owner "$OWNER"`; it atomically moves the claim to `claim-history`. On crash, uncertainty or incomplete cleanup leave it in place. Any failed command or budget check must end the model response with `[CRON_FAILURE]` and a concise reconciliation status; never silently report success. `finish` is not proof of scheduler termination.
+Journal the claim receipt and owner ID. A pre-existing claim, including a partial, stale or unknown one, is a failure: report `[CRON_FAILURE]`, preserve it and stop. Do not infer safety from the scheduler's status or automatically steal or clear it. An operator must establish all model/tool/container processes are stopped, reconcile partial evidence and exact owned containers, preserve the claim and record the decision before manually moving it aside. The short `flock` serializes claim/finish operations; the durable claim spans independent tool calls. It only coordinates cooperating jobs with the same stable trusted work root and filesystem; it does not prevent arbitrary agent code bypassing the protocol. Never unlink its lock. On a clean terminal result, after all containers are stopped and artifacts journaled, call `finish --work "$WORK" --owner "$OWNER"`; it atomically moves the claim to `claim-history`. On crash, uncertainty or incomplete cleanup leave it in place. Any failed command or budget check must start the final model response with `[CRON_FAILURE]` as the standalone first line, followed by a concise reconciliation status; never silently report success. Tool stderr alone does not declare failure to the scheduler. `finish` is not proof of scheduler termination.
+
+Example failure response:
+
+```text
+[CRON_FAILURE]
+Completion failed; claim retained for operator reconciliation.
+```
 
 Example sampled budget check, with `START_BYTES` recorded from `du -sb "$WORK"` at run start (all paths are operator-owned):
 
@@ -110,11 +117,11 @@ The existing comparator verifies registered artifact hashes, identical input/out
 
 ```sh
 python3 "$TRUSTED/scripts/daily_research.py" complete --directory "$D" \
-  --max-input-bytes "$INPUT_BYTES" --max-outcome-bytes "$OUTCOME_BYTES"
+  --max-input-bytes "$INPUT_BYTES" --max-outcome-bytes "$OUTCOME_BYTES" &&
 python3 "$TRUSTED/scripts/daily_research.py" finish --work "$WORK" --owner "$OWNER"
 ```
 
-Completion rechecks selected bytes and receipt hashes/identity; it does not authenticate the comparison or execute it. Dangling or tampered markers fail closed. Never hand-create a receipt. Follow container cleanup and budget checks before finish. Optional queue is manual-review only; there is no automatic paper/live promotion.
+Completion rechecks selected bytes and receipt hashes/identity; it does not authenticate the comparison or execute it. If completion fails, the sequence exits nonzero and does not call `finish`; retain the claim for reconciliation. If `finish` fails after completion, retain and reconcile the claim and completion receipt. Dangling or tampered markers fail closed. Never hand-create a receipt. Follow container cleanup and budget checks before finish. Optional queue is manual-review only; there is no automatic paper/live promotion.
 
 ## Independent late outcome seam
 
