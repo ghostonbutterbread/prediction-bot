@@ -36,6 +36,30 @@ def fingerprint(path: Path, maximum: int) -> tuple[str, int]:
     return digest.hexdigest(), size
 
 
+def reject_json_constant(value: str):
+    raise ValueError(f'invalid JSON constant: {value}')
+
+
+def fingerprint_input(path: Path, maximum: int) -> tuple[str, int, int]:
+    if maximum <= 0:
+        raise ValueError('byte limits must be positive')
+    digest, size, rows = hashlib.sha256(), 0, 0
+    with path.open('rb') as stream:
+        while True:
+            line = stream.readline(maximum + 1 - size)
+            if not line:
+                break
+            size += len(line)
+            if size > maximum:
+                raise ValueError(f'file exceeds byte limit: {path}')
+            digest.update(line)
+            if line.strip():
+                if not isinstance(json.loads(line, parse_constant=reject_json_constant), dict):
+                    raise ValueError('every nonblank input row must be a JSON object')
+                rows += 1
+    return digest.hexdigest(), size, rows
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--comparison', required=True, type=Path)
@@ -58,20 +82,44 @@ def main() -> int:
             raise ValueError('output parent must already exist')
         if any(path == output or path.is_relative_to(output) for path in (comparison, inputs, resolutions)):
             raise ValueError('output must not contain an input')
-        if len({comparison, inputs, resolutions}) != 3:
+        identities = [(stat.st_dev, stat.st_ino) for stat in
+                      (path.stat() for path in (comparison, inputs, resolutions))]
+        if len(set(identities)) != 3:
             raise ValueError('comparison, inputs, and resolutions must be distinct files')
-        comparison_hash, comparison_size = fingerprint(comparison, 1024 * 1024)
-        comp = json.loads(comparison.read_bytes())
+        with comparison.open('rb') as stream:
+            comparison_bytes = stream.read(1024 * 1024 + 1)
+        comparison_size = len(comparison_bytes)
+        if comparison_size > 1024 * 1024:
+            raise ValueError(f'file exceeds byte limit: {comparison}')
+        comparison_hash = hashlib.sha256(comparison_bytes).hexdigest()
+        comp = json.loads(comparison_bytes)
         if not isinstance(comp, dict) or comp.get('selected_rows_matched') is not True:
             raise ValueError('matched sealed comparison is required')
         if comp.get('outcome_sha256') != EMPTY:
             raise ValueError('original outcomes must be empty')
         runs = comp.get('runs')
-        if not isinstance(runs, list) or len(runs) != 2 or any(not isinstance(r, dict) or not isinstance(r.get('experiment_id'), str) or not r['experiment_id'] for r in runs):
-            raise ValueError('comparison must identify both experiments')
-        input_hash, input_size = fingerprint(inputs, args.max_input_bytes)
+        if (not isinstance(runs, list) or len(runs) != 2 or
+                any(not isinstance(r, dict) or not isinstance(r.get('experiment_id'), str)
+                    or not r['experiment_id'].strip() for r in runs) or
+                runs[0]['experiment_id'] == runs[1]['experiment_id']):
+            raise ValueError('comparison must identify two distinct experiments')
+        matched = comp.get('matched_decisions')
+        if type(matched) is not int or matched <= 0:
+            raise ValueError('comparison must report a nonzero matched decision count')
+        expected = {'input_records_seen': matched, 'input_records_invalid_identity': 0,
+                    'sealed_control_decisions': matched, 'sealed_candidate_decisions': matched}
+        for run in runs:
+            coverage = run.get('coverage')
+            if not isinstance(coverage, dict) or any(
+                type(coverage.get(key)) is not int or coverage[key] != count
+                for key, count in expected.items()
+            ):
+                raise ValueError('comparison coverage does not reconcile with matched decisions')
+        input_hash, input_size, input_rows = fingerprint_input(inputs, args.max_input_bytes)
         if input_hash != comp.get('input_sha256'):
             raise ValueError('input hash mismatch')
+        if input_rows != comp.get('matched_decisions'):
+            raise ValueError('input rows differ from matched decisions; rerun both experiments and comparison with the complete selected feed page')
         resolution_hash, resolution_size = fingerprint(resolutions, args.max_resolution_bytes)
         if resolution_hash != args.resolution_sha256:
             raise ValueError('resolution hash mismatch')
