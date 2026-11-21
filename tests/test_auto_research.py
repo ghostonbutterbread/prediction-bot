@@ -13,6 +13,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class AutoResearchCLITest(unittest.TestCase):
+    def test_invalid_cli_invocation_has_cron_failure_marker(self):
+        result = subprocess.run([sys.executable, str(ROOT / 'scripts/auto_research.py'), 'compare'], capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('[CRON_FAILURE]', result.stderr)
+
     def test_real_replay_records_matched_decisions_and_queues_without_paper_writes(self):
         self.assertTrue((ROOT / 'scripts/auto_research.py').is_file(), 'research CLI is missing')
         with tempfile.TemporaryDirectory() as tmp:
@@ -37,6 +42,10 @@ class AutoResearchCLITest(unittest.TestCase):
             git('add', 'bot', 'scripts')
             git('commit', '-qm', 'synthetic research code')
             commit = git('rev-parse', 'HEAD')
+            trusted = root / 'trusted'
+            subprocess.run(['git', 'clone', '-q', '--no-hardlinks', '--no-local', str(repo), str(trusted)], env=env, check=True)
+            trusted_env = dict(env, PYTHONPATH=str(trusted))
+            trusted_cmd = [sys.executable, str(trusted / 'scripts/auto_research.py')]
             key = {'shared_snapshot_id': 's1', 'shared_candidate_id': 'c1', 'market_id': 'KX1',
                    'observed_at_utc': '2026-01-01T12:00:00+00:00', 'raw_row_sha256': 'a' * 64}
             record = {'schema_name': 'replay_decision_input', 'schema_version': 1, 'decision_key': key,
@@ -117,7 +126,53 @@ class AutoResearchCLITest(unittest.TestCase):
             comparison = subprocess.run(cmd + ['compare', '--store', str(store), receipt['experiment_id'], second_receipt['experiment_id']], cwd=repo, env=env, capture_output=True, text=True)
             self.assertEqual(comparison.returncode, 0, comparison.stderr)
             comparison_result = json.loads(comparison.stdout)
+            self.assertEqual(comparison_result['input_sha256'], hashlib.sha256(inputs.read_bytes()).hexdigest())
+            self.assertEqual(comparison_result['outcome_sha256'], hashlib.sha256(outcomes.read_bytes()).hexdigest())
             self.assertTrue(comparison_result['selected_rows_matched'])
+            empty_outcomes = root / 'empty-outcomes.jsonl'; empty_outcomes.write_text('')
+            empty_receipts = []
+            stores = [root / 'collector/data/derived_reports/baseline', root / 'collector/data/derived_reports/candidate']
+            for index, (idea, separate_store) in enumerate(zip(('empty outcome baseline', 'empty outcome candidate'), stores)):
+                run_cli = trusted_cmd if index == 0 else cmd
+                completed = subprocess.run(run_cli + ['run', '--max-input-bytes', '65536', '--max-outcome-bytes', '65536', '--store', str(separate_store), '--inputs', str(inputs), '--outcomes', str(empty_outcomes), '--idea', idea], cwd=trusted if index == 0 else repo, env=trusted_env if index == 0 else env, capture_output=True, text=True)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                empty_receipts.append(json.loads(completed.stdout))
+            self.assertNotEqual(empty_receipts[0]['git_commit'], empty_receipts[1]['git_commit'])
+            compare_separate = trusted_cmd + ['compare', '--store', str(stores[0]), '--candidate-store', str(stores[1]), *(r['experiment_id'] for r in empty_receipts)]
+            empty_comparison = subprocess.run(compare_separate, cwd=trusted, env=trusted_env, capture_output=True, text=True)
+            self.assertEqual(empty_comparison.returncode, 0, empty_comparison.stderr)
+            mismatch_run = subprocess.run(cmd + ['run', '--max-input-bytes', '65536', '--max-outcome-bytes', '65536', '--store', str(stores[1]), '--inputs', str(inputs), '--outcomes', str(empty_outcomes), '--idea', 'mismatched setting', '--min-sample-count', '1'], cwd=repo, env=env, capture_output=True, text=True)
+            self.assertEqual(mismatch_run.returncode, 0, mismatch_run.stderr)
+            mismatch_cross = subprocess.run(compare_separate[:-1] + [json.loads(mismatch_run.stdout)['experiment_id']], cwd=trusted, env=trusted_env, capture_output=True, text=True)
+            self.assertNotEqual(mismatch_cross.returncode, 0)
+            self.assertIn('different input, outcome, or replay settings', mismatch_cross.stderr)
+            candidate_artifact = Path(empty_receipts[1]['output_dir']) / 'sealed_candidate_decisions.jsonl'
+            original_candidate = candidate_artifact.read_bytes()
+            candidate_artifact.write_bytes(b'{}\n')
+            corrupted = subprocess.run(compare_separate, cwd=trusted, env=trusted_env, capture_output=True, text=True)
+            self.assertNotEqual(corrupted.returncode, 0)
+            self.assertIn('artifact hash mismatch', corrupted.stderr)
+            candidate_artifact.write_bytes(original_candidate)
+            candidate_artifact.unlink()
+            candidate_artifact.symlink_to(Path(empty_receipts[0]['output_dir']) / candidate_artifact.name)
+            aliased = subprocess.run(compare_separate, cwd=trusted, env=trusted_env, capture_output=True, text=True)
+            self.assertNotEqual(aliased.returncode, 0)
+            self.assertIn('symlink', aliased.stderr)
+            candidate_artifact.unlink()
+            candidate_artifact.write_bytes(original_candidate)
+            catalog = root / 'daily-catalog.json'
+            catalog.write_text(json.dumps([{'inputs': str(inputs), 'outcomes': str(empty_outcomes)}]))
+            daily = [sys.executable, str(ROOT / 'scripts/daily_research.py')]
+            limits = ['--max-input-bytes', '65536', '--max-outcome-bytes', '65536']
+            select = daily + ['select', '--catalog', str(catalog), '--state', str(root / 'daily-state'), *limits]
+            selected = subprocess.run(select, cwd=repo, env=env, capture_output=True, text=True, check=True)
+            directory = Path(json.loads(selected.stdout)['directory'])
+            for filename, empty_receipt in zip(('baseline.json', 'candidate.json'), empty_receipts):
+                (directory / filename).write_text(json.dumps(empty_receipt))
+            (directory / 'comparison.json').write_text(empty_comparison.stdout)
+            complete = subprocess.run(daily + ['complete', '--directory', str(directory), *limits], cwd=repo, env=env, capture_output=True, text=True)
+            self.assertEqual(complete.returncode, 0, complete.stderr)
+            self.assertEqual(json.loads(subprocess.run(select, cwd=repo, env=env, capture_output=True, text=True, check=True).stdout)['status'], 'no_new_data')
             self.assertFalse(comparison_result['matched_inputs_and_settings'])
             self.assertEqual(comparison_result['runs'][0]['coverage']['input_records_seen'], 1)
             with sqlite3.connect(store / 'experiments.sqlite3') as db:
