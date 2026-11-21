@@ -6,6 +6,7 @@ This is an agent-operated research tool, not a scheduler or paper controller.
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
 import hashlib
 import json
 from pathlib import Path
@@ -47,7 +48,8 @@ def git(*args: str) -> str:
 
 def database(store: Path) -> sqlite3.Connection:
     db = sqlite3.connect(store / 'experiments.sqlite3')
-    db.executescript('''
+    try:
+        db.executescript('''
         CREATE TABLE IF NOT EXISTS experiments (
             experiment_id TEXT PRIMARY KEY, created_at TEXT NOT NULL, idea TEXT NOT NULL,
             git_commit TEXT NOT NULL, git_tree TEXT NOT NULL,
@@ -67,7 +69,10 @@ def database(store: Path) -> sqlite3.Connection:
         CREATE TRIGGER IF NOT EXISTS queue_no_delete BEFORE DELETE ON candidate_queue
         BEGIN SELECT RAISE(ABORT, 'queue is append-only'); END;
     ''')
-    db.execute('PRAGMA foreign_keys=ON')
+        db.execute('PRAGMA foreign_keys=ON')
+    except BaseException:
+        db.close()
+        raise
     return db
 
 
@@ -126,7 +131,7 @@ def main() -> int:
                 uri = dbpath.as_uri() + '?mode=ro&immutable=1'
             else:
                 uri = dbpath.as_uri() + '?mode=ro'
-            with sqlite3.connect(uri, uri=True) as db:
+            with closing(sqlite3.connect(uri, uri=True)) as db, db:
                 rows.append(db.execute('SELECT git_commit, input_sha256, outcome_sha256, config_json, result_json, output_dir FROM experiments WHERE experiment_id=?', (item,)).fetchone())
         if any(row is None for row in rows):
             raise ValueError('unknown experiment')
@@ -196,7 +201,7 @@ def main() -> int:
     if args.command == 'queue':
         if not (store / 'experiments.sqlite3').is_file():
             raise ValueError('experiment store does not exist')
-        with database(store) as db:
+        with closing(database(store)) as db, db:
             db.execute('INSERT INTO candidate_queue VALUES (?, ?, ?)', (args.experiment, now(), args.note))
         print(json.dumps({'queued': args.experiment, 'activation': 'manual_review_only',
                           'diagnostic_eligible': False, 'warning': 'source availability unverified'}))
@@ -260,7 +265,7 @@ def main() -> int:
                    'artifacts': {path.name: sha256(path) for path in sorted(output_dir.iterdir()) if path.is_file()},
                    'interpretation': 'source-only directional research; source availability unverified; economics excluded'}
     store.mkdir(parents=True, exist_ok=True)
-    with database(store) as db:
+    with closing(database(store)) as db, db:
         db.execute('INSERT INTO experiments VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                    (experiment_id, now(), args.idea, commit, tree, input_hash, outcome_hash,
                     json.dumps(config, sort_keys=True), json.dumps(result_data, sort_keys=True), str(output_dir)))

@@ -8,6 +8,12 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from argparse import Namespace
+from contextlib import closing, redirect_stdout
+from io import StringIO
+from unittest.mock import patch
+
+from scripts import auto_research, research_feedback
 
 from bot.weather.collector_source_router_replay import _sealed_decision, _canonical_json_bytes
 
@@ -86,6 +92,83 @@ class ResearchFeedbackTest(unittest.TestCase):
                 db.execute('UPDATE experiments SET experiment_id=?, output_dir=? WHERE experiment_id=?',
                            (new_id, '/old/mount/runs/' + new_id, keep))
         return candidate_store, baseline_id, candidate_id
+
+    def test_successful_auto_comparison_closes_both_connections(self):
+        with closing(sqlite3.connect(self.store / 'experiments.sqlite3')) as db, db:
+            for name in self.rows:
+                directory = self.store / 'runs' / name
+                control = (directory / 'sealed_control_decisions.jsonl').read_bytes()
+                files = {'sealed_candidate_decisions.jsonl': control,
+                         'post_decision_resolution_report.json': b'{"resolved_decisions": [], "unresolved_decisions": []}'}
+                result = json.loads(db.execute('SELECT result_json FROM experiments WHERE experiment_id=?', (name,)).fetchone()[0])
+                for filename, content in files.items():
+                    (directory / filename).write_bytes(content)
+                    result['artifacts'][filename] = digest(content)
+                db.execute('UPDATE experiments SET result_json=? WHERE experiment_id=?', (json.dumps(result), name))
+        opened, original_connect = [], sqlite3.connect
+
+        def connect(*args, **kwargs):
+            db = original_connect(*args, **kwargs)
+            opened.append(db)
+            return db
+
+        argv = ['auto_research', 'compare', '--store', str(self.store), 'baseline', 'candidate']
+        with patch('bot.collector_paths.derived_reports_root', return_value=self.store.parent), \
+             patch.object(auto_research.sqlite3, 'connect', side_effect=connect), \
+             patch.object(sys, 'argv', argv), redirect_stdout(StringIO()):
+            self.assertEqual(auto_research.main(), 0)
+        self.assertEqual(len(opened), 2)
+        for db in opened:
+            with self.assertRaisesRegex(sqlite3.ProgrammingError, 'closed'):
+                db.execute('SELECT 1')
+
+    def test_feedback_closes_connections_on_success_and_load_failure(self):
+        args = Namespace(store=self.store, candidate_store=None, baseline='baseline', candidate='candidate',
+                         outcomes=self.outcomes, outcome_sha256=digest(self.outcomes.read_bytes()),
+                         max_outcome_bytes=65536, max_decision_bytes=65536, output=self.output)
+        opened = []
+        original_connect = sqlite3.connect
+
+        def connect(*args, **kwargs):
+            db = original_connect(*args, **kwargs)
+            opened.append(db)
+            return db
+
+        with patch.object(research_feedback, 'derived_reports_root', return_value=self.store.parent), \
+             patch.object(research_feedback.sqlite3, 'connect', side_effect=connect):
+            research_feedback.run(args)
+            self.assertEqual(len(opened), 2)
+            for db in opened:
+                with self.assertRaisesRegex(sqlite3.ProgrammingError, 'closed'):
+                    db.execute('SELECT 1')
+            opened.clear()
+            args.output = self.output.parent / 'failure.json'
+            with patch.object(research_feedback, 'load_run', side_effect=ValueError('injected load failure')):
+                with self.assertRaisesRegex(ValueError, 'injected load failure'):
+                    research_feedback.run(args)
+            self.assertEqual(len(opened), 1)
+            with self.assertRaisesRegex(sqlite3.ProgrammingError, 'closed'):
+                opened[0].execute('SELECT 1')
+            self.assertFalse(args.output.exists())
+
+    def test_identical_experiment_ids_are_rejected_without_output(self):
+        same = self.run_cli(baseline='baseline', candidate='baseline')
+        self.assertNotEqual(same.returncode, 0)
+        self.assertIn('distinct experiments', same.stderr)
+        self.assertFalse(self.output.exists())
+
+    def test_identical_experiment_ids_in_separate_stores_are_rejected(self):
+        candidate_store = self.store.parent / 'candidate-store'
+        shutil.copytree(self.store, candidate_store)
+        experiment = 'a' * 32
+        for store in (self.store, candidate_store):
+            (store / 'runs' / 'baseline').rename(store / 'runs' / experiment)
+            with closing(sqlite3.connect(store / 'experiments.sqlite3')) as db, db:
+                db.execute('UPDATE experiments SET experiment_id=? WHERE experiment_id=?', (experiment, 'baseline'))
+        separate = self.run_cli(candidate_store=candidate_store, baseline=experiment, candidate=experiment)
+        self.assertNotEqual(separate.returncode, 0)
+        self.assertIn('distinct experiments', separate.stderr)
+        self.assertFalse(self.output.exists())
 
     def test_separate_stores_remap_and_same_store_compatibility(self):
         same = self.run_cli()

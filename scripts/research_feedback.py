@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from contextlib import closing
 import hashlib
 import json
 import os
@@ -160,6 +161,8 @@ def scorer_identity() -> dict:
 
 
 def run(args: argparse.Namespace) -> dict:
+    if args.baseline == args.candidate:
+        raise ValueError('feedback requires two distinct experiments')
     root, store = derived_reports_root().resolve(), args.store.resolve(strict=True)
     candidate_store = args.candidate_store.resolve(strict=True) if args.candidate_store else store
     for source_store in (store, candidate_store):
@@ -186,7 +189,7 @@ def run(args: argparse.Namespace) -> dict:
             require_local_file(source_store, dbpath)
         elif not dbpath.is_file():
             raise ValueError('experiment database does not exist')
-        with sqlite3.connect(dbpath.as_uri() + '?mode=ro', uri=True) as db:
+        with closing(sqlite3.connect(dbpath.as_uri() + '?mode=ro', uri=True)) as db, db:
             runs.append(load_run(db, source_store, experiment, args.max_decision_bytes, remap=bool(args.candidate_store)))
     left, right = runs
     for item in (left, right):
