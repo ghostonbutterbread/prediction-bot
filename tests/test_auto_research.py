@@ -190,7 +190,9 @@ class AutoResearchCLITest(unittest.TestCase):
             empty = subprocess.run(run_cmd + ['--store', str(store), '--inputs', str(empty_inputs), '--outcomes', str(outcomes), '--idea', 'empty'], cwd=repo, env=env, capture_output=True, text=True)
             self.assertEqual(empty.returncode, 0, empty.stderr)
             empty_id = json.loads(empty.stdout)['experiment_id']
-            empty_comparison = subprocess.run(cmd + ['compare', '--store', str(store), empty_id, empty_id], cwd=repo, env=env, capture_output=True, text=True)
+            empty2 = subprocess.run(run_cmd + ['--store', str(store), '--inputs', str(empty_inputs), '--outcomes', str(outcomes), '--idea', 'empty second'], cwd=repo, env=env, capture_output=True, text=True)
+            self.assertEqual(empty2.returncode, 0, empty2.stderr)
+            empty_comparison = subprocess.run(cmd + ['compare', '--store', str(store), empty_id, json.loads(empty2.stdout)['experiment_id']], cwd=repo, env=env, capture_output=True, text=True)
             self.assertEqual(empty_comparison.returncode, 0, empty_comparison.stderr)
             self.assertFalse(json.loads(empty_comparison.stdout)['matched_inputs_and_settings'])
             invalid_record = dict(record)
@@ -202,7 +204,9 @@ class AutoResearchCLITest(unittest.TestCase):
             partial = subprocess.run(run_cmd + ['--store', str(store), '--inputs', str(partial_inputs), '--outcomes', str(outcomes), '--idea', 'partial'], cwd=repo, env=env, capture_output=True, text=True)
             self.assertEqual(partial.returncode, 0, partial.stderr)
             partial_id = json.loads(partial.stdout)['experiment_id']
-            partial_compare = subprocess.run(cmd + ['compare', '--store', str(store), partial_id, partial_id], cwd=repo, env=env, capture_output=True, text=True)
+            partial2 = subprocess.run(run_cmd + ['--store', str(store), '--inputs', str(partial_inputs), '--outcomes', str(outcomes), '--idea', 'partial second'], cwd=repo, env=env, capture_output=True, text=True)
+            self.assertEqual(partial2.returncode, 0, partial2.stderr)
+            partial_compare = subprocess.run(cmd + ['compare', '--store', str(store), partial_id, json.loads(partial2.stdout)['experiment_id']], cwd=repo, env=env, capture_output=True, text=True)
             self.assertEqual(partial_compare.returncode, 0, partial_compare.stderr)
             partial_result = json.loads(partial_compare.stdout)
             self.assertFalse(partial_result['selected_rows_matched'])

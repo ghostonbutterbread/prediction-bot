@@ -10,6 +10,7 @@ import argparse
 import hashlib
 import json
 import os
+import subprocess
 from pathlib import Path
 import sys
 import tempfile
@@ -77,7 +78,7 @@ def load_page(path: Path, root: Path, max_input_bytes: int) -> tuple[dict, str]:
     return page, page_hash
 
 
-def load_comparison(path: Path, root: Path, page: dict) -> str:
+def load_comparison(path: Path, root: Path, page: dict, baseline_store: Path, candidate_store: Path) -> str:
     raw = read_bounded(within(path, root), MAX_META)
     comp = json.loads(raw)
     if (not isinstance(comp, dict) or comp.get('selected_rows_matched') is not True or
@@ -87,27 +88,66 @@ def load_comparison(path: Path, root: Path, page: dict) -> str:
     runs = comp.get('runs')
     if not isinstance(runs, list) or len(runs) != 2 or any(not isinstance(r, dict) or not isinstance(r.get('experiment_id'), str) or not r['experiment_id'] for r in runs):
         raise ValueError('comparison must identify both experiments')
+    if runs[0]['experiment_id'] == runs[1]['experiment_id']:
+        raise ValueError('comparison requires two distinct experiments')
+    stores = [within(p, root) for p in (baseline_store, candidate_store)]
+    if any(not p.is_dir() for p in stores) or stores[0] == stores[1] or any(a.is_relative_to(b) for a, b in (stores, stores[::-1])):
+        raise ValueError('comparison requires separate non-overlapping stores')
+    # A quiescent rollback-journal database is required for a strictly read-only
+    # immutable SQLite connection, which must not create WAL/shm files in a store.
+    for store in stores:
+        if any((store / ('experiments.sqlite3' + suffix)).exists() for suffix in ('-wal', '-journal')):
+            raise ValueError('store has pending SQLite journal; reconcile before comparison')
+    env = dict(os.environ, PYTHONPATH=str(ROOT), PYTHONDONTWRITEBYTECODE='1')
+    command = [sys.executable, str(ROOT / 'scripts/auto_research.py'), 'compare', '--store', str(stores[0]),
+               '--candidate-store', str(stores[1]), *(r['experiment_id'] for r in runs)]
+    result = subprocess.run(command, cwd=ROOT, env=env, capture_output=True, text=True)
+    if result.returncode:
+        raise ValueError(f'trusted comparator failed: {result.stderr.strip()}')
+    canonical = lambda value: json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False)
+    if canonical(json.loads(result.stdout)) != canonical(comp):
+        raise ValueError('trusted comparator output differs from comparison receipt')
     return digest(raw)
 
 
-def publish(path: Path, value: dict) -> None:
+def sync_directory(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def publish(path: Path, value: dict) -> bool:
     if not path.parent.is_dir():
         raise ValueError('output parent must exist')
     data = (json.dumps(value, sort_keys=True, indent=2, allow_nan=False) + '\n').encode()
     tmp = None
+    reused = False
     try:
         with tempfile.NamedTemporaryFile(prefix='.progress-', dir=path.parent, delete=False) as f:
             tmp = Path(f.name)
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
-        os.link(tmp, path)
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            if read_bounded(path, MAX_META) != data:
+                raise ValueError('existing output differs or is malformed; reconcile without overwriting')
+            reused = True
     finally:
         if tmp is not None:
             tmp.unlink(missing_ok=True)
+    try:
+        sync_directory(path.parent)
+    except OSError as exc:
+        raise OSError(f'output may exist but directory sync failed; retry identical operation or reconcile: {exc}') from exc
+    return reused
 
 
-def ack(page_path: Path, ack_dir: Path, comparison: Path | None, root: Path, limit: int) -> dict:
+def ack(page_path: Path, ack_dir: Path, comparison: Path | None, root: Path, limit: int,
+        baseline_store: Path | None = None, candidate_store: Path | None = None) -> dict:
     page, page_hash = load_page(page_path, root, limit)
     ack_dir = within(ack_dir, root)
     if not ack_dir.is_dir():
@@ -117,35 +157,38 @@ def ack(page_path: Path, ack_dir: Path, comparison: Path | None, root: Path, lim
     if page['accepted_rows']:
         if comparison is None:
             raise ValueError('comparison required for accepted input rows')
+        if baseline_store is None or candidate_store is None:
+            raise ValueError('baseline and candidate stores are required')
         comparison = within(comparison, root)
-        comparison_hash = load_comparison(comparison, root, page)
+        baseline_store, candidate_store = within(baseline_store, root), within(candidate_store, root)
+        for store in (baseline_store, candidate_store):
+            for path in (ack_dir, comparison, page_path.resolve().parent.parent):
+                if path == store or path.is_relative_to(store) or store.is_relative_to(path):
+                    raise ValueError('stores must not overlap coordinator or feed paths')
+        comparison_hash = load_comparison(comparison, root, page, baseline_store, candidate_store)
         status = 'compared'
     else:
-        if comparison is not None:
-            raise ValueError('zero-accepted page must not assert a comparison')
+        if comparison is not None or baseline_store is not None or candidate_store is not None:
+            raise ValueError('zero-accepted page must not assert a comparison or stores')
         comparison_hash, status = None, 'no_usable_inputs'
     receipt = {'schema_name':'research_feed_page_ack', 'schema_version':1, 'page_sha256':page_hash,
                'status':status, 'comparison_path':str(comparison) if comparison else None,
                'comparison_sha256':comparison_hash}
+    if status == 'compared':
+        receipt.update(baseline_store=str(baseline_store), candidate_store=str(candidate_store))
     dest = ack_dir / (page_hash + '.json')
-    try:
-        publish(dest, receipt)
-        reused = False
-    except FileExistsError:
-        if json.loads(read_bounded(dest, MAX_META)) != receipt:
-            raise ValueError('existing acknowledgment differs')
-        reused = True
+    reused = publish(dest, receipt)
     return {'status':status,'page_sha256':page_hash,'ack_path':str(dest),'reused':reused}
 
 
 def finish(last_path: Path, previous_path: Path | None, previous_checkpoint: Path | None, ack_dir: Path, output: Path, root: Path, limit: int) -> dict:
     last_path = within(last_path, root)
     ack_dir, output = within(ack_dir, root), within(output, root)
+    if output == ack_dir or output.is_relative_to(ack_dir):
+        raise ValueError('checkpoint must be outside acknowledgment directory')
     feed_root = last_path.parent.parent
     if output == feed_root or output.is_relative_to(feed_root) or ack_dir == feed_root or ack_dir.is_relative_to(feed_root):
         raise ValueError('checkpoint and acknowledgments must be outside immutable feed pages')
-    if output.exists():
-        raise ValueError('checkpoint output already exists')
     last, last_hash = load_page(last_path, root, limit)
     if last.get('checkpoint_eligible') is not True:
         raise ValueError('last page is not checkpoint eligible')
@@ -186,7 +229,14 @@ def finish(last_path: Path, previous_path: Path | None, previous_checkpoint: Pat
         if page['accepted_rows']:
             if receipt.get('status') != 'compared' or not isinstance(receipt.get('comparison_path'), str):
                 raise ValueError('page comparison acknowledgment missing')
-            if load_comparison(Path(receipt['comparison_path']), root, page) != receipt.get('comparison_sha256'):
+            if not all(isinstance(receipt.get(k), str) for k in ('baseline_store', 'candidate_store')):
+                raise ValueError('page comparison stores missing')
+            stores = [within(Path(receipt[k]), root) for k in ('baseline_store', 'candidate_store')]
+            for store in stores:
+                for target in (output, ack_dir, feed_root, Path(receipt['comparison_path']).resolve()):
+                    if target == store or target.is_relative_to(store) or store.is_relative_to(target):
+                        raise ValueError('stores must not overlap coordinator or feed paths')
+            if load_comparison(Path(receipt['comparison_path']), root, page, *stores) != receipt.get('comparison_sha256'):
                 raise ValueError('page comparison changed after acknowledgment')
         elif receipt.get('status') != 'no_usable_inputs' or receipt.get('comparison_path') is not None:
             raise ValueError('zero-input acknowledgment invalid')
@@ -224,6 +274,8 @@ def main() -> int:
     a.add_argument('--page', type=Path, required=True)
     a.add_argument('--ack-dir', type=Path, required=True)
     a.add_argument('--comparison', type=Path)
+    a.add_argument('--baseline-store', type=Path)
+    a.add_argument('--candidate-store', type=Path)
     b = sub.add_parser('finish')
     b.add_argument('--last-page', type=Path, required=True)
     b.add_argument('--previous', type=Path)
@@ -237,7 +289,7 @@ def main() -> int:
         if args.max_input_bytes < 1:
             raise ValueError('input byte limit must be positive')
         root=derived_reports_root().resolve()
-        result = ack(args.page,args.ack_dir,args.comparison,root,args.max_input_bytes) if args.command=='ack' else finish(args.last_page,args.previous,args.previous_checkpoint,args.ack_dir,args.output,root,args.max_input_bytes)
+        result = ack(args.page,args.ack_dir,args.comparison,root,args.max_input_bytes,args.baseline_store,args.candidate_store) if args.command=='ack' else finish(args.last_page,args.previous,args.previous_checkpoint,args.ack_dir,args.output,root,args.max_input_bytes)
         print(json.dumps(result,sort_keys=True))
     except (OSError,ValueError,KeyError,TypeError) as exc:
         print(f'research_feed_progress: {exc}',file=sys.stderr)

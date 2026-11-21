@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -37,7 +38,28 @@ class ResearchFeedProgressTests(unittest.TestCase):
         self.env = dict(os.environ, PYTHONPATH=str(ROOT), PYTHONDONTWRITEBYTECODE='1', HOME=str(self.root), TMPDIR=str(self.root),
                         PREDICTION_BOT_COLLECTOR_ROOT=str(self.root/'collector'))
 
-    def page(self, *, previous=None, resume=None, start=100, end=0, complete=True, checkpoint=True, data=b'{"decision":1}\n'):
+        self.comparison_stores = {}
+
+    def default_inputs(self):
+        source = self.root / 'fixture-source'; source.mkdir()
+        raw, index, manifest = source/'raw.jsonl', source/'index.jsonl', source/'manifest.json'
+        row = _legacy_collector_row(); row['run_id'] = 'fixture'
+        raw.write_text(json.dumps(row) + '\n')
+        build_collector_replay_index(raw, index, manifest)
+        out = self.derived/'fixture-feed'; out.mkdir()
+        cmd = [sys.executable, str(ROOT/'scripts/fresh_research_feed.py'), '--index', str(index), '--manifest', str(manifest),
+               '--output-root', str(out), '--protected-root', str(source), '--max-index-bytes', '2000000',
+               '--max-inspected-rows', '1', '--max-raw-row-bytes', '200000', '--max-wall-seconds', '30',
+               '--max-memory-bytes', '536870912']
+        result = subprocess.run(cmd, cwd=ROOT, env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return (Path(json.loads(result.stdout)['directory'])/'inputs.jsonl').read_bytes()
+
+    def page(self, *, previous=None, resume=None, start=100, end=0, complete=True, checkpoint=True, data=None):
+        if data is None:
+            if not hasattr(self, '_inputs'):
+                self._inputs = self.default_inputs()
+            data = self._inputs
         manifest = b'{"manifest":"synthetic"}\n'
         receipt = {'schema_name':'fresh_research_feed', 'schema_version':1, 'status':'initial' if previous is None else ('new_indexed_data' if complete else 'truncated'),
                    'complete':complete, 'checkpoint_eligible':checkpoint,'manifest_sha256':digest(manifest),'index_sha256':'b'*64,
@@ -54,10 +76,32 @@ class ResearchFeedProgressTests(unittest.TestCase):
         return directory/'receipt.json'
 
     def comparison(self, page):
-        info = json.loads(page.read_bytes())
+        repo = self.root/'fixture-repo'
+        env = dict(self.env, PYTHONPATH=str(repo), GIT_CONFIG_NOSYSTEM='1', GIT_AUTHOR_NAME='Test',
+                   GIT_AUTHOR_EMAIL='test@example.invalid', GIT_COMMITTER_NAME='Test', GIT_COMMITTER_EMAIL='test@example.invalid')
+        if not repo.exists():
+            repo.mkdir()
+            shutil.copytree(ROOT/'bot', repo/'bot', ignore=shutil.ignore_patterns('__pycache__'))
+            (repo/'scripts').mkdir()
+            shutil.copy2(ROOT/'scripts/auto_research.py', repo/'scripts/auto_research.py')
+            for command in (['git','init','-q'], ['git','add','bot','scripts'], ['git','commit','-qm','fixture']):
+                subprocess.run(command, cwd=repo, env=env, check=True, capture_output=True)
+        stores = [self.derived/(page.parent.name+'-baseline'), self.derived/(page.parent.name+'-candidate')]
+        ids = []
+        for store in stores:
+            cmd = [sys.executable, str(repo/'scripts/auto_research.py'), 'run', '--store', str(store),
+                   '--inputs', str(page.parent/'inputs.jsonl'), '--outcomes', str(page.parent/'outcomes.jsonl'),
+                   '--idea', 'fixture', '--max-input-bytes', '65536', '--max-outcome-bytes', '1']
+            run = subprocess.run(cmd, cwd=repo, env=env, capture_output=True, text=True)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            ids.append(json.loads(run.stdout)['experiment_id'])
+        cmd = [sys.executable, str(ROOT/'scripts/auto_research.py'), 'compare', '--store', str(stores[0]),
+               '--candidate-store', str(stores[1]), *ids]
+        run = subprocess.run(cmd, cwd=ROOT, env=self.env, capture_output=True, text=True)
+        self.assertEqual(run.returncode, 0, run.stderr)
         file = self.derived / (page.parent.name + '-compare.json')
-        file.write_bytes(encoded({'selected_rows_matched':True,'matched_decisions':info['accepted_rows'],'input_sha256':info['inputs_sha256'], 'outcome_sha256':EMPTY,
-                                   'runs':[{'experiment_id':'baseline'}, {'experiment_id':'candidate'}]}))
+        file.write_text(run.stdout)
+        self.comparison_stores[file] = stores
         return file
 
     def call(self, *args):
@@ -65,7 +109,9 @@ class ResearchFeedProgressTests(unittest.TestCase):
 
     def do_ack(self, page, comparison=None):
         args=['ack','--page',page,'--ack-dir',self.ack]
-        if comparison: args += ['--comparison',comparison]
+        if comparison:
+            stores = self.comparison_stores[comparison]
+            args += ['--comparison',comparison,'--baseline-store',stores[0],'--candidate-store',stores[1]]
         return self.call(*args)
 
     def do_finish(self,last,previous=None,previous_checkpoint=None):
@@ -96,6 +142,16 @@ class ResearchFeedProgressTests(unittest.TestCase):
         self.assertEqual(result['page_count'],2)
         self.assertEqual(result['coverage'],'complete_delta')
 
+    def test_same_experiment_id_cannot_acknowledge_a_page(self):
+        page = self.page()
+        comparison = self.comparison(page)
+        value = json.loads(comparison.read_bytes())
+        value['runs'][1]['experiment_id'] = value['runs'][0]['experiment_id']
+        comparison.write_bytes(encoded(value))
+        result = self.do_ack(page, comparison)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertFalse(list(self.ack.iterdir()))
+
     def test_comparison_must_match_page_and_empty_outcomes(self):
         page=self.page()
         comp=self.comparison(page)
@@ -105,6 +161,68 @@ class ResearchFeedProgressTests(unittest.TestCase):
         self.assertNotEqual(failed.returncode,0)
         self.assertIn('comparison',failed.stderr)
         self.assertEqual(list(self.ack.iterdir()),[])
+
+    def test_ack_retry_and_existing_malformed_output_are_safe(self):
+        from unittest.mock import patch
+        from scripts import research_feed_progress as progress
+        page = self.page(data=b'')
+        with patch.object(progress, 'sync_directory', side_effect=OSError('injected directory failure')):
+            with self.assertRaisesRegex(OSError, 'may exist'):
+                progress.ack(page, self.ack, None, self.derived, 1024)
+        result = progress.ack(page, self.ack, None, self.derived, 1024)
+        self.assertTrue(result['reused'])
+        target = Path(result['ack_path'])
+        target.write_bytes(b'{malformed')
+        with self.assertRaisesRegex(ValueError, 'existing output'):
+            progress.ack(page, self.ack, None, self.derived, 1024)
+        self.assertEqual(target.read_bytes(), b'{malformed')
+
+    def test_checkpoint_cannot_occupy_future_acknowledgment_path(self):
+        from scripts import research_feed_progress as progress
+        page = self.page(data=b'')
+        progress.ack(page, self.ack, None, self.derived, 1024)
+        other = self.ack / ('f' * 64 + '.json')
+        with self.assertRaisesRegex(ValueError, 'acknowledgment'):
+            progress.finish(page, None, None, self.ack, other, self.derived, 1024)
+        self.assertFalse(other.exists())
+
+    def test_checkpoint_directory_sync_failure_can_be_retried_idempotently(self):
+        from unittest.mock import patch
+        from scripts import research_feed_progress as progress
+        import stat
+        page = self.page(data=b'')
+        progress.ack(page, self.ack, None, self.derived, 1024)
+        real_fsync = os.fsync
+        def fail_directory(fd):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise OSError('injected directory fsync failure')
+            real_fsync(fd)
+        with patch.object(progress.os, 'fsync', side_effect=fail_directory):
+            with self.assertRaisesRegex(OSError, 'directory fsync failure'):
+                progress.finish(page, None, None, self.ack, self.checkpoint, self.derived, 1024)
+            with self.assertRaisesRegex(OSError, 'directory fsync failure'):
+                progress.finish(page, None, None, self.ack, self.checkpoint, self.derived, 1024)
+        self.assertTrue(self.checkpoint.exists())
+        saved = self.checkpoint.read_bytes()
+        progress.finish(page, None, None, self.ack, self.checkpoint, self.derived, 1024)
+        self.assertEqual(self.checkpoint.read_bytes(), saved)
+        self.checkpoint.write_bytes(b'{malformed')
+        with self.assertRaisesRegex(ValueError, 'existing output'):
+            progress.finish(page, None, None, self.ack, self.checkpoint, self.derived, 1024)
+        self.assertEqual(self.checkpoint.read_bytes(), b'{malformed')
+
+    def test_existing_zero_ack_can_be_retried_without_replacement(self):
+        from scripts import research_feed_progress as progress
+        page = self.page(data=b'')
+        page_hash = digest(page.read_bytes())
+        old = {'schema_name':'research_feed_page_ack', 'schema_version':1, 'page_sha256':page_hash,
+               'status':'no_usable_inputs', 'comparison_path':None, 'comparison_sha256':None}
+        target = self.ack / (page_hash + '.json')
+        target.write_text(json.dumps(old, sort_keys=True, indent=2) + '\n')
+        before = target.read_bytes()
+        self.assertTrue(progress.ack(page, self.ack, None, self.derived, 1024)['reused'])
+        self.assertEqual(target.read_bytes(), before)
+        progress.finish(page, None, None, self.ack, self.checkpoint, self.derived, 1024)
 
     def test_zero_accepted_page_may_be_acknowledged_without_experiment(self):
         page=self.page(data=b'')
