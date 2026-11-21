@@ -108,6 +108,8 @@ def main() -> int:
     if store == derived or not store.is_relative_to(derived):
         raise ValueError('store must be a separate directory beneath data/derived_reports')
     if args.command == 'compare':
+        if args.experiments[0] == args.experiments[1]:
+            raise ValueError('comparison requires two distinct experiments')
         candidate_store = args.candidate_store.resolve() if args.candidate_store else store
         if candidate_store == derived or not candidate_store.is_relative_to(derived):
             raise ValueError('candidate store must be beneath data/derived_reports')
@@ -118,7 +120,13 @@ def main() -> int:
         for source_store, item in zip(stores, args.experiments):
             dbpath = source_store / 'experiments.sqlite3'
             require_local_file(source_store, dbpath)
-            with sqlite3.connect(dbpath.as_uri() + '?mode=ro', uri=True) as db:
+            if args.candidate_store:
+                if any((source_store / ('experiments.sqlite3' + suffix)).exists() for suffix in ('-wal', '-journal')):
+                    raise ValueError('store has pending SQLite journal; reconcile before comparison')
+                uri = dbpath.as_uri() + '?mode=ro&immutable=1'
+            else:
+                uri = dbpath.as_uri() + '?mode=ro'
+            with sqlite3.connect(uri, uri=True) as db:
                 rows.append(db.execute('SELECT git_commit, input_sha256, outcome_sha256, config_json, result_json, output_dir FROM experiments WHERE experiment_id=?', (item,)).fetchone())
         if any(row is None for row in rows):
             raise ValueError('unknown experiment')
