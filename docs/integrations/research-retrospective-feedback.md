@@ -4,7 +4,7 @@
 - **Owner/task:** prediction-bot `t_2f4bb125`.
 - **Branch:** `feat/auto-learning-feedback-t_2f4bb125`; worktree `/home/ryushe/worktrees/prediction-bot-auto-learning-feedback-t_2f4bb125`.
 - **Base:** `99216cdd33117200f2e049fcf82b0b2aa88d05fd`; merge-back target `feat/auto-learning-loop-t_2f4bb125`, then beta only after combined verification.
-- **Immutable implementation/recovery checkpoint:** `2a3055030fb7f3e0ac0b6669d6e42c8bca2886e0`. This dossier is recorded by a later commit.
+- **Immutable implementation/recovery checkpoints:** initial `2a3055030fb7f3e0ac0b6669d6e42c8bca2886e0`; review-blocker correction `83a273cb5cefffd51007b7af040acfa5f91ae9fc`. This checkpoint update is recorded by a later dossier-only commit. Resume by re-reviewing the correction and retained-data receipt before parent integration; no activation is authorized.
 - **Intent:** close the immediate loop between an agent's sealed source-only experiments and later resolved directional feedback without executing candidate code against outcomes. This is not a full-strategy, paper, live, or promotion implementation.
 
 ## Contract
@@ -24,4 +24,4 @@ The scorer runs trusted checkout code, not the candidate version; proper contain
 
 ## Next and release boundaries
 
-Independent reviewer: examine artifact/SQLite/path and input/config integrity, outcome blindness claims, action/side classification, output crash/overwrite behavior, and actual CLI on exact `2a3055030fb7f3e0ac0b6669d6e42c8bca2886e0`; run named synthetic tests only. Fix blockers and re-review before parent integration. To close the larger learning loop, connect the reviewed fresh-input and independent-outcome adapters, agent/scheduler and separately verified paper behavior; never mark a candidate promotion-ready from this report. Keep the previously approval-blocked wallet/source-clock probes blocked; do not reproduce or substitute them.
+Independent reviewer: re-check correction `83a273cb5cefffd51007b7af040acfa5f91ae9fc`, its focused synthetic tests and retained-data receipt, especially coverage, seal and scorer-reproducibility limits, before parent integration. To close the larger learning loop, connect the reviewed fresh-input and independent-outcome adapters, agent/scheduler and separately verified paper behavior; never mark a candidate promotion-ready from this report. Keep the previously approval-blocked wallet/source-clock probes blocked; do not reproduce or substitute them.
