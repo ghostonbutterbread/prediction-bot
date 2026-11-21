@@ -11,6 +11,62 @@ SCRIPT = Path(__file__).resolve().parents[1] / 'scripts/daily_research.py'
 GUARD = SCRIPT.parent / 'daily_research_guard.sh'
 
 class DailyResearchTest(unittest.TestCase):
+    def test_concurrent_native_claims_have_one_owner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            commands = [[sys.executable, str(SCRIPT), 'claim', '--work', tmp, '--owner', owner] for owner in ('first', 'second')]
+            processes = [subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for cmd in commands]
+            results = [process.communicate(timeout=10) for process in processes]
+            self.assertEqual(sorted(p.returncode for p in processes), [0, 1], results)
+            winner = next(i for i, p in enumerate(processes) if p.returncode == 0)
+            self.assertEqual(json.loads((Path(tmp) / '.daily-claim' / 'claim.json').read_text())['owner'], ('first', 'second')[winner])
+
+    def test_invalid_cli_invocation_has_cron_failure_marker(self):
+        result = subprocess.run([sys.executable, str(SCRIPT), 'claim'], capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('[CRON_FAILURE]', result.stderr)
+
+    def test_native_claim_survives_crash_and_requires_matching_finish(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            claim = [sys.executable, str(SCRIPT), 'claim', '--work', str(root), '--owner', 'run-1']
+            finish = [sys.executable, str(SCRIPT), 'finish', '--work', str(root), '--owner', 'run-1']
+            first = subprocess.run(claim, capture_output=True, text=True)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            duplicate = subprocess.run(claim, capture_output=True, text=True)
+            self.assertNotEqual(duplicate.returncode, 0)
+            self.assertIn('[CRON_FAILURE]', duplicate.stderr)
+            wrong = subprocess.run(finish[:-1] + ['run-2'], capture_output=True, text=True)
+            self.assertNotEqual(wrong.returncode, 0)
+            self.assertTrue((root / '.daily-claim').exists())
+            self.assertEqual(subprocess.run(finish, capture_output=True, text=True).returncode, 0)
+            self.assertFalse((root / '.daily-claim').exists())
+            self.assertEqual(len(list((root / 'claim-history').iterdir())), 1)
+            self.assertEqual(subprocess.run(claim[:-1] + ['run-3'], capture_output=True, text=True).returncode, 0)
+            (root / '.daily-claim' / 'claim.json').write_text('incomplete')
+            stale = subprocess.run(finish[:-1] + ['run-3'], capture_output=True, text=True)
+            self.assertNotEqual(stale.returncode, 0)
+            self.assertTrue((root / '.daily-claim').exists())
+            # Only an operator reconciliation moves the uncertain claim aside.
+            (root / '.daily-claim').rename(root / 'operator-preserved-claim')
+            recovered = subprocess.run(claim[:-1] + ['run-4'], capture_output=True, text=True)
+            self.assertEqual(recovered.returncode, 0, recovered.stderr)
+            self.assertEqual((root / 'operator-preserved-claim' / 'claim.json').read_text(), 'incomplete')
+
+    def test_dangling_completion_marker_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            inputs = root / 'inputs'; inputs.write_text('input')
+            outcomes = root / 'outcomes'; outcomes.write_text('outcome')
+            catalog = root / 'catalog'; catalog.write_text(json.dumps([{'inputs': str(inputs), 'outcomes': str(outcomes)}]))
+            cmd = [sys.executable, str(SCRIPT), 'select', '--catalog', str(catalog), '--state', str(root / 'state'), '--max-input-bytes', '100', '--max-outcome-bytes', '100']
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            directory = Path(json.loads(result.stdout)['directory'])
+            (directory / 'complete.json').symlink_to('missing')
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('[CRON_FAILURE]', result.stderr)
+            self.assertTrue((directory / 'complete.json').is_symlink())
+
     def test_guard_locks_job_and_reconciles_only_owned_container(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); work = root / 'work'; work.mkdir()

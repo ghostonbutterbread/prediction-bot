@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Select bounded frozen research inputs and verify declared completion evidence."""
 import argparse
+import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
 import sys
+import uuid
+from datetime import datetime, timezone
 
 
 def read_bounded(path, limit):
@@ -21,6 +24,51 @@ def read_bounded(path, limit):
 
 def digest(content):
     return hashlib.sha256(content).hexdigest()
+
+
+def sync_directory(path):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def ownership(args):
+    work = Path(args.work).resolve(strict=True)
+    if not work.is_dir() or not args.owner.strip():
+        raise ValueError('existing work directory and nonempty owner required')
+    active = work / '.daily-claim'
+    with (work / '.daily-claim.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if args.command == 'claim':
+            try:
+                active.mkdir()
+            except FileExistsError as exc:
+                raise ValueError('existing or unknown claim; operator reconciliation required') from exc
+            sync_directory(work)
+            record = {'owner': args.owner, 'claim_id': uuid.uuid4().hex,
+                      'started_at': datetime.now(timezone.utc).isoformat()}
+            with (active / 'claim.json').open('x') as stream:
+                json.dump(record, stream, sort_keys=True)
+                stream.flush()
+                os.fsync(stream.fileno())
+            sync_directory(active)
+            return {'status': 'claimed', **record}
+        record = read_json(active / 'claim.json')
+        claim_id = record.get('claim_id') if isinstance(record, dict) else None
+        if not isinstance(record, dict) or record.get('owner') != args.owner or not isinstance(claim_id, str) or len(claim_id) != 32 or any(c not in '0123456789abcdef' for c in claim_id):
+            raise ValueError('claim owner or identity mismatch; operator reconciliation required')
+        history = work / 'claim-history'
+        history.mkdir(exist_ok=True)
+        sync_directory(work)
+        destination = history / claim_id
+        if os.path.lexists(destination):
+            raise ValueError('claim history collision; operator reconciliation required')
+        os.rename(active, destination)
+        sync_directory(history)
+        sync_directory(work)
+        return {'status': 'finished', **record}
 
 
 def read_json(path, limit=1024 * 1024):
@@ -110,7 +158,7 @@ def select(args):
         directory = state / pair
         if directory.exists():
             validate_selection(directory, pair, ih, oh, args.max_input_bytes, args.max_outcome_bytes)
-            if (directory / 'complete.json').exists():
+            if os.path.lexists(directory / 'complete.json'):
                 validate_completion(directory, pair)
                 continue
             if chosen is None:
@@ -164,8 +212,13 @@ def complete(args):
     return {'status': 'complete', 'directory': str(directory), 'pair_sha256': pair}
 
 
+class CronArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        super().error('[CRON_FAILURE] ' + message)
+
+
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = CronArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
     s = sub.add_parser('select')
     s.add_argument('--catalog', required=True)
@@ -178,11 +231,16 @@ def main():
     c.add_argument('--directory', required=True)
     c.add_argument('--max-input-bytes', type=int, required=True)
     c.add_argument('--max-outcome-bytes', type=int, required=True)
+    for name in ('claim', 'finish'):
+        o = sub.add_parser(name)
+        o.add_argument('--work', required=True)
+        o.add_argument('--owner', required=True)
     args = parser.parse_args()
     try:
-        print(json.dumps(select(args) if args.command == 'select' else complete(args), sort_keys=True))
+        operation = {'select': select, 'complete': complete, 'claim': ownership, 'finish': ownership}[args.command]
+        print(json.dumps(operation(args), sort_keys=True))
     except (OSError, ValueError, KeyError, TypeError) as exc:
-        print(f'daily_research error: {exc}', file=sys.stderr)
+        print(f'[CRON_FAILURE] daily_research error: {exc}', file=sys.stderr)
         return 1
     return 0
 

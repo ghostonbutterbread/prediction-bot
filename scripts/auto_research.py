@@ -28,6 +28,18 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def require_local_file(root: Path, path: Path) -> None:
+    """Reject store-internal links; the mounted root itself is caller-trusted."""
+    relative = path.relative_to(root)
+    current = root
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            raise ValueError(f'symlink in experiment store: {current}')
+    if not path.is_file():
+        raise ValueError(f'experiment file missing: {path}')
+
+
 def git(*args: str) -> str:
     return subprocess.run(['git', *args], cwd=ROOT, check=True, text=True,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout.strip()
@@ -63,8 +75,13 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+class CronArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        super().error('[CRON_FAILURE] ' + message)
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = CronArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
     run = sub.add_parser('run')
     run.add_argument('--store', type=Path, required=True, help='directory beneath collector data/derived_reports')
@@ -81,6 +98,7 @@ def main() -> int:
     queue.add_argument('--note', required=True)
     compare = sub.add_parser('compare', help='compare two matched source-only runs')
     compare.add_argument('--store', type=Path, required=True)
+    compare.add_argument('--candidate-store', type=Path, help='separate candidate store; remaps both run paths under their respective stores')
     compare.add_argument('experiments', nargs=2)
     args = parser.parse_args()
 
@@ -90,10 +108,18 @@ def main() -> int:
     if store == derived or not store.is_relative_to(derived):
         raise ValueError('store must be a separate directory beneath data/derived_reports')
     if args.command == 'compare':
-        if not (store / 'experiments.sqlite3').is_file():
-            raise ValueError('experiment store does not exist')
-        with sqlite3.connect(store / 'experiments.sqlite3') as db:
-            rows = [db.execute('SELECT git_commit, input_sha256, outcome_sha256, config_json, result_json, output_dir FROM experiments WHERE experiment_id=?', (item,)).fetchone() for item in args.experiments]
+        candidate_store = args.candidate_store.resolve() if args.candidate_store else store
+        if candidate_store == derived or not candidate_store.is_relative_to(derived):
+            raise ValueError('candidate store must be beneath data/derived_reports')
+        stores = (store, candidate_store)
+        if args.candidate_store and (store == candidate_store or store.is_relative_to(candidate_store) or candidate_store.is_relative_to(store)):
+            raise ValueError('baseline and candidate stores must be distinct and non-overlapping')
+        rows = []
+        for source_store, item in zip(stores, args.experiments):
+            dbpath = source_store / 'experiments.sqlite3'
+            require_local_file(source_store, dbpath)
+            with sqlite3.connect(dbpath.as_uri() + '?mode=ro', uri=True) as db:
+                rows.append(db.execute('SELECT git_commit, input_sha256, outcome_sha256, config_json, result_json, output_dir FROM experiments WHERE experiment_id=?', (item,)).fetchone())
         if any(row is None for row in rows):
             raise ValueError('unknown experiment')
         config_a, config_b = (json.loads(row[3]) for row in rows)
@@ -101,11 +127,22 @@ def main() -> int:
         if rows[0][1:3] != rows[1][1:3] or any(config_a[key] != config_b[key] for key in keys):
             raise ValueError('experiments have different input, outcome, or replay settings')
         summaries, identities = [], []
-        for experiment_id, row in zip(args.experiments, rows):
-            result, directory = json.loads(row[4]), Path(row[5])
+        for experiment_id, row, source_store in zip(args.experiments, rows, stores):
+            result = json.loads(row[4])
+            if args.candidate_store:
+                if len(experiment_id) != 32 or any(c not in '0123456789abcdef' for c in experiment_id):
+                    raise ValueError('invalid experiment identity')
+                directory = source_store / 'runs' / experiment_id
+            else:
+                directory = Path(row[5])
             if result.get('economic_status') != 'excluded_quote_only':
                 raise ValueError('legacy economic results are ineligible; rerun in a new output directory')
+            required = {'sealed_control_decisions.jsonl', 'sealed_candidate_decisions.jsonl', 'post_decision_resolution_report.json'}
+            if not required.issubset(result['artifacts']) or any(Path(name).name != name for name in result['artifacts']):
+                raise ValueError('required artifact hashes missing or invalid')
             for artifact, expected_hash in result['artifacts'].items():
+                if args.candidate_store:
+                    require_local_file(source_store, directory / artifact)
                 if sha256(directory / artifact) != expected_hash:
                     raise ValueError('artifact hash mismatch')
             lanes, lane_keys, lane_ids = {}, [], {}
@@ -226,6 +263,6 @@ def main() -> int:
 if __name__ == '__main__':
     try:
         raise SystemExit(main())
-    except (ValueError, OSError, sqlite3.Error, subprocess.CalledProcessError) as exc:
-        print(f'auto_research: {exc}', file=sys.stderr)
+    except (ValueError, OSError, KeyError, TypeError, sqlite3.Error, subprocess.CalledProcessError) as exc:
+        print(f'[CRON_FAILURE] auto_research: {exc}', file=sys.stderr)
         raise SystemExit(1)
