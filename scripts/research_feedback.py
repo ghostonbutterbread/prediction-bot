@@ -28,6 +28,18 @@ ARTIFACT = 'sealed_control_decisions.jsonl'
 REPLAY_SETTINGS = ('min_sample_count', 'max_rows', 'history', 'cohort_per_shape_target')
 
 
+def require_local_file(root: Path, path: Path) -> None:
+    """Reject store-internal links; the mounted root itself is caller-trusted."""
+    relative = path.relative_to(root)
+    current = root
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            raise ValueError(f'symlink in experiment store: {current}')
+    if not path.is_file():
+        raise ValueError(f'experiment file missing: {path}')
+
+
 def read_bounded(path: Path, maximum: int) -> bytes:
     if maximum < 1:
         raise ValueError('byte limits must be positive')
@@ -57,7 +69,9 @@ def identity(row: dict) -> str:
     return json.dumps([key, digest], sort_keys=True, separators=(',', ':'))
 
 
-def load_run(db: sqlite3.Connection, store: Path, experiment: str, maximum: int) -> dict:
+def load_run(db: sqlite3.Connection, store: Path, experiment: str, maximum: int, *, remap: bool = False) -> dict:
+    if remap and (len(experiment) != 32 or any(c not in '0123456789abcdef' for c in experiment)):
+        raise ValueError('invalid experiment identity')
     row = db.execute('SELECT git_commit,input_sha256,outcome_sha256,config_json,result_json,output_dir FROM experiments WHERE experiment_id=?', (experiment,)).fetchone()
     if row is None:
         raise ValueError(f'unknown experiment: {experiment}')
@@ -67,10 +81,12 @@ def load_run(db: sqlite3.Connection, store: Path, experiment: str, maximum: int)
     config, result = json.loads(config_json), json.loads(result_json)
     if result.get('economic_status') != 'excluded_quote_only':
         raise ValueError('experiment is not a directional-only research run')
-    directory = Path(directory).resolve(strict=True)
+    directory = store / 'runs' / experiment if remap else Path(directory).resolve(strict=True)
     if not directory.is_relative_to((store / 'runs').resolve()):
         raise ValueError('experiment output must be inside this research store')
     path = directory / ARTIFACT
+    if remap:
+        require_local_file(store, path)
     raw = read_bounded(path, maximum)
     observed_hash = hashlib.sha256(raw).hexdigest()
     if observed_hash != result.get('artifacts', {}).get(ARTIFACT):
@@ -90,14 +106,15 @@ def load_run(db: sqlite3.Connection, store: Path, experiment: str, maximum: int)
     if not isinstance(stats, dict) or any(type(stats.get(k)) is not int or stats[k] < 0 for k in names):
         coverage = {'status': 'unknown', 'reason': 'missing or invalid producer decision_stats'}
     else:
-        seen, invalid, produced = (stats[k] for k in names[:3])
-        complete = invalid == 0 and seen == produced == len(decisions)
+        seen, invalid, produced, candidate = (stats[k] for k in names)
+        reconciled = seen == invalid + produced and produced == candidate == len(decisions)
+        complete = invalid == 0 and reconciled
         coverage = {'status': 'complete_for_producer_seen_rows' if complete else 'incomplete',
                     'input_records_seen': seen, 'input_records_invalid_identity': invalid,
                     'produced_control_decisions': produced,
-                    'produced_candidate_decisions': stats['sealed_candidate_decisions'],
+                    'produced_candidate_decisions': candidate,
                     'artifact_control_decisions': len(decisions),
-                    'counts_reconcile': seen == invalid + produced and produced == len(decisions)}
+                    'counts_reconcile': reconciled}
     return {'experiment_id': experiment, 'git_commit': commit, 'input_sha256': input_hash,
             'original_outcome_sha256': old_outcome_hash, 'config': config,
             'selected_coverage': coverage, 'sealed_decisions_sha256': observed_hash,
@@ -144,11 +161,15 @@ def scorer_identity() -> dict:
 
 def run(args: argparse.Namespace) -> dict:
     root, store = derived_reports_root().resolve(), args.store.resolve(strict=True)
-    if store == root or not store.is_relative_to(root):
-        raise ValueError('store must be a separate directory beneath data/derived_reports')
+    candidate_store = args.candidate_store.resolve(strict=True) if args.candidate_store else store
+    for source_store in (store, candidate_store):
+        if source_store == root or not source_store.is_relative_to(root):
+            raise ValueError('store must be a separate directory beneath data/derived_reports')
+    if args.candidate_store and (store == candidate_store or store.is_relative_to(candidate_store) or candidate_store.is_relative_to(store)):
+        raise ValueError('baseline and candidate stores must be distinct and non-overlapping')
     output = args.output.resolve()
-    if output == root or not output.is_relative_to(root) or output.is_relative_to(store):
-        raise ValueError('output must be a separate path under data/derived_reports and outside store')
+    if output == root or not output.is_relative_to(root) or any(output.is_relative_to(s) for s in (store, candidate_store)):
+        raise ValueError('output must be a separate path under data/derived_reports and outside stores')
     if not output.parent.is_dir():
         raise ValueError('output parent directory must already exist')
     if output.exists():
@@ -158,13 +179,24 @@ def run(args: argparse.Namespace) -> dict:
     if outcome_hash != args.outcome_sha256:
         raise ValueError('outcome hash mismatch')
     outcomes = read_jsonl(outcomes_raw)
-    dbpath = store / 'experiments.sqlite3'
-    if not dbpath.is_file():
-        raise ValueError('experiment database does not exist')
-    with sqlite3.connect(dbpath.as_uri() + '?mode=ro', uri=True) as db:
-        left = load_run(db, store, args.baseline, args.max_decision_bytes)
-        right = load_run(db, store, args.candidate, args.max_decision_bytes)
-    if left['input_sha256'] != right['input_sha256'] or any(left['config'].get(k) != right['config'].get(k) for k in REPLAY_SETTINGS):
+    runs = []
+    for source_store, experiment in ((store, args.baseline), (candidate_store, args.candidate)):
+        dbpath = source_store / 'experiments.sqlite3'
+        if args.candidate_store:
+            require_local_file(source_store, dbpath)
+        elif not dbpath.is_file():
+            raise ValueError('experiment database does not exist')
+        with sqlite3.connect(dbpath.as_uri() + '?mode=ro', uri=True) as db:
+            runs.append(load_run(db, source_store, experiment, args.max_decision_bytes, remap=bool(args.candidate_store)))
+    left, right = runs
+    for item in (left, right):
+        missing = [key for key in REPLAY_SETTINGS if key not in item['config']]
+        if missing:
+            raise ValueError(f"missing replay settings for {item['experiment_id']}: {', '.join(missing)}")
+        invalid = [key for key in ('min_sample_count', 'cohort_per_shape_target') if item['config'][key] is None]
+        if invalid:
+            raise ValueError(f"invalid replay settings for {item['experiment_id']}: {', '.join(invalid)}")
+    if left['input_sha256'] != right['input_sha256'] or any(left['config'][k] != right['config'][k] for k in REPLAY_SETTINGS):
         raise ValueError('experiments have different input or replay settings')
     if left['identities'] != right['identities']:
         raise ValueError('selected decision identities differ')
@@ -186,8 +218,8 @@ def run(args: argparse.Namespace) -> dict:
               'outcome_sha256': outcome_hash, 'outcome_rows': len(outcomes),
               'sealed_decision_identities_matched': True, 'independent_opportunity_roster': False,
               'producer_coverage_counts_match': (left['selected_coverage'] == right['selected_coverage']
-                  if all(r['selected_coverage']['status'] != 'unknown' for r in (left, right)) else None),
-              'reproducibility': {**scorer_identity(), 'compared_replay_settings': {k: left['config'].get(k) for k in REPLAY_SETTINGS}},
+                  if all(r['selected_coverage'].get('counts_reconcile') is True for r in (left, right)) else None),
+              'reproducibility': {**scorer_identity(), 'compared_replay_settings': {k: left['config'][k] for k in REPLAY_SETTINGS}},
               'runs': [a, b], 'changed_resolved_decisions': [
                   {'from': old, 'to': new, 'baseline_direction': direction, 'count': count}
                   for (old, new, direction), count in sorted(changes.items())],
@@ -213,6 +245,7 @@ def run(args: argparse.Namespace) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--store', type=Path, required=True)
+    parser.add_argument('--candidate-store', type=Path, help='separate candidate store; remap both run paths under their respective stores')
     parser.add_argument('--baseline', required=True)
     parser.add_argument('--candidate', required=True)
     parser.add_argument('--outcomes', type=Path, required=True)

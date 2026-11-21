@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import shutil
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -62,13 +63,117 @@ class ResearchFeedbackTest(unittest.TestCase):
                 db.execute('INSERT INTO experiments VALUES (?,?,?,?,?,?,?)', (name, 'c'*40, self.input_hash,
                            self.empty_hash, json.dumps(config), json.dumps(result), str(directory)))
 
-    def run_cli(self, *, outcome_hash=None, output=None):
+    def run_cli(self, *, outcome_hash=None, output=None, candidate_store=None, baseline='baseline', candidate='candidate'):
         env = dict(os.environ, HOME=str(self.root), TMPDIR=str(self.root),
                    PREDICTION_BOT_COLLECTOR_ROOT=str(self.root / 'collector'), PYTHONDONTWRITEBYTECODE='1', PYTHONPATH=str(ROOT))
-        return subprocess.run([sys.executable, str(SCRIPT), '--store', str(self.store), '--baseline', 'baseline',
-            '--candidate', 'candidate', '--outcomes', str(self.outcomes), '--outcome-sha256', outcome_hash or digest(self.outcomes.read_bytes()),
-            '--max-outcome-bytes', '65536', '--max-decision-bytes', '65536', '--output', str(output or self.output)],
-            env=env, cwd=ROOT, capture_output=True, text=True)
+        cmd = [sys.executable, str(SCRIPT), '--store', str(self.store), '--baseline', baseline,
+            '--candidate', candidate, '--outcomes', str(self.outcomes), '--outcome-sha256', outcome_hash or digest(self.outcomes.read_bytes()),
+            '--max-outcome-bytes', '65536', '--max-decision-bytes', '65536', '--output', str(output or self.output)]
+        if candidate_store is not None:
+            cmd.extend(['--candidate-store', str(candidate_store)])
+        return subprocess.run(cmd, env=env, cwd=ROOT, capture_output=True, text=True)
+
+    def prepare_separate_stores(self):
+        candidate_store = self.store.parent / 'candidate-store'
+        shutil.copytree(self.store, candidate_store)
+        baseline_id, candidate_id = 'a' * 32, 'b' * 32
+        for store, keep, remove, new_id in ((self.store, 'baseline', 'candidate', baseline_id),
+                                             (candidate_store, 'candidate', 'baseline', candidate_id)):
+            shutil.rmtree(store / 'runs' / remove)
+            (store / 'runs' / keep).rename(store / 'runs' / new_id)
+            with sqlite3.connect(store / 'experiments.sqlite3') as db:
+                db.execute('DELETE FROM experiments WHERE experiment_id=?', (remove,))
+                db.execute('UPDATE experiments SET experiment_id=?, output_dir=? WHERE experiment_id=?',
+                           (new_id, '/old/mount/runs/' + new_id, keep))
+        return candidate_store, baseline_id, candidate_id
+
+    def test_separate_stores_remap_and_same_store_compatibility(self):
+        same = self.run_cli()
+        self.assertEqual(same.returncode, 0, same.stderr)
+        same_report = json.loads(self.output.read_text())
+        candidate_store, baseline_id, candidate_id = self.prepare_separate_stores()
+        separate_output = self.output.parent / 'separate.json'
+        before = {p: p.read_bytes() for store in (self.store, candidate_store)
+                  for p in store.rglob('*') if p.is_file()}
+        run = self.run_cli(candidate_store=candidate_store, baseline=baseline_id, candidate=candidate_id, output=separate_output)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        report = json.loads(separate_output.read_text())
+        self.assertEqual([r['experiment_id'] for r in report['runs']], [baseline_id, candidate_id])
+        self.assertEqual(report['changed_resolved_decisions'], same_report['changed_resolved_decisions'])
+        self.assertTrue(report['producer_coverage_counts_match'])
+        self.assertFalse(report['diagnostic_eligible'])
+        self.assertEqual(before, {p: p.read_bytes() for store in (self.store, candidate_store)
+                                  for p in store.rglob('*') if p.is_file()})
+        self.assertFalse((self.store / 'runs' / candidate_id).exists())
+
+    def test_separate_stores_reject_overlaps_invalid_ids_and_internal_symlinks(self):
+        candidate_store, baseline_id, candidate_id = self.prepare_separate_stores()
+        for target in (self.store, self.store / 'runs', self.root):
+            run = self.run_cli(candidate_store=target, baseline=baseline_id, candidate=candidate_id)
+            self.assertNotEqual(run.returncode, 0, run.stderr)
+            self.assertFalse(self.output.exists())
+        run = self.run_cli(candidate_store=candidate_store, baseline='../escape', candidate=candidate_id)
+        self.assertIn('invalid experiment identity', run.stderr)
+        run = self.run_cli(candidate_store=candidate_store, baseline=baseline_id, candidate=candidate_id,
+                           output=candidate_store / 'result.json')
+        self.assertNotEqual(run.returncode, 0)
+        self.assertFalse((candidate_store / 'result.json').exists())
+        artifact = candidate_store / 'runs' / candidate_id / 'sealed_control_decisions.jsonl'
+        outside = self.root / 'outside.jsonl'
+        outside.write_bytes(artifact.read_bytes())
+        artifact.unlink()
+        artifact.symlink_to(outside)
+        run = self.run_cli(candidate_store=candidate_store, baseline=baseline_id, candidate=candidate_id)
+        self.assertIn('symlink in experiment store', run.stderr)
+        self.assertFalse(self.output.exists())
+
+    def test_real_producer_two_stores_feed_retrospective_feedback(self):
+        repo = self.root / 'producer-repo'
+        repo.mkdir()
+        shutil.copytree(ROOT / 'bot', repo / 'bot', ignore=shutil.ignore_patterns('__pycache__'))
+        (repo / 'scripts').mkdir()
+        shutil.copy2(ROOT / 'scripts/auto_research.py', repo / 'scripts/auto_research.py')
+        env = dict(os.environ, HOME=str(self.root), TMPDIR=str(self.root),
+                   XDG_CONFIG_HOME=str(self.root / 'config'), PREDICTION_BOT_COLLECTOR_ROOT=str(self.root / 'collector'),
+                   PYTHONDONTWRITEBYTECODE='1', PYTHONPATH=str(repo), GIT_CONFIG_NOSYSTEM='1',
+                   GIT_AUTHOR_NAME='Test', GIT_AUTHOR_EMAIL='test@example.invalid',
+                   GIT_COMMITTER_NAME='Test', GIT_COMMITTER_EMAIL='test@example.invalid')
+        for command in (('git', 'init', '-q'), ('git', 'add', 'bot', 'scripts'), ('git', 'commit', '-qm', 'synthetic producer')):
+            subprocess.run(command, cwd=repo, env=env, check=True, capture_output=True)
+        record = {'schema_name': 'replay_decision_input', 'schema_version': 1, 'decision_key': self.key,
+                  'shared_snapshot_id': 'snapshot', 'shared_candidate_id': 'candidate', 'market_id': 'market',
+                  'observed_at': self.key['observed_at_utc'],
+                  'market': {'question': 'Will Miami high exceed 80F?', 'best_yes_ask': .4, 'best_no_ask': .6,
+                             'market_metadata': {'city_id': 'miami_fl', 'market_kind': 'high', 'contract_shape': 'range'}},
+                  'source_inputs': {'source_context': {'source': 'weather', 'data': {'weather_source_snapshot': {
+                      'predicted_prob': .8, 'forecast': {'threshold': 80.0, 'question_side': 'above'},
+                      'sources': [{'source_id': 'nws', 'source_name': 'NWS', 'forecast_high': 82.0}]}}}}}
+        record['canonical_input_sha256'] = digest(json.dumps(record, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode())
+        inputs, empty = self.root / 'inputs.jsonl', self.root / 'empty.jsonl'
+        inputs.write_bytes(encode([record]))
+        empty.write_bytes(b'')
+        outcome = {'decision_key': self.key, 'canonical_input_sha256': record['canonical_input_sha256'],
+                   'market_id': 'market', 'market_status': 'finalized', 'official_outcome': 'YES',
+                   'settlement_ts': '2026-01-02T12:00:00+00:00', 'resolution_id': 'synthetic'}
+        self.outcomes.write_bytes(encode([outcome]))
+        stores = [self.store.parent / 'producer-baseline', self.store.parent / 'producer-candidate']
+        ids = []
+        for store in stores:
+            result = subprocess.run([sys.executable, str(repo / 'scripts/auto_research.py'), 'run', '--store', str(store),
+                '--inputs', str(inputs), '--outcomes', str(empty), '--idea', 'synthetic',
+                '--max-input-bytes', '65536', '--max-outcome-bytes', '65536'], cwd=repo, env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            ids.append(json.loads(result.stdout)['experiment_id'])
+        self.store = stores[0]
+        result = self.run_cli(candidate_store=stores[1], baseline=ids[0], candidate=ids[1])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(self.output.read_text())
+        self.assertEqual([r['selected_rows'] for r in report['runs']], [1, 1])
+        self.assertEqual([r['resolved_rows'] for r in report['runs']], [1, 1])
+        self.assertTrue(report['producer_coverage_counts_match'])
+        self.assertTrue(all(r['selected_coverage']['counts_reconcile'] for r in report['runs']))
+        self.assertFalse(report['diagnostic_eligible'])
+        self.assertFalse((stores[0] / 'runs' / ids[1]).exists())
 
     def test_scores_later_outcome_after_empty_outcome_decision_runs(self):
         run = self.run_cli()
@@ -146,6 +251,77 @@ class ResearchFeedbackTest(unittest.TestCase):
         self.assertEqual(coverage['input_records_seen'], 2)
         self.assertEqual(coverage['input_records_invalid_identity'], 1)
         self.assertEqual(coverage['produced_control_decisions'], 1)
+        self.assertTrue(coverage['counts_reconcile'])
+        report = json.loads(self.output.read_text())
+        self.assertTrue(report['producer_coverage_counts_match'])
+        self.assertFalse(report['diagnostic_eligible'])
+
+    def test_candidate_count_contradiction_is_not_reconciled(self):
+        with sqlite3.connect(self.store / 'experiments.sqlite3') as db:
+            for name in self.rows:
+                result = json.loads(db.execute('SELECT result_json FROM experiments WHERE experiment_id=?', (name,)).fetchone()[0])
+                result['decision_stats']['sealed_candidate_decisions'] = 0
+                db.execute('UPDATE experiments SET result_json=? WHERE experiment_id=?', (json.dumps(result), name))
+        run = self.run_cli()
+        self.assertEqual(run.returncode, 0, run.stderr)
+        report = json.loads(self.output.read_text())
+        for item in report['runs']:
+            self.assertEqual(item['selected_coverage']['status'], 'incomplete')
+            self.assertFalse(item['selected_coverage']['counts_reconcile'])
+        self.assertIsNone(report['producer_coverage_counts_match'])
+        self.assertFalse(report['diagnostic_eligible'])
+
+    def test_valid_but_different_partial_coverage_counts_do_not_match(self):
+        with sqlite3.connect(self.store / 'experiments.sqlite3') as db:
+            result = json.loads(db.execute("SELECT result_json FROM experiments WHERE experiment_id='candidate'").fetchone()[0])
+            result['decision_stats']['input_records_seen'] = 2
+            result['decision_stats']['input_records_invalid_identity'] = 1
+            db.execute("UPDATE experiments SET result_json=? WHERE experiment_id='candidate'", (json.dumps(result),))
+        run = self.run_cli()
+        self.assertEqual(run.returncode, 0, run.stderr)
+        report = json.loads(self.output.read_text())
+        self.assertFalse(report['producer_coverage_counts_match'])
+        self.assertTrue(report['runs'][1]['selected_coverage']['counts_reconcile'])
+        self.assertEqual(report['runs'][1]['selected_coverage']['status'], 'incomplete')
+        self.assertFalse(report['diagnostic_eligible'])
+
+    def test_missing_replay_setting_in_either_or_both_configs_is_rejected(self):
+        keys = ('min_sample_count', 'max_rows', 'history', 'cohort_per_shape_target')
+        original = {'min_sample_count': 5, 'max_rows': None, 'history': None, 'cohort_per_shape_target': 30}
+        for key in keys:
+            for missing_from in (('baseline',), ('candidate',), ('baseline', 'candidate')):
+                with self.subTest(key=key, missing_from=missing_from):
+                    with sqlite3.connect(self.store / 'experiments.sqlite3') as db:
+                        for name in self.rows:
+                            config = dict(original)
+                            if name in missing_from:
+                                config.pop(key)
+                            db.execute('UPDATE experiments SET config_json=? WHERE experiment_id=?', (json.dumps(config), name))
+                    output = self.output.parent / (key + '-' + '-'.join(missing_from) + '.json')
+                    run = self.run_cli(output=output)
+                    self.assertNotEqual(run.returncode, 0)
+                    self.assertIn('missing replay settings', run.stderr)
+                    self.assertFalse(output.exists())
+        with sqlite3.connect(self.store / 'experiments.sqlite3') as db:
+            db.execute('UPDATE experiments SET config_json=?', (json.dumps(original),))
+        run = self.run_cli()
+        self.assertEqual(run.returncode, 0, run.stderr)
+        settings = json.loads(self.output.read_text())['reproducibility']['compared_replay_settings']
+        self.assertEqual(settings, original)
+
+    def test_null_nonoptional_replay_settings_are_rejected(self):
+        for key in ('min_sample_count', 'cohort_per_shape_target'):
+            with self.subTest(key=key):
+                with sqlite3.connect(self.store / 'experiments.sqlite3') as db:
+                    for name in self.rows:
+                        config = json.loads(db.execute('SELECT config_json FROM experiments WHERE experiment_id=?', (name,)).fetchone()[0])
+                        config[key] = None
+                        db.execute('UPDATE experiments SET config_json=? WHERE experiment_id=?', (json.dumps(config), name))
+                output = self.output.parent / (key + '.json')
+                run = self.run_cli(output=output)
+                self.assertNotEqual(run.returncode, 0)
+                self.assertIn('invalid replay settings', run.stderr)
+                self.assertFalse(output.exists())
 
     def test_stale_seal_rejected_even_when_artifact_hash_matches(self):
         row = dict(self.rows['baseline'][0], action='SKIP')
@@ -180,7 +356,7 @@ class ResearchFeedbackTest(unittest.TestCase):
         report = json.loads(self.output.read_text())
         self.assertEqual(report['runs'][1]['selected_coverage']['status'], 'incomplete')
         self.assertFalse(report['runs'][1]['selected_coverage']['counts_reconcile'])
-        self.assertFalse(report['producer_coverage_counts_match'])
+        self.assertIsNone(report['producer_coverage_counts_match'])
 
     def test_seal_requires_producer_newline(self):
         row = dict(self.rows['baseline'][0])
