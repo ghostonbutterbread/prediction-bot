@@ -142,6 +142,7 @@ def main() -> int:
             for run in summaries
         )
         print(json.dumps({'matched_inputs_and_settings': False, 'selected_rows_matched': matched,
+                          'input_sha256': rows[0][1], 'outcome_sha256': rows[0][2],
                           'matched_decisions': len(identities[0]),
                           'diagnostic_eligible': False,
                           'coverage_scope': 'selected input rows only; no independent opportunity roster',
