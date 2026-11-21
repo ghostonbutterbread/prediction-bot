@@ -1,6 +1,6 @@
 # Feedback identity and SQLite cleanup — integration dossier
 
-- **Status:** awaiting parent independent review; not integrated or activated
+- **Status:** independent scoped PASS at `d027ab0f6c3b9bd62a574711c2fd2b845cefbb73`; parent integration pending, not activated.
 - **Owner / branch:** `fix/auto-learning-feedback-integrity-t_2f4bb125`
 - **Base:** `3d3321fe5a6301c07409dac08ed55bfc9091851f`
 - **Intended integration target:** `feat/auto-learning-loop-t_2f4bb125` (parent owns review and merge)
@@ -10,7 +10,7 @@
 
 ## Implemented contract and boundaries
 
-Feedback rejects equal baseline/candidate experiment IDs before output publication, including across different stores. Existing distinct-ID behavior is retained. Both feedback reads and auto-research compare, queue and run close connections after SQLite's existing transaction context exits; `database()` also closes on initialization failure. No SQLite URI, runtime, journal or storage settings were changed. Commit and rollback were checked against actual disposable SQLite databases. Nothing was deployed, scheduled, merged, pushed, or run against collector/paper data. Sibling `feat/auto-learning-strategy-inputs-t_2f4bb125` also changes `scripts/auto_research.py` and its tests; parent must reconcile and test the combined tree.
+Feedback rejects equal baseline/candidate experiment IDs before output publication, including across different stores. Existing distinct-ID behavior is retained. Both feedback reads and auto-research compare, queue and run close connections after SQLite's existing transaction context exits; `database()` also closes on initialization failure. No SQLite URI, runtime, journal or storage settings were changed. Commit and rollback were checked against actual disposable SQLite databases. Nothing was deployed, scheduled, merged, pushed, or run against collector/paper data. The sibling strategy-input branch modifies `bot/replay_decision_input.py` and its tests, not `scripts/auto_research.py`; that sibling remains independently blocked and is not part of this integration.
 
 ## RED / GREEN evidence
 
@@ -25,5 +25,5 @@ Working directory: this branch's worktree, with `PYTHONPATH="$PWD"`, `PYTHONDONT
 ## Remaining assumption and gates
 
 - SQLite `mode=ro` on WAL databases can create sidecars; the caller must continue to provide quiescent stores as already documented. This change neither tests nor changes SQLite journal/storage policy, and makes no general immutable-read claim.
-- Parent must obtain independent review of this exact range, reconcile sibling overlap and run relevant synthetic tests on the combined integration tree before merging. Remove this branch-local dossier from the integration target upon acceptance. Runtime activation and stable promotion remain separate decisions.
+- Independent reviewer `deleg_f361df5e` gave scoped PASS at `d027ab0f6c3b9bd62a574711c2fd2b845cefbb73`: 13 named synthetic tests and six additional tests passed, including actual rollback on commit denial and the integrated synthetic feed → compare → queue → feedback → checkpoint path. Fixture-only ResourceWarnings remained. Parent must run relevant synthetic tests on the combined tree and omit this branch-local dossier from the integration target. Runtime activation and stable promotion remain separate decisions.
 - **Resume point:** review implementation commit and dossier; integrate only through the parent-owned branch after the above gates. No task-owned uncommitted changes are intended at handoff.
