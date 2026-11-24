@@ -37,12 +37,21 @@ research agent (Hermes cron, model)            agentless cycle (Hermes cron --no
   by trusted code from the trusted checkout, never by candidate code.
 - **Same inputs:** every version in a cycle replays the same snapshot; trusted `compare` must report
   `selected_rows_matched` and the full row count, or the pair is rejected.
-- **Source clocks:** a snapshot row whose recorded source/knowledge clock (`fetched_at`, `as_of`, …) is
-  later than its `observed_at` is excluded from replay and counted in the report. The replay itself does
-  not check source availability, so this guard is the protection (verified by the source-clock probe).
+- **Source clocks:** a snapshot row with any clock-named field (`as_of`, `*_at`, `*_as_of`, `*_timestamp`)
+  later than its `observed_at`, or unreadable, is excluded from replay and counted in the report. The replay
+  itself does not check source availability (shown by the source-clock probe), so this guard is the
+  protection. Forecast-target dates are not clocks and are not checked.
 - **No overlap:** a new snapshot starts only after `min_new_rows` new indexed rows, and must not reuse
-  rows from the previous snapshot. Snapshots are the newest `page_rows` rows, not a complete history.
-- **Champion is fixed** until the operator runs `set-champion`. A `better` verdict is a flag for review.
+  rows from the previous snapshot. The snapshot is consumed before replays, so a failed cycle loses that
+  snapshot rather than replaying it twice; a version gets at most one pair per snapshot. Snapshots are the
+  newest `page_rows` rows, not a complete history.
+- **Executors:** `docker` (network none, read-only code, separate writable store) is the production
+  executor. `local` runs candidate code as the cycle user with no isolation; use it only for tests.
+- **Champion is fixed** until the operator runs `set-champion`, which also retires active candidates
+  (`superseded`) because their scores were measured against the old champion. A `better` verdict is a flag
+  for review.
+- **Live ledger:** the resolver rewrites the resolution ledger in place, so outcome binding only uses a read
+  that saw an unchanged file (size, mtime, inode); otherwise outcomes are deferred to the next cycle.
 - **Failures are loud:** any cycle failure prints `[CRON_FAILURE]` as the first line and exits nonzero;
   the journal records the error. A failing candidate is recorded and skipped; two consecutive failures
   conclude it as `broken`.

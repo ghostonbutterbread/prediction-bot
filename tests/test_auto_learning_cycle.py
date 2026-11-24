@@ -153,6 +153,49 @@ class AutoLearningCycleTest(unittest.TestCase):
         failed = self.cli('run', '--work', self.work, expect=1).stdout
         self.assertTrue(failed.startswith('[CRON_FAILURE]\n'), failed)
 
+    def test_broken_candidate_is_isolated_and_clock_guard_fails_closed(self):
+        self.append_rows([collector_row(i, letter) for i, letter in enumerate('ABCD', 1)])
+        self.cli('init', '--work', self.work, '--collector-root', self.collector, '--trusted', self.repo,
+                 '--python', sys.executable, '--executor', 'local', '--index', self.index, '--manifest', self.manifest,
+                 '--protected-root', self.source, '--resolutions', self.resolutions, '--page-rows', 4)
+        config = json.loads((self.work / 'config.json').read_text())
+        config.update(min_free_bytes=1, max_candidate_failures=1, pending_max_age_days=0)
+        (self.work / 'config.json').write_text(json.dumps(config))
+        agent = self.work / 'agent-repo'
+        subprocess.run(['git', 'checkout', '-q', '-b', 'research/noisy', 'champion'], cwd=agent, env=self.env, check=True)
+        script = agent / 'scripts/auto_research.py'
+        text = script.read_text()
+        script.write_text(text.replace("    print(json.dumps({'experiment_id'", "    print('debug line')\n    print(json.dumps({'experiment_id'", 1))
+        self.assertNotEqual(script.read_text(), text)
+        subprocess.run(['git', 'commit', '-qam', 'Noisy stdout'], cwd=agent, env=self.env, check=True)
+        commit = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=agent, env=self.env, check=True,
+                                capture_output=True, text=True).stdout.strip()
+        candidate_id = json.loads(self.cli('register', '--work', self.work, '--commit', commit,
+                                           '--hypothesis', 'noisy').stdout)['candidate_id']
+        # One row has a late recorded_as_of, one an unreadable fetched_at: both must be excluded.
+        late, unreadable = collector_row(5, 'A'), collector_row(6, 'B')
+        late['decision_artifact']['source_context']['data']['weather_source_snapshot']['sources'][0]['as_of'] = \
+            '2026-08-13T00:00:00+00:00'
+        unreadable['decision_artifact']['source_context']['data']['weather_source_snapshot']['sources'][0]['fetched_at'] = \
+            'yesterday'
+        self.append_rows([late, unreadable])
+        config.update(page_rows=6, min_new_rows=2)
+        (self.work / 'config.json').write_text(json.dumps(config))
+        out = self.cli('run', '--work', self.work, '--verbose').stdout
+        self.assertIn('complete_with_warnings', out)
+        self.assertIn(f'Candidate failure {candidate_id}', out)
+        cycle = json.loads(sorted(self.work.glob('cycles/*/cycle.json'))[-1].read_text())
+        self.assertEqual(cycle['snapshot']['audit']['source_clock_violation_rows'], 2, cycle['snapshot']['audit'])
+        self.assertEqual(cycle['snapshot']['replay_rows'], 4)
+        state = json.loads((self.work / 'state/feed.json').read_text())
+        self.assertEqual(state['cycle_id'], cycle['cycle_id'])
+        board = json.loads((self.work / 'scoreboard.json').read_text())
+        self.assertEqual(board['groups'][candidate_id]['verdict'], 'broken')
+        # An open pair past its age limit expires instead of staying open forever.
+        pairs = list(self.work.glob('pending/*/events.jsonl'))
+        self.assertEqual(len(pairs), 0)  # the only candidate failed: no pair was queued
+        self.assertIn('waiting_for_new_rows', self.cli('run', '--work', self.work, '--verbose').stdout)
+
 
 if __name__ == '__main__':
     unittest.main()

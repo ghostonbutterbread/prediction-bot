@@ -58,15 +58,20 @@ DEFAULTS = {
     'max_candidate_failures': 2,
     'notify': 'events',
 }
-# Source/knowledge clocks that must not be later than the decision observation.
-# Forecast-target keys (valid/target dates) are intentionally not included.
-KNOWLEDGE_CLOCK_KEYS = {'as_of', 'fetched_at', 'source_fetched_at', 'attempted_at', 'captured_at',
-                        'retrieved_at', 'issued_at', 'published_at', 'updated_at',
-                        'source_reported_updated_at', 'observed_at', 'current_observed_at'}
+# Knowledge clocks (when something was known/fetched) that must not be later than the decision
+# observation: these names plus any key ending in ``_at``/``_as_of``/``_timestamp``. Forecast-target
+# keys (``target_date``, ``forecast_date``, ``market_target_date``) are not clocks and are ignored.
+KNOWLEDGE_CLOCK_KEYS = {'as_of', 'source_timestamp', 'timestamp'}
+CLOCK_SUFFIXES = ('_at', '_as_of', '_timestamp')
+DECISION_IDENTITY_KEYS = {'decision_key', 'observed_at'}
 
 
 class CycleError(Exception):
     """An actionable failure: the message says what failed and what to reconcile."""
+
+
+class LedgerUnstable(CycleError):
+    """The live resolution ledger was being rewritten; retry next cycle."""
 
 
 # --------------------------------------------------------------------------- utilities
@@ -351,14 +356,17 @@ def ensure_code(work: Work, source_repos: list[Path], commit: str) -> Path:
 
 # --------------------------------------------------------------------------- snapshot
 
+def is_clock_key(key: str) -> bool:
+    return key in KNOWLEDGE_CLOCK_KEYS or key.endswith(CLOCK_SUFFIXES)
+
+
 def iter_knowledge_clocks(value, path: str):
+    """Yield (path, datetime or None) for every clock-named scalar; None means unreadable."""
     if isinstance(value, dict):
         for key, item in value.items():
             child = f'{path}.{key}'
-            if isinstance(item, str) and (key in KNOWLEDGE_CLOCK_KEYS or key.endswith('fetched_at')):
-                parsed = parse_time(item)
-                if parsed is not None:
-                    yield child, parsed
+            if isinstance(key, str) and is_clock_key(key) and item is not None and not isinstance(item, (dict, list)):
+                yield child, parse_time(item)
             else:
                 yield from iter_knowledge_clocks(item, child)
     elif isinstance(value, list):
@@ -379,8 +387,10 @@ def audit_inputs(path: Path, clean_output: Path | None = None) -> dict:
         decision_time = parse_time(row.get('observed_at'))
         if decision_time is not None:
             observed.append(decision_time)
-        late = sorted({p for p, t in iter_knowledge_clocks(row.get('source_inputs'), 'source_inputs')
-                       if decision_time is not None and t > decision_time})
+        scanned = {k: v for k, v in row.items() if k not in DECISION_IDENTITY_KEYS}
+        # Fail closed: an unreadable clock counts as a violation, like a later one.
+        late = sorted({p for p, t in iter_knowledge_clocks(scanned, 'row')
+                       if decision_time is not None and (t is None or t > decision_time)})
         if late or decision_time is None:
             violations += 1
             if len(examples) < 5:
@@ -499,7 +509,12 @@ def replay(cfg: dict, cycle: Path, cycle_id: str, label: str, commit: str, code:
     (run_dir / 'stderr.log').write_text(result.stderr[-200_000:], encoding='utf-8')
     if result.returncode != 0:
         raise CycleError(f'replay {label} at {commit[:12]} failed (exit {result.returncode}): {tail(result.stderr)}')
-    receipt = json.loads(result.stdout)
+    try:  # candidate-controlled output: any malformed receipt is that candidate's failure
+        receipt = json.loads(result.stdout)
+        if not isinstance(receipt, dict) or not isinstance(receipt.get('experiment_id'), str):
+            raise ValueError('receipt lacks experiment_id')
+    except ValueError as exc:
+        raise CycleError(f'replay {label} printed an invalid receipt: {exc}; stdout {tail(result.stdout, 300)!r}') from exc
     if receipt.get('git_commit') != commit:
         raise CycleError(f'replay {label} reported commit {receipt.get("git_commit")}, expected {commit}')
     write_json_new(run_dir / 'receipt.json', receipt)
@@ -564,6 +579,11 @@ def pair_records(work: Work) -> list[dict]:
 
 def create_pair(work: Work, *, pair_id: str, label: str, candidate_id: str | None, comparison_path: Path,
                 comparison: dict, inputs: Path, baseline: dict, candidate: dict, extra: dict) -> dict:
+    for existing in pair_records(work):  # one pair per version and snapshot, even after a crash/retry
+        if (existing.get('candidate_id'), existing['label'], existing['inputs_sha256']) == \
+                (candidate_id, label, comparison['input_sha256']):
+            raise CycleError(f'pair for {label} on inputs {comparison["input_sha256"][:12]} already exists '
+                             f'({existing["pair_id"]})')
     record = {'schema': 'auto-learning-pending-pair-v1', 'pair_id': pair_id, 'label': label,
               'candidate_id': candidate_id, 'created_at': iso(),
               'comparison_path': str(comparison_path), 'comparison_sha256': sha256_file(comparison_path),
@@ -580,11 +600,20 @@ def create_pair(work: Work, *, pair_id: str, label: str, candidate_id: str | Non
 def filter_resolutions(cfg: dict, market_ids: set[str], destination: Path) -> dict:
     """Copy only relevant complete rows from the live resolution ledger into a pinned file."""
     source = Path(cfg['resolutions'])
-    size = source.stat().st_size
-    if size > cfg['max_resolution_bytes']:
-        raise CycleError(f'resolution ledger {source} exceeds max_resolution_bytes')
-    with source.open('rb') as stream:
-        data = stream.read(size)
+    # The resolver rewrites this ledger in place; only use a read that saw a stable file.
+    for _attempt in range(3):
+        before = source.stat()
+        if before.st_size > cfg['max_resolution_bytes']:
+            raise CycleError(f'resolution ledger {source} exceeds max_resolution_bytes')
+        with source.open('rb') as stream:
+            data = stream.read(before.st_size + 1)
+        after = source.stat()
+        if (before.st_size, before.st_mtime_ns, before.st_ino) == (after.st_size, after.st_mtime_ns, after.st_ino) \
+                and len(data) == before.st_size:
+            break
+        time.sleep(5)
+    else:
+        raise LedgerUnstable(f'resolution ledger {source} changed during three reads; outcomes deferred')
     data = data[:data.rfind(b'\n') + 1]
     kept, present, malformed = [], set(), 0
     for line in data.splitlines(keepends=True):
@@ -621,8 +650,20 @@ def process_outcomes(cfg: dict, work: Work, cycle: Path, cycle_id: str) -> dict:
     if not open_pairs:
         return summary
     cache: dict = {}
-    needed = set().union(*(market_ids_of(Path(p['inputs_path']), cache) for p in open_pairs))
-    pinned = filter_resolutions(cfg, needed, cycle / 'resolutions.filtered.jsonl')
+    usable = []
+    for pair in open_pairs:
+        try:
+            market_ids_of(Path(pair['inputs_path']), cache)
+            usable.append(pair)
+        except (OSError, ValueError, KeyError) as exc:
+            summary['errors'].append({'pair_id': pair['pair_id'], 'error': f'inputs unreadable: {exc}'})
+    open_pairs = usable
+    needed = set().union(set(), *(market_ids_of(Path(p['inputs_path']), cache) for p in open_pairs))
+    try:
+        pinned = filter_resolutions(cfg, needed, cycle / 'resolutions.filtered.jsonl')
+    except LedgerUnstable as exc:
+        summary['deferred'] = str(exc)
+        return summary
     present = pinned.pop('markets_present')
     summary['resolutions'] = pinned
     for pair in open_pairs:
@@ -665,8 +706,13 @@ def process_outcomes(cfg: dict, work: Work, cycle: Path, cycle_id: str) -> dict:
                     summary['finalized'].append(pair['pair_id'])
                 elif status == 'expired':
                     summary['expired'].append(pair['pair_id'])
-            except CycleError as exc:
-                summary['errors'].append({'pair_id': pair['pair_id'], 'error': str(exc)})
+            except (CycleError, OSError, ValueError, KeyError, TypeError) as exc:
+                summary['errors'].append({'pair_id': pair['pair_id'], 'error': f'{type(exc).__name__}: {exc}'})
+                if pair_age >= cfg['pending_max_age_days']:
+                    append_jsonl(directory / 'events.jsonl', {**{k: v for k, v in last.items() if k != 'at'},
+                                                             'at': iso(), 'status': 'expired', 'cycle_id': cycle_id,
+                                                             'error': str(exc)[:1000]})
+                    summary['expired'].append(pair['pair_id'])
         elif pair_age >= cfg['pending_max_age_days']:
             append_jsonl(directory / 'events.jsonl', {**{k: v for k, v in last.items() if k != 'at'},
                                                      'at': iso(), 'status': 'expired', 'cycle_id': cycle_id})
@@ -722,6 +768,10 @@ def build_scoreboard(work: Work, cfg: dict) -> dict:
             add_metrics(group['champion'], run_metrics(champion))
             add_metrics(group['candidate'], run_metrics(candidate))
             group['resolved_changed'] += sum(item['count'] for item in feedback['changed_resolved_decisions'])
+    for candidate_id in candidates:  # candidates with no pair yet (new or broken) still appear
+        groups.setdefault(candidate_id, {'pairs': 0, 'final_pairs': 0, 'decisions': 0, 'changed_decisions': 0,
+                                         'resolved_changed': 0, 'champion': {}, 'candidate': {},
+                                         'source_clock_violation_rows': 0, 'transitions': Counter()})
     board = {'schema': 'auto-learning-scoreboard-v1', 'generated_at': iso(),
              'champion': read_json(work.champion), 'groups': {}}
     for key, group in groups.items():
@@ -857,6 +907,13 @@ def cmd_run(args) -> int:
             summary['outcomes'] = process_outcomes(cfg, work, cycle, cycle_id)
             snapshot = {'status': 'skipped'} if args.skip_snapshot else take_snapshot(cfg, work, cycle)
             summary['snapshot'] = snapshot
+            if snapshot['status'] == 'snapshot':
+                # Consume the snapshot before replays: a failed or interrupted cycle never re-replays
+                # the same rows (no duplicate pairs); it loses that snapshot instead, loudly.
+                write_json_atomic(work.feed_state, {
+                    'updated_at': iso(), 'cycle_id': cycle_id, 'page': snapshot['page'],
+                    'indexed_rows_at_snapshot': snapshot['indexed_rows_at_snapshot'],
+                    'last_max_row_number': snapshot['max_row_number']})
             summary['diffs'], summary['candidate_failures'] = {}, []
             if snapshot['status'] == 'snapshot' and snapshot.get('replay_rows', 0) > 0:
                 inputs = Path(snapshot['replay_inputs'])
@@ -890,16 +947,11 @@ def cmd_run(args) -> int:
                                            'source_clock_violation_rows': snapshot['audit']['source_clock_violation_rows']})
                         if candidate_id:
                             candidate_event(work, candidate_id, 'active', cycle_id=cycle_id, changed=diff['changed'])
-                    except CycleError as exc:
-                        summary['candidate_failures'].append({'label': label, 'error': str(exc)})
+                    except (CycleError, OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+                        summary['candidate_failures'].append({'label': label, 'error': f'{type(exc).__name__}: {exc}'})
                         if candidate_id:
-                            candidate_event(work, candidate_id, 'active', cycle_id=cycle_id, replay_failure=str(exc))
+                            candidate_event(work, candidate_id, 'active', cycle_id=cycle_id, replay_failure=str(exc)[:2000])
                 summary['runs'] = runs
-            if snapshot['status'] == 'snapshot':
-                write_json_atomic(work.feed_state, {
-                    'updated_at': iso(), 'cycle_id': cycle_id, 'page': snapshot['page'],
-                    'indexed_rows_at_snapshot': snapshot['indexed_rows_at_snapshot'],
-                    'last_max_row_number': snapshot['max_row_number']})
             board = build_scoreboard(work, cfg)
             summary['concluded'] = evaluate_candidates(work, cfg, board)
             if summary['concluded']:
@@ -1048,6 +1100,12 @@ def cmd_set_champion(args) -> int:
         write_json_atomic(work.champion, record)
         append_jsonl(work.champion_history, record)
         git('update-ref', 'refs/heads/champion', commit, cwd=work.agent_repo)
+        # Scores are only comparable against one champion: retire candidates measured against the old one.
+        for candidate in candidate_records(work):
+            if candidate['status'] == 'active':
+                candidate_event(work, candidate['candidate_id'], 'concluded', verdict='superseded',
+                                reason=f'champion changed to {commit[:12]}; re-register against the new champion',
+                                delta={}, resolved_changed=0, needs_operator_review=False)
     print(json.dumps({'status': 'champion_set', **record}))
     return 0
 
