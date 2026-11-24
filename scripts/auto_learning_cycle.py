@@ -63,6 +63,9 @@ DEFAULTS = {
 # keys (``target_date``, ``forecast_date``, ``market_target_date``) are not clocks and are ignored.
 KNOWLEDGE_CLOCK_KEYS = {'as_of', 'source_timestamp', 'timestamp'}
 CLOCK_SUFFIXES = ('_at', '_as_of', '_timestamp')
+# Contract schedule terms are known at decision time and are normally in the future.
+SCHEDULE_KEYS = {'closes_at', 'close_time', 'opens_at', 'open_time', 'expires_at', 'expiration_time',
+                 'expected_expiration_time', 'latest_expiration_time'}
 DECISION_IDENTITY_KEYS = {'decision_key', 'observed_at'}
 
 
@@ -357,7 +360,7 @@ def ensure_code(work: Work, source_repos: list[Path], commit: str) -> Path:
 # --------------------------------------------------------------------------- snapshot
 
 def is_clock_key(key: str) -> bool:
-    return key in KNOWLEDGE_CLOCK_KEYS or key.endswith(CLOCK_SUFFIXES)
+    return key not in SCHEDULE_KEYS and (key in KNOWLEDGE_CLOCK_KEYS or key.endswith(CLOCK_SUFFIXES))
 
 
 def iter_knowledge_clocks(value, path: str):
@@ -453,17 +456,23 @@ def take_snapshot(cfg: dict, work: Work, cycle: Path) -> dict:
 
 # --------------------------------------------------------------------------- replay and compare
 
-def remove_stale_containers(cfg: dict) -> list[str]:
+def work_label(work: Work) -> str:
+    return sha256_bytes(str(work.root).encode())[:16]
+
+
+def remove_stale_containers(cfg: dict, work: Work) -> list[str]:
+    """Remove leftover replay containers from an interrupted cycle of this work root only."""
     if cfg['executor'] != 'docker':
         return []
-    listed = run_command(['docker', 'ps', '-aq', '--filter', f'label={DOCKER_LABEL}=1'], name='docker ps', timeout=60)
+    listed = run_command(['docker', 'ps', '-aq', '--filter', f'label={DOCKER_LABEL}.work={work_label(work)}'],
+                         name='docker ps', timeout=60)
     stale = listed.stdout.split()
     for container in stale:
         run_command(['docker', 'rm', '-f', container], name='docker rm stale', timeout=60)
     return stale
 
 
-def replay(cfg: dict, cycle: Path, cycle_id: str, label: str, commit: str, code: Path, inputs: Path,
+def replay(cfg: dict, work: Work, cycle: Path, cycle_id: str, label: str, commit: str, code: Path, inputs: Path,
            empty_outcomes: Path) -> dict:
     run_dir = cycle / 'runs' / label
     runtime = run_dir / 'runtime'
@@ -475,6 +484,7 @@ def replay(cfg: dict, cycle: Path, cycle_id: str, label: str, commit: str, code:
         container = f'auto-learning-{cycle_id}-{label}'
         command = ['timeout', '--signal=TERM', '--kill-after=10s', str(cfg['replay_timeout_seconds']),
                    'docker', 'run', '--rm', '--name', container, '--label', f'{DOCKER_LABEL}=1',
+                   '--label', f'{DOCKER_LABEL}.work={work_label(work)}',
                    '--label', f'{DOCKER_LABEL}.cycle={cycle_id}', '--log-driver', 'none', '--network', 'none',
                    '--read-only', '--tmpfs', '/tmp:rw,nosuid,nodev,size=256m', '--cpus', '2', '--memory', '2g',
                    '--pids-limit', '256', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
@@ -909,7 +919,7 @@ def cmd_run(args) -> int:
             if free < cfg['min_free_bytes']:
                 raise CycleError(f'free space {free} bytes below min_free_bytes {cfg["min_free_bytes"]}; '
                                  'no cycle work started')
-            summary['stale_containers_removed'] = remove_stale_containers(cfg)
+            summary['stale_containers_removed'] = remove_stale_containers(cfg, work)
             summary['outcomes'] = process_outcomes(cfg, work, cycle, cycle_id)
             snapshot = {'status': 'skipped'} if args.skip_snapshot else take_snapshot(cfg, work, cycle)
             summary['snapshot'] = snapshot
@@ -927,7 +937,7 @@ def cmd_run(args) -> int:
                 empty.write_bytes(b'')
                 sources = [work.agent_repo, Path(cfg['trusted_checkout'])]
                 champion_commit = read_json(work.champion)['commit']
-                baseline = replay(cfg, cycle, cycle_id, 'champion', champion_commit,
+                baseline = replay(cfg, work, cycle, cycle_id, 'champion', champion_commit,
                                   ensure_code(work, sources, champion_commit), inputs, empty)
                 versions = [(c['candidate_id'], c['candidate_id'], c['commit']) for c in active_candidates(work, cfg)]
                 if not versions:
@@ -935,7 +945,7 @@ def cmd_run(args) -> int:
                 runs = {'champion': baseline}
                 for label, candidate_id, commit in versions:
                     try:
-                        candidate = replay(cfg, cycle, cycle_id, label, commit, ensure_code(work, sources, commit),
+                        candidate = replay(cfg, work, cycle, cycle_id, label, commit, ensure_code(work, sources, commit),
                                            inputs, empty)
                         comparison_path, comparison = compare(cfg, cycle, baseline, candidate)
                         if comparison['matched_decisions'] != snapshot['replay_rows']:

@@ -14,7 +14,10 @@ import sys
 import tempfile
 import unittest
 
+from types import SimpleNamespace
+
 from bot.collector_replay_index import build_collector_replay_index, update_collector_replay_index
+from bot.shared_market_feed import build_shared_market_candidate_row
 from tests.test_replay_decision_input import _snapshot_row
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,6 +39,13 @@ def collector_row(index: int, letter: str, *, future_fetch: bool = False) -> dic
     snapshot['predicted_prob'] = PROBABILITIES[letter]
     if future_fetch:
         snapshot['source_fetched_at'] = '2026-08-13T15:00:00+00:00'
+    # The real producer adds the shared market candidate, including a future close time.
+    market = SimpleNamespace(id=market_id, question=row['question'], exchange='kalshi', yes_price=.42, no_price=.58,
+                             volume=456, category='Weather', closes_at='2026-08-13T04:00:00+00:00', metadata={})
+    row['shared_candidate'] = build_shared_market_candidate_row(
+        run_id='run', market=market, decision_artifact=row['decision_artifact'], source_runtime='prediction_lab',
+        observed_at=row['observed_at'])
+    row['shared_candidate_id'] = row['shared_candidate']['candidate_id']
     return row
 
 

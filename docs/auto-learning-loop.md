@@ -40,7 +40,11 @@ research agent (Hermes cron, model)            agentless cycle (Hermes cron --no
 - **Source clocks:** a snapshot row with any clock-named field (`as_of`, `*_at`, `*_as_of`, `*_timestamp`)
   later than its `observed_at`, or unreadable, is excluded from replay and counted in the report. The replay
   itself does not check source availability (shown by the source-clock probe), so this guard is the
-  protection. Forecast-target dates are not clocks and are not checked.
+  protection. Forecast-target dates and contract schedule terms (`closes_at`, `close_time`,
+  `expiration_time`, …) are not knowledge clocks and are not checked.
+- **Canonical hashes:** the strategy-input projection adds recorded market fields and order books to
+  `market`, so rows reprojected with this code get new `canonical_input_sha256` values. Never mix
+  freshly projected rows with older persisted replay inputs or bindings.
 - **No overlap:** a new snapshot starts only after `min_new_rows` new indexed rows, and must not reuse
   rows from the previous snapshot. The snapshot is consumed before replays, so a failed cycle loses that
   snapshot rather than replaying it twice; a version gets at most one pair per snapshot. Snapshots are the
