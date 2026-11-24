@@ -271,8 +271,14 @@ class ResearchFeedbackTest(unittest.TestCase):
         self.assertEqual(result['runs'][1]['resolved_skip_rows'], 1)
         self.assertEqual(result['changed_resolved_decisions'][0]['baseline_direction'], 'incorrect')
         self.assertEqual(result['changed_resolved_decisions'][0]['count'], 1)
-        # P&L appears only as the separately labelled hypothetical quote proxy.
-        self.assertEqual(result['schema_version'], 2)
+        # P&L appears only as the separately labelled hypothetical quote proxy, overall and per changed decision.
+        self.assertEqual(result['schema_version'], 3)
+        paired = result.pop('paired_changed_decisions')
+        self.assertEqual(len(paired), 1)
+        self.assertEqual((paired[0]['market_id'], paired[0]['official_outcome']), ('market', 'NO'))
+        self.assertEqual(paired[0]['baseline']['proxy_pnl_usd'], -1.0)
+        self.assertEqual((paired[0]['candidate']['action'], paired[0]['candidate']['proxy_pnl_usd']), ('SKIP', 0.0))
+        self.assertTrue(paired[0]['unit_id'])
         directional = [{k: v for k, v in r.items() if k != 'hypothetical_quote_proxy'} for r in result['runs']]
         self.assertNotIn('pnl', json.dumps({**result, 'runs': directional}).lower())
         proxies = [r['hypothetical_quote_proxy'] for r in result['runs']]
