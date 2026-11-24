@@ -1165,6 +1165,8 @@ def cron_states(hermes: str, jobs: list[str]) -> dict[str, dict]:
 def cmd_cron(args) -> int:
     """Pause or resume every scheduled job of this loop together."""
     work = Work(args.work)
+    if not work.root.is_dir():
+        raise CycleError(f'work directory {work.root} not found; pass --work <loop work root>')
     jobs = (read_json(work.config) if work.config.is_file() else {}).get('cron_jobs') or []
     if not jobs or not all(isinstance(job, str) and job for job in jobs):
         raise CycleError(f'{work.config} has no cron_jobs list; add the Hermes cron job ids of this loop')
@@ -1214,7 +1216,7 @@ def format_overview(work: Work, jobs: list[str], states: dict[str, dict]) -> str
             last = read_json(cycles[-1])
             lines.append(f'Last cycle: {last.get("cycle_id", cycles[-1].parent.name)} ({last.get("status")})')
         lines.append(f'Report: {work.report}')
-    except (CycleError, OSError, ValueError, KeyError, TypeError) as exc:
+    except (CycleError, OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
         lines.append(f'Loop status unavailable: {type(exc).__name__}: {exc}')
     return '\n'.join(lines)
 

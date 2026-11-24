@@ -265,7 +265,17 @@ class AutoLearningCronSwitchTest(unittest.TestCase):
             self.assertIn('Loop status unavailable', off.stdout)  # this fixture has no loop config
             self.assertIn('cccccc333333 active', state.read_text())
             on = learning('on')
+            self.assertEqual(on.returncode, 0, on.stdout + on.stderr)
             self.assertIn('Auto-learning loop: ON (2/2 jobs active)', on.stdout)
+            (work / 'config.json').write_text(json.dumps({'cron_jobs': ['aaaaaa111111'], 'schema': 'x'}))
+            (work / 'cycles/c1').mkdir(parents=True)
+            (work / 'cycles/c1/cycle.json').write_text('[]')  # malformed shapes degrade, never crash
+            self.assertIn('Loop status unavailable', learning('status').stdout)
+            gone = subprocess.run([sys.executable, str(ROOT / 'main.py'), 'learning', 'off', '--work', str(tmp / 'nope')],
+                                  env=env, capture_output=True, text=True, cwd=ROOT)
+            self.assertEqual(gone.returncode, 1)
+            self.assertIn('not found', gone.stdout)
+            (work / 'config.json').write_text(json.dumps({'cron_jobs': ['aaaaaa111111', 'bbbbbb222222']}))
             self.assertEqual(learning('status').returncode, 0)
             self.assertEqual(learning('sideways').returncode, 2)
             (work / 'config.json').write_text(json.dumps({'cron_jobs': ['dddddd444444']}))

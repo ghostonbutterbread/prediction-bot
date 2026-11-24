@@ -90,7 +90,9 @@ $CYCLE cron down --work <work>     # pause every scheduled job of this loop (up 
 
 From the main CLI, `python main.py learning on|off|status [--work DIR]` does the same with a readable summary
 (switch state, schedules, champion, active candidates, last cycle). `DIR` defaults to
-`<collector root>/data/derived_reports/auto-learning`, which may be a symlink to the active work root.
+`<collector root>/data/derived_reports/auto-learning`, which may be a symlink to the active work root. The
+collector root comes from the `PREDICTION_BOT_COLLECTOR_ROOT` environment variable (`.env` is not loaded for
+this command), else `/mnt/data-collection/prediction-bot`.
 
 `cron up|down|status` drives the Hermes cron job ids listed in `<work>/config.json` under `cron_jobs`
 (the agentless cycle and the research agent), skips jobs already in the wanted state, re-reads the

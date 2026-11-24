@@ -568,6 +568,9 @@ def cmd_learning(argv: list[str]) -> int:
             return 2
         work = args[idx + 1]
         del args[idx:idx + 2]
+        if work.startswith("-"):
+            print("usage: python main.py learning on|off|status [--work DIR]")
+            return 2
     action = args[0].lower() if args else "status"
     if action not in actions or len(args) > 1:
         print("usage: python main.py learning on|off|status [--work DIR]")
