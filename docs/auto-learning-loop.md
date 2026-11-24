@@ -85,7 +85,13 @@ $CYCLE run --work <work> --verbose          # one cycle (cron runs this)
 $CYCLE status --work <work>
 $CYCLE register --work <work> --commit <sha> --hypothesis '...'   # research agent
 $CYCLE set-champion --work <work> --commit <sha> --note '...'     # operator only
+$CYCLE cron down --work <work>     # pause every scheduled job of this loop (up / status likewise)
 ```
+
+`cron up|down|status` drives the Hermes cron job ids listed in `<work>/config.json` under `cron_jobs`
+(the agentless cycle and the research agent), skips jobs already in the wanted state, re-reads the
+scheduler and fails unless every listed job reached it. Other cron jobs are never touched. A cycle that is
+already running finishes; `down` only stops future runs.
 
 The trusted checkout must stay clean; update it by checking out a newly reviewed commit. Disk use grows
 with cycles (replay stores, snapshot pages); `min_free_bytes` stops a cycle before work starts. Retention
