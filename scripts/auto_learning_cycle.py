@@ -1165,6 +1165,8 @@ def cron_states(hermes: str, jobs: list[str]) -> dict[str, dict]:
 def cmd_cron(args) -> int:
     """Pause or resume every scheduled job of this loop together."""
     work = Work(args.work)
+    if not work.root.is_dir():
+        raise CycleError(f'work directory {work.root} not found; pass --work <loop work root>')
     jobs = (read_json(work.config) if work.config.is_file() else {}).get('cron_jobs') or []
     if not jobs or not all(isinstance(job, str) and job for job in jobs):
         raise CycleError(f'{work.config} has no cron_jobs list; add the Hermes cron job ids of this loop')
@@ -1184,8 +1186,39 @@ def cmd_cron(args) -> int:
         wrong = [f'{job}={states.get(job, {}).get("state")}' for job in jobs if states.get(job, {}).get('state') != wanted]
         if wrong:
             raise CycleError(f'cron {args.action} incomplete; jobs not {wanted}: {", ".join(wrong)}')
-    print(json.dumps({'action': args.action, 'jobs': {job: states[job] for job in jobs}}, indent=2))
+    if args.text:
+        print(format_overview(work, jobs, states))
+    else:
+        print(json.dumps({'action': args.action, 'jobs': {job: states[job] for job in jobs}}, indent=2))
     return 0
+
+
+def format_overview(work: Work, jobs: list[str], states: dict[str, dict]) -> str:
+    """Human summary for the main CLI: switch state, schedule, champion, candidates, last cycle."""
+    active = sum(states[job]['state'] == 'active' for job in jobs)
+    switch = 'ON' if active == len(jobs) else 'OFF' if active == 0 else 'PARTIAL'
+    lines = [f'Auto-learning loop: {switch} ({active}/{len(jobs)} jobs active)']
+    for job in jobs:
+        state = states[job]
+        lines.append(f'- {state.get("name", job)} [{job}]: {state["state"]}, {state.get("schedule", "?")}, '
+                     f'next {state.get("next_run", "?")}')
+    try:
+        cfg = load_config(work)
+        champion = read_json(work.champion)
+        lines.append(f'Champion: {champion["commit"][:12]} ({champion.get("note", "")})')
+        candidates = active_candidates(work, cfg)
+        lines.append(f'Candidates: {len(candidates)}/{cfg["max_active_candidates"]} active')
+        for candidate in candidates:
+            hypothesis = ' '.join(str(candidate.get('hypothesis', '')).split())
+            lines.append(f'- {candidate["candidate_id"]}: {hypothesis[:100]}{"…" if len(hypothesis) > 100 else ""}')
+        cycles = sorted(path for path in work.cycles.glob('*/cycle.json')) if work.cycles.is_dir() else []
+        if cycles:
+            last = read_json(cycles[-1])
+            lines.append(f'Last cycle: {last.get("cycle_id", cycles[-1].parent.name)} ({last.get("status")})')
+        lines.append(f'Report: {work.report}')
+    except (CycleError, OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        lines.append(f'Loop status unavailable: {type(exc).__name__}: {exc}')
+    return '\n'.join(lines)
 
 
 class Parser(argparse.ArgumentParser):
@@ -1195,7 +1228,7 @@ class Parser(argparse.ArgumentParser):
         raise SystemExit(2)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = Parser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest='command', required=True)
     init = sub.add_parser('init')
@@ -1211,7 +1244,7 @@ def main() -> int:
     init.add_argument('--protected-root', action='append', required=True)
     init.add_argument('--resolutions', required=True, help='finalized resolution ledger (read only)')
     init.add_argument('--page-rows', type=int, default=400)
-    init.add_argument('--max-active', type=int, default=3)
+    init.add_argument('--max-active', type=int, default=8)
     init.add_argument('--note', default='initial champion')
     run = sub.add_parser('run')
     run.add_argument('--work', required=True)
@@ -1244,7 +1277,8 @@ def main() -> int:
     cron = sub.add_parser('cron', help='turn all scheduled jobs of this loop on (up) or off (down) together')
     cron.add_argument('action', choices=('up', 'down', 'status'))
     cron.add_argument('--work', required=True)
-    args = parser.parse_args()
+    cron.add_argument('--text', action='store_true', help='print a human summary instead of JSON')
+    args = parser.parse_args(argv)
     handlers = {'init': cmd_init, 'run': cmd_run, 'register': cmd_register, 'adopt-pair': cmd_adopt_pair,
                 'set-champion': cmd_set_champion, 'status': cmd_status, 'cron': cmd_cron}
     try:
