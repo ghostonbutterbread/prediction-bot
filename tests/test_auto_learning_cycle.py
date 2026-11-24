@@ -191,9 +191,8 @@ class AutoLearningCycleTest(unittest.TestCase):
         self.assertEqual(state['cycle_id'], cycle['cycle_id'])
         board = json.loads((self.work / 'scoreboard.json').read_text())
         self.assertEqual(board['groups'][candidate_id]['verdict'], 'broken')
-        # An open pair past its age limit expires instead of staying open forever.
-        pairs = list(self.work.glob('pending/*/events.jsonl'))
-        self.assertEqual(len(pairs), 0)  # the only candidate failed: no pair was queued
+        # The only candidate failed, so no pair was queued for this snapshot.
+        self.assertEqual(list(self.work.glob('pending/*/events.jsonl')), [])
         self.assertIn('waiting_for_new_rows', self.cli('run', '--work', self.work, '--verbose').stdout)
 
 

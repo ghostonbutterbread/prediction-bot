@@ -657,6 +657,12 @@ def process_outcomes(cfg: dict, work: Work, cycle: Path, cycle_id: str) -> dict:
             usable.append(pair)
         except (OSError, ValueError, KeyError) as exc:
             summary['errors'].append({'pair_id': pair['pair_id'], 'error': f'inputs unreadable: {exc}'})
+            if age_days(pair['created_at']) >= cfg['pending_max_age_days']:
+                last = pair['events'][-1]
+                append_jsonl(work.pending / pair['pair_id'] / 'events.jsonl', {
+                    **{k: v for k, v in last.items() if k != 'at'}, 'at': iso(), 'status': 'expired',
+                    'cycle_id': cycle_id, 'error': f'inputs unreadable: {exc}'[:1000]})
+                summary['expired'].append(pair['pair_id'])
     open_pairs = usable
     needed = set().union(set(), *(market_ids_of(Path(p['inputs_path']), cache) for p in open_pairs))
     try:
@@ -957,8 +963,8 @@ def cmd_run(args) -> int:
             if summary['concluded']:
                 board = build_scoreboard(work, cfg)
             write_json_atomic(work.scoreboard, board)
-            summary['status'] = 'complete_with_warnings' if (summary['candidate_failures'] or
-                                                              summary['outcomes']['errors']) else 'complete'
+            summary['status'] = 'complete_with_warnings' if (summary['candidate_failures'] or summary['outcomes']['errors']
+                                                              or summary['outcomes'].get('deferred')) else 'complete'
             report = render_report(work, cfg, board, summary)
             write_text_atomic(work.report, report)
             write_text_atomic(work.reports / f'{cycle_id}.md', report)
@@ -977,6 +983,7 @@ def cmd_run(args) -> int:
 
 def notable(summary: dict) -> bool:
     return bool(summary.get('concluded') or summary.get('candidate_failures') or summary['outcomes'].get('errors')
+                or summary['outcomes'].get('deferred')
                 or (summary.get('snapshot', {}).get('audit') or {}).get('source_clock_violation_rows'))
 
 
@@ -1000,6 +1007,8 @@ def cycle_message(summary: dict, work: Work) -> str:
         lines.append(f'• Candidate failure {item["label"]}: {item["error"][:300]}')
     for item in outcomes.get('errors', []):
         lines.append(f'• Outcome error {item["pair_id"]}: {item["error"][:300]}')
+    if outcomes.get('deferred'):
+        lines.append(f'• Outcomes deferred: {outcomes["deferred"]}')
     lines.append(f'Report: {work.report}')
     return '\n'.join(lines)
 
