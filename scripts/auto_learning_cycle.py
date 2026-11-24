@@ -677,12 +677,17 @@ def process_outcomes(cfg: dict, work: Work, cycle: Path, cycle_id: str) -> dict:
 # --------------------------------------------------------------------------- scoring
 
 def run_metrics(run: dict) -> dict:
+    """Directional counts plus the price-proxy P&L (recorded ask, else recorded market reference)."""
     proxy = run.get('hypothetical_quote_proxy') or {}
     correct, incorrect = run.get('directionally_correct_rows', 0), run.get('directionally_incorrect_rows', 0)
+    totals = [proxy.get(f'hypothetical_{kind}_pnl_total_usd') for kind in ('ask_quote', 'reference_price')]
+    complete = bool(proxy) and all(proxy.get(f'hypothetical_{kind}_pnl_total_status') in ('complete', 'empty')
+                                   for kind in ('ask_quote', 'reference_price'))
     return {'resolved_rows': run.get('resolved_rows', 0), 'resolved_buys': run.get('resolved_buy_rows', 0),
             'correct': correct, 'incorrect': incorrect,
-            'quote_pnl_usd': proxy.get('hypothetical_ask_quote_pnl_total_usd'),
-            'quote_pnl_decisions': proxy.get('hypothetical_ask_quote_pnl_decisions', 0)}
+            'quote_pnl_usd': round(sum(t or 0.0 for t in totals), 6) if complete else None,
+            'ask_quote_decisions': proxy.get('hypothetical_ask_quote_pnl_decisions', 0),
+            'reference_price_decisions': proxy.get('hypothetical_reference_price_pnl_decisions', 0)}
 
 
 def add_metrics(total: dict, part: dict) -> None:
@@ -700,7 +705,7 @@ def build_scoreboard(work: Work, cfg: dict) -> dict:
     candidates = {c['candidate_id']: c for c in candidate_records(work)}
     groups: dict[str, dict] = {}
     for pair in pair_records(work):
-        key = pair.get('candidate_id') or 'champion-replicate'
+        key = pair.get('candidate_id') or ('champion-replicate' if pair['label'] == 'replicate' else pair['label'])
         group = groups.setdefault(key, {'pairs': 0, 'final_pairs': 0, 'decisions': 0, 'changed_decisions': 0,
                                         'resolved_changed': 0, 'champion': {}, 'candidate': {},
                                         'source_clock_violation_rows': 0, 'transitions': Counter()})
@@ -780,9 +785,10 @@ def render_report(work: Work, cfg: dict, board: dict, cycle_summary: dict) -> st
              f'- Champion: `{champion["commit"]}` ({champion.get("note", "")})',
              f'- Last cycle: `{cycle_summary.get("cycle_id")}` — {cycle_summary.get("status")}',
              f'- Candidate slots: {len(active_candidates(work, cfg))}/{cfg["max_active_candidates"]} active',
-             '', 'Scores are diagnostic: outcomes are bound after decisions are sealed, prices are recorded ask '
-             'quotes (not fills), $1 hypothetical stake, zero fees. Source availability is audited per snapshot '
-             'but not proven. Nothing here promotes automatically.', '']
+             '', 'Scores are diagnostic: outcomes are bound after decisions are sealed. P&L is a price proxy: $1 '
+             'per BUY at the recorded ask quote, or the recorded market price when no ask was recorded; binary '
+             'payout, zero fees, not fills. Source availability is audited per snapshot but not proven. '
+             'Nothing here promotes automatically.', '']
     snapshot = cycle_summary.get('snapshot') or {}
     if snapshot.get('status') == 'snapshot':
         audit = snapshot.get('audit', {})
@@ -809,12 +815,13 @@ def render_report(work: Work, cfg: dict, board: dict, cycle_summary: dict) -> st
         if a:
             lines.append(f'- Champion on these rows: {a.get("resolved_buys", 0)} resolved buys, '
                          f'{a.get("correct", 0)} correct / {a.get("incorrect", 0)} incorrect, '
-                         f'quote P&L {fmt_money(a.get("quote_pnl_usd"))}')
+                         f'proxy P&L {fmt_money(a.get("quote_pnl_usd"))} ({a.get("ask_quote_decisions", 0)} ask, '
+                         f'{a.get("reference_price_decisions", 0)} reference-price)')
         if b and key != 'champion-replicate':
             lines.append(f'- Candidate: {b.get("resolved_buys", 0)} resolved buys, {b.get("correct", 0)} correct / '
-                         f'{b.get("incorrect", 0)} incorrect, quote P&L {fmt_money(b.get("quote_pnl_usd"))}')
+                         f'{b.get("incorrect", 0)} incorrect, proxy P&L {fmt_money(b.get("quote_pnl_usd"))}')
             lines.append(f'- Delta (candidate − champion): net correct {delta.get("net_correct", "n/a")}, '
-                         f'quote P&L {fmt_money(delta.get("quote_pnl_usd"))}')
+                         f'proxy P&L {fmt_money(delta.get("quote_pnl_usd"))}')
         lines.append('')
     recent = cycle_summary.get('diffs') or {}
     if recent:
