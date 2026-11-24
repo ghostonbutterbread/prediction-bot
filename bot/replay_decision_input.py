@@ -13,7 +13,7 @@ from typing import Any, Mapping
 from urllib.parse import parse_qsl, urlsplit
 
 
-from bot.shared_market_feed import shared_candidate_identity_mismatch
+from bot.shared_market_feed import SCHEMA_NAME as SHARED_CANDIDATE_SCHEMA_NAME, shared_candidate_identity_mismatch
 from bot.feeds.weather_pro import project_probability_evidence
 
 REPLAY_DECISION_INPUT_SCHEMA_NAME = "replay_decision_input"
@@ -51,6 +51,8 @@ _SANITIZED_TOP_LEVEL_CONTRACT_FIELDS = frozenset(
 # snapshot, rather than a generic JSON blob.  Each nested mapping/list is rebuilt
 # from this v1 schema, so unreviewed fields cannot cross the replay boundary.
 _SCALAR = object()
+_FINITE_RECORDED_NUMBER = object()
+_BOOK_NUMBER = object()
 _OPTIONAL_WEATHER_PROVENANCE = object()
 _PUBLIC_WEATHER_URL = object()
 _JSON_SCALAR_TYPES = (str, int, float, bool, type(None))
@@ -297,6 +299,28 @@ _DERIVED_FEATURE_VALUES_V1 = {
     "source_agreement_score": _SCALAR, "weather_confidence_score": _SCALAR,
     "station_id": _SCALAR, "market_date": _SCALAR, "weather_date": _SCALAR,
 }
+_ORDER_BOOK_DATA_V1 = {key: _BOOK_NUMBER for key in (
+    "best_yes_ask", "best_yes_bid", "best_no_ask", "best_no_bid",
+    "mid_yes", "spread", "spread_pct",
+)}
+_ORDER_BOOK_SNAPSHOT_V1 = {
+    "source": _SCALAR, "stage": _SCALAR, "market_id": _SCALAR,
+    "observed_at": _SCALAR, "as_of": _SCALAR, "data": _ORDER_BOOK_DATA_V1,
+}
+_ROOT_STRATEGY_MARKET_V1 = {key: _SCALAR for key in ("exchange", "series", "group", "event_ticker")}
+_ROOT_STRATEGY_MARKET_V1["volume"] = _FINITE_RECORDED_NUMBER
+_SHARED_STRATEGY_INPUT_V1 = {
+    "market": {
+        **{key: _SCALAR for key in (
+            "exchange", "category", "closes_at", "series", "group",
+            "family", "event_ticker", "series_ticker",
+        )},
+        "volume": _FINITE_RECORDED_NUMBER,
+        "route": _MARKET_ROUTE_V1,
+    },
+    "prices": {"order_book_snapshot": _ORDER_BOOK_SNAPSHOT_V1},
+    "evidence": {"pre_logic_order_book_snapshot": _ORDER_BOOK_SNAPSHOT_V1},
+}
 _EXECUTION_SNAPSHOT_V1 = {
     "source": _SCALAR, "yes_price": _SCALAR, "no_price": _SCALAR,
     "best_yes_ask": _SCALAR, "best_no_ask": _SCALAR, "best_yes_bid": _SCALAR,
@@ -508,10 +532,29 @@ def _build_replay_decision_input_sanitized_v1(
     if errors:
         return ReplayDecisionInputBuildResult(record=None, errors=tuple(errors))
     assert observed_at is not None and market_id is not None and question is not None
-    assert source_context is not None and source_context_source is not None and source_context_data is not None
+    assert artifact is not None and source_context is not None and source_context_source is not None and source_context_data is not None
 
     omitted_fields: list[dict[str, str]] = []
     _record_legacy_output_omissions(row, omitted_fields)
+    root_strategy_market = _sanitized_allowlisted_mapping(
+        {key: row[key] for key in _ROOT_STRATEGY_MARKET_V1 if key in row},
+        _ROOT_STRATEGY_MARKET_V1, "$", omitted_fields,
+    )
+    shared = row.get("shared_candidate")
+    strategy_inputs = _sanitized_allowlisted_mapping(
+        shared, _SHARED_STRATEGY_INPUT_V1, "shared_candidate", omitted_fields,
+    ) if isinstance(shared, Mapping) and shared.get("schema_name") == SHARED_CANDIDATE_SCHEMA_NAME else {}
+    artifact_books = {}
+    for name, schema in (("pre_logic_order_book_snapshot", _ORDER_BOOK_SNAPSHOT_V1),
+                         ("order_book_snapshot", _ORDER_BOOK_SNAPSHOT_V1),
+                         ("order_book", _ORDER_BOOK_DATA_V1)):
+        value = _field(artifact, name)
+        if isinstance(value, Mapping):
+            artifact_books[name] = _sanitized_allowlisted_mapping(
+                value, schema, f"decision_artifact.{name}", omitted_fields,
+            )
+        elif name in artifact:
+            _add_omitted_field(omitted_fields, f"decision_artifact.{name}", "unallowlisted")
     allowed_source_data = _sanitized_allowlisted_mapping(
         source_context_data, _SOURCE_CONTEXT_DATA_V1, "decision_artifact.source_context.data", omitted_fields,
     )
@@ -626,6 +669,81 @@ def _build_replay_decision_input_sanitized_v1(
         },
         "sanitization": {"omitted_fields": _sorted_omitted_fields(omitted_fields)},
     }
+    shared_market = strategy_inputs.get("market", {})
+    record["market"].update({key: value for key, value in shared_market.items() if value is not None and value != ""})
+    record["market"].update({key: value for key, value in root_strategy_market.items() if value is not None and value != ""})
+    book_provenance = {}
+    for container, name in (("evidence", "pre_logic_order_book_snapshot"), ("prices", "order_book_snapshot")):
+        artifact_path = f"decision_artifact.{name}"
+        shared_path = f"shared_candidate.{container}.{name}"
+        options = [(artifact_books.get(name), artifact_path), (strategy_inputs.get(container, {}).get(name), shared_path)]
+        if name == "order_book_snapshot":
+            # The producer's shared representation can correct raw provenance.
+            options.reverse()
+        elif isinstance(shared, Mapping):
+            raw_shared_prices = shared.get("prices")
+            shared_price_book = raw_shared_prices.get("order_book_snapshot") if isinstance(raw_shared_prices, Mapping) else None
+            raw_pre = _field(artifact, name)
+            if not isinstance(raw_pre, Mapping):
+                raw_evidence = shared.get("evidence")
+                raw_pre = raw_evidence.get(name) if isinstance(raw_evidence, Mapping) else None
+            if (isinstance(raw_pre, Mapping) and isinstance(shared_price_book, Mapping)
+                    and shared_price_book.get("source") == "synthetic"
+                    and {k: v for k, v in raw_pre.items() if k != "source"} ==
+                        {k: v for k, v in shared_price_book.items() if k != "source"}):
+                options.insert(0, (strategy_inputs.get("prices", {}).get("order_book_snapshot"),
+                                   "shared_candidate.prices.order_book_snapshot"))
+        for book, path in options:
+            if {"path": f"{path}.data.spread_pct", "category": "invalid_numeric"} in omitted_fields:
+                _add_omitted_field(omitted_fields, path, "invalid_book_spread")
+                continue
+            if isinstance(book, dict) and isinstance(book.get("data"), dict) and book["data"]:
+                if path == "shared_candidate.prices.order_book_snapshot":
+                    raw_prices = shared.get("prices") if isinstance(shared, Mapping) else None
+                    raw_book = raw_prices.get("order_book_snapshot") if isinstance(raw_prices, Mapping) else None
+                elif path == shared_path:
+                    shared_container = shared.get(container) if isinstance(shared, Mapping) else None
+                    raw_book = shared_container.get(name) if isinstance(shared_container, Mapping) else None
+                else:
+                    raw_book = _field(artifact, name)
+                shared_evidence = shared.get("evidence") if isinstance(shared, Mapping) else None
+                post_books = (_field(artifact, "post_logic_order_book_snapshot"),
+                              shared_evidence.get("post_logic_order_book_snapshot") if isinstance(shared_evidence, Mapping) else None)
+                def matches_post(post: Any) -> bool:
+                    if not isinstance(raw_book, Mapping) or not isinstance(post, Mapping) or not post:
+                        return False
+                    if container == "prices" and raw_book.get("stage") != "pre_logic":
+                        # A generic book of unknown timing whose supported quote data equals a
+                        # post-logic snapshot is treated as that snapshot, whatever the envelope.
+                        data = _normalized_book_data(raw_book)
+                        return bool(data) and data == _normalized_book_data(post)
+                    # The producer may relabel the shared copy synthetic.
+                    return {k: v for k, v in raw_book.items() if k != "source"} == {
+                        k: v for k, v in post.items() if k != "source"}
+                if book.get("stage") == "post_logic" or any(matches_post(post) for post in post_books):
+                    _add_omitted_field(omitted_fields, path, "post_logic_book")
+                    continue
+                record["market"][name] = book
+                book_provenance[name] = {"path": path, "timing": "pre_logic" if container == "evidence" else "generic"}
+                break
+    if book_provenance:
+        record["market"]["book_projection_provenance"] = book_provenance
+    if {"path": "decision_artifact.order_book.spread_pct", "category": "invalid_numeric"} in omitted_fields:
+        _add_omitted_field(omitted_fields, "decision_artifact.order_book", "invalid_book_spread")
+    elif artifact_books.get("order_book"):
+        raw_direct_book = _field(artifact, "order_book")
+        shared_evidence = shared.get("evidence") if isinstance(shared, Mapping) else None
+        post_snapshots = (_field(artifact, "post_logic_order_book_snapshot"),
+                          shared_evidence.get("post_logic_order_book_snapshot") if isinstance(shared_evidence, Mapping) else None)
+        direct_data = artifact_books["order_book"]
+        post_data = [_normalized_book_data(post) for post in post_snapshots]
+        if (isinstance(raw_direct_book, Mapping) and raw_direct_book.get("stage") == "post_logic") or (
+                direct_data and any(data and direct_data == data for data in post_data)):
+            _add_omitted_field(omitted_fields, "decision_artifact.order_book", "post_logic_book")
+        else:
+            record["market"]["order_book"] = artifact_books["order_book"]
+            record["market"].setdefault("book_projection_provenance", {})["order_book"] = {
+                "path": "decision_artifact.order_book", "timing": "generic"}
     if source_history_only:
         record["input_purpose"] = "source_correctness_history"
     if source_context_as_of is not None:
@@ -638,11 +756,20 @@ def _build_replay_decision_input_sanitized_v1(
     if decision_context:
         record["decision_context"] = decision_context
 
+    record["sanitization"]["omitted_fields"] = _sorted_omitted_fields(omitted_fields)
     canonical_input_json = _canonical_json_bytes(record, errors)
     if errors or canonical_input_json is None:
         return ReplayDecisionInputBuildResult(record=None, errors=tuple(errors))
     record["canonical_input_sha256"] = hashlib.sha256(canonical_input_json).hexdigest()
     return ReplayDecisionInputBuildResult(record=record, canonical_input_json=canonical_input_json)
+
+
+def _normalized_book_data(envelope: Any) -> dict[str, Any]:
+    """Supported, numeric-normalized quote fields of a book envelope, for equality checks only."""
+    data = envelope.get("data") if isinstance(envelope, Mapping) else None
+    if not isinstance(data, Mapping):
+        return {}
+    return _sanitized_allowlisted_mapping(data, _ORDER_BOOK_DATA_V1, "book", [])
 
 
 def _sanitized_provenance(
@@ -769,6 +896,13 @@ def _sanitized_decision_context(value: Any, omitted_fields: list[dict[str, str]]
 def _record_legacy_output_omissions(row: Mapping[str, Any], omitted_fields: list[dict[str, str]]) -> None:
     for key, value in row.items():
         key_text = str(key)
+        if key_text in _ROOT_STRATEGY_MARKET_V1:
+            # Report malformed values through the root projection, not as omitted.
+            continue
+        if (key_text == "shared_candidate" and isinstance(value, Mapping)
+                and value.get("schema_name") == SHARED_CANDIDATE_SCHEMA_NAME):
+            # This subtree is reported by the narrow projection below.
+            continue
         if key_text in {
             "main_decision", "normal_decision", "shared_pipeline", "decision_type", "direction",
             "recorded_prediction", "weather_risk", "paper_lab", "opportunity_mode",
@@ -782,7 +916,8 @@ def _record_legacy_output_omissions(row: Mapping[str, Any], omitted_fields: list
     artifact = _field(row, "decision_artifact")
     if not isinstance(artifact, Mapping):
         return
-    retained = {"source_context", "source_snapshots", "execution_snapshot"}
+    retained = {"source_context", "source_snapshots", "execution_snapshot", "pre_logic_order_book_snapshot",
+                "order_book_snapshot", "order_book"}
     for key, value in artifact.items():
         if key not in retained:
             _record_omitted_subtree(value, f"decision_artifact.{key}", omitted_fields, category="recorded_decision")
@@ -834,6 +969,26 @@ def _sanitized_allowlisted_value(
     value: Any, spec: Any, path: str, omitted_fields: list[dict[str, str]],
     *, reject_sensitive_string_values: bool = False,
 ) -> Any:
+    if spec is _BOOK_NUMBER:
+        try:
+            if not isinstance(value, bool) and isinstance(value, (str, int, float)):
+                number = float(value)
+                if isfinite(number):
+                    return number if isinstance(value, str) else value
+        except (ValueError, OverflowError):
+            pass
+        _add_omitted_field(omitted_fields, path, "invalid_numeric")
+        return _UNSET
+    if spec is _FINITE_RECORDED_NUMBER:
+        if value is None:
+            return None
+        try:
+            if not isinstance(value, bool) and isinstance(value, (str, int, float)) and isfinite(float(value)):
+                return value
+        except (ValueError, OverflowError):
+            pass
+        _add_omitted_field(omitted_fields, path, "invalid_numeric")
+        return _UNSET
     if spec is _SCALAR:
         sensitive_category = _string_semantics_omission_category(value)
         if reject_sensitive_string_values and sensitive_category is not None:
@@ -957,6 +1112,23 @@ def _valid_price_or_none(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return price if isfinite(price) and 0 <= price <= 1 else None
+
+
+def count_missing_strategy_inputs_v1(records: Any) -> dict[str, int]:
+    """Count structural absence only; presence is not qualification or fill evidence."""
+    fields = ("volume", "closes_at", "category", "exchange", "liquidity",
+              "pre_logic_order_book_snapshot", "order_book_snapshot")
+    missing: dict[str, int] = {field: 0 for field in fields}
+    for record in records:
+        market = record.get("market") if isinstance(record, Mapping) else None
+        market = market if isinstance(market, Mapping) else {}
+        for key in fields:
+            value = market.get(key)
+            if key.endswith("order_book_snapshot"):
+                value = value.get("data") if isinstance(value, Mapping) else None
+            if value is None or value == "" or value == {}:
+                missing[key] += 1
+    return missing
 
 
 def verify_replay_decision_input_v1(record: Mapping[str, Any] | Any, canonical_input_json: bytes | bytearray | Any) -> bool:

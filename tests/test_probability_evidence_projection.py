@@ -85,6 +85,7 @@ class ProbabilityEvidenceProjectionTests(unittest.TestCase):
             change_weather(weather)
         market = SimpleNamespace(id=MARKET_ID, question=QUESTION, exchange="kalshi",
             yes_price=0.4, no_price=0.4, volume=10000, liquidity=10000, category="Weather",
+            closes_at=_Clock.fromisoformat("2026-10-20T00:00:00+00:00"),
             metadata={**metadata,
                 "market_group": "weather", "series": "daily_temperature",
                 "event_ticker": "KXHIGHLAX-26OCT19", "market_route": {
@@ -103,7 +104,9 @@ class ProbabilityEvidenceProjectionTests(unittest.TestCase):
             "execution_snapshot": {"source": "book", "best_yes_ask": 0.4,
                                    "best_no_ask": 0.4, "estimated_fill_price": 0.45},
             "pre_logic_order_book_snapshot": {"source": "book", "market_id": MARKET_ID, "observed_at": STAMP,
-                           "data": {"best_yes_ask": 0.4, "best_no_ask": 0.4}},
+                           "data": {"best_yes_ask": 0.4, "best_no_ask": 0.4,
+                                    "best_yes_bid": 0.39, "best_no_bid": 0.38,
+                                    "mid_yes": 0.395, "spread": 0.01, "spread_pct": 2.5}},
             "order_book": {"source": "book", "market_id": MARKET_ID, "observed_at": STAMP,
                            "data": {"best_yes_ask": 0.4, "best_no_ask": 0.4}}}
         self.lab._attach_weather_source_snapshot(artifact, market)
@@ -115,6 +118,44 @@ class ProbabilityEvidenceProjectionTests(unittest.TestCase):
     @staticmethod
     def snapshot(row):
         return row["decision_artifact"]["source_context"]["data"]["weather_source_snapshot"]
+
+    def test_collector_strategy_inputs_are_blind_and_preserved(self):
+        from bot.replay_decision_input import build_replay_decision_input_v1, verify_replay_decision_input_record_v1
+
+        row, _, _ = self.producer()
+        # Exercise the two actual shared-candidate producer paths independently
+        # of the separate artifact fallback.
+        row["decision_artifact"].pop("pre_logic_order_book_snapshot")
+        for book in (row["shared_candidate"]["evidence"]["pre_logic_order_book_snapshot"],
+                     row["shared_candidate"]["prices"]["order_book_snapshot"]):
+            book["data"]["winningSide"] = "YES"
+            book["finalOutcome"] = "YES"
+        before = copy.deepcopy(row)
+        built = build_replay_decision_input_v1(row)
+        self.assertTrue(built.ok, built.errors)
+        market = built.record["market"]
+        self.assertEqual({k: market[k] for k in ("volume", "closes_at", "category", "exchange")},
+                         {"volume": 10000, "closes_at": "2026-10-20T00:00:00+00:00",
+                          "category": "Weather", "exchange": "kalshi"})
+        expected_book = {"best_yes_ask": .4, "best_no_ask": .4, "best_yes_bid": .39,
+                         "best_no_bid": .38, "mid_yes": .395, "spread": .01, "spread_pct": 2.5}
+        for key in ("pre_logic_order_book_snapshot", "order_book_snapshot"):
+            self.assertEqual(market[key]["data"], expected_book)
+            self.assertNotIn("finalOutcome", market[key])
+        from bot.prediction_lab_replay import ReplayArtifactInput, _market_from_record, _recorded_order_book
+        # This is a test-only handoff shape for the existing consumers, not a replay adapter.
+        consumer_row = {"market_id": built.record["market_id"], "question": market["question"],
+                        "yes_price": market["yes_price"], "no_price": market["no_price"],
+                        "shared_candidate": {"schema_name": "shared_market_candidate", "market": market}}
+        consumer_artifact = {"source_context": built.record["source_inputs"]["source_context"],
+                             "pre_logic_order_book_snapshot": market["pre_logic_order_book_snapshot"]}
+        consumer_market = _market_from_record(ReplayArtifactInput(row=consumer_row, artifact=consumer_artifact))
+        self.assertEqual((consumer_market.volume, consumer_market.closes_at, consumer_market.exchange),
+                         (10000, market["closes_at"], "kalshi"))
+        self.assertEqual(_recorded_order_book(consumer_artifact), expected_book)
+        self.assertNotIn("liquidity", market)
+        self.assertEqual(row, before)
+        self.assertTrue(verify_replay_decision_input_record_v1(built.record))
 
     def test_producer_fixture_uses_recorded_decision_time_when_wall_clock_advances(self):
         class LaterWallClock(_Clock):
