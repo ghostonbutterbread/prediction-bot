@@ -141,6 +141,15 @@ def summarize(run: dict, outcomes: list[dict]) -> tuple[dict, dict]:
                    'invalid_action_side_rows': sum(r['action'] in ('BUY_YES', 'BUY_NO') and not valid_buy(r) for r in resolved),
                    'resolved_skip_rows': sum(r['action'] == 'SKIP' for r in resolved),
                    'outcome_ledger_counts': report['summary']['outcome_ledger']})
+    # Same exact join, scored as the reviewed $1 fixed-dollar quote proxy: recorded
+    # ask quotes, binary payout, zero fees. A price proxy, never a fill or P&L.
+    proxy = resolve_sealed_source_probability_decisions(run['decisions'], outcomes, directional_only=False)['summary']
+    result['hypothetical_quote_proxy'] = {
+        key: proxy[key] for key in proxy
+        if key.startswith(('hypothetical_ask_quote_pnl', 'hypothetical_reference_price_pnl'))}
+    result['hypothetical_quote_proxy']['semantics'] = (
+        '$1 dollar cost per BUY at the recorded selected-side ask quote; binary payout; zero fees; '
+        'not a fill, realized P&L, or promotion evidence')
     return result, {identity(row): row for row in resolved}
 
 
@@ -215,7 +224,7 @@ def run(args: argparse.Namespace) -> dict:
         if x['action'] != y['action']:
             baseline_direction = ('correct' if x['side'] == x['official_outcome'] else 'incorrect') if valid_buy(x) else 'not_scored'
             changes[(x['action'], y['action'], baseline_direction)] += 1
-    result = {'schema_name': 'research_retrospective_directional_feedback', 'schema_version': 1,
+    result = {'schema_name': 'research_retrospective_directional_feedback', 'schema_version': 2,
               'diagnostic_eligible': False, 'source_time_status': 'unverified',
               'outcome_authority': 'caller-pinned bytes; producer and clock unverified',
               'outcome_sha256': outcome_hash, 'outcome_rows': len(outcomes),

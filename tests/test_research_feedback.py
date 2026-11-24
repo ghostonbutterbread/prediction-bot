@@ -271,7 +271,14 @@ class ResearchFeedbackTest(unittest.TestCase):
         self.assertEqual(result['runs'][1]['resolved_skip_rows'], 1)
         self.assertEqual(result['changed_resolved_decisions'][0]['baseline_direction'], 'incorrect')
         self.assertEqual(result['changed_resolved_decisions'][0]['count'], 1)
-        self.assertNotIn('pnl', json.dumps(result).lower())
+        # P&L appears only as the separately labelled hypothetical quote proxy.
+        self.assertEqual(result['schema_version'], 2)
+        directional = [{k: v for k, v in r.items() if k != 'hypothetical_quote_proxy'} for r in result['runs']]
+        self.assertNotIn('pnl', json.dumps({**result, 'runs': directional}).lower())
+        proxies = [r['hypothetical_quote_proxy'] for r in result['runs']]
+        self.assertEqual(proxies[0]['hypothetical_ask_quote_pnl_total_usd'], -1.0)
+        self.assertEqual(proxies[1]['hypothetical_ask_quote_pnl_decisions'], 0)
+        self.assertIn('not a fill', proxies[0]['semantics'])
         self.assertEqual(self.outcomes.read_bytes(), encode([{'decision_key': self.key, 'canonical_input_sha256': 'b' * 64,
                  'market_id': 'market', 'market_status': 'finalized', 'official_outcome': 'NO',
                  'settlement_ts': '2026-01-02T12:00:00+00:00', 'resolution_id': 'resolution'}]))
