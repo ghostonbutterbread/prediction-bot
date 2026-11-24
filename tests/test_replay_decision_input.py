@@ -3,7 +3,7 @@ import json
 import unittest
 from pathlib import Path
 
-from bot.replay_decision_input import build_replay_decision_input_v1, verify_replay_decision_input_v1
+from bot.replay_decision_input import _field_name_is_forbidden, build_replay_decision_input_v1, verify_replay_decision_input_v1
 
 
 def _sha256(seed: str) -> str:
@@ -120,6 +120,71 @@ def _snapshot_row(*, patch: dict | None = None) -> dict:
 
 
 class ReplayDecisionInputTests(unittest.TestCase):
+    def test_unsupported_shared_candidate_is_not_projected_as_market_evidence(self):
+        row = _snapshot_row()
+        row["shared_candidate"] = {"schema_name": "unrelated", "market": {"volume": 789}}
+        result = build_replay_decision_input_v1(row)
+        self.assertTrue(result.ok, result.errors)
+        self.assertNotIn("volume", result.record["market"])
+
+    def test_legacy_recorded_root_market_inputs_survive_without_defaults(self):
+        row = _snapshot_row(patch={"volume": 123, "exchange": "kalshi", "series": "weather",
+                                   "group": "climate", "event_ticker": "KXTEST"})
+        row["shared_candidate"] = {"schema_name": "shared_market_candidate", "market": {"volume": 456, "exchange": "other"}}
+        result = build_replay_decision_input_v1(row)
+        self.assertTrue(result.ok, result.errors)
+        self.assertEqual({key: result.record["market"][key] for key in
+                          ("volume", "exchange", "series", "group", "event_ticker")},
+                         {"volume": 123, "exchange": "kalshi", "series": "weather",
+                          "group": "climate", "event_ticker": "KXTEST"})
+        self.assertNotIn("closes_at", result.record["market"])
+        self.assertNotIn("liquidity", result.record["market"])
+
+    def test_artifact_only_books_are_projected_without_decision_outputs(self):
+        from bot.replay_decision_input import verify_replay_decision_input_record_v1
+        row = _snapshot_row()
+        artifact = row["decision_artifact"]
+        artifact["pre_logic_order_book_snapshot"] = {"source": "book", "data": {
+            "best_yes_ask": .43, "spread_pct": 2.0, "winningSide": "NO"}}
+        artifact["order_book_snapshot"] = {"source": "book", "data": {"best_no_ask": .59}}
+        artifact["order_book"] = {"best_yes_ask": .44, "result": "NO"}
+        result = build_replay_decision_input_v1(row)
+        self.assertTrue(result.ok)
+        market = result.record["market"]
+        self.assertEqual(market["pre_logic_order_book_snapshot"]["data"], {"best_yes_ask": .43, "spread_pct": 2.0})
+        self.assertEqual(market["order_book_snapshot"]["data"], {"best_no_ask": .59})
+        self.assertEqual(market["order_book"], {"best_yes_ask": .44})
+        self.assertTrue(verify_replay_decision_input_record_v1(result.record))
+
+    def test_strategy_input_missing_counts_preserve_old_v1(self):
+        from bot.replay_decision_input import count_missing_strategy_inputs_v1, verify_replay_decision_input_record_v1
+
+        old = build_replay_decision_input_v1(_snapshot_row())
+        self.assertTrue(old.ok)
+        self.assertTrue(verify_replay_decision_input_record_v1(old.record))
+        self.assertEqual(old.record["canonical_input_sha256"],
+                         "8e31c010aa2c8f135b90dc7a66c380c70fa4751267ea966ba7430524deef1a5c")
+        self.assertNotIn("volume", old.record["market"])
+        partial = {"market": {"volume": 0, "exchange": "kalshi", "category": "Weather",
+                              "closes_at": "2026-08-13T00:00:00+00:00",
+                              "pre_logic_order_book_snapshot": {"data": {"best_yes_ask": .4}}}}
+        self.assertEqual(count_missing_strategy_inputs_v1([old.record, partial]), {
+            "volume": 1, "closes_at": 1, "category": 1, "exchange": 1,
+            "liquidity": 2, "pre_logic_order_book_snapshot": 1, "order_book_snapshot": 2,
+        })
+
+    def test_classifier_recognizes_winning_side_without_weakening_provenance(self):
+        for name in ("winning_side", "winningSide", "Winning-Side"):
+            with self.subTest(name=name):
+                self.assertTrue(_field_name_is_forbidden(name))
+        for name in ("settlement_source", "settlement_authority", "station_resolution", "actual_temp_used"):
+            with self.subTest(name=name):
+                self.assertFalse(_field_name_is_forbidden(name))
+        # Economics remain forbidden in canonical projection; only the legacy
+        # evaluator's local screen makes a narrow compatibility exception.
+        for name in ("expected_net_profit_usd", "confidence_slow_profit"):
+            self.assertTrue(_field_name_is_forbidden(name))
+
     def test_v2_collector_row_requires_recorded_shared_identity(self):
         row = _snapshot_row(patch={"collector_artifact_schema_version": 2})
         del row["shared_snapshot_id"]
@@ -232,6 +297,7 @@ class ReplayDecisionInputTests(unittest.TestCase):
             ("decision_artifact.source_snapshots[0]", "settlementTimestamp"),
             ("replay_derived_features.values", "finalOutcome"),
             ("decision_artifact.source_context.data.market_metadata", "resolvedAt"),
+            ("decision_artifact.source_context.data.market_metadata", "winningSide"),
         )
         for path, field in cases:
             with self.subTest(path=path, field=field):
@@ -385,7 +451,7 @@ class ReplayDecisionInputTests(unittest.TestCase):
         row = _snapshot_row()
         row["main_decision"] = {"action": "BUY_YES", "model_probability": 0.99, "position_size": 12}
         row["decision_artifact"]["source_context"]["data"]["market_metadata"].update(
-            {"outcome": "YES", "result": "YES", "status": "closed"}
+            {"outcome": "YES", "result": "YES", "winning_side": "NO", "status": "closed"}
         )
         row["decision_artifact"]["source_context"]["data"]["weather_source_snapshot"]["veto"] = {
             "final_action": "BUY_YES"
@@ -402,6 +468,10 @@ class ReplayDecisionInputTests(unittest.TestCase):
         self.assertIn({"path": "main_decision", "category": "recorded_decision"}, omitted)
         self.assertIn(
             {"path": "decision_artifact.source_context.data.market_metadata.outcome", "category": "outcome_or_future"},
+            omitted,
+        )
+        self.assertIn(
+            {"path": "decision_artifact.source_context.data.market_metadata.winning_side", "category": "outcome_or_future"},
             omitted,
         )
         self.assertIn(

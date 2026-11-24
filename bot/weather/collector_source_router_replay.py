@@ -2,8 +2,8 @@
 
 This narrow research slice consumes only sanitized collector replay inputs and
 an explicit, separately supplied finalized-outcome ledger.  It creates sealed
-decision artifacts first; realized outcomes and fixed-stake PnL exist only in
-the separate resolution report.  It never reads legacy paper decisions, calls
+decision artifacts first; outcomes and hypothetical fixed-stake price P&L exist
+only in the separate resolution report. It never reads legacy paper decisions, calls
 the network, or changes a lane, wallet, or raw archive.
 """
 
@@ -68,6 +68,8 @@ def build_sealed_source_probability_decisions(
     supplied historical source-ledger observations whose settlement timestamp
     is strictly before the candidate decision timestamp.  Exact-identity
     outcome binding happens later in ``resolve_sealed_source_probability_decisions``.
+    The legacy decision price basis ``recorded_executable_ask`` denotes a quote,
+    not an observed fill or a guarantee of execution.
     """
     if min_sample_count < 1:
         raise ValueError("min_sample_count must be at least 1")
@@ -105,12 +107,16 @@ def build_sealed_source_probability_decisions(
 
 def resolve_sealed_source_probability_decisions(
     decisions: Iterable[Mapping[str, Any]], finalized_outcomes: Iterable[Mapping[str, Any]],
+    *, directional_only: bool = False,
 ) -> dict[str, Any]:
     """Join sealed decisions to explicit outcomes by the complete input identity."""
     outcome_index, outcome_stats = _strict_outcome_index(finalized_outcomes)
     resolved: list[dict[str, Any]] = []
     unresolved: list[dict[str, Any]] = []
     source_correctness_observations: list[dict[str, Any]] = []
+    quote_pnl_values: list[float] = []
+    reference_pnl_values: list[float] = []
+    noncalculable: Counter[str] = Counter()
     for decision in decisions:
         if not isinstance(decision, Mapping):
             continue
@@ -130,6 +136,10 @@ def resolve_sealed_source_probability_decisions(
             "action_label": decision.get("action_label"),
             "fixed_stake_usd": decision.get("fixed_stake_usd"),
         }
+        for field in ("entry_price", "fixed_stake_usd"):
+            value = base[field]
+            if isinstance(value, float) and not math.isfinite(value):
+                base[field] = None
         if outcome is None:
             unresolved.append({**base, "resolution_status": "unresolved_exact_identity_required"})
             continue
@@ -148,13 +158,27 @@ def resolve_sealed_source_probability_decisions(
         if source_correctness_observation is not None:
             source_correctness_observations.append(source_correctness_observation)
         side = decision.get("side")
-        price = _finite_number(decision.get("entry_price"))
-        stake = _finite_number(decision.get("fixed_stake_usd"))
+        price = None if isinstance(decision.get("entry_price"), bool) else _finite_number(decision.get("entry_price"))
+        stake = None if isinstance(decision.get("fixed_stake_usd"), bool) else _finite_number(decision.get("fixed_stake_usd"))
         action = decision.get("action")
         pnl_category = _pnl_category(action, side, price, stake, decision.get("price_basis"))
         calculable = pnl_category is not None
         won = side == official_outcome if calculable else None
-        pnl = round(stake * ((1.0 - price) if won else -price), 6) if calculable and won is not None else None
+        pnl = None
+        pnl_status = "not_eligible"
+        if not directional_only and calculable and price is not None and stake is not None:
+            # Dollar entry cost, fractional contracts, binary payout, zero fees.
+            modeled_pnl = stake / price - stake if won else -stake
+            if math.isfinite(modeled_pnl):
+                pnl = round(modeled_pnl, 6)
+                pnl_status = "calculated"
+                if pnl_category == "hypothetical_ask_quote_pnl":
+                    quote_pnl_values.append(modeled_pnl)
+                else:
+                    reference_pnl_values.append(modeled_pnl)
+            else:
+                pnl_status = "noncalculable_nonfinite"
+                noncalculable[pnl_category] += 1
         resolved.append({
             **base,
             "resolution_status": "resolved_exact_identity",
@@ -163,40 +187,74 @@ def resolve_sealed_source_probability_decisions(
             "resolution_id": outcome.get("resolution_id"),
             "won": won,
             "pnl_category": pnl_category,
-            "executable_pnl_usd": pnl if pnl_category == "executable_pnl" else None,
-            "reference_price_proxy_pnl_usd": pnl if pnl_category == "reference_price_proxy_pnl" else None,
+            "pnl_calculation_status": pnl_status,
+            "hypothetical_ask_quote_pnl_usd": pnl if pnl_category == "hypothetical_ask_quote_pnl" else None,
+            "hypothetical_reference_price_pnl_usd": pnl if pnl_category == "hypothetical_reference_price_pnl" else None,
         })
 
-    executable_pnl_rows = [row for row in resolved if row.get("executable_pnl_usd") is not None]
-    reference_price_proxy_rows = [row for row in resolved if row.get("reference_price_proxy_pnl_usd") is not None]
-    return {
+    def pnl_summary(category: str, values: list[float]) -> dict[str, Any]:
+        missing = noncalculable[category]
+        total = sum(values)
+        if missing:
+            status, total = "unavailable_noncalculable_positions", None
+        elif not math.isfinite(total):
+            status, total = "unavailable_nonfinite_aggregate", None
+        else:
+            status, total = ("complete" if values else "empty"), round(total, 6)
+        return {
+            category + "_decisions": len(values),
+            category + "_noncalculable_decisions": missing,
+            category + "_total_usd": total,
+            category + "_total_status": status,
+        }
+
+    result = {
         "schema_name": "source_probability_resolution_report",
-        "schema_version": 3,
+        "schema_version": 6,
         "research_status": "offline_source_only_research",
         "non_mutating": True,
         "promotion_requirement": "forward_paper_required_before_promotion",
         "resolution_join": "exact_decision_key_and_canonical_input_sha256",
-        "fixed_stake_policy": {"fixed_stake_usd": FIXED_STAKE_USD, "fee_model_version": "none_v1"},
+        "fixed_stake_policy": {
+            "fixed_stake_usd": FIXED_STAKE_USD,
+            "stake_semantics": "sealed builder default in dollars; the resolver uses each decision's fixed_stake_usd",
+            "fee_model_version": "none_v1",
+        },
+        "economic_status": "hypothetical_price_proxy_not_fill",
+        "source_time_status": "unverified",
+        "diagnostic_eligible": False,
         "pnl_semantics": {
-            "executable_pnl": "only decisions priced from a recorded positive order-book ask",
-            "reference_price_proxy_pnl": "diagnostic proxy only; never an executable fill or realizable P&L",
+            "hypothetical_ask_quote_pnl": "hypothetical price proxy from a recorded ask quote, not a fill or realized P&L",
+            "hypothetical_reference_price_pnl": "hypothetical price proxy from a recorded market reference, not a fill or realized P&L",
+            "calculation": "fractional contracts = dollar stake / selected-side price; binary $1 payout per winning contract; zero fees; no liquidity or slippage model",
+            "numeric_reporting": "binary floating-point proxies; row and complete aggregate values rounded to six decimal places; unavailable totals are null, not partial sums",
         },
         "summary": {
             "sealed_decisions_seen": len(resolved) + len(unresolved),
             "exactly_resolved_decisions": len(resolved),
             "unresolved_decisions": len(unresolved),
-            "executable_pnl_decisions": len(executable_pnl_rows),
-            "executable_pnl_total_usd": round(sum(float(row["executable_pnl_usd"]) for row in executable_pnl_rows), 6),
-            "reference_price_proxy_pnl_decisions": len(reference_price_proxy_rows),
-            "reference_price_proxy_pnl_total_usd": round(
-                sum(float(row["reference_price_proxy_pnl_usd"]) for row in reference_price_proxy_rows), 6,
-            ),
+            **pnl_summary("hypothetical_ask_quote_pnl", quote_pnl_values),
+            **pnl_summary("hypothetical_reference_price_pnl", reference_pnl_values),
             "outcome_ledger": outcome_stats,
         },
         "source_correctness": _source_selection_correctness_report(source_correctness_observations),
         "resolved_decisions": resolved,
         "unresolved_decisions": unresolved,
     }
+    if directional_only:
+        result["schema_version"] = 4
+        result["economic_status"] = "excluded_quote_only"
+        result["diagnostic_eligible"] = False
+        result["source_time_status"] = "unverified"
+        result.pop("pnl_semantics")
+        result.pop("fixed_stake_policy")
+        for key in list(result["summary"]):
+            if "pnl" in key:
+                del result["summary"][key]
+        for row in resolved:
+            for key in ("pnl_category", "pnl_calculation_status", "hypothetical_ask_quote_pnl_usd", "hypothetical_reference_price_pnl_usd"):
+                row.pop(key)
+    return result
 
 
 def _source_selection_correctness_observation(
@@ -302,6 +360,7 @@ def run_collector_source_router_replay(
     history_manifest_path: str | Path | None = None,
     history_ledger_path: str | Path | None = None,
     cohort_per_shape_target: int = DEFAULT_PER_SHAPE_TARGET,
+    directional_only: bool = False,
 ) -> CollectorSourceRouterReplayResult:
     """Run the complete offline slice and write only new derived artifacts."""
     if max_rows is not None and max_rows < 0:
@@ -326,7 +385,7 @@ def run_collector_source_router_replay(
     control, candidate, decision_stats = build_sealed_source_probability_decisions(
         records, outcomes, history_ledger=history_ledger, min_sample_count=min_sample_count,
     )
-    report = resolve_sealed_source_probability_decisions(control + candidate, outcomes)
+    report = resolve_sealed_source_probability_decisions(control + candidate, outcomes, directional_only=directional_only)
     report["source_correctness"]["historical_source_quality"] = {
         "interpretation": decision_stats["selector_history"]["source_quality_interpretation"],
         "target_proof_rejections": {
@@ -358,7 +417,7 @@ def run_collector_source_router_replay(
     cohort_path.write_bytes(cohort_bytes)
     metadata = {
         "schema_name": "collector_source_router_replay_run",
-        "schema_version": 3,
+        "schema_version": 3 if directional_only else 5,
         "research_status": "offline_source_only_research",
         "offline": True,
         "network_access": False,
@@ -370,7 +429,7 @@ def run_collector_source_router_replay(
         "decision_policy": {
             "control": "weather_source_snapshot.predicted_prob; buy only when side_probability minus recorded decision-time price is at least 0.05",
             "candidate": "existing source_router selection; selected source prior win rate versus recorded decision-time same-side price; prior settlement strictly before decision timestamp",
-            "price_basis": "positive order-book asks are recorded_executable_ask; yes_price/no_price fallback is recorded_market_reference and reference_price_diagnostic only",
+            "price_basis": "legacy recorded_executable_ask denotes an observed ask quote, not a fill; yes_price/no_price fallback is recorded_market_reference; both are hypothetical price proxies",
             "promotion_requirement": "downstream forward paper evidence is required before any promotion",
             "fixed_stake_usd": FIXED_STAKE_USD,
             "selector_history_only": True,
@@ -403,6 +462,14 @@ def run_collector_source_router_replay(
             cohort_path.name: {"sha256": hashlib.sha256(cohort_bytes).hexdigest()},
         },
     }
+    if directional_only:
+        metadata.update({"diagnostic_eligible": False, "source_time_status": "unverified",
+                         "economic_status": "excluded_quote_only",
+                         "quote_notice": "recorded_executable_ask is a quote, not evidence of a fill"})
+    else:
+        metadata.update({"diagnostic_eligible": False, "source_time_status": "unverified",
+                         "economic_status": "hypothetical_price_proxy_not_fill",
+                         "quote_notice": "recorded_executable_ask is a quote, not evidence of a fill"})
     metadata_path.write_bytes(_canonical_json_bytes(metadata))
     return CollectorSourceRouterReplayResult(
         output_dir=target_dir,
@@ -486,7 +553,8 @@ def _sealed_decision(
         "probability": _round(probability),
         "side": side,
         "action": action,
-        "entry_price": _round(entry_price),
+        # Preserve the selected input price used for the decision and later P&L.
+        "entry_price": entry_price,
         "price_basis": price_basis,
         "action_label": "reference_price_diagnostic" if action != SKIP and price_basis == "recorded_market_reference" else None,
         "fixed_stake_usd": FIXED_STAKE_USD,
@@ -800,12 +868,13 @@ def _select_price(record: Mapping[str, Any], side: str | None) -> tuple[float | 
 def _pnl_category(
     action: Any, side: Any, price: float | None, stake: float | None, price_basis: Any,
 ) -> str | None:
-    if action not in {BUY_YES, BUY_NO} or side not in {"YES", "NO"} or price is None or stake is None:
+    if (action not in {BUY_YES, BUY_NO} or side not in {"YES", "NO"} or action != "BUY_" + side
+            or price is None or not 0.0 < price < 1.0 or stake is None or stake <= 0):
         return None
     if price_basis == "recorded_executable_ask":
-        return "executable_pnl"
+        return "hypothetical_ask_quote_pnl"
     if price_basis == "recorded_market_reference":
-        return "reference_price_proxy_pnl"
+        return "hypothetical_reference_price_pnl"
     return None
 
 
@@ -932,7 +1001,7 @@ def _round(value: float | None) -> float | None:
 
 
 def _canonical_json_bytes(value: Any) -> bytes:
-    return (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
+    return (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
 
 
 def _jsonl_bytes(rows: Iterable[Mapping[str, Any]]) -> bytes:

@@ -1,3 +1,4 @@
+import copy
 import json
 import tempfile
 import unittest
@@ -20,6 +21,7 @@ from bot.prediction_lab_replay import (
     replay_recorded_artifacts,
     validate_prediction_lab_tables,
 )
+from bot.prediction_lab_shadow_delta import summarize_shadow_delta_rows
 from bot.risk import RiskDecision
 from bot.strategies.enhanced import StrategyTrace
 from bot.strategies.signal_validator import SignalValidator
@@ -1444,6 +1446,241 @@ class PredictionLabReplayTests(unittest.TestCase):
         self.assertEqual(result.rows[0].source_mode, "missing")
         self.assertIn("source_mode_missing_for_historical_replay", result.rows[0].warnings)
 
+    def test_winning_side_values_do_not_influence_or_reach_replay(self):
+        class OutcomeSensitiveStrategy(RecordedLiveSourceStrategy):
+            def analyze_market_with_trace(self, market, order_book=None):
+                source = self._live_data_signal(market)
+                self.seen_market = copy.deepcopy(vars(market))
+                self.seen_source = copy.deepcopy(source)
+                if market.metadata.get("winning_side") == "NO":
+                    source["predicted_prob"] = 0.05
+                with patch.object(self, "_live_data_signal", return_value=source):
+                    return super().analyze_market_with_trace(market, order_book)
+
+        base = _row(artifact_patch={"source_snapshots": [{
+            "mode": "recorded_as_of", "source": "weather",
+            "signal": {"signal_type": "weather", "predicted_prob": 0.82,
+                       "confidence": 0.92, "data": {"forecast_high": 84.0}},
+        }]})
+        for record_type in ("row", "artifact_input"):
+            outputs = []
+            for side in ("YES", "NO"):
+                row = copy.deepcopy(base)
+                artifact = row["decision_artifact"]
+                artifact["source_context"]["data"]["market_metadata"]["winning_side"] = side
+                artifact["source_snapshots"][0]["signal"]["data"]["winningSide"] = side
+                artifact["strategy_signal"]["nested"] = [{"winning_side": side}]
+                record = row if record_type == "row" else ReplayArtifactInput(row=row, artifact=artifact)
+                before = copy.deepcopy(record)
+                strategy = OutcomeSensitiveStrategy()
+                evaluator = self._evaluator(strategy)
+                evaluate = evaluator.evaluate
+                captured = {}
+
+                def capture(market, **kwargs):
+                    captured.update(market=copy.deepcopy(vars(market)), kwargs=copy.deepcopy(kwargs))
+                    return evaluate(market, **kwargs)
+
+                with patch.object(evaluator, "evaluate", side_effect=capture):
+                    result = replay_recorded_artifacts([record], evaluator=evaluator, require_recorded_source=True)
+                self.assertEqual(record, before)
+                assert result.rows[0].replayed_artifact is not None
+                observed = (captured, strategy.seen_market, strategy.seen_source, result.to_dict())
+                serialized = json.dumps(observed, default=str)
+                self.assertFalse('"winning_side"' in serialized or '"winningSide"' in serialized,
+                                 "winning-side alias reached replay inputs or outputs")
+                outputs.append((captured, strategy.seen_market, strategy.seen_source,
+                                result.rows[0].replayed_action, result.rows[0].replayed_reason_code,
+                                result.rows[0].original_artifact,
+                                result.rows[0].replayed_artifact["strategy_trace"]))
+            self.assertEqual(outputs[0], outputs[1])
+            self.assertEqual(outputs[0][3], "BUY_YES")
+
+    def test_preserves_decision_time_economics_and_lane_config(self):
+        class InspectingStrategy(RecordedLiveSourceStrategy):
+            def analyze_market_with_trace(self, market, order_book=None):
+                self.market_metadata = copy.deepcopy(market.metadata)
+                self.recorded_signal = copy.deepcopy(self._live_data_signal(market))
+                return super().analyze_market_with_trace(market, order_book)
+
+        lane = {"enabled": True, "min_edge": 0.02}
+        row = _row(artifact_patch={"source_snapshots": [{
+            "mode": "recorded_as_of", "source": "weather",
+            "signal": {"signal_type": "weather", "predicted_prob": 0.82,
+                       "confidence": 0.92, "data": {"expected_net_profit_usd": 3.5,
+                       "confidence_slow_profit": copy.deepcopy(lane), "actual_temp_used": 83.0}},
+        }]})
+        metadata = row["decision_artifact"]["source_context"]["data"]["market_metadata"]
+        metadata.update({"expected_net_profit_usd": 3.5, "confidence_slow_profit": copy.deepcopy(lane),
+                         "settlement_source": "NWS", "station_resolution": {"station_id": "KNYC"}})
+        config = {"scan": {"allowed_market_routes": ["weather.daily_temperature"]},
+                  "strategy": {"min_edge": 0.01, "min_confidence": 0.5}, "max_entry_price": 0.7,
+                  "strategy_lanes": {"confidence_slow_profit": {"enabled": True, "min_edge": 0.02}},
+                  "trade_economics": {"min_expected_net_profit_usd": 1.0}}
+        before_row, before_config = copy.deepcopy(row), copy.deepcopy(config)
+        strategy = InspectingStrategy()
+        evaluator = self._evaluator(strategy)
+        evaluate = evaluator.evaluate
+        captured = {}
+
+        def capture(market, **kwargs):
+            captured.update(market=copy.deepcopy(vars(market)), kwargs=copy.deepcopy(kwargs))
+            return evaluate(market, **kwargs)
+
+        with patch.object(evaluator, "evaluate", side_effect=capture):
+            result = replay_recorded_artifacts([row], config=config, evaluator=evaluator, require_recorded_source=True)
+        self.assertEqual(row, before_row)
+        self.assertEqual(config, before_config)
+        self.assertEqual(captured["kwargs"]["config_snapshot"], config)
+        assert result.rows[0].original_artifact is not None
+        assert result.rows[0].replayed_artifact is not None
+        for value in (strategy.market_metadata, strategy.recorded_signal["data"],
+                      result.rows[0].original_artifact["source_context"]["data"]["market_metadata"],
+                      result.rows[0].replayed_artifact["strategy_trace"]["raw_signals"]["live"]["data"]):
+            self.assertIn("expected_net_profit_usd", value)
+            self.assertIn("confidence_slow_profit", value)
+            self.assertEqual(value["expected_net_profit_usd"], 3.5)
+            self.assertEqual(value["confidence_slow_profit"], {"enabled": True, "min_edge": 0.02})
+        self.assertEqual(strategy.recorded_signal["data"]["actual_temp_used"], 83.0)
+        self.assertEqual(strategy.market_metadata["settlement_source"], "NWS")
+        self.assertEqual(strategy.market_metadata["station_resolution"], {"station_id": "KNYC"})
+        self.assertEqual(result.rows[0].replayed_action, "BUY_YES")
+        self.assertEqual(result.rows[0].replayed_artifact["trade_context"]["metadata"]["strategy_lanes"],
+                         config["strategy_lanes"])
+
+        contaminated = copy.deepcopy(row)
+        nested = contaminated["decision_artifact"]["source_context"]["data"]["market_metadata"]["confidence_slow_profit"]
+        nested["winning_side"] = "REMOVE_ME"
+        before_contaminated = copy.deepcopy(contaminated)
+        screened = replay_recorded_artifacts([contaminated], config=config,
+                                              evaluator=self._evaluator(RecordedLiveSourceStrategy()),
+                                              require_recorded_source=True)
+        self.assertEqual(contaminated, before_contaminated)
+        assert screened.rows[0].original_artifact is not None
+        safe_lane = screened.rows[0].original_artifact["source_context"]["data"]["market_metadata"]["confidence_slow_profit"]
+        self.assertEqual(safe_lane, lane)
+        self.assertNotIn("REMOVE_ME", json.dumps(screened.to_dict(), default=str))
+
+    def test_recorded_station_identifiers_survive_evaluator_screen(self):
+        from bot.shared_core.weather_risk import build_weather_source_confidence_evidence
+
+        class ForwardRecordedStationStrategy(RecordedLiveSourceStrategy):
+            def analyze_market_with_trace(self, market, order_book=None):
+                source = self._live_data_signal(market)
+                self.seen_source = copy.deepcopy(source)
+                with patch.object(self, "_live_data_signal", return_value=source):
+                    signal, trace = super().analyze_market_with_trace(market, order_book)
+                signal["data"] = copy.deepcopy(source["data"])
+                return signal, trace
+
+        for field in ("station_id", "settlement_station", "resolution_station", None):
+            for record_type in ("row", "artifact_input"):
+                with self.subTest(field=field, record_type=record_type):
+                    data: dict = {"forecast_high": 84.0}
+                    if field:
+                        data[field] = "KSEA"
+                    row = _row(artifact_patch={"source_snapshots": [{
+                        "mode": "recorded_as_of", "source": "weather",
+                        "signal": {"signal_type": "weather", "predicted_prob": 0.82,
+                                   "confidence": 0.92, "data": data},
+                    }]})
+                    record = row if record_type == "row" else ReplayArtifactInput(row=row, artifact=row["decision_artifact"])
+                    before = copy.deepcopy(record)
+                    strategy = ForwardRecordedStationStrategy()
+                    with patch("bot.shared_core.decision.build_weather_source_confidence_evidence",
+                               wraps=build_weather_source_confidence_evidence) as weather_evidence:
+                        result = replay_recorded_artifacts([record], evaluator=self._evaluator(strategy),
+                                                           require_recorded_source=True)
+                    self.assertEqual(record, before)
+                    self.assertEqual(result.rows[0].replayed_action, "BUY_YES")
+                    seen = strategy.seen_source["data"]
+                    self.assertEqual(weather_evidence.call_count, 1)
+                    actual = build_weather_source_confidence_evidence(weather_evidence.call_args.args[0])
+                    station = actual["weather_station_resolution"]
+                    self.assertEqual(station["station_id"], "KSEA" if field else "KNYC")
+                    self.assertEqual(station["source"], "explicit_station_field" if field else "static_baseline_station_cache")
+                    if field:
+                        self.assertEqual(seen.get(field), "KSEA")
+
+    def test_retained_station_fields_still_screen_nested_outcomes(self):
+        class InspectingStrategy(RecordedLiveSourceStrategy):
+            def analyze_market_with_trace(self, market, order_book=None):
+                self.seen_source = copy.deepcopy(self._live_data_signal(market))
+                return super().analyze_market_with_trace(market, order_book)
+
+        for field in ("settlement_station", "resolution_station"):
+            with self.subTest(field=field):
+                row = _row(artifact_patch={"source_snapshots": [{
+                    "mode": "recorded_as_of", "source": "weather",
+                    "signal": {"signal_type": "weather", "predicted_prob": 0.82,
+                               "confidence": 0.92, "data": {field: {
+                                   "label": "keep", "result": "LEAK_RESULT",
+                                   "nested": [{"winner": "LEAK_WINNER", "label": "keep"}],
+                               }}},
+                }]})
+                before = copy.deepcopy(row)
+                strategy = InspectingStrategy()
+                result = replay_recorded_artifacts([row], evaluator=self._evaluator(strategy),
+                                                   require_recorded_source=True)
+                self.assertEqual(row, before)
+                self.assertEqual(strategy.seen_source["data"].get(field), {
+                    "label": "keep", "nested": [{"label": "keep"}],
+                })
+                self.assertNotIn("LEAK_", json.dumps(result.rows[0].original_artifact))
+
+    def test_nested_outcomes_never_reach_real_evaluator_inputs(self):
+        class InspectingStrategy(RecordedLiveSourceStrategy):
+            def analyze_market_with_trace(self, market, order_book=None):
+                self.recorded_signal = copy.deepcopy(self._live_data_signal(market))
+                return super().analyze_market_with_trace(market, order_book)
+
+        for record_type in ("row", "artifact_input"):
+            with self.subTest(record_type=record_type):
+                row = _row(artifact_patch={"source_snapshots": [{
+                    "mode": "recorded_as_of", "source": "weather",
+                    "signal": {"signal_type": "weather", "predicted_prob": 0.82,
+                               "confidence": 0.92, "data": {"forecast_high": 84.0}},
+                }]})
+                artifact = row["decision_artifact"]
+                metadata = artifact["source_context"]["data"]["market_metadata"]
+                metadata.update({"settlement_source": "NWS", "station_resolution": {"station_id": "KNYC"},
+                                 "nested": [{"label": "keep"}]})
+                control = copy.deepcopy(row)
+                control_result = replay_recorded_artifacts(
+                    [control], evaluator=self._evaluator(RecordedLiveSourceStrategy()), require_recorded_source=True,
+                )
+                metadata.update({"winner": "LEAK_WINNER", "marketResult": "LEAK_RESULT"})
+                metadata["station_resolution"]["result"] = "LEAK_STATION"
+                metadata["nested"][0]["payout"] = "LEAK_PAYOUT"
+                artifact["source_snapshots"][0]["signal"]["data"]["winner"] = "LEAK_SIGNAL"
+                artifact["strategy_signal"]["nested"] = {"resolvedOutcome": "LEAK_STRATEGY"}
+                artifact["pre_logic_order_book_snapshot"]["data"]["winner"] = "LEAK_BOOK"
+                row["nested"] = {"result": "LEAK_ROW"}
+                record = row if record_type == "row" else ReplayArtifactInput(row=row, artifact=artifact)
+                before = copy.deepcopy(record)
+                strategy = InspectingStrategy()
+                evaluator = self._evaluator(strategy)
+                evaluate = evaluator.evaluate
+                captured = {}
+
+                def capture(market, **kwargs):
+                    captured.update(market=copy.deepcopy(vars(market)), kwargs=copy.deepcopy(kwargs))
+                    return evaluate(market, **kwargs)
+
+                with patch.object(evaluator, "evaluate", side_effect=capture):
+                    result = replay_recorded_artifacts([record], evaluator=evaluator, require_recorded_source=True)
+
+                self.assertEqual(record, before)
+                self.assertEqual(result.rows[0].replayed_action, "BUY_YES")
+                self.assertEqual(result.rows[0].replayed_action, control_result.rows[0].replayed_action)
+                self.assertEqual(result.rows[0].replayed_reason_code, control_result.rows[0].replayed_reason_code)
+                self.assertEqual(captured["market"]["metadata"]["settlement_source"], "NWS")
+                self.assertEqual(captured["market"]["metadata"]["station_resolution"], {"station_id": "KNYC"})
+                self.assertEqual(captured["market"]["metadata"]["nested"], [{"label": "keep"}])
+                self.assertEqual(strategy.recorded_signal["predicted_prob"], 0.82)
+                for observed in (captured, strategy.recorded_signal, result.to_dict()):
+                    self.assertNotIn("LEAK_", json.dumps(observed, default=str))
+
     def test_recorded_source_snapshot_changes_replayed_behavior_without_live_calls(self):
         strategy = RecordedLiveSourceStrategy()
         high_source = {
@@ -1582,6 +1819,76 @@ class PredictionLabReplayTests(unittest.TestCase):
 
         self.assertEqual(result.summary["input_total"], 1)
         self.assertEqual(result.all_rows[0].source_mode, "recorded_as_of")
+
+    def test_loaded_replay_row_strips_nonempty_winning_side_without_mutating_inputs(self):
+        row = _row()
+        row.update({"winning_side": "YES", "Winning-Side": "NO", "settlement_source": "NWS",
+                    "expected_net_profit_usd": 3.5, "confidence_slow_profit": {"enabled": True},
+                    "future_forecast_config": {"enabled": True}, "winningSide": ""})
+        row["shared_candidate"] = {"market": {"winningSide": "NO", "settlement_source": "NWS"},
+                                   "evidence": [{"Winning-Side": "YES"}, {"winning_side": None}]}
+        row["shadow_delta"] = {"status": "complete", "changed": False}
+        before = copy.deepcopy(row)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "snapshot.jsonl"
+            clean = _row()
+            path.write_text(json.dumps(clean) + "\n", encoding="utf-8")
+            self.assertEqual(load_replay_artifacts([path])[0].row, clean)
+            path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+            loaded = load_replay_artifacts([path])[0]
+            self.assertNotIn("winning_side", loaded.row)
+            self.assertNotIn("Winning-Side", loaded.row)
+            self.assertEqual(loaded.row["winningSide"], "")
+            self.assertEqual(loaded.row["shared_candidate"]["market"], {"settlement_source": "NWS"})
+            self.assertEqual(loaded.row["shared_candidate"]["evidence"], [{}, {"winning_side": None}])
+            for key in ("settlement_source", "expected_net_profit_usd", "confidence_slow_profit", "future_forecast_config"):
+                self.assertEqual(loaded.row[key], row[key])
+            for record in (row, ReplayArtifactInput(row=row, artifact=row["decision_artifact"]), loaded):
+                with patch("bot.prediction_lab_replay.summarize_shadow_delta_rows", wraps=summarize_shadow_delta_rows) as summary:
+                    report = replay_recorded_artifacts([record], evaluator=self._evaluator(FixedSignalStrategy(_signal()))).to_dict()
+                summary_row = summary.call_args.args[0][0]
+                self.assertNotIn("winning_side", summary_row)
+                self.assertNotIn("Winning-Side", summary_row)
+                self.assertEqual(summary_row["winningSide"], "")
+                self.assertEqual(summary_row["shared_candidate"]["evidence"], [{}, {"winning_side": None}])
+                self.assertEqual(report["summary"]["shadow_delta"]["total_shadow_delta_rows"], 1)
+                self.assertNotIn('"winning_side"', json.dumps(report))
+                self.assertNotIn('"winningSide"', json.dumps(report))
+                self.assertNotIn('"Winning-Side"', json.dumps(report))
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), before)
+        self.assertEqual(row, before)
+
+    def test_prediction_lab_validator_flags_normalized_winning_side_only_when_nonempty(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "snapshot.jsonl"
+            for name in ("winning_side", "winningSide", "Winning-Side", "WINNING_SIDE"):
+                for value in ("YES", "NO", {"value": "YES"}, [None, "NO"]):
+                    with self.subTest(name=name, value=value):
+                        row = _row()
+                        row["decision_artifact"]["source_context"]["data"]["market_metadata"]["extra"] = [{name: value}]
+                        path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+                        result = validate_prediction_lab_tables([path]).to_dict()
+                        self.assertFalse(result["ok"])
+                        self.assertEqual(result["issue_counts"].get("outcome_leakage"), 1)
+
+            for value in (None, "", "   ", [], {}, [None, ""], {"value": " "}):
+                with self.subTest(empty=value):
+                    row = _row()
+                    row["decision_artifact"]["source_context"]["data"]["market_metadata"]["extra"] = [{"winningSide": value}]
+                    path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+                    result = validate_prediction_lab_tables([path]).to_dict()
+                    self.assertTrue(result["ok"])
+                    self.assertNotIn("outcome_leakage", result["issue_counts"])
+
+            row = _row()
+            row["decision_artifact"]["source_context"]["data"]["market_metadata"].update({
+                "settlement_source": "NWS", "expected_net_profit_usd": 3.5,
+                "confidence_slow_profit": {"enabled": True}, "future_forecast_config": {"enabled": True},
+            })
+            path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+            result = validate_prediction_lab_tables([path]).to_dict()
+            self.assertTrue(result["ok"])
+            self.assertNotIn("outcome_leakage", result["issue_counts"])
 
     def test_prediction_lab_validator_flags_duplicates_and_outcome_leakage(self):
         with tempfile.TemporaryDirectory() as tmpdir:
