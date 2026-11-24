@@ -105,7 +105,8 @@ class AutoLearningCycleTest(unittest.TestCase):
                  '--protected-root', self.source, '--resolutions', self.resolutions, '--page-rows', 4,
                  '--max-active', 2)
         config = json.loads((self.work / 'config.json').read_text())
-        config.update(min_free_bytes=1, conclude_min_resolved_changes=2)
+        # Operator mode: a passing proof is flagged for review instead of promoted.
+        config.update(min_free_bytes=1, auto_promote=False, promotion_min_units=1)
         (self.work / 'config.json').write_text(json.dumps(config))
         champion = json.loads((self.work / 'champion.json').read_text())['commit']
 
@@ -152,6 +153,10 @@ class AutoLearningCycleTest(unittest.TestCase):
         self.assertGreater(group['delta']['quote_pnl_usd'], 0)
         self.assertEqual(group['verdict'], 'better')
         self.assertTrue(group['needs_operator_review'])
+        concluded = [json.loads(line) for line in (self.work / 'candidates' / registered['candidate_id'] /
+                                                   'events.jsonl').read_text().splitlines()][-1]
+        self.assertTrue(concluded['proof']['passes'])
+        self.assertEqual(concluded['proof']['delta_usd'], 2.0)
         replicate = board['groups']['champion-replicate']
         self.assertEqual(replicate['changed_decisions'], 0)
         self.assertEqual(replicate['delta']['net_correct'], 0)
@@ -204,6 +209,113 @@ class AutoLearningCycleTest(unittest.TestCase):
         # The only candidate failed, so no pair was queued for this snapshot.
         self.assertEqual(list(self.work.glob('pending/*/events.jsonl')), [])
         self.assertIn('waiting_for_new_rows', self.cli('run', '--work', self.work, '--verbose').stdout)
+
+    def test_parameter_candidate_is_promoted_on_proof_and_rolled_back_by_its_guard(self):
+        self.append_rows([collector_row(i, letter) for i, letter in enumerate('ABCD', 1)])
+        self.cli('init', '--work', self.work, '--collector-root', self.collector, '--trusted', self.repo,
+                 '--python', sys.executable, '--executor', 'local', '--index', self.index, '--manifest', self.manifest,
+                 '--protected-root', self.source, '--resolutions', self.resolutions, '--page-rows', 4, '--max-active', 3)
+        config = json.loads((self.work / 'config.json').read_text())
+        config.update(min_free_bytes=1, promotion_min_units=1)  # every fixture row is one event (one unit)
+        (self.work / 'config.json').write_text(json.dumps(config))
+        original = json.loads((self.work / 'champion.json').read_text())
+        self.cli('run', '--work', self.work)
+
+        # A lane file, not a branch: same code, a YES probability floor.
+        bad = self.cli('register', '--work', self.work, '--parameters', '{"yes_floor": 0.7}', '--hypothesis', 'x',
+                       expect=1).stdout
+        self.assertIn('unknown source-probability parameter', bad)
+        registered = json.loads(self.cli('register', '--work', self.work, '--parameters',
+                                         '{"YES": {"min_probability": 0.70}}', '--hypothesis',
+                                         'Skip weak YES source signals').stdout)
+        self.assertEqual(registered['commit'], original['commit'])
+        self.assertEqual(registered['parameters'], {'YES': {'min_probability': 0.7}})
+        self.cli('register', '--work', self.work, '--parameters', '{"YES": {"min_probability": 0.7}}',
+                 '--hypothesis', 'same version', expect=1)
+
+        self.append_rows([collector_row(i, letter) for i, letter in zip(range(5, 9), 'ABCD')])
+        self.assertIn(f'{registered["candidate_id"]}: 2/4 decisions changed',
+                      self.cli('run', '--work', self.work, '--verbose').stdout)
+        runs = list(self.work.glob(f'cycles/*/runs/{registered["candidate_id"]}/parameters.json'))
+        self.assertEqual(len(runs), 1)
+
+        # The two weak YES buys the candidate skipped both lost: proof passes and the loop promotes it.
+        outcomes = {1: 'YES', 2: 'NO', 3: 'NO', 4: 'NO', 5: 'YES', 6: 'NO', 7: 'NO', 8: 'NO'}
+        self.resolutions.write_text(''.join(json.dumps(resolution(f'KXHIGHNY-26AUG12-T8{i}', o)) + '\n'
+                                            for i, o in outcomes.items()))
+        promoted = self.cli('run', '--work', self.work, '--skip-snapshot').stdout  # notable: printed without --verbose
+        self.assertIn(f'PROMOTED {registered["candidate_id"]}', promoted)
+        champion = json.loads((self.work / 'champion.json').read_text())
+        self.assertEqual((champion['commit'], champion['parameters']), (original['commit'], registered['parameters']))
+        self.assertEqual(champion['set_by'], 'auto-promotion')
+        self.assertTrue(champion['proof']['passes'])
+        candidates = {json.loads(p.read_text())['candidate_id']: json.loads(p.read_text())
+                      for p in self.work.glob('candidates/*/candidate.json')}
+        guard = next(c for c in candidates.values() if c['kind'] == 'rollback_guard')
+        self.assertEqual((guard['commit'], guard['parameters']), (original['commit'], {}))
+        report = (self.work / 'report.md').read_text()
+        self.assertIn('## Champion changes', report)
+        self.assertIn('promoted automatically only when a candidate passes the proof', report)
+
+        # Later the old policy's weak YES buys win: the guard proves the old champion better and restores it.
+        self.append_rows([collector_row(i, letter) for i, letter in zip(range(9, 13), 'BCBC')])
+        self.assertIn(f'{guard["candidate_id"]}: 4/4 decisions changed',
+                      self.cli('run', '--work', self.work, '--verbose').stdout)
+        outcomes.update({9: 'YES', 10: 'YES', 11: 'YES', 12: 'YES'})
+        self.resolutions.write_text(''.join(json.dumps(resolution(f'KXHIGHNY-26AUG12-T8{i}', o)) + '\n'
+                                            for i, o in outcomes.items()))
+        restored = self.cli('run', '--work', self.work, '--skip-snapshot').stdout
+        self.assertIn(f'ROLLED BACK to {guard["candidate_id"]}', restored)
+        champion = json.loads((self.work / 'champion.json').read_text())
+        self.assertEqual((champion['commit'], champion['parameters']), (original['commit'], {}))
+        status = json.loads(self.cli('status', '--work', self.work).stdout)
+        self.assertEqual(status['active_candidates'], [])  # a restoring guard does not spawn another guard
+        history = [json.loads(line) for line in (self.work / 'champion-history.jsonl').read_text().splitlines()]
+        self.assertEqual([h['set_by'] for h in history], ['init', 'auto-promotion', 'auto-promotion'])
+
+
+class ProofOfImprovementTest(unittest.TestCase):
+    CFG = {'promotion_min_units': 20, 'promotion_min_confidence': 0.8, 'promotion_min_buy_ratio': 0.25,
+           'promotion_bootstrap_samples': 2000}
+
+    @staticmethod
+    def rows(deltas):
+        return [{'unit_id': unit, 'market_id': f'{unit}-m{i}', 'baseline': {'proxy_pnl_usd': 0.0},
+                 'candidate': {'proxy_pnl_usd': delta}} for i, (unit, delta) in enumerate(deltas)]
+
+    def proof(self, rows, champion_buys=10, candidate_buys=8, **cfg):
+        import scripts.auto_learning_cycle as cycle
+        return cycle.proof_of_improvement(rows, champion_buys=champion_buys, candidate_buys=candidate_buys,
+                                          cfg={**self.CFG, **cfg}, seed='seed')
+
+    def test_rows_of_one_event_count_once(self):
+        result = self.proof(self.rows([('KXHIGHAUS-26NOV24', 1.0)] * 30))
+        self.assertEqual((result['units'], result['decisions'], result['delta_usd']), (1, 30, 30.0))
+        self.assertFalse(result['passes'])
+        self.assertIn('1/20 independent units', result['blockers'][0])
+
+    def test_consistent_gains_across_enough_units_pass(self):
+        result = self.proof(self.rows([(f'E{i}', 1.0) for i in range(20)]))
+        self.assertEqual((result['units'], result['confidence']), (20, 1.0))
+        self.assertTrue(result['passes'])
+
+    def test_mixed_units_give_a_deterministic_intermediate_confidence(self):
+        rows = self.rows([(f'E{i}', 1.0) for i in range(12)] + [(f'L{i}', -1.0) for i in range(10)])
+        first, second = self.proof(rows), self.proof(list(reversed(rows)))
+        self.assertEqual(first['confidence'], second['confidence'])
+        self.assertTrue(0.5 < first['confidence'] < 0.9, first)
+        self.assertEqual(first['delta_usd'], 2.0)
+
+    def test_trading_nothing_unpriced_rows_and_losses_are_blocked(self):
+        gains = [(f'E{i}', 1.0) for i in range(20)]
+        self.assertIn('buys 10%', self.proof(self.rows(gains), champion_buys=10, candidate_buys=1)['blockers'][0])
+        unpriced = self.rows(gains) + [{'unit_id': 'X', 'market_id': 'x', 'baseline': {'proxy_pnl_usd': None},
+                                        'candidate': {'proxy_pnl_usd': 5.0}}]
+        self.assertEqual(self.proof(unpriced)['unpriced_decisions'], 1)
+        losing = self.proof(self.rows([(f'E{i}', -1.0) for i in range(20)]))
+        self.assertEqual(losing['confidence'], 0.0)
+        self.assertIn('paired proxy P&L delta is not positive', losing['blockers'])
+        self.assertTrue(self.proof([], champion_buys=0, candidate_buys=0)['blockers'])
 
 
 FAKE_HERMES = '''#!/bin/sh

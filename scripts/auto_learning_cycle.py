@@ -24,6 +24,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import random
 import re
 import shutil
 import subprocess
@@ -53,11 +54,16 @@ DEFAULTS = {
     'max_input_bytes': 256 * 1024 ** 2,
     'max_resolution_bytes': 512 * 1024 ** 2,
     'max_decision_bytes': 256 * 1024 ** 2,
-    'conclude_min_resolved_changes': 30,
     'candidate_max_age_days': 7,
     'pending_max_age_days': 7,
     'max_candidate_failures': 2,
     'notify': 'events',
+    # Proof-gated automatic promotion of the paper research champion (never live trading).
+    'auto_promote': True,
+    'promotion_min_units': 20,          # independent units (event tickers / city-days) with a settled disagreement
+    'promotion_min_confidence': 0.80,   # bootstrap probability that the paired proxy-P&L delta is positive
+    'promotion_min_buy_ratio': 0.25,    # candidate resolved buys / champion resolved buys (no "trade nothing")
+    'promotion_bootstrap_samples': 2000,
 }
 # Knowledge clocks (when something was known/fetched) that must not be later than the decision
 # observation: these names plus any key ending in ``_at``/``_as_of``/``_timestamp``. Forecast-target
@@ -253,9 +259,15 @@ def load_config(work: Work) -> dict:
         raise CycleError('docker executor requires a pinned image id')
     if cfg['min_new_rows'] is None:
         cfg['min_new_rows'] = cfg['page_rows']
-    for key in ('page_rows', 'max_active_candidates', 'min_new_rows'):
+    for key in ('page_rows', 'max_active_candidates', 'min_new_rows', 'promotion_min_units',
+                'promotion_bootstrap_samples'):
         if not isinstance(cfg[key], int) or isinstance(cfg[key], bool) or cfg[key] < 1:
             raise CycleError(f'config {key} must be a positive integer')
+    for key in ('promotion_min_confidence', 'promotion_min_buy_ratio'):
+        if isinstance(cfg[key], bool) or not isinstance(cfg[key], (int, float)) or not 0 <= cfg[key] <= 1:
+            raise CycleError(f'config {key} must be a number in [0, 1]')
+    if not isinstance(cfg['auto_promote'], bool):
+        raise CycleError('config auto_promote must be true or false')
     derived = (Path(cfg['collector_root']) / 'data' / 'derived_reports').resolve()
     if work.root == derived or not work.root.is_relative_to(derived):
         raise CycleError(f'work root must be beneath {derived}')
@@ -303,6 +315,35 @@ def verify_trusted_checkout(cfg: dict) -> dict:
 
 # --------------------------------------------------------------------------- candidates
 
+def version_key(commit: str, parameters_sha256: str | None) -> str:
+    """A replayable version: code commit plus control-lane parameters ("lane file")."""
+    return f'{commit}:{parameters_sha256 or "default"}'
+
+
+def champion_record(work: Work) -> dict:
+    record = read_json(work.champion)
+    record.setdefault('parameters', {})
+    record.setdefault('parameters_sha256', None)
+    record['key'] = version_key(record['commit'], record['parameters_sha256'])
+    return record
+
+
+def check_parameters(cfg: dict, work: Work, parameters) -> tuple[dict, str | None]:
+    """Validate parameters with the trusted replay code; return (canonical, sha256 or None for default)."""
+    if parameters in (None, {}):
+        return {}, None
+    scratch = work.root / '.scratch' / uuid.uuid4().hex[:12]
+    scratch.mkdir(parents=True)
+    try:
+        path = scratch / 'parameters.json'
+        path.write_text(json.dumps(parameters), encoding='utf-8')
+        checked = json.loads(trusted(cfg, scratch / 'home', 'auto_research.py', 'check-parameters', path,
+                                     name='trusted check-parameters').stdout)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    return (checked['parameters'], checked['parameters_sha256']) if checked['parameters'] else ({}, None)
+
+
 def candidate_records(work: Work) -> list[dict]:
     records = []
     if not work.candidates.is_dir():
@@ -311,6 +352,10 @@ def candidate_records(work: Work) -> list[dict]:
         path = directory / 'candidate.json'
         if path.is_file():
             record = read_json(path)
+            record.setdefault('parameters', {})
+            record.setdefault('parameters_sha256', None)
+            record.setdefault('kind', 'code')
+            record['key'] = version_key(record['commit'], record['parameters_sha256'])
             events = read_jsonl(directory / 'events.jsonl')
             record['status'] = events[-1]['status'] if events else 'active'
             record['events'] = events
@@ -474,12 +519,16 @@ def remove_stale_containers(cfg: dict, work: Work) -> list[str]:
 
 
 def replay(cfg: dict, work: Work, cycle: Path, cycle_id: str, label: str, commit: str, code: Path, inputs: Path,
-           empty_outcomes: Path) -> dict:
+           empty_outcomes: Path, parameters: dict | None = None, parameters_sha256: str | None = None) -> dict:
     run_dir = cycle / 'runs' / label
     runtime = run_dir / 'runtime'
     (runtime / STORE_RELATIVE).parent.mkdir(parents=True, exist_ok=False)
-    options = ['--idea', f'auto-learning {label} @ {commit[:12]}', '--max-input-bytes', str(cfg['max_input_bytes']),
-               '--max-outcome-bytes', '1']
+    options = ['--idea', f'auto-learning {label} @ {version_key(commit, parameters_sha256)[:20]}',
+               '--max-input-bytes', str(cfg['max_input_bytes']), '--max-outcome-bytes', '1']
+    parameters_file = None
+    if parameters:
+        parameters_file = run_dir / 'parameters.json'
+        parameters_file.write_text(json.dumps(parameters, sort_keys=True), encoding='utf-8')
     container = None
     if cfg['executor'] == 'docker':
         container = f'auto-learning-{cycle_id}-{label}'
@@ -496,15 +545,19 @@ def replay(cfg: dict, work: Work, cycle: Path, cycle_id: str, label: str, commit
                    '--mount', f'type=bind,src={inputs},dst=/work/inputs.jsonl,readonly',
                    '--mount', f'type=bind,src={empty_outcomes},dst=/work/outcomes.jsonl,readonly',
                    '--mount', f'type=bind,src={runtime},dst=/work/runtime',
+                   *(['--mount', f'type=bind,src={parameters_file},dst=/work/parameters.json,readonly']
+                     if parameters_file else []),
                    '--workdir', '/work/code', cfg['image'], 'scripts/auto_research.py', 'run',
                    '--store', f'/work/runtime/{STORE_RELATIVE}', '--inputs', '/work/inputs.jsonl',
-                   '--outcomes', '/work/outcomes.jsonl', *options]
+                   '--outcomes', '/work/outcomes.jsonl', *options,
+                   *(['--parameters-file', '/work/parameters.json'] if parameters_file else [])]
         env = None
     else:
         scratch = run_dir / 'scratch'
         scratch.mkdir()
         command = [cfg['python'], code / 'scripts' / 'auto_research.py', 'run', '--store', runtime / STORE_RELATIVE,
-                   '--inputs', inputs, '--outcomes', empty_outcomes, *options]
+                   '--inputs', inputs, '--outcomes', empty_outcomes, *options,
+                   *(['--parameters-file', parameters_file] if parameters_file else [])]
         env = {'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'HOME': str(scratch), 'TMPDIR': str(scratch),
                'LANG': 'C.UTF-8', 'PYTHONDONTWRITEBYTECODE': '1', 'PYTHONPATH': str(code),
                'GIT_CONFIG_NOSYSTEM': '1', 'PREDICTION_BOT_COLLECTOR_ROOT': str(runtime / 'collector')}
@@ -528,9 +581,13 @@ def replay(cfg: dict, work: Work, cycle: Path, cycle_id: str, label: str, commit
         raise CycleError(f'replay {label} printed an invalid receipt: {exc}; stdout {tail(result.stdout, 300)!r}') from exc
     if receipt.get('git_commit') != commit:
         raise CycleError(f'replay {label} reported commit {receipt.get("git_commit")}, expected {commit}')
+    if receipt.get('control_parameters_sha256') != parameters_sha256:
+        raise CycleError(f'replay {label} applied parameters {receipt.get("control_parameters_sha256")}, '
+                         f'expected {parameters_sha256}')
     write_json_new(run_dir / 'receipt.json', receipt)
-    return {'label': label, 'commit': commit, 'experiment_id': receipt['experiment_id'],
-            'store': str(runtime / STORE_RELATIVE), 'seconds': round(time.monotonic() - started, 1)}
+    return {'label': label, 'commit': commit, 'parameters_sha256': parameters_sha256,
+            'experiment_id': receipt['experiment_id'], 'store': str(runtime / STORE_RELATIVE),
+            'seconds': round(time.monotonic() - started, 1)}
 
 
 def sealed_control(store: Path, experiment_id: str) -> dict:
@@ -600,8 +657,9 @@ def create_pair(work: Work, *, pair_id: str, label: str, candidate_id: str | Non
               'comparison_path': str(comparison_path), 'comparison_sha256': sha256_file(comparison_path),
               'inputs_path': str(inputs), 'inputs_sha256': comparison['input_sha256'],
               'matched_decisions': comparison['matched_decisions'],
-              'baseline': {k: baseline[k] for k in ('commit', 'experiment_id', 'store')},
-              'candidate': {k: candidate[k] for k in ('commit', 'experiment_id', 'store')}, **extra}
+              'baseline': {k: baseline.get(k) for k in ('commit', 'parameters_sha256', 'experiment_id', 'store')},
+              'candidate': {k: candidate.get(k) for k in ('commit', 'parameters_sha256', 'experiment_id', 'store')},
+              **extra}
     write_json_new(work.pending / pair_id / 'pair.json', record)
     append_jsonl(work.pending / pair_id / 'events.jsonl', {'at': iso(), 'status': 'open', 'bound': 0,
                                                             'total': record['matched_decisions']})
@@ -764,8 +822,57 @@ def add_metrics(total: dict, part: dict) -> None:
             total[key] = total.get(key, 0) + value
 
 
+def proof_of_improvement(rows: list[dict], *, champion_buys: int, candidate_buys: int, cfg: dict, seed: str) -> dict:
+    """Is the candidate better than the champion on settled decisions where they disagreed?
+
+    Each row is one resolved decision the two versions decided differently, with each side's price-proxy
+    P&L (a SKIP is 0). Rows are summed per independence unit (event ticker, e.g. one city-day: all of its
+    brackets settle on the same temperature), then a bootstrap over units estimates the probability that
+    the total paired delta is positive. It passes when there are enough units, that probability reaches
+    the configured confidence, the total is positive, and the candidate still trades (buy ratio).
+    """
+    units: dict[str, float] = {}
+    unpriced = 0
+    for row in rows:
+        a, b = row['baseline'].get('proxy_pnl_usd'), row['candidate'].get('proxy_pnl_usd')
+        if a is None or b is None:
+            unpriced += 1
+            continue
+        unit = str(row.get('unit_id') or row.get('market_id'))
+        units[unit] = units.get(unit, 0.0) + (b - a)
+    values = [units[key] for key in sorted(units)]
+    delta = round(sum(values), 6)
+    confidence = None
+    if values:
+        rng = random.Random(int(sha256_bytes(seed.encode())[:16], 16))
+        samples, n = cfg['promotion_bootstrap_samples'], len(values)
+        wins = sum(sum(values[rng.randrange(n)] for _ in range(n)) > 0 for _ in range(samples))
+        confidence = round(wins / samples, 4)
+    ratio = None if champion_buys == 0 else round(candidate_buys / champion_buys, 4)
+    blockers = []
+    if len(values) < cfg['promotion_min_units']:
+        blockers.append(f'{len(values)}/{cfg["promotion_min_units"]} independent units with settled disagreements')
+    if confidence is None or confidence < cfg['promotion_min_confidence']:
+        blockers.append(f'confidence {0 if confidence is None else confidence:.0%} < '
+                        f'{cfg["promotion_min_confidence"]:.0%}')
+    if delta <= 0:
+        blockers.append('paired proxy P&L delta is not positive')
+    if ratio is not None and ratio < cfg['promotion_min_buy_ratio']:
+        blockers.append(f'buys {ratio:.0%} of the champion\'s < {cfg["promotion_min_buy_ratio"]:.0%}')
+    return {'units': len(values), 'decisions': len(rows) - unpriced, 'unpriced_decisions': unpriced,
+            'delta_usd': delta, 'confidence': confidence, 'champion_resolved_buys': champion_buys,
+            'candidate_resolved_buys': candidate_buys, 'buy_ratio': ratio, 'passes': not blockers,
+            'blockers': blockers}
+
+
+def pair_champion_key(pair: dict) -> str:
+    return pair.get('champion_key') or version_key(pair['baseline']['commit'], pair['baseline'].get('parameters_sha256'))
+
+
 def build_scoreboard(work: Work, cfg: dict) -> dict:
     candidates = {c['candidate_id']: c for c in candidate_records(work)}
+    champion = champion_record(work)
+    evidence: dict[str, dict] = {}  # per candidate, pairs measured against the current champion only
     groups: dict[str, dict] = {}
     for pair in pair_records(work):
         key = pair.get('candidate_id') or ('champion-replicate' if pair['label'] == 'replicate' else pair['label'])
@@ -781,16 +888,26 @@ def build_scoreboard(work: Work, cfg: dict) -> dict:
         feedback_path = next((e['feedback'] for e in reversed(pair['events']) if e.get('feedback')), None)
         if feedback_path:
             feedback = read_json(Path(feedback_path))
-            champion, candidate = feedback['runs']
-            add_metrics(group['champion'], run_metrics(champion))
-            add_metrics(group['candidate'], run_metrics(candidate))
+            champion_run, candidate_run = feedback['runs']
+            add_metrics(group['champion'], run_metrics(champion_run))
+            add_metrics(group['candidate'], run_metrics(candidate_run))
             group['resolved_changed'] += sum(item['count'] for item in feedback['changed_resolved_decisions'])
+            if pair.get('candidate_id') in candidates and pair_champion_key(pair) == champion['key']:
+                item = evidence.setdefault(pair['candidate_id'], {'rows': [], 'champion_buys': 0, 'candidate_buys': 0,
+                                                                  'pairs': 0, 'pairs_without_paired_rows': 0})
+                item['pairs'] += 1
+                if 'paired_changed_decisions' in feedback:
+                    item['rows'] += feedback['paired_changed_decisions']
+                    item['champion_buys'] += champion_run.get('resolved_buy_rows', 0)
+                    item['candidate_buys'] += candidate_run.get('resolved_buy_rows', 0)
+                else:
+                    item['pairs_without_paired_rows'] += 1
     for candidate_id in candidates:  # candidates with no pair yet (new or broken) still appear
         groups.setdefault(candidate_id, {'pairs': 0, 'final_pairs': 0, 'decisions': 0, 'changed_decisions': 0,
                                          'resolved_changed': 0, 'champion': {}, 'candidate': {},
                                          'source_clock_violation_rows': 0, 'transitions': Counter()})
-    board = {'schema': 'auto-learning-scoreboard-v1', 'generated_at': iso(),
-             'champion': read_json(work.champion), 'groups': {}}
+    board = {'schema': 'auto-learning-scoreboard-v2', 'generated_at': iso(),
+             'champion': {k: v for k, v in champion.items()}, 'groups': {}}
     for key, group in groups.items():
         group['transitions'] = dict(group['transitions'])
         a, b = group['champion'], group['candidate']
@@ -802,39 +919,87 @@ def build_scoreboard(work: Work, cfg: dict) -> dict:
         if key in candidates:
             record = candidates[key]
             last = record['events'][-1] if record['events'] else {}
-            group.update({'commit': record['commit'], 'hypothesis': record['hypothesis'], 'status': record['status'],
+            group.update({'commit': record['commit'], 'parameters': record['parameters'],
+                          'parameters_sha256': record['parameters_sha256'], 'kind': record['kind'],
+                          'hypothesis': record['hypothesis'], 'status': record['status'],
                           'registered_at': record['registered_at'], 'verdict': last.get('verdict'),
                           'verdict_reason': last.get('reason'),
                           'needs_operator_review': bool(last.get('needs_operator_review'))})
+            if record['status'] == 'active':
+                item = evidence.get(key, {'rows': [], 'champion_buys': 0, 'candidate_buys': 0, 'pairs': 0,
+                                          'pairs_without_paired_rows': 0})
+                group['proof'] = {**proof_of_improvement(item['rows'], champion_buys=item['champion_buys'],
+                                                         candidate_buys=item['candidate_buys'], cfg=cfg,
+                                                         seed=f'{key}|{champion["key"]}'),
+                                  'pairs_vs_current_champion': item['pairs'],
+                                  'pairs_without_paired_rows': item['pairs_without_paired_rows']}
         board['groups'][key] = group
     return board
 
 
+def promote_proven(work: Work, cfg: dict, board: dict, cycle_id: str) -> dict | None:
+    """Promote at most one active candidate whose proof passes (caller holds the work lock).
+
+    The previous champion is registered as a rollback guard: an ordinary candidate that is promoted back
+    if it later proves better than the new champion. A winning guard restores without a new guard."""
+    proven = [(board['groups'][r['candidate_id']]['proof'], r) for r in candidate_records(work)
+              if r['status'] == 'active' and board['groups'].get(r['candidate_id'], {}).get('proof', {}).get('passes')]
+    if not proven:
+        return None
+    proof, winner = max(proven, key=lambda item: (item[0]['confidence'], item[0]['delta_usd'], item[1]['registered_at']))
+    previous = champion_record(work)
+    note = (f'restored by rollback guard {winner["candidate_id"]}' if winner['kind'] == 'rollback_guard'
+            else f'auto-promoted {winner["candidate_id"]}: {winner["hypothesis"][:200]}')
+    record = set_champion(work, commit=winner['commit'], parameters=winner['parameters'],
+                          parameters_sha256=winner['parameters_sha256'], note=note, set_by='auto-promotion',
+                          promoted_candidate=winner['candidate_id'], cycle_id=cycle_id, proof=proof)
+    candidate_event(work, winner['candidate_id'], 'concluded', verdict='promoted', reason='passed the promotion proof',
+                    delta=board['groups'][winner['candidate_id']].get('delta', {}), proof=proof,
+                    needs_operator_review=False)
+    guard = None
+    if winner['kind'] != 'rollback_guard' and not any(
+            r['status'] == 'active' and r['key'] == previous['key'] for r in candidate_records(work)):
+        guard = register_candidate(
+            work, commit=previous['commit'], parameters=previous['parameters'],
+            parameters_sha256=previous['parameters_sha256'], branch=None, registered_by='auto-promotion',
+            champion=champion_record(work), kind='rollback_guard',
+            hypothesis=f'Rollback guard for {winner["candidate_id"]}: the previous champion {previous["key"][:24]} '
+                       'returns automatically if it proves better than the new champion.')
+    return {'candidate_id': winner['candidate_id'], 'kind': winner['kind'], 'champion_key': version_key(
+        record['commit'], record['parameters_sha256']), 'previous_key': previous['key'], 'proof': proof,
+        'rollback_guard': guard}
+
+
 def evaluate_candidates(work: Work, cfg: dict, board: dict) -> list[dict]:
-    """Conclude active candidates once evidence or age limits are reached. Never promotes."""
+    """Conclude active candidates that are broken, inert, proven worse, proven better (operator mode) or
+    out of time. Automatic promotion happens separately, in promote_proven."""
     concluded = []
     for record in candidate_records(work):
         if record['status'] != 'active':
             continue
         group = board['groups'].get(record['candidate_id'], {})
+        proof = group.get('proof') or {}
         candidate_age = age_days(record['registered_at'])
         failures = sum(1 for e in record['events'][-cfg['max_candidate_failures']:] if e.get('status') == 'active'
                        and e.get('replay_failure'))
         verdict = reason = None
         delta = group.get('delta', {})
-        better = delta.get('quote_pnl_usd', 0) > 0 and delta.get('net_correct', 0) >= 0
         if failures >= cfg['max_candidate_failures']:
             verdict, reason = 'broken', f'{failures} consecutive replay failures'
         elif group.get('pairs', 0) >= 2 and group.get('changed_decisions', 0) == 0:
             verdict, reason = 'no_effect', 'no decision changed across two snapshots'
-        elif group.get('resolved_changed', 0) >= cfg['conclude_min_resolved_changes']:
-            verdict, reason = ('better' if better else 'not_better'), 'reached resolved changed-decision target'
+        elif (proof.get('units', 0) >= cfg['promotion_min_units'] and proof.get('confidence') is not None
+              and proof['confidence'] <= 1 - cfg['promotion_min_confidence']):
+            verdict, reason = 'not_better', f'proof shows it is worse (P(better) {proof["confidence"]:.0%})'
+        elif not cfg['auto_promote'] and proof.get('passes'):
+            verdict, reason = 'better', 'passed the promotion proof; automatic promotion is off'
         elif candidate_age >= cfg['candidate_max_age_days']:
-            verdict = 'insufficient_evidence' if group.get('resolved_changed', 0) < 5 else (
-                'better' if better else 'not_better')
-            reason = f'reached {cfg["candidate_max_age_days"]}-day testing window'
+            verdict = 'insufficient_evidence'
+            reason = f'reached {cfg["candidate_max_age_days"]}-day testing window without proof'
+            if record['kind'] == 'rollback_guard':
+                reason += '; the new champion stands'
         if verdict:
-            details = {'verdict': verdict, 'reason': reason, 'delta': delta,
+            details = {'verdict': verdict, 'reason': reason, 'delta': delta, 'proof': proof,
                        'resolved_changed': group.get('resolved_changed', 0),
                        'needs_operator_review': verdict == 'better'}
             candidate_event(work, record['candidate_id'], 'concluded', **details)
@@ -846,16 +1011,38 @@ def fmt_money(value) -> str:
     return 'n/a' if value is None else f'{value:+.2f}'
 
 
+def describe_parameters(parameters: dict) -> str:
+    return json.dumps(parameters, sort_keys=True, separators=(',', ':')) if parameters else 'default'
+
+
 def render_report(work: Work, cfg: dict, board: dict, cycle_summary: dict) -> str:
     champion = board['champion']
+    promotion = (f'The paper research champion is promoted automatically only when a candidate passes the proof: '
+                 f'≥{cfg["promotion_min_units"]} independent units (event tickers) with settled disagreements, '
+                 f'P(paired proxy-P&L delta > 0) ≥ {cfg["promotion_min_confidence"]:.0%} by bootstrap over units, a '
+                 f'positive delta, and buys ≥ {cfg["promotion_min_buy_ratio"]:.0%} of the champion\'s. The previous '
+                 'champion then runs as a rollback guard. Live trading is never affected.'
+                 if cfg['auto_promote'] else 'Automatic promotion is off; a passing proof is flagged for the operator.')
     lines = ['# Auto-learning report', '', f'- Generated: {board["generated_at"]}',
-             f'- Champion: `{champion["commit"]}` ({champion.get("note", "")})',
+             f'- Champion: `{champion["commit"][:12]}` parameters {describe_parameters(champion.get("parameters") or {})} '
+             f'({champion.get("note", "")})',
              f'- Last cycle: `{cycle_summary.get("cycle_id")}` — {cycle_summary.get("status")}',
              f'- Candidate slots: {len(active_candidates(work, cfg))}/{cfg["max_active_candidates"]} active',
              '', 'Scores are diagnostic: outcomes are bound after decisions are sealed. P&L is a price proxy: $1 '
              'per BUY at the recorded ask quote, or the recorded market price when no ask was recorded; binary '
              'payout, zero fees, not fills. Source availability is audited per snapshot but not proven. '
-             'Nothing here promotes automatically.', '']
+             + promotion, '']
+    history = read_jsonl(work.champion_history) if work.champion_history.exists() else []
+    changes = [h for h in history if h.get('set_by') in ('auto-promotion', 'operator')][-5:]
+    if changes:
+        lines += ['## Champion changes', '']
+        for change in reversed(changes):
+            proof = change.get('proof') or {}
+            lines.append(f'- {change["set_at"]} {change.get("set_by")}: `{change["commit"][:12]}` parameters '
+                         f'{describe_parameters(change.get("parameters") or {})} — {change.get("note", "")}'
+                         + (f' (proof: {proof.get("units")} units, P(better) {proof.get("confidence", 0):.0%}, '
+                            f'Δ {fmt_money(proof.get("delta_usd"))})' if proof else ''))
+        lines.append('')
     snapshot = cycle_summary.get('snapshot') or {}
     if snapshot.get('status') == 'snapshot':
         audit = snapshot.get('audit', {})
@@ -872,7 +1059,9 @@ def render_report(work: Work, cfg: dict, board: dict, cycle_summary: dict) -> st
         title = key if key != 'champion-replicate' else 'champion (self-replicate)'
         lines += [f'### {title}', '']
         if group.get('hypothesis'):
-            lines += [f'- Hypothesis: {group["hypothesis"]}', f'- Commit: `{group["commit"]}`',
+            lines += [f'- Hypothesis: {group["hypothesis"]}',
+                      f'- Version: {group.get("kind", "code")} — commit `{group["commit"][:12]}`, parameters '
+                      f'{describe_parameters(group.get("parameters") or {})}',
                       f'- Status: {group.get("status")}' + (f' — verdict **{group["verdict"]}** ({group.get("verdict_reason")})'
                                                             if group.get('verdict') else '')
                       + (' — **needs operator review for promotion**' if group.get('needs_operator_review') else '')]
@@ -889,6 +1078,13 @@ def render_report(work: Work, cfg: dict, board: dict, cycle_summary: dict) -> st
                          f'{b.get("incorrect", 0)} incorrect, proxy P&L {fmt_money(b.get("quote_pnl_usd"))}')
             lines.append(f'- Delta (candidate − champion): net correct {delta.get("net_correct", "n/a")}, '
                          f'proxy P&L {fmt_money(delta.get("quote_pnl_usd"))}')
+        proof = group.get('proof')
+        if proof:
+            confidence = 'n/a' if proof['confidence'] is None else f'{proof["confidence"]:.0%}'
+            ratio = 'n/a' if proof['buy_ratio'] is None else f'{proof["buy_ratio"]:.0%}'
+            lines.append(f'- Proof vs current champion: {proof["units"]}/{cfg["promotion_min_units"]} units, '
+                         f'P(better) {confidence}, Δ {fmt_money(proof["delta_usd"])}, buy ratio {ratio} — '
+                         + ('**passes**' if proof['passes'] else 'not yet: ' + '; '.join(proof['blockers'])))
         lines.append('')
     recent = cycle_summary.get('diffs') or {}
     if recent:
@@ -937,17 +1133,20 @@ def cmd_run(args) -> int:
                 empty = cycle / 'empty-outcomes.jsonl'
                 empty.write_bytes(b'')
                 sources = [work.agent_repo, Path(cfg['trusted_checkout'])]
-                champion_commit = read_json(work.champion)['commit']
-                baseline = replay(cfg, work, cycle, cycle_id, 'champion', champion_commit,
-                                  ensure_code(work, sources, champion_commit), inputs, empty)
-                versions = [(c['candidate_id'], c['candidate_id'], c['commit']) for c in active_candidates(work, cfg)]
+                champion = champion_record(work)
+                baseline = replay(cfg, work, cycle, cycle_id, 'champion', champion['commit'],
+                                  ensure_code(work, sources, champion['commit']), inputs, empty,
+                                  champion['parameters'], champion['parameters_sha256'])
+                versions = [(c['candidate_id'], c['candidate_id'], c['commit'], c['parameters'], c['parameters_sha256'])
+                            for c in active_candidates(work, cfg)]
                 if not versions:
-                    versions = [('replicate', None, champion_commit)]
+                    versions = [('replicate', None, champion['commit'], champion['parameters'],
+                                 champion['parameters_sha256'])]
                 runs = {'champion': baseline}
-                for label, candidate_id, commit in versions:
+                for label, candidate_id, commit, parameters, parameters_sha256 in versions:
                     try:
                         candidate = replay(cfg, work, cycle, cycle_id, label, commit, ensure_code(work, sources, commit),
-                                           inputs, empty)
+                                           inputs, empty, parameters, parameters_sha256)
                         comparison_path, comparison = compare(cfg, cycle, baseline, candidate)
                         if comparison['matched_decisions'] != snapshot['replay_rows']:
                             raise CycleError(f'{label} compared {comparison["matched_decisions"]} of '
@@ -958,7 +1157,8 @@ def cmd_run(args) -> int:
                         create_pair(work, pair_id=f'{cycle_id}--{label}', label=label, candidate_id=candidate_id,
                                     comparison_path=comparison_path, comparison=comparison, inputs=inputs,
                                     baseline=baseline, candidate=candidate,
-                                    extra={'cycle_id': cycle_id, 'diff': {k: diff[k] for k in ('changed', 'transitions')},
+                                    extra={'cycle_id': cycle_id, 'champion_key': champion['key'],
+                                           'diff': {k: diff[k] for k in ('changed', 'transitions')},
                                            'snapshot_page': snapshot['page'],
                                            'newest_observed_at': snapshot['audit']['newest_observed_at'],
                                            'source_clock_violation_rows': snapshot['audit']['source_clock_violation_rows']})
@@ -970,6 +1170,9 @@ def cmd_run(args) -> int:
                             candidate_event(work, candidate_id, 'active', cycle_id=cycle_id, replay_failure=str(exc)[:2000])
                 summary['runs'] = runs
             board = build_scoreboard(work, cfg)
+            summary['promoted'] = promote_proven(work, cfg, board, cycle_id) if cfg['auto_promote'] else None
+            if summary['promoted']:
+                board = build_scoreboard(work, cfg)
             summary['concluded'] = evaluate_candidates(work, cfg, board)
             if summary['concluded']:
                 board = build_scoreboard(work, cfg)
@@ -993,7 +1196,8 @@ def cmd_run(args) -> int:
 
 
 def notable(summary: dict) -> bool:
-    return bool(summary.get('concluded') or summary.get('candidate_failures') or summary['outcomes'].get('errors')
+    return bool(summary.get('promoted') or summary.get('concluded') or summary.get('candidate_failures')
+                or summary['outcomes'].get('errors')
                 or summary['outcomes'].get('deferred')
                 or (summary.get('snapshot', {}).get('audit') or {}).get('source_clock_violation_rows'))
 
@@ -1012,6 +1216,13 @@ def cycle_message(summary: dict, work: Work) -> str:
     outcomes = summary.get('outcomes', {})
     lines.append(f'• Outcomes: {outcomes.get("newly_bound", 0)} newly bound decisions, '
                  f'{len(outcomes.get("finalized", []))} pairs final, {outcomes.get("open_pairs", 0)} were open')
+    promoted = summary.get('promoted')
+    if promoted:
+        proof = promoted['proof']
+        action = 'ROLLED BACK to' if promoted['kind'] == 'rollback_guard' else 'PROMOTED'
+        lines.append(f'• {action} {promoted["candidate_id"]} → champion `{promoted["champion_key"][:24]}` '
+                     f'(proof: {proof["units"]} units, P(better) {proof["confidence"]:.0%}, Δ {fmt_money(proof["delta_usd"])})'
+                     + (f'; rollback guard {promoted["rollback_guard"]}' if promoted.get('rollback_guard') else ''))
     for item in summary.get('concluded', []):
         lines.append(f'• Concluded {item["candidate_id"]}: {item["verdict"]} ({item["reason"]}); delta {item["delta"]}')
     for item in summary.get('candidate_failures', []):
@@ -1047,8 +1258,8 @@ def cmd_init(args) -> int:
     if not work.agent_repo.exists():
         git('clone', '-q', '--no-local', str(trusted_checkout), str(work.agent_repo), cwd=work.root)
     git('branch', '-f', 'champion', champion, cwd=work.agent_repo)
-    write_json_new(work.champion, {'commit': git('rev-parse', champion, cwd=work.agent_repo), 'set_at': iso(),
-                                   'note': args.note})
+    write_json_new(work.champion, {'commit': git('rev-parse', champion, cwd=work.agent_repo), 'parameters': {},
+                                   'parameters_sha256': None, 'set_at': iso(), 'set_by': 'init', 'note': args.note})
     append_jsonl(work.champion_history, read_json(work.champion))
     print(json.dumps({'status': 'initialized', 'work': str(work.root), 'champion': read_json(work.champion)}))
     return 0
@@ -1059,28 +1270,54 @@ def cmd_register(args) -> int:
     cfg = load_config(work)
     if not args.hypothesis.strip():
         raise CycleError('a hypothesis is required')
+    if args.parameters is not None and args.parameters_file is not None:
+        raise CycleError('use either --parameters or --parameters-file, not both')
+    raw_parameters = None
+    try:
+        if args.parameters is not None:
+            raw_parameters = json.loads(args.parameters)
+        elif args.parameters_file is not None:
+            raw_parameters = json.loads(Path(args.parameters_file).read_text(encoding='utf-8'))
+    except ValueError as exc:
+        raise CycleError(f'parameters are not valid JSON: {exc}') from exc
     with work_lock(work, wait_seconds=args.wait_seconds):
-        commit = git('rev-parse', '--verify', f'{args.commit}^{{commit}}', cwd=work.agent_repo)
-        champion = read_json(work.champion)['commit']
-        if commit == champion:
-            raise CycleError('candidate commit equals the champion commit')
+        champion = champion_record(work)
+        commit = git('rev-parse', '--verify', f'{args.commit or champion["commit"]}^{{commit}}', cwd=work.agent_repo)
+        git('cat-file', '-e', f'{commit}:scripts/auto_research.py', cwd=work.agent_repo)
+        if raw_parameters not in (None, {}) and '--parameters-file' not in git(
+                'show', f'{commit}:scripts/auto_research.py', cwd=work.agent_repo):
+            raise CycleError(f'commit {commit[:12]} predates control-lane parameters; build on the current champion')
+        parameters, parameters_sha256 = check_parameters(cfg, work, raw_parameters)
+        key = version_key(commit, parameters_sha256)
+        if key == champion['key']:
+            raise CycleError('candidate (commit + parameters) equals the champion')
         records = candidate_records(work)
-        if any(r['commit'] == commit for r in records):
-            raise CycleError(f'commit {commit} is already registered')
         active = [r for r in records if r['status'] == 'active']
+        if any(r['key'] == key for r in active):
+            raise CycleError(f'version {key} is already an active candidate')
         if len(active) >= cfg['max_active_candidates']:
             raise CycleError(f'no free candidate slot ({len(active)}/{cfg["max_active_candidates"]} active)')
-        git('cat-file', '-e', f'{commit}:scripts/auto_research.py', cwd=work.agent_repo)
-        changed = git('diff', '--name-only', champion, commit, cwd=work.agent_repo).splitlines()
-        candidate_id = f'cand-{utcnow():%Y%m%d}-{uuid.uuid4().hex[:6]}'
-        record = {'schema': 'auto-learning-candidate-v1', 'candidate_id': candidate_id, 'commit': commit,
-                  'base_champion': champion, 'branch': args.branch, 'hypothesis': args.hypothesis.strip(),
-                  'registered_at': iso(), 'changed_paths': changed, 'registered_by': args.registered_by}
-        write_json_new(work.candidates / candidate_id / 'candidate.json', record)
-        candidate_event(work, candidate_id, 'active', note='registered')
+        candidate_id = register_candidate(work, commit=commit, parameters=parameters, parameters_sha256=parameters_sha256,
+                                          hypothesis=args.hypothesis.strip(), branch=args.branch,
+                                          registered_by=args.registered_by, champion=champion)
     print(json.dumps({'status': 'registered', 'candidate_id': candidate_id, 'commit': commit,
-                      'changed_paths': changed}))
+                      'parameters': parameters, 'parameters_sha256': parameters_sha256}))
     return 0
+
+
+def register_candidate(work: Work, *, commit: str, parameters: dict, parameters_sha256: str | None, hypothesis: str,
+                       branch: str | None, registered_by: str, champion: dict, kind: str | None = None) -> str:
+    """Write a candidate record (caller holds the work lock and has validated the version)."""
+    changed = git('diff', '--name-only', champion['commit'], commit, cwd=work.agent_repo).splitlines()
+    candidate_id = f'cand-{utcnow():%Y%m%d}-{uuid.uuid4().hex[:6]}'
+    record = {'schema': 'auto-learning-candidate-v2', 'candidate_id': candidate_id, 'commit': commit,
+              'parameters': parameters, 'parameters_sha256': parameters_sha256,
+              'kind': kind or ('parameters' if commit == champion['commit'] else 'code'),
+              'base_champion': champion['commit'], 'base_champion_key': champion['key'], 'branch': branch,
+              'hypothesis': hypothesis, 'registered_at': iso(), 'changed_paths': changed, 'registered_by': registered_by}
+    write_json_new(work.candidates / candidate_id / 'candidate.json', record)
+    candidate_event(work, candidate_id, 'active', note='registered')
+    return candidate_id
 
 
 def cmd_adopt_pair(args) -> int:
@@ -1113,29 +1350,42 @@ def cmd_adopt_pair(args) -> int:
 
 def cmd_set_champion(args) -> int:
     work = Work(args.work)
-    load_config(work)
+    cfg = load_config(work)
+    try:
+        raw_parameters = json.loads(args.parameters) if args.parameters else None
+    except ValueError as exc:
+        raise CycleError(f'parameters are not valid JSON: {exc}') from exc
     with work_lock(work, wait_seconds=args.wait_seconds):
         commit = git('rev-parse', '--verify', f'{args.commit}^{{commit}}', cwd=work.agent_repo)
-        record = {'commit': commit, 'set_at': iso(), 'note': args.note}
-        write_json_atomic(work.champion, record)
-        append_jsonl(work.champion_history, record)
-        git('update-ref', 'refs/heads/champion', commit, cwd=work.agent_repo)
-        # Scores are only comparable against one champion: retire candidates measured against the old one.
-        for candidate in candidate_records(work):
-            if candidate['status'] == 'active':
-                candidate_event(work, candidate['candidate_id'], 'concluded', verdict='superseded',
-                                reason=f'champion changed to {commit[:12]}; re-register against the new champion',
-                                delta={}, resolved_changed=0, needs_operator_review=False)
+        parameters, parameters_sha256 = check_parameters(cfg, work, raw_parameters)
+        record = set_champion(work, commit=commit, parameters=parameters, parameters_sha256=parameters_sha256,
+                              note=args.note, set_by='operator')
     print(json.dumps({'status': 'champion_set', **record}))
     return 0
+
+
+def set_champion(work: Work, *, commit: str, parameters: dict, parameters_sha256: str | None, note: str,
+                 set_by: str, **details) -> dict:
+    """Replace the champion version (caller holds the work lock). Active candidates keep running; their
+    promotion evidence restarts because proof only counts pairs measured against the current champion."""
+    previous = champion_record(work) if work.champion.exists() else None
+    record = {'commit': commit, 'parameters': parameters, 'parameters_sha256': parameters_sha256, 'set_at': iso(),
+              'set_by': set_by, 'note': note, 'previous_key': previous and previous['key'], **details}
+    write_json_atomic(work.champion, record)
+    append_jsonl(work.champion_history, record)
+    git('update-ref', 'refs/heads/champion', commit, cwd=work.agent_repo)
+    return record
 
 
 def cmd_status(args) -> int:
     work = Work(args.work)
     cfg = load_config(work)
     board = read_json(work.scoreboard) if work.scoreboard.exists() else None
-    print(json.dumps({'champion': read_json(work.champion),
-                      'active_candidates': [{k: c[k] for k in ('candidate_id', 'commit', 'hypothesis', 'registered_at')}
+    proofs = {k: g.get('proof') for k, g in (board or {}).get('groups', {}).items()}
+    print(json.dumps({'champion': champion_record(work),
+                      'active_candidates': [{**{k: c[k] for k in ('candidate_id', 'kind', 'commit', 'parameters',
+                                                                  'hypothesis', 'registered_at')},
+                                             'proof': proofs.get(c['candidate_id'])}
                                             for c in active_candidates(work, cfg)],
                       'free_slots': cfg['max_active_candidates'] - len(active_candidates(work, cfg)),
                       'report': str(work.report), 'scoreboard_generated_at': board and board['generated_at']},
@@ -1204,8 +1454,9 @@ def format_overview(work: Work, jobs: list[str], states: dict[str, dict]) -> str
                      f'next {state.get("next_run", "?")}')
     try:
         cfg = load_config(work)
-        champion = read_json(work.champion)
-        lines.append(f'Champion: {champion["commit"][:12]} ({champion.get("note", "")})')
+        champion = champion_record(work)
+        lines.append(f'Champion: {champion["commit"][:12]} parameters {describe_parameters(champion["parameters"])} '
+                     f'({champion.get("note", "")})')
         candidates = active_candidates(work, cfg)
         lines.append(f'Candidates: {len(candidates)}/{cfg["max_active_candidates"]} active')
         for candidate in candidates:
@@ -1252,7 +1503,9 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument('--verbose', action='store_true', help='always print the cycle summary')
     register = sub.add_parser('register')
     register.add_argument('--work', required=True)
-    register.add_argument('--commit', required=True, help='commit in <work>/agent-repo')
+    register.add_argument('--commit', help='commit in <work>/agent-repo (default: the champion commit)')
+    register.add_argument('--parameters', help='control-lane parameters as a JSON object ("lane file")')
+    register.add_argument('--parameters-file', help='control-lane parameters JSON file')
     register.add_argument('--hypothesis', required=True)
     register.add_argument('--branch')
     register.add_argument('--registered-by', default='research-agent')
@@ -1270,6 +1523,7 @@ def main(argv: list[str] | None = None) -> int:
     champion = sub.add_parser('set-champion', help='operator only: change the baseline commit')
     champion.add_argument('--work', required=True)
     champion.add_argument('--commit', required=True)
+    champion.add_argument('--parameters', help='control-lane parameters JSON object (default policy when omitted)')
     champion.add_argument('--note', required=True)
     champion.add_argument('--wait-seconds', type=int, default=60)
     status = sub.add_parser('status')
