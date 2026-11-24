@@ -20,6 +20,7 @@ Usage:
     python main.py prediction-lab-resolve   # Resolve matured Prediction Lab positions
     python main.py prediction-lab-report    # Show Prediction Lab summary
     python main.py news <query>      # Test news feed
+    python main.py learning on|off|status [--work DIR]  # Paper auto-learning loop switch (all its cron jobs)
 """
 
 import sys
@@ -548,6 +549,33 @@ def cmd_prediction_lab_collect(config_path: str = 'config.yaml'):
     prediction_lab_collect_main()
 
 
+def cmd_learning(argv: list[str]) -> int:
+    """Switch the paper-only auto-learning loop's scheduled jobs together, or show its status.
+
+    The work directory defaults to ``<collector root>/data/derived_reports/auto-learning`` (a symlink to the
+    active loop is fine). Pausing only stops future runs; nothing is deleted.
+    """
+    from bot.collector_paths import derived_reports_root
+    from scripts.auto_learning_cycle import main as auto_learning_main
+
+    actions = {"on": "up", "off": "down", "status": "status"}
+    args = list(argv)
+    work = None
+    if "--work" in args:
+        idx = args.index("--work")
+        if idx + 1 >= len(args):
+            print("usage: python main.py learning on|off|status [--work DIR]")
+            return 2
+        work = args[idx + 1]
+        del args[idx:idx + 2]
+    action = args[0].lower() if args else "status"
+    if action not in actions or len(args) > 1:
+        print("usage: python main.py learning on|off|status [--work DIR]")
+        return 2
+    work = work or str(derived_reports_root() / "auto-learning")
+    return auto_learning_main(["cron", actions[action], "--work", work, "--text"])
+
+
 def cmd_canary_preflight(config_path: str = "config.live_supervised.yaml") -> bool:
     """Read-only live canary preflight; does not instantiate runtime services."""
     import yaml
@@ -613,7 +641,7 @@ def main():
         return
 
     cmd = sys.argv[1].lower()
-    if cmd not in {"canary-preflight", "live-repeatability-report"}:
+    if cmd not in {"canary-preflight", "live-repeatability-report", "learning"}:
         load_dotenv()
 
     single_trade = "--single-trade" in sys.argv
@@ -707,6 +735,8 @@ def main():
     elif cmd == "news":
         query = " ".join(sys.argv[2:]) if len(sys.argv) > 2 else None
         cmd_news(query)
+    elif cmd == "learning":
+        sys.exit(cmd_learning(sys.argv[2:]))
     else:
         print(f"Unknown command: {cmd}")
         print(__doc__)

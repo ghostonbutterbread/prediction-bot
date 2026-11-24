@@ -8,7 +8,7 @@ anything. Promotion (`set-champion`) and paper cohorts are operator decisions.
 ```text
 research agent (Hermes cron, model)            agentless cycle (Hermes cron --no-agent)
   read report.md + scoreboard.json               1. lock; check trusted checkout and free space
-  commit 1–3 ideas in <work>/agent-repo          2. bind newly settled outcomes to earlier sealed pairs, score
+  commit 1–4 ideas in <work>/agent-repo          2. bind newly settled outcomes to earlier sealed pairs, score
   auto_learning_cycle.py register ...            3. snapshot the newest collector rows (outcome-free, audited)
                                                  4. replay champion + each active candidate at its commit
                                                     (separate stores; Docker, network none)
@@ -87,6 +87,10 @@ $CYCLE register --work <work> --commit <sha> --hypothesis '...'   # research age
 $CYCLE set-champion --work <work> --commit <sha> --note '...'     # operator only
 $CYCLE cron down --work <work>     # pause every scheduled job of this loop (up / status likewise)
 ```
+
+From the main CLI, `python main.py learning on|off|status [--work DIR]` does the same with a readable summary
+(switch state, schedules, champion, active candidates, last cycle). `DIR` defaults to
+`<collector root>/data/derived_reports/auto-learning`, which may be a symlink to the active work root.
 
 `cron up|down|status` drives the Hermes cron job ids listed in `<work>/config.json` under `cron_jobs`
 (the agentless cycle and the research agent), skips jobs already in the wanted state, re-reads the

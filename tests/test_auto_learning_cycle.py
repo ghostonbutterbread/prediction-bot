@@ -253,6 +253,21 @@ class AutoLearningCronSwitchTest(unittest.TestCase):
             self.assertEqual(up.returncode, 0, up.stdout + up.stderr)
             self.assertEqual({s['state'] for s in json.loads(up.stdout)['jobs'].values()}, {'active'})
             self.assertEqual(json.loads(cron('status').stdout)['jobs']['bbbbbb222222']['name'], 'job bbbbbb222222')
+            # The main CLI switch drives the same jobs with a human summary.
+            def learning(*args):
+                return subprocess.run([sys.executable, str(ROOT / 'main.py'), 'learning', *args, '--work', str(work)],
+                                      env=env, capture_output=True, text=True, cwd=ROOT)
+
+            off = learning('off')
+            self.assertEqual(off.returncode, 0, off.stdout + off.stderr)
+            self.assertIn('Auto-learning loop: OFF (0/2 jobs active)', off.stdout)
+            self.assertIn('job aaaaaa111111 [aaaaaa111111]: paused', off.stdout)
+            self.assertIn('Loop status unavailable', off.stdout)  # this fixture has no loop config
+            self.assertIn('cccccc333333 active', state.read_text())
+            on = learning('on')
+            self.assertIn('Auto-learning loop: ON (2/2 jobs active)', on.stdout)
+            self.assertEqual(learning('status').returncode, 0)
+            self.assertEqual(learning('sideways').returncode, 2)
             (work / 'config.json').write_text(json.dumps({'cron_jobs': ['dddddd444444']}))
             missing = cron('down')
             self.assertEqual(missing.returncode, 1)
