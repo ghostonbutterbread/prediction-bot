@@ -24,6 +24,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -1142,6 +1143,51 @@ def cmd_status(args) -> int:
     return 0
 
 
+CRON_JOB_LINE = re.compile(r'^\s*([0-9a-f]{6,})\s+\[([a-z_]+)\]\s*$')
+
+
+def cron_states(hermes: str, jobs: list[str]) -> dict[str, dict]:
+    listing = run_command([hermes, 'cron', 'list', '--all'], name='hermes cron list', timeout=60).stdout
+    states, current = {}, None
+    for line in listing.splitlines():
+        match = CRON_JOB_LINE.match(line)
+        if match:
+            current = match.group(1) if match.group(1) in jobs else None
+            if current:
+                states[current] = {'state': match.group(2)}
+        elif current and ':' in line:
+            key, value = line.strip().split(':', 1)
+            if key in ('Name', 'Schedule', 'Next run'):
+                states[current][key.lower().replace(' ', '_')] = value.strip()
+    return states
+
+
+def cmd_cron(args) -> int:
+    """Pause or resume every scheduled job of this loop together."""
+    work = Work(args.work)
+    jobs = (read_json(work.config) if work.config.is_file() else {}).get('cron_jobs') or []
+    if not jobs or not all(isinstance(job, str) and job for job in jobs):
+        raise CycleError(f'{work.config} has no cron_jobs list; add the Hermes cron job ids of this loop')
+    hermes = shutil.which('hermes')
+    if not hermes:
+        raise CycleError('hermes CLI not found on PATH; cannot manage the loop cron jobs')
+    states = cron_states(hermes, jobs)
+    missing = [job for job in jobs if job not in states]
+    if missing:
+        raise CycleError(f'cron jobs not found in `hermes cron list --all`: {", ".join(missing)}')
+    if args.action != 'status':
+        wanted, verb = ('active', 'resume') if args.action == 'up' else ('paused', 'pause')
+        for job in jobs:
+            if states[job]['state'] != wanted:
+                run_command([hermes, 'cron', verb, job], name=f'hermes cron {verb} {job}', timeout=60)
+        states = cron_states(hermes, jobs)
+        wrong = [f'{job}={states.get(job, {}).get("state")}' for job in jobs if states.get(job, {}).get('state') != wanted]
+        if wrong:
+            raise CycleError(f'cron {args.action} incomplete; jobs not {wanted}: {", ".join(wrong)}')
+    print(json.dumps({'action': args.action, 'jobs': {job: states[job] for job in jobs}}, indent=2))
+    return 0
+
+
 class Parser(argparse.ArgumentParser):
     def error(self, message):
         self.print_usage(sys.stderr)
@@ -1195,9 +1241,12 @@ def main() -> int:
     champion.add_argument('--wait-seconds', type=int, default=60)
     status = sub.add_parser('status')
     status.add_argument('--work', required=True)
+    cron = sub.add_parser('cron', help='turn all scheduled jobs of this loop on (up) or off (down) together')
+    cron.add_argument('action', choices=('up', 'down', 'status'))
+    cron.add_argument('--work', required=True)
     args = parser.parse_args()
     handlers = {'init': cmd_init, 'run': cmd_run, 'register': cmd_register, 'adopt-pair': cmd_adopt_pair,
-                'set-champion': cmd_set_champion, 'status': cmd_status}
+                'set-champion': cmd_set_champion, 'status': cmd_status, 'cron': cmd_cron}
     try:
         return handlers[args.command](args)
     except (CycleError, OSError, ValueError, KeyError) as exc:

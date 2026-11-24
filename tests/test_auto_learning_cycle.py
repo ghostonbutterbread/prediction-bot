@@ -206,5 +206,58 @@ class AutoLearningCycleTest(unittest.TestCase):
         self.assertIn('waiting_for_new_rows', self.cli('run', '--work', self.work, '--verbose').stdout)
 
 
+FAKE_HERMES = '''#!/bin/sh
+state="$FAKE_HERMES_STATE"
+case "$2" in
+  list)
+    echo "warning: install out of sync"
+    while read -r id st; do
+      printf '  %s [%s]\\n    Name:      job %s\\n    Next run:  soon\\n\\n' "$id" "$st" "$id"
+    done < "$state" ;;
+  pause|resume)
+    [ "$2" = pause ] && new=paused || new=active
+    echo "$2 $3" >> "$state.calls"
+    sed -i "s/^$3 .*/$3 $new/" "$state" ;;
+  *) exit 2 ;;
+esac
+'''
+
+
+class AutoLearningCronSwitchTest(unittest.TestCase):
+    def test_cron_up_down_switches_every_loop_job_together(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            (tmp / 'bin').mkdir()
+            (tmp / 'bin/hermes').write_text(FAKE_HERMES)
+            (tmp / 'bin/hermes').chmod(0o755)
+            state = tmp / 'state'
+            state.write_text('aaaaaa111111 active\nbbbbbb222222 paused\ncccccc333333 active\n')
+            work = tmp / 'work'
+            work.mkdir()
+            (work / 'config.json').write_text(json.dumps({'cron_jobs': ['aaaaaa111111', 'bbbbbb222222']}))
+            env = dict(os.environ, PATH=f'{tmp / "bin"}:{os.environ["PATH"]}', FAKE_HERMES_STATE=str(state))
+
+            def cron(action):
+                return subprocess.run([sys.executable, str(ROOT / 'scripts/auto_learning_cycle.py'), 'cron', action,
+                                       '--work', str(work)],
+                                      env=env, capture_output=True, text=True)
+
+            down = cron('down')
+            self.assertEqual(down.returncode, 0, down.stdout + down.stderr)
+            jobs = json.loads(down.stdout)['jobs']
+            self.assertEqual({job: s['state'] for job, s in jobs.items()},
+                             {'aaaaaa111111': 'paused', 'bbbbbb222222': 'paused'})
+            self.assertIn('cccccc333333 active', state.read_text())  # unrelated job untouched
+            self.assertEqual((tmp / 'state.calls').read_text(), 'pause aaaaaa111111\n')  # already-paused job skipped
+            up = cron('up')
+            self.assertEqual(up.returncode, 0, up.stdout + up.stderr)
+            self.assertEqual({s['state'] for s in json.loads(up.stdout)['jobs'].values()}, {'active'})
+            self.assertEqual(json.loads(cron('status').stdout)['jobs']['bbbbbb222222']['name'], 'job bbbbbb222222')
+            (work / 'config.json').write_text(json.dumps({'cron_jobs': ['dddddd444444']}))
+            missing = cron('down')
+            self.assertEqual(missing.returncode, 1)
+            self.assertIn('not found', missing.stdout)
+
+
 if __name__ == '__main__':
     unittest.main()
