@@ -158,6 +158,45 @@ class StrategyProjectionRegressionTests(unittest.TestCase):
                 self.assertIn({'path': 'decision_artifact.order_book', 'category': 'post_logic_book'},
                               projected['sanitization']['omitted_fields'])
 
+    def test_generic_book_matching_post_logic_data_is_not_projected(self):
+        from bot.prediction_lab_replay import _recorded_order_book
+        data = {'best_yes_ask': .44, 'spread_pct': 3}
+        cases = {
+            'post_envelope_has_stage': ({'source': 'book', 'data': data},
+                                        {'source': 'book', 'stage': 'post_logic', 'market_id': 'm', 'data': data}),
+            'post_data_has_extra_field': ({'source': 'book', 'data': data},
+                                          {'source': 'book', 'data': {**data, 'best_yes_ask_size': 12}}),
+            'generic_numeric_strings': ({'source': 'book', 'data': {'best_yes_ask': '0.44', 'spread_pct': '3'}},
+                                        {'source': 'book', 'data': data}),
+        }
+        for name, (generic, post) in cases.items():
+            for with_shared in (False, True):
+                with self.subTest(name=name, with_shared=with_shared):
+                    row = _snapshot_row()
+                    row['decision_artifact']['order_book_snapshot'] = generic
+                    row['decision_artifact']['post_logic_order_book_snapshot'] = post
+                    if with_shared:
+                        candidate(row)
+                    projected = project(row)
+                    self.assertNotIn('order_book_snapshot', projected['market'])
+                    self.assertNotEqual((_recorded_order_book(projected['market']) or {}).get('best_yes_ask'), .44)
+                    self.assertIn('post_logic_book', {x['category'] for x in projected['sanitization']['omitted_fields']})
+
+    def test_generic_and_pre_logic_books_differing_or_explicitly_pre_logic_survive(self):
+        row = _snapshot_row()
+        row['decision_artifact']['order_book_snapshot'] = {'source': 'book', 'data': {'best_yes_ask': .41}}
+        row['decision_artifact']['post_logic_order_book_snapshot'] = {
+            'source': 'book', 'stage': 'post_logic', 'data': {'best_yes_ask': .44}}
+        self.assertEqual(project(row)['market']['order_book_snapshot']['data'], {'best_yes_ask': .41})
+        quiet = _snapshot_row()
+        same = {'best_yes_ask': .44}
+        quiet['decision_artifact']['pre_logic_order_book_snapshot'] = {'source': 'book', 'stage': 'pre_logic', 'data': same}
+        quiet['decision_artifact']['order_book_snapshot'] = {'source': 'book', 'stage': 'pre_logic', 'data': same}
+        quiet['decision_artifact']['post_logic_order_book_snapshot'] = {'source': 'book', 'stage': 'post_logic', 'data': same}
+        market = project(quiet)['market']
+        self.assertEqual(market['pre_logic_order_book_snapshot']['data'], same)
+        self.assertEqual(market['order_book_snapshot']['data'], same)
+
     def test_post_logic_books_never_enter_usable_projection(self):
         from bot.prediction_lab_replay import _recorded_order_book
         for explicit_stage in (True, False):

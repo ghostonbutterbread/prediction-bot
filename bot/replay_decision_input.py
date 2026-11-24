@@ -712,6 +712,11 @@ def _build_replay_decision_input_sanitized_v1(
                 def matches_post(post: Any) -> bool:
                     if not isinstance(raw_book, Mapping) or not isinstance(post, Mapping) or not post:
                         return False
+                    if container == "prices" and raw_book.get("stage") != "pre_logic":
+                        # A generic book of unknown timing whose supported quote data equals a
+                        # post-logic snapshot is treated as that snapshot, whatever the envelope.
+                        data = _normalized_book_data(raw_book)
+                        return bool(data) and data == _normalized_book_data(post)
                     # The producer may relabel the shared copy synthetic.
                     return {k: v for k, v in raw_book.items() if k != "source"} == {
                         k: v for k, v in post.items() if k != "source"}
@@ -731,10 +736,9 @@ def _build_replay_decision_input_sanitized_v1(
         post_snapshots = (_field(artifact, "post_logic_order_book_snapshot"),
                           shared_evidence.get("post_logic_order_book_snapshot") if isinstance(shared_evidence, Mapping) else None)
         direct_data = artifact_books["order_book"]
-        post_data = [_sanitized_allowlisted_mapping(post["data"], _ORDER_BOOK_DATA_V1, "post_logic_book", [])
-                     for post in post_snapshots if isinstance(post, Mapping) and isinstance(post.get("data"), Mapping)]
+        post_data = [_normalized_book_data(post) for post in post_snapshots]
         if (isinstance(raw_direct_book, Mapping) and raw_direct_book.get("stage") == "post_logic") or (
-                direct_data and any(isinstance(data, Mapping) and direct_data == data for data in post_data)):
+                direct_data and any(data and direct_data == data for data in post_data)):
             _add_omitted_field(omitted_fields, "decision_artifact.order_book", "post_logic_book")
         else:
             record["market"]["order_book"] = artifact_books["order_book"]
@@ -758,6 +762,14 @@ def _build_replay_decision_input_sanitized_v1(
         return ReplayDecisionInputBuildResult(record=None, errors=tuple(errors))
     record["canonical_input_sha256"] = hashlib.sha256(canonical_input_json).hexdigest()
     return ReplayDecisionInputBuildResult(record=record, canonical_input_json=canonical_input_json)
+
+
+def _normalized_book_data(envelope: Any) -> dict[str, Any]:
+    """Supported, numeric-normalized quote fields of a book envelope, for equality checks only."""
+    data = envelope.get("data") if isinstance(envelope, Mapping) else None
+    if not isinstance(data, Mapping):
+        return {}
+    return _sanitized_allowlisted_mapping(data, _ORDER_BOOK_DATA_V1, "book", [])
 
 
 def _sanitized_provenance(
