@@ -994,8 +994,8 @@ def reconcile_champion_state(work: Work) -> list[str]:
     except CycleError:
         current_ref = None
     if current_ref != champion['commit']:
-        git('update-ref', 'refs/heads/champion', champion['commit'], cwd=work.agent_repo)
-        repairs.append('agent-repo champion ref')
+        warning = move_champion_ref(work, champion['commit'])
+        repairs.append('agent-repo champion ref' + (f' ({warning})' if warning else ''))
     history = read_jsonl(work.champion_history) if work.champion_history.exists() else []
     stored = {k: v for k, v in champion.items() if k != 'key'}
     if not history or {k: history[-1].get(k) for k in ('commit', 'parameters_sha256', 'set_at')} != \
@@ -1410,6 +1410,27 @@ def cmd_set_champion(args) -> int:
     return 0
 
 
+def move_champion_ref(work: Work, commit: str) -> str | None:
+    """Point the agent repo's `champion` branch at commit, keeping a checked-out champion tree in step.
+
+    `update-ref` alone leaves a checked-out champion's index and files at the old commit, which then show
+    as staged reverts that a later `commit -a` would fold into a candidate. A clean checkout is moved
+    with the ref; a dirty one is left untouched and reported (it holds uncommitted agent work)."""
+    repo = work.agent_repo
+    try:
+        on_champion = git('symbolic-ref', '-q', 'HEAD', cwd=repo) == 'refs/heads/champion'
+    except CycleError:  # detached HEAD
+        on_champion = False
+    dirty = on_champion and bool(git('status', '--porcelain', '--untracked-files=no', cwd=repo))
+    git('update-ref', 'refs/heads/champion', commit, cwd=repo)
+    if on_champion and not dirty:
+        git('reset', '-q', '--hard', 'refs/heads/champion', cwd=repo)
+    elif dirty:
+        return (f'agent-repo has champion checked out with uncommitted changes; its files still show the old '
+                f'champion. Inspect and run `git -C {repo} reset --hard champion` before branching')
+    return None
+
+
 def set_champion(work: Work, *, commit: str, parameters: dict, parameters_sha256: str | None, note: str,
                  set_by: str, **details) -> dict:
     """Replace the champion version (caller holds the work lock). Active candidates keep running; their
@@ -1419,7 +1440,9 @@ def set_champion(work: Work, *, commit: str, parameters: dict, parameters_sha256
               'set_by': set_by, 'note': note, 'previous_key': previous and previous['key'], **details}
     write_json_atomic(work.champion, record)
     append_jsonl(work.champion_history, record)
-    git('update-ref', 'refs/heads/champion', commit, cwd=work.agent_repo)
+    warning = move_champion_ref(work, commit)
+    if warning:
+        record = {**record, 'warning': warning}
     return record
 
 

@@ -163,6 +163,15 @@ class AutoLearningCycleTest(unittest.TestCase):
         self.assertIn('verdict **better**', (self.work / 'report.md').read_text())
         # Nothing is promoted automatically.
         self.assertEqual(json.loads((self.work / 'champion.json').read_text())['commit'], champion)
+        # Moving the champion keeps the agent's checked-out champion tree in step (no staged reverts).
+        subprocess.run(['git', 'checkout', '-q', 'champion'], cwd=agent, env=self.env, check=True)
+        self.cli('set-champion', '--work', self.work, '--commit', commit, '--note', 'operator test')
+        status = subprocess.run(['git', 'status', '--porcelain'], cwd=agent, env=self.env, check=True,
+                                capture_output=True, text=True).stdout
+        self.assertEqual(status, '')
+        head = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=agent, env=self.env, check=True,
+                              capture_output=True, text=True).stdout.strip()
+        self.assertEqual(head, commit)
         # A dirty trusted checkout fails loudly before any work.
         (self.repo / 'scratch.txt').write_text('dirty')
         failed = self.cli('run', '--work', self.work, expect=1).stdout
