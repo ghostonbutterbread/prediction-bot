@@ -954,14 +954,27 @@ def _first_text(*values: Any) -> str | None:
     return None
 
 
+def _recorded_ask(market: Mapping[str, Any], key: str) -> float | None:
+    ask = _price(_mapping(market.get("execution_snapshot")).get(key), market.get(key))
+    if ask is not None:
+        return ask
+    # Canonical inputs carry asks only in the decision's projected books. The earliest-stage book that
+    # records the side decides: a no-seller quote there means no executable ask, not a later book's ask.
+    for book in (_mapping(_mapping(market.get("pre_logic_order_book_snapshot")).get("data")),
+                 _mapping(_mapping(market.get("order_book_snapshot")).get("data")),
+                 _mapping(market.get("order_book"))):
+        if book.get(key) is not None:
+            return _price(book.get(key))
+    return None
+
+
 def _select_price(record: Mapping[str, Any], side: str | None) -> tuple[float | None, str | None]:
     market = record.get("market") if isinstance(record.get("market"), Mapping) else {}
-    execution = market.get("execution_snapshot") if isinstance(market.get("execution_snapshot"), Mapping) else {}
     if side == "YES":
-        executable_ask = _price(execution.get("best_yes_ask"), market.get("best_yes_ask"))
+        executable_ask = _recorded_ask(market, "best_yes_ask")
         reference_price = _price(market.get("yes_price"))
     if side == "NO":
-        executable_ask = _price(execution.get("best_no_ask"), market.get("best_no_ask"))
+        executable_ask = _recorded_ask(market, "best_no_ask")
         reference_price = _price(market.get("no_price"))
     if side not in {"YES", "NO"}:
         return None, None

@@ -1378,7 +1378,7 @@ def _market_from_record(record: ReplayArtifactInput) -> Any:
         volume=_first_number(row.get("volume"), signal.get("market_volume"), shared_market.get("volume"), default=0.0),
         category=str(metadata.get("series") or shared_market.get("category") or row.get("series") or row.get("group") or "unknown"),
         metadata=metadata,
-        closes_at=shared_market.get("closes_at"),
+        closes_at=_parse_dt_utc(shared_market.get("closes_at")),
     )
 
 

@@ -205,15 +205,19 @@ class DecisionPipelineEvaluator:
         *,
         as_of: datetime | None = None,
     ) -> tuple[dict[str, Any] | None, StrategyTrace]:
+        # A given as_of (replay) is the decision clock for both the validator and the strategy's own
+        # time logic; live calls pass none and keep the real clock.
         validator = getattr(self.strategy, "validator", None)
-        previous_as_of = getattr(validator, "as_of", None) if validator is not None else None
-        if validator is not None and as_of is not None and hasattr(validator, "as_of"):
-            validator.as_of = as_of
+        clocked = [] if as_of is None else [
+            item for item in (validator, self.strategy) if item is not None and hasattr(item, "as_of")]
+        previous = [item.as_of for item in clocked]
+        for item in clocked:
+            item.as_of = as_of
         try:
             return self._analyze_with_trace_inner(market, order_book)
         finally:
-            if validator is not None and as_of is not None and hasattr(validator, "as_of"):
-                validator.as_of = previous_as_of
+            for item, value in zip(clocked, previous):
+                item.as_of = value
 
     def _analyze_with_trace_inner(self, market: Any, order_book: dict[str, Any] | None) -> tuple[dict[str, Any] | None, StrategyTrace]:
         traced = getattr(self.strategy, "analyze_market_with_trace", None)

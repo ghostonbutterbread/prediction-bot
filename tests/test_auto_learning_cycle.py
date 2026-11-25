@@ -337,7 +337,7 @@ class ProofOfImprovementTest(unittest.TestCase):
         blocked = self.proof(unpriced)
         self.assertEqual(blocked['unpriced_decisions'], 1)
         self.assertFalse(blocked['passes'])  # an unverifiable price can never be dropped silently
-        self.assertIn('unverified price', blocked['blockers'][0])
+        self.assertIn('could not price', blocked['blockers'][0])
         losing = self.proof(self.rows([(f'E{i}', -1.0) for i in range(20)]))
         self.assertEqual(losing['confidence'], 0.0)
         self.assertIn('paired proxy P&L delta is not positive', losing['blockers'])

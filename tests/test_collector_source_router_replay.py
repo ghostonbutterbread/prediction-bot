@@ -818,6 +818,33 @@ class CollectorSourceRouterReplayTests(unittest.TestCase):
         self.assertEqual(edge_observation["action"], "SKIP")
         self.assertEqual(edge_observation["source_selection_correctness"], "correct")
 
+    def test_canonical_order_book_asks_are_executable_prices(self):
+        # Canonical replay inputs carry asks only inside the projected order books, never as top-level fields.
+        from bot.weather.collector_source_router_replay import _select_price
+
+        def canonical(book):
+            record = replay_input(market_id="KXBOOK", observed_at="2026-01-01T12:00:00+00:00", raw_hash="e" * 64)
+            record["market"].pop("best_yes_ask")
+            record["market"].pop("best_no_ask")
+            record["market"].update({"yes_price": 0.41, "no_price": 0.59, **book})
+            return record
+
+        cases = {
+            "pre-logic snapshot first": ({"pre_logic_order_book_snapshot": {"data": {"best_yes_ask": 0.40, "best_no_ask": 0.61}},
+                                          "order_book": {"best_yes_ask": 0.30, "best_no_ask": 0.71}},
+                                         (0.40, "recorded_executable_ask"), (0.61, "recorded_executable_ask")),
+            "decision snapshot": ({"order_book_snapshot": {"data": {"best_yes_ask": 0.39, "best_no_ask": 0.62}}},
+                                  (0.39, "recorded_executable_ask"), (0.62, "recorded_executable_ask")),
+            "generic book": ({"order_book": {"best_yes_ask": 0.38, "best_no_ask": 0.63}},
+                             (0.38, "recorded_executable_ask"), (0.63, "recorded_executable_ask")),
+            "no seller falls back to reference": ({"order_book": {"best_yes_ask": 1.0, "best_no_ask": 0.0}},
+                                                  (0.41, "recorded_market_reference"), (0.59, "recorded_market_reference")),
+        }
+        for name, (book, yes, no) in cases.items():
+            with self.subTest(name):
+                record = canonical(book)
+                self.assertEqual((_select_price(record, "YES"), _select_price(record, "NO")), (yes, no))
+
     def test_price_basis_distinguishes_executable_asks_from_reference_price_proxies(self):
         reference = replay_input(
             market_id="KXREFERENCE", observed_at="2026-01-01T12:00:00+00:00", raw_hash="e" * 64,

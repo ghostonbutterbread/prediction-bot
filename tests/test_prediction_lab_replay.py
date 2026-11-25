@@ -2,6 +2,7 @@ import copy
 import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -2324,6 +2325,13 @@ class PredictionLabReplayTests(unittest.TestCase):
         self.assertEqual(market.volume, 321)
         self.assertEqual(market.metadata["series"], "KXSHARED")
         self.assertEqual(market.metadata["event_ticker"], "KXSHARED-26MAY")
+
+    def test_replay_market_close_time_is_a_datetime(self):
+        row = {"market_id": "KX-CLOSE", "shared_candidate": {
+            "schema_name": "shared_market_candidate", "candidate_id": "c", "market_id": "KX-CLOSE",
+            "market": {"id": "KX-CLOSE", "closes_at": "2026-08-13T04:00:00Z"}, "prices": {"yes_price": 0.4}}}
+        market = _market_from_record(ReplayArtifactInput(row=row, artifact={"final_action": "SKIP"}))
+        self.assertEqual(market.closes_at, datetime(2026, 8, 13, 4, tzinfo=timezone.utc))
 
 
 if __name__ == "__main__":
