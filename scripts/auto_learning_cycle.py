@@ -982,7 +982,7 @@ def promote_proven(work: Work, cfg: dict, board: dict, cycle_id: str) -> dict | 
                     needs_operator_review=False)
     return {'candidate_id': winner['candidate_id'], 'kind': winner['kind'], 'champion_key': version_key(
         record['commit'], record['parameters_sha256']), 'previous_key': previous['key'], 'proof': proof,
-        'rollback_guard': guard}
+        'rollback_guard': guard, 'warning': record.get('warning')}
 
 
 def reconcile_champion_state(work: Work) -> list[str]:
@@ -1223,8 +1223,10 @@ def cmd_run(args) -> int:
             if summary['concluded']:
                 board = build_scoreboard(work, cfg)
             write_json_atomic(work.scoreboard, board)
-            summary['status'] = 'complete_with_warnings' if (summary['candidate_failures'] or summary['outcomes']['errors']
-                                                              or summary['outcomes'].get('deferred')) else 'complete'
+            summary['status'] = 'complete_with_warnings' if (
+                summary['candidate_failures'] or summary['outcomes']['errors'] or summary['outcomes'].get('deferred')
+                or (summary.get('promoted') or {}).get('warning')
+                or any('(' in repair for repair in summary.get('reconciled') or [])) else 'complete'
             report = render_report(work, cfg, board, summary)
             write_text_atomic(work.report, report)
             write_text_atomic(work.reports / f'{cycle_id}.md', report)
@@ -1269,6 +1271,10 @@ def cycle_message(summary: dict, work: Work) -> str:
         lines.append(f'• {action} {promoted["candidate_id"]} → champion `{promoted["champion_key"][:24]}` '
                      f'(proof: {proof["units"]} units, P(better) {proof["confidence"]:.0%}, Δ {fmt_money(proof["delta_usd"])})'
                      + (f'; rollback guard {promoted["rollback_guard"]}' if promoted.get('rollback_guard') else ''))
+        if promoted.get('warning'):
+            lines.append(f'• Agent checkout: {promoted["warning"]}')
+    for repair in summary.get('reconciled') or []:
+        lines.append(f'• Reconciled: {repair}')
     for item in summary.get('concluded', []):
         lines.append(f'• Concluded {item["candidate_id"]}: {item["verdict"]} ({item["reason"]}); delta {item["delta"]}')
     for item in summary.get('candidate_failures', []):
@@ -1407,6 +1413,8 @@ def cmd_set_champion(args) -> int:
         record = set_champion(work, commit=commit, parameters=parameters, parameters_sha256=parameters_sha256,
                               note=args.note, set_by='operator')
     print(json.dumps({'status': 'champion_set', **record}))
+    if record.get('warning'):
+        print(f'WARNING: {record["warning"]}', file=sys.stderr)
     return 0
 
 
@@ -1421,14 +1429,22 @@ def move_champion_ref(work: Work, commit: str) -> str | None:
         on_champion = git('symbolic-ref', '-q', 'HEAD', cwd=repo) == 'refs/heads/champion'
     except CycleError:  # detached HEAD
         on_champion = False
-    dirty = on_champion and bool(git('status', '--porcelain', '--untracked-files=no', cwd=repo))
-    git('update-ref', 'refs/heads/champion', commit, cwd=repo)
-    if on_champion and not dirty:
-        git('reset', '-q', '--hard', 'refs/heads/champion', cwd=repo)
-    elif dirty:
-        return (f'agent-repo has champion checked out with uncommitted changes; its files still show the old '
-                f'champion. Inspect and run `git -C {repo} reset --hard champion` before branching')
-    return None
+    if not on_champion:
+        git('update-ref', 'refs/heads/champion', commit, cwd=repo)
+        return None
+    try:
+        # Moves branch and files together; refuses (changing nothing) rather than overwrite local edits
+        # or untracked files in the way.
+        git('checkout', '-q', '-B', 'champion', commit, cwd=repo)
+        return None
+    except CycleError as exc:
+        # Keep the agent's files: detach at the old commit, then move the branch. If this fails too, the
+        # ref stays behind and reconcile_champion_state retries next cycle.
+        git('checkout', '-q', '--detach', cwd=repo)
+        git('update-ref', 'refs/heads/champion', commit, cwd=repo)
+        return (f'agent-repo had champion checked out with uncommitted or untracked work in the way ({exc}); '
+                f'left detached at the old champion with its files intact. Commit or move that work, then '
+                f'`git -C {repo} checkout champion`')
 
 
 def set_champion(work: Work, *, commit: str, parameters: dict, parameters_sha256: str | None, note: str,
