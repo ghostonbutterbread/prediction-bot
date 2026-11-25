@@ -856,7 +856,7 @@ def proof_of_improvement(rows: list[dict], *, champion_buys: int, candidate_buys
     ratio = None if champion_buys == 0 else round(candidate_buys / champion_buys, 4)
     blockers = []
     if unpriced:
-        blockers.append(f'{unpriced} paired decision(s) with unverified price, basis or stake')
+        blockers.append(f'{unpriced} paired BUY(s) that trusted code could not price')
     if len(values) < cfg['promotion_min_units']:
         blockers.append(f'{len(values)}/{cfg["promotion_min_units"]} independent units with settled disagreements')
     if confidence is None or confidence < cfg['promotion_min_confidence']:
@@ -1120,13 +1120,14 @@ def render_report(work: Work, cfg: dict, board: dict, cycle_summary: dict) -> st
         if a:
             lines.append(f'- Champion on these rows: {a.get("resolved_buys", 0)} resolved buys, '
                          f'{a.get("correct", 0)} correct / {a.get("incorrect", 0)} incorrect, '
-                         f'proxy P&L {fmt_money(a.get("quote_pnl_usd"))} ({a.get("ask_quote_decisions", 0)} ask, '
+                         f'version-reported proxy P&L {fmt_money(a.get("quote_pnl_usd"))} ({a.get("ask_quote_decisions", 0)} ask, '
                          f'{a.get("reference_price_decisions", 0)} reference-price)')
         if b and key != 'champion-replicate':
             lines.append(f'- Candidate: {b.get("resolved_buys", 0)} resolved buys, {b.get("correct", 0)} correct / '
-                         f'{b.get("incorrect", 0)} incorrect, proxy P&L {fmt_money(b.get("quote_pnl_usd"))}')
+                         f'{b.get("incorrect", 0)} incorrect, version-reported proxy P&L {fmt_money(b.get("quote_pnl_usd"))}')
             lines.append(f'- Delta (candidate − champion): net correct {delta.get("net_correct", "n/a")}, '
-                         f'proxy P&L {fmt_money(delta.get("quote_pnl_usd"))}')
+                         f'version-reported proxy P&L {fmt_money(delta.get("quote_pnl_usd"))} (the proof line uses '
+                         'trusted prices)')
         proof = group.get('proof')
         if proof:
             confidence = 'n/a' if proof['confidence'] is None else f'{proof["confidence"]:.0%}'
