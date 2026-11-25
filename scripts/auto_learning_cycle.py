@@ -982,20 +982,24 @@ def promote_proven(work: Work, cfg: dict, board: dict, cycle_id: str) -> dict | 
                     needs_operator_review=False)
     return {'candidate_id': winner['candidate_id'], 'kind': winner['kind'], 'champion_key': version_key(
         record['commit'], record['parameters_sha256']), 'previous_key': previous['key'], 'proof': proof,
-        'rollback_guard': guard}
+        'rollback_guard': guard, 'warning': record.get('warning')}
 
 
-def reconcile_champion_state(work: Work) -> list[str]:
-    """Repair a promotion interrupted between its steps (caller holds the work lock)."""
+def reconcile_champion_state(work: Work) -> tuple[list[str], list[str]]:
+    """Repair a promotion interrupted between its steps (caller holds the work lock).
+
+    Returns (repairs made, warnings needing operator attention)."""
     champion = champion_record(work)
-    repairs = []
+    repairs, warnings = [], []
     try:
         current_ref = git('rev-parse', '--verify', 'refs/heads/champion^{commit}', cwd=work.agent_repo)
     except CycleError:
         current_ref = None
     if current_ref != champion['commit']:
-        git('update-ref', 'refs/heads/champion', champion['commit'], cwd=work.agent_repo)
+        warning = move_champion_ref(work, champion['commit'])
         repairs.append('agent-repo champion ref')
+        if warning:
+            warnings.append(warning)
     history = read_jsonl(work.champion_history) if work.champion_history.exists() else []
     stored = {k: v for k, v in champion.items() if k != 'key'}
     if not history or {k: history[-1].get(k) for k in ('commit', 'parameters_sha256', 'set_at')} != \
@@ -1009,7 +1013,7 @@ def reconcile_champion_state(work: Work) -> list[str]:
                             reason='reconciled: this version is the champion', delta={}, proof={},
                             needs_operator_review=False)
             repairs.append(f'concluded {record["candidate_id"]}')
-    return repairs
+    return repairs, warnings
 
 
 def evaluate_candidates(work: Work, cfg: dict, board: dict) -> list[dict]:
@@ -1162,7 +1166,7 @@ def cmd_run(args) -> int:
                 raise CycleError(f'free space {free} bytes below min_free_bytes {cfg["min_free_bytes"]}; '
                                  'no cycle work started')
             summary['stale_containers_removed'] = remove_stale_containers(cfg, work)
-            summary['reconciled'] = reconcile_champion_state(work)
+            summary['reconciled'], summary['warnings'] = reconcile_champion_state(work)
             summary['outcomes'] = process_outcomes(cfg, work, cycle, cycle_id)
             snapshot = {'status': 'skipped'} if args.skip_snapshot else take_snapshot(cfg, work, cycle)
             summary['snapshot'] = snapshot
@@ -1223,8 +1227,9 @@ def cmd_run(args) -> int:
             if summary['concluded']:
                 board = build_scoreboard(work, cfg)
             write_json_atomic(work.scoreboard, board)
-            summary['status'] = 'complete_with_warnings' if (summary['candidate_failures'] or summary['outcomes']['errors']
-                                                              or summary['outcomes'].get('deferred')) else 'complete'
+            summary['status'] = 'complete_with_warnings' if (
+                summary['candidate_failures'] or summary['outcomes']['errors'] or summary['outcomes'].get('deferred')
+                or (summary.get('promoted') or {}).get('warning') or summary.get('warnings')) else 'complete'
             report = render_report(work, cfg, board, summary)
             write_text_atomic(work.report, report)
             write_text_atomic(work.reports / f'{cycle_id}.md', report)
@@ -1243,6 +1248,7 @@ def cmd_run(args) -> int:
 
 def notable(summary: dict) -> bool:
     return bool(summary.get('promoted') or summary.get('concluded') or summary.get('candidate_failures')
+                or summary.get('warnings') or summary.get('reconciled')
                 or summary['outcomes'].get('errors')
                 or summary['outcomes'].get('deferred')
                 or (summary.get('snapshot', {}).get('audit') or {}).get('source_clock_violation_rows'))
@@ -1269,6 +1275,12 @@ def cycle_message(summary: dict, work: Work) -> str:
         lines.append(f'• {action} {promoted["candidate_id"]} → champion `{promoted["champion_key"][:24]}` '
                      f'(proof: {proof["units"]} units, P(better) {proof["confidence"]:.0%}, Δ {fmt_money(proof["delta_usd"])})'
                      + (f'; rollback guard {promoted["rollback_guard"]}' if promoted.get('rollback_guard') else ''))
+        if promoted.get('warning'):
+            lines.append(f'• Agent checkout: {promoted["warning"]}')
+    for repair in summary.get('reconciled') or []:
+        lines.append(f'• Reconciled: {repair}')
+    for warning in summary.get('warnings') or []:
+        lines.append(f'• Warning: {warning}')
     for item in summary.get('concluded', []):
         lines.append(f'• Concluded {item["candidate_id"]}: {item["verdict"]} ({item["reason"]}); delta {item["delta"]}')
     for item in summary.get('candidate_failures', []):
@@ -1407,7 +1419,38 @@ def cmd_set_champion(args) -> int:
         record = set_champion(work, commit=commit, parameters=parameters, parameters_sha256=parameters_sha256,
                               note=args.note, set_by='operator')
     print(json.dumps({'status': 'champion_set', **record}))
+    if record.get('warning'):
+        print(f'WARNING: {record["warning"]}', file=sys.stderr)
     return 0
+
+
+def move_champion_ref(work: Work, commit: str) -> str | None:
+    """Point the agent repo's `champion` branch at commit, keeping a checked-out champion tree in step.
+
+    `update-ref` alone leaves a checked-out champion's index and files at the old commit, which then show
+    as staged reverts that a later `commit -a` would fold into a candidate. A clean checkout is moved
+    with the ref; a dirty one is left untouched and reported (it holds uncommitted agent work)."""
+    repo = work.agent_repo
+    try:
+        on_champion = git('symbolic-ref', '-q', 'HEAD', cwd=repo) == 'refs/heads/champion'
+    except CycleError:  # detached HEAD
+        on_champion = False
+    if not on_champion:
+        git('update-ref', 'refs/heads/champion', commit, cwd=repo)
+        return None
+    try:
+        # Moves branch and files together; refuses (changing nothing) rather than overwrite local edits
+        # or untracked files in the way.
+        git('checkout', '-q', '-B', 'champion', commit, cwd=repo)
+        return None
+    except CycleError as exc:
+        # Keep the agent's files: detach at the old commit, then move the branch. If this fails too, the
+        # ref stays behind and reconcile_champion_state retries next cycle.
+        git('checkout', '-q', '--detach', cwd=repo)
+        git('update-ref', 'refs/heads/champion', commit, cwd=repo)
+        return (f'agent-repo had champion checked out with uncommitted or untracked work in the way ({exc}); '
+                f'left detached at the old champion with its files intact. Commit or move that work, then '
+                f'`git -C {repo} checkout champion`')
 
 
 def set_champion(work: Work, *, commit: str, parameters: dict, parameters_sha256: str | None, note: str,
@@ -1419,7 +1462,9 @@ def set_champion(work: Work, *, commit: str, parameters: dict, parameters_sha256
               'set_by': set_by, 'note': note, 'previous_key': previous and previous['key'], **details}
     write_json_atomic(work.champion, record)
     append_jsonl(work.champion_history, record)
-    git('update-ref', 'refs/heads/champion', commit, cwd=work.agent_repo)
+    warning = move_champion_ref(work, commit)
+    if warning:
+        record = {**record, 'warning': warning}
     return record
 
 

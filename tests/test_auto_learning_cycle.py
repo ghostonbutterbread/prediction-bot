@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from types import SimpleNamespace
 
@@ -163,6 +164,15 @@ class AutoLearningCycleTest(unittest.TestCase):
         self.assertIn('verdict **better**', (self.work / 'report.md').read_text())
         # Nothing is promoted automatically.
         self.assertEqual(json.loads((self.work / 'champion.json').read_text())['commit'], champion)
+        # Moving the champion keeps the agent's checked-out champion tree in step (no staged reverts).
+        subprocess.run(['git', 'checkout', '-q', 'champion'], cwd=agent, env=self.env, check=True)
+        self.cli('set-champion', '--work', self.work, '--commit', commit, '--note', 'operator test')
+        status = subprocess.run(['git', 'status', '--porcelain'], cwd=agent, env=self.env, check=True,
+                                capture_output=True, text=True).stdout
+        self.assertEqual(status, '')
+        head = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=agent, env=self.env, check=True,
+                              capture_output=True, text=True).stdout.strip()
+        self.assertEqual(head, commit)
         # A dirty trusted checkout fails loudly before any work.
         (self.repo / 'scratch.txt').write_text('dirty')
         failed = self.cli('run', '--work', self.work, expect=1).stdout
@@ -332,6 +342,66 @@ class ProofOfImprovementTest(unittest.TestCase):
         self.assertEqual(losing['confidence'], 0.0)
         self.assertIn('paired proxy P&L delta is not positive', losing['blockers'])
         self.assertTrue(self.proof([], champion_buys=0, candidate_buys=0)['blockers'])
+
+
+class MoveChampionRefTest(unittest.TestCase):
+    """The agent's checked-out champion follows the champion without ever discarding agent work."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix='champion-ref-'))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.repo = self.tmp / 'agent-repo'
+        self.repo.mkdir()
+        self.env = {'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'HOME': str(self.tmp), 'GIT_CONFIG_NOSYSTEM': '1',
+                    'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@x.invalid', 'GIT_COMMITTER_NAME': 't',
+                    'GIT_COMMITTER_EMAIL': 't@x.invalid'}
+        self.git('init', '-q', '-b', 'champion')
+        (self.repo / 'a.txt').write_text('old\n')
+        self.git('add', 'a.txt')
+        self.git('commit', '-qm', 'old')
+        self.old = self.git('rev-parse', 'HEAD')
+        (self.repo / 'a.txt').write_text('new\n')
+        (self.repo / 'added.txt').write_text('champion file\n')
+        self.git('add', 'a.txt', 'added.txt')
+        self.git('commit', '-qm', 'new')
+        self.new = self.git('rev-parse', 'HEAD')
+        self.git('reset', '-q', '--hard', self.old)  # checkout at the old champion, as an agent repo would be
+        import scripts.auto_learning_cycle as cycle
+        self.cycle = cycle
+        self.work = SimpleNamespace(agent_repo=self.repo)
+
+    def git(self, *args):
+        return subprocess.run(['git', *args], cwd=self.repo, env=self.env, check=True, capture_output=True,
+                              text=True).stdout.strip()
+
+    def move(self):
+        with patch.dict(os.environ, self.env):
+            return self.cycle.move_champion_ref(self.work, self.new)
+
+    def test_clean_checkout_moves_with_the_ref(self):
+        self.assertIsNone(self.move())
+        self.assertEqual((self.git('rev-parse', 'HEAD'), self.git('status', '--porcelain')), (self.new, ''))
+        self.assertEqual(self.git('symbolic-ref', 'HEAD'), 'refs/heads/champion')
+
+    def test_conflicting_agent_edit_is_kept_and_reported(self):
+        (self.repo / 'a.txt').write_text('agent edit\n')
+        warning = self.move()
+        self.assertIn('uncommitted', warning)
+        self.assertEqual((self.repo / 'a.txt').read_text(), 'agent edit\n')
+        self.assertEqual(self.git('rev-parse', 'refs/heads/champion'), self.new)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), self.old)  # detached at the old commit: no fake reverts
+
+    def test_untracked_file_in_the_way_is_never_overwritten(self):
+        (self.repo / 'added.txt').write_text('agent draft\n')
+        self.assertIsNotNone(self.move())
+        self.assertEqual((self.repo / 'added.txt').read_text(), 'agent draft\n')
+        self.assertEqual(self.git('rev-parse', 'refs/heads/champion'), self.new)
+
+    def test_other_branch_or_detached_only_moves_the_ref(self):
+        self.git('checkout', '-q', '-b', 'research/x')
+        self.assertIsNone(self.move())
+        self.assertEqual((self.git('rev-parse', 'HEAD'), self.git('rev-parse', 'refs/heads/champion')),
+                         (self.old, self.new))
 
 
 FAKE_HERMES = '''#!/bin/sh
