@@ -985,17 +985,21 @@ def promote_proven(work: Work, cfg: dict, board: dict, cycle_id: str) -> dict | 
         'rollback_guard': guard, 'warning': record.get('warning')}
 
 
-def reconcile_champion_state(work: Work) -> list[str]:
-    """Repair a promotion interrupted between its steps (caller holds the work lock)."""
+def reconcile_champion_state(work: Work) -> tuple[list[str], list[str]]:
+    """Repair a promotion interrupted between its steps (caller holds the work lock).
+
+    Returns (repairs made, warnings needing operator attention)."""
     champion = champion_record(work)
-    repairs = []
+    repairs, warnings = [], []
     try:
         current_ref = git('rev-parse', '--verify', 'refs/heads/champion^{commit}', cwd=work.agent_repo)
     except CycleError:
         current_ref = None
     if current_ref != champion['commit']:
         warning = move_champion_ref(work, champion['commit'])
-        repairs.append('agent-repo champion ref' + (f' ({warning})' if warning else ''))
+        repairs.append('agent-repo champion ref')
+        if warning:
+            warnings.append(warning)
     history = read_jsonl(work.champion_history) if work.champion_history.exists() else []
     stored = {k: v for k, v in champion.items() if k != 'key'}
     if not history or {k: history[-1].get(k) for k in ('commit', 'parameters_sha256', 'set_at')} != \
@@ -1009,7 +1013,7 @@ def reconcile_champion_state(work: Work) -> list[str]:
                             reason='reconciled: this version is the champion', delta={}, proof={},
                             needs_operator_review=False)
             repairs.append(f'concluded {record["candidate_id"]}')
-    return repairs
+    return repairs, warnings
 
 
 def evaluate_candidates(work: Work, cfg: dict, board: dict) -> list[dict]:
@@ -1162,7 +1166,7 @@ def cmd_run(args) -> int:
                 raise CycleError(f'free space {free} bytes below min_free_bytes {cfg["min_free_bytes"]}; '
                                  'no cycle work started')
             summary['stale_containers_removed'] = remove_stale_containers(cfg, work)
-            summary['reconciled'] = reconcile_champion_state(work)
+            summary['reconciled'], summary['warnings'] = reconcile_champion_state(work)
             summary['outcomes'] = process_outcomes(cfg, work, cycle, cycle_id)
             snapshot = {'status': 'skipped'} if args.skip_snapshot else take_snapshot(cfg, work, cycle)
             summary['snapshot'] = snapshot
@@ -1225,8 +1229,7 @@ def cmd_run(args) -> int:
             write_json_atomic(work.scoreboard, board)
             summary['status'] = 'complete_with_warnings' if (
                 summary['candidate_failures'] or summary['outcomes']['errors'] or summary['outcomes'].get('deferred')
-                or (summary.get('promoted') or {}).get('warning')
-                or any('(' in repair for repair in summary.get('reconciled') or [])) else 'complete'
+                or (summary.get('promoted') or {}).get('warning') or summary.get('warnings')) else 'complete'
             report = render_report(work, cfg, board, summary)
             write_text_atomic(work.report, report)
             write_text_atomic(work.reports / f'{cycle_id}.md', report)
@@ -1245,6 +1248,7 @@ def cmd_run(args) -> int:
 
 def notable(summary: dict) -> bool:
     return bool(summary.get('promoted') or summary.get('concluded') or summary.get('candidate_failures')
+                or summary.get('warnings') or summary.get('reconciled')
                 or summary['outcomes'].get('errors')
                 or summary['outcomes'].get('deferred')
                 or (summary.get('snapshot', {}).get('audit') or {}).get('source_clock_violation_rows'))
@@ -1275,6 +1279,8 @@ def cycle_message(summary: dict, work: Work) -> str:
             lines.append(f'• Agent checkout: {promoted["warning"]}')
     for repair in summary.get('reconciled') or []:
         lines.append(f'• Reconciled: {repair}')
+    for warning in summary.get('warnings') or []:
+        lines.append(f'• Warning: {warning}')
     for item in summary.get('concluded', []):
         lines.append(f'• Concluded {item["candidate_id"]}: {item["verdict"]} ({item["reason"]}); delta {item["delta"]}')
     for item in summary.get('candidate_failures', []):
