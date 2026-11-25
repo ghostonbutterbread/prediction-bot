@@ -158,8 +158,9 @@ def summarize(run: dict, outcomes: list[dict]) -> tuple[dict, dict, dict]:
 def proxy_side(decision: dict, proxied: dict, record: dict | None) -> dict:
     """One side of a paired resolved decision: SKIP costs nothing; a BUY carries its price-proxy P&L.
 
-    With the trusted input record, a BUY's sealed price, price basis and stake must equal what trusted code
-    selects from that record; otherwise its P&L is withheld (None), so version code cannot price itself."""
+    With the trusted input record, trusted code prices a BUY itself (the price it selects from that record,
+    the fixed stake and the bound outcome), whatever price, basis or stake the version recorded, so version
+    code cannot price itself. A BUY that trusted code cannot price has its P&L withheld (None)."""
     pnl = 0.0 if decision['action'] == 'SKIP' else (
         proxied.get('hypothetical_ask_quote_pnl_usd') if proxied.get('hypothetical_ask_quote_pnl_usd') is not None
         else proxied.get('hypothetical_reference_price_pnl_usd'))
@@ -167,13 +168,17 @@ def proxy_side(decision: dict, proxied: dict, record: dict | None) -> dict:
             'price_basis': decision.get('price_basis'), 'proxy_pnl_usd': pnl}
     if record is not None and decision['action'] != 'SKIP':
         price, basis = resolver._select_price(record, decision.get('side'))
-        sealed = decision.get('entry_price')
-        verified = (price is not None and isinstance(sealed, (int, float)) and not isinstance(sealed, bool)
-                    and abs(sealed - price) <= 1e-9 and decision.get('price_basis') == basis
-                    and decision.get('fixed_stake_usd') == resolver.FIXED_STAKE_USD)
-        side['price_verified'] = verified
-        if not verified:
+        sealed, stake, outcome = decision.get('entry_price'), resolver.FIXED_STAKE_USD, proxied.get('official_outcome')
+        side['reported_price_matches'] = (
+            price is not None and isinstance(sealed, (int, float)) and not isinstance(sealed, bool)
+            and abs(sealed - price) <= 1e-9 and decision.get('price_basis') == basis
+            and decision.get('fixed_stake_usd') == stake)
+        if price is None or not valid_buy(decision) or outcome not in ('YES', 'NO'):
             side['proxy_pnl_usd'] = None
+        else:  # same model as the resolver: dollar entry cost, binary payout, zero fees
+            won = decision['side'] == outcome
+            side.update(entry_price=price, price_basis=basis, proxy_pnl_usd=round(stake / price - stake if won else -stake, 6))
+        side['price_verified'] = side['proxy_pnl_usd'] is not None
     return side
 
 

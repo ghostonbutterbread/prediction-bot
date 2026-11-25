@@ -78,6 +78,7 @@ class EnhancedStrategyEngine:
         self.strategy_policy_status = strategy_policy_status(self.strategy_policy)
         self.min_edge = config.get("min_edge", 0.05)
         self.min_confidence = config.get("min_confidence", 0.50)
+        self.as_of: datetime | None = None  # decision clock set by replay; None means the real clock
         self.max_position_pct = config.get("max_position_pct", 0.10)
         self.news_weight = config.get("news_weight", 0.20)
         self.social_weight = config.get("social_weight", 0.15)
@@ -1079,7 +1080,9 @@ class EnhancedStrategyEngine:
         if not market.closes_at:
             return None
 
-        now = datetime.now(timezone.utc)
+        now = getattr(self, "as_of", None) or datetime.now(timezone.utc)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
         hours_left = (market.closes_at - now).total_seconds() / 3600
 
         if hours_left < 0:

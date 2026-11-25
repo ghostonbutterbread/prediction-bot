@@ -290,21 +290,30 @@ class ResearchFeedbackTest(unittest.TestCase):
                  'market_id': 'market', 'market_status': 'finalized', 'official_outcome': 'NO',
                  'settlement_ts': '2026-01-02T12:00:00+00:00', 'resolution_id': 'resolution'}]))
 
-    def test_paired_prices_and_stakes_must_match_trusted_inputs(self):
+    def test_paired_buys_are_priced_by_trusted_code_whatever_the_version_recorded(self):
         import scripts.research_feedback as feedback
         from tests.test_collector_source_router_replay import replay_input
-        record = replay_input(market_id='m', observed_at='2026-08-12T15:00:00+00:00', raw_hash='a' * 64)
+        record = replay_input(market_id='m', observed_at='2026-08-12T15:00:00+00:00', raw_hash='a' * 64)  # YES ask 0.40
         decision = {'action': 'BUY_YES', 'side': 'YES', 'entry_price': 0.40, 'price_basis': 'recorded_executable_ask',
                     'fixed_stake_usd': 1.0}
-        proxied = {'hypothetical_ask_quote_pnl_usd': 1.5}
-        self.assertEqual(feedback.proxy_side(decision, proxied, record)['proxy_pnl_usd'], 1.5)
+        won = {'hypothetical_ask_quote_pnl_usd': 1.5, 'official_outcome': 'YES'}
+        side = feedback.proxy_side(decision, won, record)
+        self.assertEqual((side['proxy_pnl_usd'], side['price_verified'], side['reported_price_matches']), (1.5, True, True))
+        # Whatever price, basis or stake the version recorded, trusted code prices the BUY from the input.
         for change in ({'entry_price': 0.10}, {'price_basis': 'recorded_market_reference'}, {'fixed_stake_usd': 5.0}):
             with self.subTest(change=change):
-                side = feedback.proxy_side({**decision, **change}, proxied, record)
-                self.assertFalse(side['price_verified'])
-                self.assertIsNone(side['proxy_pnl_usd'])
+                side = feedback.proxy_side({**decision, **change}, {**won, 'hypothetical_ask_quote_pnl_usd': 99.0}, record)
+                self.assertEqual((side['proxy_pnl_usd'], side['entry_price'], side['price_basis']),
+                                 (1.5, 0.40, 'recorded_executable_ask'))
+                self.assertFalse(side['reported_price_matches'])
+        self.assertEqual(feedback.proxy_side(decision, {'official_outcome': 'NO'}, record)['proxy_pnl_usd'], -1.0)
+        unpriceable = replay_input(market_id='u', observed_at='2026-08-12T15:00:00+00:00', raw_hash='b' * 64)
+        unpriceable['market'].update({'best_yes_ask': None, 'yes_price': None})
+        for bad_decision, bad_record in ((decision, unpriceable), ({**decision, 'side': 'NO'}, record)):
+            side = feedback.proxy_side(bad_decision, won, bad_record)
+            self.assertEqual((side['proxy_pnl_usd'], side['price_verified']), (None, False))
         self.assertEqual(feedback.proxy_side({'action': 'SKIP'}, {}, record)['proxy_pnl_usd'], 0.0)
-        self.assertNotIn('price_verified', feedback.proxy_side(decision, proxied, None))
+        self.assertNotIn('price_verified', feedback.proxy_side(decision, won, None))
 
     def test_rejects_changed_artifact_and_wrong_outcome_digest_without_output(self):
         (self.store / 'runs/baseline/sealed_control_decisions.jsonl').write_text('{}\n')

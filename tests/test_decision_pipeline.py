@@ -1,5 +1,7 @@
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -292,6 +294,35 @@ class DecisionPipelineTests(unittest.TestCase):
         self.assertEqual(prediction_lab["mode"], "collector")
         self.assertTrue(prediction_lab["observer_mode"])
         self.assertTrue(prediction_lab["score_only"])
+
+
+class DecisionClockTests(unittest.TestCase):
+    """A replayed decision measures time to close from its own decision time, not from today."""
+
+    def test_time_signal_uses_the_strategy_decision_clock(self):
+        decided = datetime(2026, 8, 12, 15, tzinfo=timezone.utc)
+        market = SimpleNamespace(closes_at=decided + timedelta(hours=5), yes_price=0.4)
+        engine = EnhancedStrategyEngine.__new__(EnhancedStrategyEngine)  # no feeds needed
+        self.assertIsNone(engine._time_signal(market))  # by today's clock this market closed long ago
+        engine.as_of = decided
+        self.assertEqual(engine._time_signal(market)['confidence'], 0.8)
+
+    def test_evaluator_sets_and_restores_the_strategy_clock(self):
+        decided = datetime(2026, 8, 12, 15, tzinfo=timezone.utc)
+        seen = []
+
+        class Strategy:
+            as_of = None
+
+            def analyze_market_with_trace(self, market, order_book):
+                seen.append(self.as_of)
+                return None, StrategyTrace()
+
+        evaluator = DecisionPipelineEvaluator.__new__(DecisionPipelineEvaluator)
+        evaluator.strategy = Strategy()
+        evaluator._analyze_with_trace(object(), None, as_of=decided)
+        evaluator._analyze_with_trace(object(), None)  # live calls pass no as_of: the real clock applies
+        self.assertEqual((seen, evaluator.strategy.as_of), ([decided, None], None))
 
 
 if __name__ == "__main__":
