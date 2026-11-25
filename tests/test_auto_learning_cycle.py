@@ -286,8 +286,9 @@ class ProofOfImprovementTest(unittest.TestCase):
 
     @staticmethod
     def rows(deltas):
-        return [{'unit_id': unit, 'market_id': f'{unit}-m{i}', 'baseline': {'proxy_pnl_usd': 0.0},
-                 'candidate': {'proxy_pnl_usd': delta}} for i, (unit, delta) in enumerate(deltas)]
+        return [{'unit_id': unit, 'market_id': f'{unit}-m{i}', 'independence_quality': 'event_ticker',
+                 'baseline': {'proxy_pnl_usd': 0.0}, 'candidate': {'proxy_pnl_usd': delta}}
+                for i, (unit, delta) in enumerate(deltas)]
 
     def proof(self, rows, champion_buys=10, candidate_buys=8, **cfg):
         import scripts.auto_learning_cycle as cycle

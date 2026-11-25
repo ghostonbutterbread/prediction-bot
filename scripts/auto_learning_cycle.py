@@ -840,7 +840,7 @@ def proof_of_improvement(rows: list[dict], *, champion_buys: int, candidate_buys
         if a is None or b is None:
             unpriced += 1
             continue
-        if row.get('independence_quality', 'event_ticker') == 'event_ticker':
+        if row.get('independence_quality') == 'event_ticker':
             unit = str(row.get('unit_id') or row.get('market_id'))
         else:  # no event ticker: contracts may share a settlement, so they form one pooled unit
             unit, pooled = '\x00contract-only', pooled + 1
@@ -989,7 +989,11 @@ def reconcile_champion_state(work: Work) -> list[str]:
     """Repair a promotion interrupted between its steps (caller holds the work lock)."""
     champion = champion_record(work)
     repairs = []
-    if git('rev-parse', '--verify', 'refs/heads/champion^{commit}', cwd=work.agent_repo) != champion['commit']:
+    try:
+        current_ref = git('rev-parse', '--verify', 'refs/heads/champion^{commit}', cwd=work.agent_repo)
+    except CycleError:
+        current_ref = None
+    if current_ref != champion['commit']:
         git('update-ref', 'refs/heads/champion', champion['commit'], cwd=work.agent_repo)
         repairs.append('agent-repo champion ref')
     history = read_jsonl(work.champion_history) if work.champion_history.exists() else []
@@ -1018,8 +1022,9 @@ def evaluate_candidates(work: Work, cfg: dict, board: dict) -> list[dict]:
         group = board['groups'].get(record['candidate_id'], {})
         proof = group.get('proof') or {}
         # The testing window restarts with the champion, as the proof does.
-        champion_set = board['champion'].get('set_at')
-        candidate_age = age_days(max(record['registered_at'], champion_set) if champion_set else record['registered_at'])
+        registered, champion_set = parse_time(record['registered_at']), parse_time(board['champion'].get('set_at'))
+        candidate_age = age_days(iso(max(registered, champion_set)) if registered and champion_set
+                                 else record['registered_at'])
         failures = sum(1 for e in record['events'][-cfg['max_candidate_failures']:] if e.get('status') == 'active'
                        and e.get('replay_failure'))
         verdict = reason = None
