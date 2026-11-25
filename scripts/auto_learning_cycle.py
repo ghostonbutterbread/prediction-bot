@@ -767,6 +767,7 @@ def process_outcomes(cfg: dict, work: Work, cycle: Path, cycle_id: str) -> dict:
                         '--outcomes', outcomes, '--outcome-sha256', bound['outcomes_sha256'],
                         '--max-outcome-bytes', cfg['max_resolution_bytes'],
                         '--max-decision-bytes', cfg['max_decision_bytes'], '--output', feedback,
+                        '--inputs', pair['inputs_path'], '--max-input-bytes', cfg['max_input_bytes'],
                         name=f'score {pair["pair_id"]}')
                 counts = bound['binding_counts']
                 status = 'final' if counts.get('bound') == pair['matched_decisions'] else 'open'
@@ -896,7 +897,7 @@ def build_scoreboard(work: Work, cfg: dict) -> dict:
                 item = evidence.setdefault(pair['candidate_id'], {'rows': [], 'champion_buys': 0, 'candidate_buys': 0,
                                                                   'pairs': 0, 'pairs_without_paired_rows': 0})
                 item['pairs'] += 1
-                if 'paired_changed_decisions' in feedback:
+                if feedback.get('paired_changed_decisions_verified') is True:
                     item['rows'] += feedback['paired_changed_decisions']
                     item['champion_buys'] += champion_run.get('resolved_buy_rows', 0)
                     item['candidate_buys'] += candidate_run.get('resolved_buy_rows', 0)

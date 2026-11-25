@@ -155,13 +155,33 @@ def summarize(run: dict, outcomes: list[dict]) -> tuple[dict, dict, dict]:
     return result, {identity(row): row for row in resolved}, proxy_pnl
 
 
-def proxy_side(decision: dict, proxied: dict) -> dict:
-    """One side of a paired resolved decision: SKIP costs nothing; a BUY carries its price-proxy P&L."""
+def proxy_side(decision: dict, proxied: dict, record: dict | None) -> dict:
+    """One side of a paired resolved decision: SKIP costs nothing; a BUY carries its price-proxy P&L.
+
+    With the trusted input record, a BUY's sealed price, price basis and stake must equal what trusted code
+    selects from that record; otherwise its P&L is withheld (None), so version code cannot price itself."""
     pnl = 0.0 if decision['action'] == 'SKIP' else (
         proxied.get('hypothetical_ask_quote_pnl_usd') if proxied.get('hypothetical_ask_quote_pnl_usd') is not None
         else proxied.get('hypothetical_reference_price_pnl_usd'))
-    return {'action': decision['action'], 'side': decision.get('side'), 'entry_price': decision.get('entry_price'),
+    side = {'action': decision['action'], 'side': decision.get('side'), 'entry_price': decision.get('entry_price'),
             'price_basis': decision.get('price_basis'), 'proxy_pnl_usd': pnl}
+    if record is not None and decision['action'] != 'SKIP':
+        price, basis = resolver._select_price(record, decision.get('side'))
+        sealed = decision.get('entry_price')
+        verified = (price is not None and isinstance(sealed, (int, float)) and not isinstance(sealed, bool)
+                    and abs(sealed - price) <= 1e-9 and decision.get('price_basis') == basis
+                    and decision.get('fixed_stake_usd') == resolver.FIXED_STAKE_USD)
+        side['price_verified'] = verified
+        if not verified:
+            side['proxy_pnl_usd'] = None
+    return side
+
+
+def trusted_inputs(path: Path, maximum: int, expected_sha256: str) -> dict[str, dict]:
+    raw = read_bounded(path.resolve(strict=True), maximum)
+    if hashlib.sha256(raw).hexdigest() != expected_sha256:
+        raise ValueError('inputs do not match the replayed input hash')
+    return {identity(row): row for row in read_jsonl(raw)}
 
 
 def scorer_identity() -> dict:
@@ -225,7 +245,15 @@ def run(args: argparse.Namespace) -> dict:
         raise ValueError('selected decision identities differ')
     a, am, ap = summarize(left, outcomes)
     b, bm, bp = summarize(right, outcomes)
-    units = {identity(d): d.get('unit_id') or d.get('market_id') for d in left['decisions']}
+    sealed_left = {identity(d): d for d in left['decisions']}
+    sealed_right = {identity(d): d for d in right['decisions']}
+    inputs = getattr(args, 'inputs', None)  # optional for programmatic callers built before --inputs existed
+    records = trusted_inputs(inputs, getattr(args, 'max_input_bytes', 256 * 1024 * 1024),
+                             left['input_sha256']) if inputs else None
+    if records is not None:
+        units = {key: resolver._decision_time_market_traits(row)['unit_id'] for key, row in records.items()}
+    else:
+        units = {identity(d): d.get('unit_id') or d.get('market_id') for d in left['decisions']}
     paired = []
     if set(am) != set(bm):
         raise ValueError('resolved decision identities differ')
@@ -238,9 +266,13 @@ def run(args: argparse.Namespace) -> dict:
             baseline_direction = ('correct' if x['side'] == x['official_outcome'] else 'incorrect') if valid_buy(x) else 'not_scored'
             changes[(x['action'], y['action'], baseline_direction)] += 1
         if (x['action'], x.get('side')) != (y['action'], y.get('side')) and x['official_outcome'] in ('YES', 'NO'):
+            record = records.get(key) if records is not None else None
+            if records is not None and record is None:
+                raise ValueError('a resolved decision has no trusted input row')
             paired.append({'market_id': x['market_id'], 'unit_id': units.get(key) or x['market_id'],
                            'decision_key': x.get('decision_key'), 'official_outcome': x['official_outcome'],
-                           'baseline': proxy_side(x, ap.get(key, {})), 'candidate': proxy_side(y, bp.get(key, {}))})
+                           'baseline': proxy_side(sealed_left[key], ap.get(key, {}), record),
+                           'candidate': proxy_side(sealed_right[key], bp.get(key, {}), record)})
     result = {'schema_name': 'research_retrospective_directional_feedback', 'schema_version': 3,
               'diagnostic_eligible': False, 'source_time_status': 'unverified',
               'outcome_authority': 'caller-pinned bytes; producer and clock unverified',
@@ -256,6 +288,7 @@ def run(args: argparse.Namespace) -> dict:
               # independence unit (event ticker when recorded) so callers can cluster correlated rows.
               'paired_changed_decisions': sorted(paired, key=lambda r: (r['unit_id'], r['market_id'],
                                                                         json.dumps(r['decision_key'], sort_keys=True))),
+              'paired_changed_decisions_verified': records is not None,
               'limitations': ['retrospective directional feedback only, not profit or promotion evidence',
                               'matching market IDs does not prove independent physical events',
                               'original outcomes files were empty, but this alone does not prove complete blindness']}
@@ -286,6 +319,9 @@ def main() -> int:
     parser.add_argument('--max-outcome-bytes', type=int, required=True)
     parser.add_argument('--max-decision-bytes', type=int, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--inputs', type=Path, help='the replayed input JSONL; when given, paired rows take their '
+                        'unit and entry-price checks from these trusted inputs instead of the sealed decisions')
+    parser.add_argument('--max-input-bytes', type=int, default=256 * 1024 * 1024)
     args = parser.parse_args()
     try:
         print(json.dumps(run(args), sort_keys=True))

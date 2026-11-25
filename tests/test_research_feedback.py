@@ -279,6 +279,7 @@ class ResearchFeedbackTest(unittest.TestCase):
         self.assertEqual(paired[0]['baseline']['proxy_pnl_usd'], -1.0)
         self.assertEqual((paired[0]['candidate']['action'], paired[0]['candidate']['proxy_pnl_usd']), ('SKIP', 0.0))
         self.assertTrue(paired[0]['unit_id'])
+        self.assertFalse(result.pop('paired_changed_decisions_verified'))  # no --inputs: units/prices unverified
         directional = [{k: v for k, v in r.items() if k != 'hypothetical_quote_proxy'} for r in result['runs']]
         self.assertNotIn('pnl', json.dumps({**result, 'runs': directional}).lower())
         proxies = [r['hypothetical_quote_proxy'] for r in result['runs']]
@@ -288,6 +289,22 @@ class ResearchFeedbackTest(unittest.TestCase):
         self.assertEqual(self.outcomes.read_bytes(), encode([{'decision_key': self.key, 'canonical_input_sha256': 'b' * 64,
                  'market_id': 'market', 'market_status': 'finalized', 'official_outcome': 'NO',
                  'settlement_ts': '2026-01-02T12:00:00+00:00', 'resolution_id': 'resolution'}]))
+
+    def test_paired_prices_and_stakes_must_match_trusted_inputs(self):
+        import scripts.research_feedback as feedback
+        from tests.test_collector_source_router_replay import replay_input
+        record = replay_input(market_id='m', observed_at='2026-08-12T15:00:00+00:00', raw_hash='a' * 64)
+        decision = {'action': 'BUY_YES', 'side': 'YES', 'entry_price': 0.40, 'price_basis': 'recorded_executable_ask',
+                    'fixed_stake_usd': 1.0}
+        proxied = {'hypothetical_ask_quote_pnl_usd': 1.5}
+        self.assertEqual(feedback.proxy_side(decision, proxied, record)['proxy_pnl_usd'], 1.5)
+        for change in ({'entry_price': 0.10}, {'price_basis': 'recorded_market_reference'}, {'fixed_stake_usd': 5.0}):
+            with self.subTest(change=change):
+                side = feedback.proxy_side({**decision, **change}, proxied, record)
+                self.assertFalse(side['price_verified'])
+                self.assertIsNone(side['proxy_pnl_usd'])
+        self.assertEqual(feedback.proxy_side({'action': 'SKIP'}, {}, record)['proxy_pnl_usd'], 0.0)
+        self.assertNotIn('price_verified', feedback.proxy_side(decision, proxied, None))
 
     def test_rejects_changed_artifact_and_wrong_outcome_digest_without_output(self):
         (self.store / 'runs/baseline/sealed_control_decisions.jsonl').write_text('{}\n')

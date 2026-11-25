@@ -84,7 +84,11 @@ times. A bootstrap over units estimates P(total delta > 0). The proof passes whe
 - the candidate's resolved buys are ≥ `promotion_min_buy_ratio` (0.25) of the champion's, so "trade
   nothing" cannot win by default.
 
-Only pairs measured against the current champion count. One proven candidate (highest confidence, then
+Version code writes its own sealed decisions, so trusted `research_feedback.py --inputs` re-derives each
+paired row's unit from the frozen input row and requires every BUY's sealed price, price basis and $1
+stake to equal what trusted code selects from that row; otherwise that side's P&L is withheld and the
+row cannot help the proof. A version that changes how prices are selected therefore cannot be promoted.
+Only verified feedback and pairs measured against the current champion count. One proven candidate (highest confidence, then
 delta) is promoted per cycle; the old champion is registered as a `rollback_guard` candidate and is
 restored by the same proof if it later beats the new champion (a restoring guard does not spawn another
 guard). A candidate also concludes as `not_better` once it has enough units and P(better) ≤ 1 − the
