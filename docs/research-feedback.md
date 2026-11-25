@@ -29,3 +29,7 @@ Reproducibility records the four replay settings compared; all four keys must be
 ## Schema v2 — hypothetical quote proxy
 
 Version 2 adds `runs[].hypothetical_quote_proxy`: the same exact-identity join scored as a $1 fixed-dollar price proxy (recorded ask quote, else recorded market reference; binary payout; zero fees). It is not a fill, realized P&L or promotion evidence. Directional fields are unchanged; consumers that ignore the new key are unaffected.
+
+## Schema v3 — paired changed decisions
+
+Version 3 adds `paired_changed_decisions`: one row per resolved decision the two runs decided differently, with `unit_id` (event ticker when recorded, else market id), the official outcome and each side's action, price and price-proxy P&L (`proxy_pnl_usd`, 0 for SKIP; ask quote when recorded, else the recorded market price). The auto-learning promotion proof clusters these rows by `unit_id`. Same proxy limits as v2: quotes, not fills.

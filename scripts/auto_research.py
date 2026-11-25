@@ -85,6 +85,16 @@ class CronArgumentParser(argparse.ArgumentParser):
         super().error('[CRON_FAILURE] ' + message)
 
 
+def load_parameters(path: Path | None) -> dict:
+    """Read and normalize a control-lane parameters file (None -> default policy)."""
+    if path is None:
+        return {}
+    if path.stat().st_size > 64 * 1024:
+        raise ValueError('parameters file exceeds 64 KiB')
+    from bot.weather.collector_source_router_replay import normalize_source_probability_parameters
+    return normalize_source_probability_parameters(json.loads(path.read_text(encoding='utf-8')))
+
+
 def main() -> int:
     parser = CronArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
@@ -97,6 +107,9 @@ def main() -> int:
     run.add_argument('--max-rows', type=int, default=None, help='maximum selected input object rows, not an I/O bound')
     run.add_argument('--max-input-bytes', type=int, required=True, help='maximum complete input file size to hash and read')
     run.add_argument('--max-outcome-bytes', type=int, required=True, help='maximum complete outcome file size to hash and load')
+    run.add_argument('--parameters-file', type=Path, help='control-lane parameters JSON object ("lane file"); default policy when omitted')
+    check = sub.add_parser('check-parameters', help='validate a control-lane parameters file and print its canonical form')
+    check.add_argument('parameters_file', type=Path)
     queue = sub.add_parser('queue', help='record a manual-review handoff, never activate')
     queue.add_argument('--store', type=Path, required=True)
     queue.add_argument('--experiment', required=True)
@@ -106,6 +119,13 @@ def main() -> int:
     compare.add_argument('--candidate-store', type=Path, help='separate candidate store; remaps both run paths under their respective stores')
     compare.add_argument('experiments', nargs=2)
     args = parser.parse_args()
+
+    if args.command == 'check-parameters':
+        parameters = load_parameters(args.parameters_file)
+        from bot.weather.collector_source_router_replay import source_probability_parameters_sha256
+        print(json.dumps({'parameters': parameters, 'parameters_sha256': source_probability_parameters_sha256(parameters)},
+                         sort_keys=True))
+        return 0
 
     from bot.collector_paths import derived_reports_root
     store = args.store.resolve()
@@ -183,6 +203,7 @@ def main() -> int:
             coverage = {key: stats[key] for key in ('input_records_seen', 'input_records_invalid_identity',
                                                        'sealed_control_decisions', 'sealed_candidate_decisions')}
             summaries.append({'experiment_id': experiment_id, 'git_commit': row[0],
+                              'control_parameters_sha256': json.loads(row[3]).get('control_parameters_sha256'),
                               'lanes': lanes, 'coverage': coverage})
         if identities[0] != identities[1]:
             raise ValueError('experiment decision identities differ')
@@ -242,7 +263,11 @@ def main() -> int:
             errors = _copied_subtree_forbidden_errors(payload, 'input')
             if errors:
                 raise ValueError(f'forbidden replay field at line {number}: {errors[0].path}')
-    config = {'min_sample_count': args.min_sample_count, 'max_rows': args.max_rows,
+    parameters = load_parameters(args.parameters_file)
+    from bot.weather.collector_source_router_replay import source_probability_parameters_sha256
+    parameters_sha256 = source_probability_parameters_sha256(parameters) if parameters else None
+    config = {'control_parameters': parameters, 'control_parameters_sha256': parameters_sha256,
+              'min_sample_count': args.min_sample_count, 'max_rows': args.max_rows,
               'max_input_bytes': args.max_input_bytes, 'max_outcome_bytes': args.max_outcome_bytes,
               'resource_scope': 'whole input and outcome files; stable immutable regular files required',
               'history': None, 'cohort_per_shape_target': 30, 'python': sys.version,
@@ -253,7 +278,8 @@ def main() -> int:
     from bot.weather.collector_source_router_replay import run_collector_source_router_replay
     result = run_collector_source_router_replay(
         replay_inputs_path=inputs, finalized_outcomes_path=outcomes, output_dir=output_dir,
-        min_sample_count=args.min_sample_count, max_rows=args.max_rows, directional_only=True)
+        min_sample_count=args.min_sample_count, max_rows=args.max_rows, directional_only=True,
+        control_parameters=parameters)
     if (sha256(inputs), sha256(outcomes)) != (input_hash, outcome_hash):
         raise ValueError('input changed during replay; artifacts are incomplete and not registered')
     if git('status', '--porcelain', '--untracked-files=all') or git('rev-parse', 'HEAD') != commit:
@@ -269,7 +295,8 @@ def main() -> int:
         db.execute('INSERT INTO experiments VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                    (experiment_id, now(), args.idea, commit, tree, input_hash, outcome_hash,
                     json.dumps(config, sort_keys=True), json.dumps(result_data, sort_keys=True), str(output_dir)))
-    print(json.dumps({'experiment_id': experiment_id, 'git_commit': commit, 'output_dir': str(output_dir)}))
+    print(json.dumps({'experiment_id': experiment_id, 'git_commit': commit, 'output_dir': str(output_dir),
+                      'control_parameters_sha256': parameters_sha256}))
     return 0
 
 

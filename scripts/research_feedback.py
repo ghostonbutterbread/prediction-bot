@@ -126,7 +126,7 @@ def valid_buy(row: dict) -> bool:
     return (row.get('action'), row.get('side')) in (('BUY_YES', 'YES'), ('BUY_NO', 'NO'))
 
 
-def summarize(run: dict, outcomes: list[dict]) -> tuple[dict, dict]:
+def summarize(run: dict, outcomes: list[dict]) -> tuple[dict, dict, dict]:
     report = resolve_sealed_source_probability_decisions(run['decisions'], outcomes, directional_only=True)
     resolved = report['resolved_decisions']
     scored = [r for r in resolved if valid_buy(r) and r['official_outcome'] in ('YES', 'NO')]
@@ -143,14 +143,45 @@ def summarize(run: dict, outcomes: list[dict]) -> tuple[dict, dict]:
                    'outcome_ledger_counts': report['summary']['outcome_ledger']})
     # Same exact join, scored as the reviewed $1 fixed-dollar quote proxy: recorded
     # ask quotes, binary payout, zero fees. A price proxy, never a fill or P&L.
-    proxy = resolve_sealed_source_probability_decisions(run['decisions'], outcomes, directional_only=False)['summary']
+    proxy_report = resolve_sealed_source_probability_decisions(run['decisions'], outcomes, directional_only=False)
+    proxy = proxy_report['summary']
     result['hypothetical_quote_proxy'] = {
         key: proxy[key] for key in proxy
         if key.startswith(('hypothetical_ask_quote_pnl', 'hypothetical_reference_price_pnl'))}
     result['hypothetical_quote_proxy']['semantics'] = (
         '$1 dollar cost per BUY at the recorded selected-side ask quote; binary payout; zero fees; '
         'not a fill, realized P&L, or promotion evidence')
-    return result, {identity(row): row for row in resolved}
+    proxy_pnl = {identity(row): row for row in proxy_report['resolved_decisions']}
+    return result, {identity(row): row for row in resolved}, proxy_pnl
+
+
+def proxy_side(decision: dict, proxied: dict, record: dict | None) -> dict:
+    """One side of a paired resolved decision: SKIP costs nothing; a BUY carries its price-proxy P&L.
+
+    With the trusted input record, a BUY's sealed price, price basis and stake must equal what trusted code
+    selects from that record; otherwise its P&L is withheld (None), so version code cannot price itself."""
+    pnl = 0.0 if decision['action'] == 'SKIP' else (
+        proxied.get('hypothetical_ask_quote_pnl_usd') if proxied.get('hypothetical_ask_quote_pnl_usd') is not None
+        else proxied.get('hypothetical_reference_price_pnl_usd'))
+    side = {'action': decision['action'], 'side': decision.get('side'), 'entry_price': decision.get('entry_price'),
+            'price_basis': decision.get('price_basis'), 'proxy_pnl_usd': pnl}
+    if record is not None and decision['action'] != 'SKIP':
+        price, basis = resolver._select_price(record, decision.get('side'))
+        sealed = decision.get('entry_price')
+        verified = (price is not None and isinstance(sealed, (int, float)) and not isinstance(sealed, bool)
+                    and abs(sealed - price) <= 1e-9 and decision.get('price_basis') == basis
+                    and decision.get('fixed_stake_usd') == resolver.FIXED_STAKE_USD)
+        side['price_verified'] = verified
+        if not verified:
+            side['proxy_pnl_usd'] = None
+    return side
+
+
+def trusted_inputs(path: Path, maximum: int, expected_sha256: str) -> dict[str, dict]:
+    raw = read_bounded(path.resolve(strict=True), maximum)
+    if hashlib.sha256(raw).hexdigest() != expected_sha256:
+        raise ValueError('inputs do not match the replayed input hash')
+    return {identity(row): row for row in read_jsonl(raw)}
 
 
 def scorer_identity() -> dict:
@@ -212,8 +243,20 @@ def run(args: argparse.Namespace) -> dict:
         raise ValueError('experiments have different input or replay settings')
     if left['identities'] != right['identities']:
         raise ValueError('selected decision identities differ')
-    a, am = summarize(left, outcomes)
-    b, bm = summarize(right, outcomes)
+    a, am, ap = summarize(left, outcomes)
+    b, bm, bp = summarize(right, outcomes)
+    sealed_left = {identity(d): d for d in left['decisions']}
+    sealed_right = {identity(d): d for d in right['decisions']}
+    inputs = getattr(args, 'inputs', None)  # optional for programmatic callers built before --inputs existed
+    records = trusted_inputs(inputs, getattr(args, 'max_input_bytes', 256 * 1024 * 1024),
+                             left['input_sha256']) if inputs else None
+    if records is not None:
+        traits = {key: resolver._decision_time_market_traits(row) for key, row in records.items()}
+        units = {key: (t['unit_id'], t['independence_quality']) for key, t in traits.items()}
+    else:
+        units = {identity(d): (d.get('unit_id') or d.get('market_id'), d.get('independence_quality'))
+                 for d in left['decisions']}
+    paired = []
     if set(am) != set(bm):
         raise ValueError('resolved decision identities differ')
     changes = Counter()
@@ -224,7 +267,16 @@ def run(args: argparse.Namespace) -> dict:
         if x['action'] != y['action']:
             baseline_direction = ('correct' if x['side'] == x['official_outcome'] else 'incorrect') if valid_buy(x) else 'not_scored'
             changes[(x['action'], y['action'], baseline_direction)] += 1
-    result = {'schema_name': 'research_retrospective_directional_feedback', 'schema_version': 2,
+        if (x['action'], x.get('side')) != (y['action'], y.get('side')) and x['official_outcome'] in ('YES', 'NO'):
+            record = records.get(key) if records is not None else None
+            if records is not None and record is None:
+                raise ValueError('a resolved decision has no trusted input row')
+            unit_id, independence = units.get(key) or (x['market_id'], None)
+            paired.append({'market_id': x['market_id'], 'unit_id': unit_id, 'independence_quality': independence,
+                           'decision_key': x.get('decision_key'), 'official_outcome': x['official_outcome'],
+                           'baseline': proxy_side(sealed_left[key], ap.get(key, {}), record),
+                           'candidate': proxy_side(sealed_right[key], bp.get(key, {}), record)})
+    result = {'schema_name': 'research_retrospective_directional_feedback', 'schema_version': 3,
               'diagnostic_eligible': False, 'source_time_status': 'unverified',
               'outcome_authority': 'caller-pinned bytes; producer and clock unverified',
               'outcome_sha256': outcome_hash, 'outcome_rows': len(outcomes),
@@ -235,6 +287,11 @@ def run(args: argparse.Namespace) -> dict:
               'runs': [a, b], 'changed_resolved_decisions': [
                   {'from': old, 'to': new, 'baseline_direction': direction, 'count': count}
                   for (old, new, direction), count in sorted(changes.items())],
+              # Per-decision price-proxy P&L where the two versions decided differently, keyed by the
+              # independence unit (event ticker when recorded) so callers can cluster correlated rows.
+              'paired_changed_decisions': sorted(paired, key=lambda r: (r['unit_id'], r['market_id'],
+                                                                        json.dumps(r['decision_key'], sort_keys=True))),
+              'paired_changed_decisions_verified': records is not None,
               'limitations': ['retrospective directional feedback only, not profit or promotion evidence',
                               'matching market IDs does not prove independent physical events',
                               'original outcomes files were empty, but this alone does not prove complete blindness']}
@@ -265,6 +322,9 @@ def main() -> int:
     parser.add_argument('--max-outcome-bytes', type=int, required=True)
     parser.add_argument('--max-decision-bytes', type=int, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--inputs', type=Path, help='the replayed input JSONL; when given, paired rows take their '
+                        'unit and entry-price checks from these trusted inputs instead of the sealed decisions')
+    parser.add_argument('--max-input-bytes', type=int, default=256 * 1024 * 1024)
     args = parser.parse_args()
     try:
         print(json.dumps(run(args), sort_keys=True))

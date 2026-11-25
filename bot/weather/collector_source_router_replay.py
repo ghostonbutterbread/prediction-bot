@@ -38,6 +38,69 @@ CANDIDATE_LANE_ID = "source_router_candidate_v1"
 POLICY_VERSION = "source_probability_replay_v1"
 MIN_ABSOLUTE_EDGE = 0.05
 FIXED_STAKE_USD = 1.0
+
+# Control-lane parameters ("lane file"). An empty mapping is exactly the default policy above; each key
+# narrows (or, for min_edge, moves) the BUY rule. Parameter-induced skips carry a parameter_* reason.
+_SIDE_BOUNDS = ("min_probability", "max_probability", "min_price", "max_price", "min_edge", "max_edge")
+_TRAIT_FILTERS = {
+    "include_cities": "city_id", "exclude_cities": "city_id",
+    "include_market_kinds": "market_kind", "exclude_market_kinds": "market_kind",
+    "include_contract_shapes": "contract_shape", "exclude_contract_shapes": "contract_shape",
+}
+_TRAIT_REASON = {"city_id": "city", "market_kind": "market_kind", "contract_shape": "contract_shape"}
+
+
+def normalize_source_probability_parameters(parameters: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Validate control-lane parameters and return their canonical form ({} = default policy)."""
+    if parameters is None:
+        return {}
+    if not isinstance(parameters, Mapping):
+        raise ValueError("source-probability parameters must be a JSON object")
+    unknown = sorted(set(parameters) - {"min_edge", "allowed_actions", "YES", "NO", *_TRAIT_FILTERS})
+    if unknown:
+        raise ValueError(f"unknown source-probability parameter(s): {', '.join(map(str, unknown))}")
+
+    def unit(value: Any, name: str) -> float:
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 1:
+            raise ValueError(f"source-probability parameter {name} must be a number in [0, 1]")
+        return round(float(value), 6)
+
+    normalized: dict[str, Any] = {}
+    if "min_edge" in parameters:
+        normalized["min_edge"] = unit(parameters["min_edge"], "min_edge")
+    if "allowed_actions" in parameters:
+        actions = parameters["allowed_actions"]
+        if not isinstance(actions, list) or not actions or any(a not in (BUY_YES, BUY_NO) for a in actions):
+            raise ValueError("source-probability parameter allowed_actions must be a non-empty list of BUY_YES/BUY_NO")
+        normalized["allowed_actions"] = sorted(set(actions))
+    for side in ("YES", "NO"):
+        if side not in parameters:
+            continue
+        bounds = parameters[side]
+        if not isinstance(bounds, Mapping):
+            raise ValueError(f"source-probability parameter {side} must be an object")
+        extra = sorted(set(bounds) - set(_SIDE_BOUNDS))
+        if extra:
+            raise ValueError(f"unknown source-probability parameter(s): {', '.join(f'{side}.{k}' for k in extra)}")
+        clean = {key: unit(bounds[key], f"{side}.{key}") for key in _SIDE_BOUNDS if key in bounds}
+        for low, high in (("min_probability", "max_probability"), ("min_price", "max_price"), ("min_edge", "max_edge")):
+            if low in clean and high in clean and clean[low] > clean[high]:
+                raise ValueError(f"source-probability parameter {side}.{low} exceeds {side}.{high}")
+        if clean:
+            normalized[side] = clean
+    for key in _TRAIT_FILTERS:
+        if key not in parameters:
+            continue
+        values = parameters[key]
+        if not isinstance(values, list) or not values or not all(isinstance(v, str) and v.strip() for v in values):
+            raise ValueError(f"source-probability parameter {key} must be a non-empty list of strings")
+        normalized[key] = sorted({v.strip() for v in values})
+    return normalized
+
+
+def source_probability_parameters_sha256(parameters: Mapping[str, Any]) -> str:
+    """Identity of canonical (already normalized) control-lane parameters."""
+    return hashlib.sha256(_canonical_json_bytes(dict(parameters))).hexdigest()
 _IDENTITY_FIELDS = (
     "shared_snapshot_id", "shared_candidate_id", "market_id", "observed_at_utc", "raw_row_sha256",
 )
@@ -60,6 +123,7 @@ def build_sealed_source_probability_decisions(
     *,
     history_ledger: Iterable[Mapping[str, Any]] | None = None,
     min_sample_count: int = 5,
+    control_parameters: Mapping[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     """Build matched sealed control/candidate decisions with no outcome fields.
 
@@ -73,6 +137,7 @@ def build_sealed_source_probability_decisions(
     """
     if min_sample_count < 1:
         raise ValueError("min_sample_count must be at least 1")
+    parameters = normalize_source_probability_parameters(control_parameters)
 
     del finalized_outcomes
     records = [dict(row) for row in replay_inputs if isinstance(row, Mapping)]
@@ -90,7 +155,7 @@ def build_sealed_source_probability_decisions(
     control: list[dict[str, Any]] = []
     candidate: list[dict[str, Any]] = []
     for record, current_edges in prepared:
-        control.append(_control_decision(record))
+        control.append(_control_decision(record, parameters))
         candidate.append(_candidate_decision(record, current_edges, historical_edges, min_sample_count=min_sample_count))
 
     stats = {
@@ -102,6 +167,9 @@ def build_sealed_source_probability_decisions(
         "selector_history_only": True,
         "selector_history": history_stats,
     }
+    if parameters:
+        stats["control_parameters"] = parameters
+        stats["control_parameters_sha256"] = source_probability_parameters_sha256(parameters)
     return control, candidate, stats
 
 
@@ -361,6 +429,7 @@ def run_collector_source_router_replay(
     history_ledger_path: str | Path | None = None,
     cohort_per_shape_target: int = DEFAULT_PER_SHAPE_TARGET,
     directional_only: bool = False,
+    control_parameters: Mapping[str, Any] | None = None,
 ) -> CollectorSourceRouterReplayResult:
     """Run the complete offline slice and write only new derived artifacts."""
     if max_rows is not None and max_rows < 0:
@@ -384,6 +453,7 @@ def run_collector_source_router_replay(
     outcomes = _read_jsonl(outcomes_path)
     control, candidate, decision_stats = build_sealed_source_probability_decisions(
         records, outcomes, history_ledger=history_ledger, min_sample_count=min_sample_count,
+        control_parameters=control_parameters,
     )
     report = resolve_sealed_source_probability_decisions(control + candidate, outcomes, directional_only=directional_only)
     report["source_correctness"]["historical_source_quality"] = {
@@ -441,6 +511,8 @@ def run_collector_source_router_replay(
             "selector_history": history_provenance,
         },
         "decision_stats": decision_stats,
+        "control_parameters": decision_stats.get("control_parameters", {}),
+        "control_parameters_sha256": decision_stats.get("control_parameters_sha256"),
         "resolution_summary": report["summary"],
         "source_correctness_cohort_summary": {
             "per_shape": [
@@ -482,16 +554,50 @@ def run_collector_source_router_replay(
     )
 
 
-def _control_decision(record: Mapping[str, Any]) -> dict[str, Any]:
+def _control_decision(record: Mapping[str, Any], parameters: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    parameters = parameters or {}
     probability = _snapshot_probability(record)
     side = "YES" if probability is not None and probability >= 0.5 else ("NO" if probability is not None else None)
     price, price_basis = _select_price(record, side)
-    action, reason = _threshold_action(probability, side, price, probability_is_yes=True)
+    action, reason = _threshold_action(probability, side, price, probability_is_yes=True,
+                                       min_edge=parameters.get("min_edge", MIN_ABSOLUTE_EDGE))
+    extra: dict[str, Any] = {"probability_basis": "weather_source_snapshot.predicted_prob"}
+    if parameters:
+        extra["control_parameters_sha256"] = source_probability_parameters_sha256(parameters)
+        if action != SKIP:
+            parameter_reason = _parameter_skip_reason(record, parameters, action, side, probability, price)
+            if parameter_reason:
+                action, reason = SKIP, parameter_reason
     return _sealed_decision(
         record, lane_id=CONTROL_LANE_ID, probability=probability, side=side, action=action,
         entry_price=price if action != SKIP else None, price_basis=price_basis, skip_reason=reason,
-        extra={"probability_basis": "weather_source_snapshot.predicted_prob"},
+        extra=extra,
     )
+
+
+def _parameter_skip_reason(record: Mapping[str, Any], parameters: Mapping[str, Any], action: str, side: Any,
+                           probability: float | None, price: float | None) -> str | None:
+    """First control-lane parameter that rejects an otherwise-eligible BUY, as a stable reason code."""
+    if action not in parameters.get("allowed_actions", (BUY_YES, BUY_NO)):
+        return "parameter_action_not_allowed"
+    if probability is None or price is None or side not in ("YES", "NO"):
+        return None
+    side_probability = probability if side == "YES" else 1 - probability
+    values = {"probability": side_probability, "price": price, "edge": side_probability - price}
+    for key, bound in (parameters.get(side) or {}).items():
+        kind, _, measure = key.partition("_")
+        value = values[measure]
+        if (kind == "min" and value < bound) or (kind == "max" and value > bound):
+            return f"parameter_{side.lower()}_{key}"
+    traits = _decision_time_market_traits(record)
+    for key, trait in _TRAIT_FILTERS.items():
+        if key in parameters:
+            included = traits.get(trait) in parameters[key]
+            if key.startswith("include_") and not included:
+                return f"parameter_{_TRAIT_REASON[trait]}_not_included"
+            if key.startswith("exclude_") and included:
+                return f"parameter_{_TRAIT_REASON[trait]}_excluded"
+    return None
 
 
 def _candidate_decision(
@@ -807,6 +913,7 @@ def _candidate_context(record: Mapping[str, Any]) -> dict[str, Any]:
 
 def _threshold_action(
     probability: float | None, side: str | None, price: float | None, *, probability_is_yes: bool,
+    min_edge: float = MIN_ABSOLUTE_EDGE,
 ) -> tuple[str, str | None]:
     if probability is None:
         return SKIP, "missing_probability"
@@ -815,7 +922,7 @@ def _threshold_action(
     if price is None:
         return SKIP, "missing_decision_price"
     selected_side_probability = 1 - probability if probability_is_yes and side == "NO" else probability
-    if selected_side_probability - price < MIN_ABSOLUTE_EDGE:
+    if selected_side_probability - price < min_edge:
         return SKIP, "below_source_probability_edge_threshold"
     return (BUY_YES if side == "YES" else BUY_NO), None
 
