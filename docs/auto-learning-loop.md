@@ -79,19 +79,27 @@ the candidate make more money? Each such decision contributes `candidate P&L −
 bracket of that day settles on the same temperature and repeated snapshots see the same market many
 times. A bootstrap over units estimates P(total delta > 0). The proof passes when:
 
-- at least `promotion_min_units` (20) units have a settled disagreement;
-- P(delta > 0) ≥ `promotion_min_confidence` (0.80) and the total delta is positive;
+- at least `promotion_min_units` (20) units have a settled disagreement (rows without an event ticker
+  are pooled into a single unit, since their contracts may share a settlement);
+- P(delta > 0) ≥ `promotion_min_confidence` (0.95 — high because every candidate is checked every
+  cycle, and repeated looks inflate false passes) and the total delta is positive;
 - the candidate's resolved buys are ≥ `promotion_min_buy_ratio` (0.25) of the champion's, so "trade
-  nothing" cannot win by default.
+  nothing" cannot win by default;
+- every paired decision has a verified price (see below) — one unverifiable row blocks the proof.
 
 Version code writes its own sealed decisions, so trusted `research_feedback.py --inputs` re-derives each
 paired row's unit from the frozen input row and requires every BUY's sealed price, price basis and $1
 stake to equal what trusted code selects from that row; otherwise that side's P&L is withheld and the
 row cannot help the proof. A version that changes how prices are selected therefore cannot be promoted.
 Only verified feedback and pairs measured against the current champion count. One proven candidate (highest confidence, then
-delta) is promoted per cycle; the old champion is registered as a `rollback_guard` candidate and is
-restored by the same proof if it later beats the new champion (a restoring guard does not spawn another
-guard). A candidate also concludes as `not_better` once it has enough units and P(better) ≤ 1 − the
+delta) is promoted per cycle; the old champion is registered as a `rollback_guard` candidate (at most one
+guard is active: a newer promotion supersedes the older guard) and is restored by the same proof if it
+later beats the new champion (a restoring guard does not spawn another guard). The guard is registered
+before the champion changes, and each cycle starts by reconciling an interrupted promotion (champion
+ref, history line, a promoted candidate still marked active). A candidate's testing window restarts
+when the champion changes. Different event tickers can still be correlated (same-day weather across
+cities), so the confidence is an optimistic bound, and after a code candidate is promoted the champion
+itself runs agent-written code (its prices are still verified). A candidate also concludes as `not_better` once it has enough units and P(better) ≤ 1 − the
 confidence, `no_effect` when two snapshots change nothing, `insufficient_evidence` after
 `candidate_max_age_days`, or `broken` after repeated failures. The proof inherits the price proxy's
 limits (quotes, not fills).

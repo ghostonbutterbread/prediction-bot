@@ -251,9 +251,11 @@ def run(args: argparse.Namespace) -> dict:
     records = trusted_inputs(inputs, getattr(args, 'max_input_bytes', 256 * 1024 * 1024),
                              left['input_sha256']) if inputs else None
     if records is not None:
-        units = {key: resolver._decision_time_market_traits(row)['unit_id'] for key, row in records.items()}
+        traits = {key: resolver._decision_time_market_traits(row) for key, row in records.items()}
+        units = {key: (t['unit_id'], t['independence_quality']) for key, t in traits.items()}
     else:
-        units = {identity(d): d.get('unit_id') or d.get('market_id') for d in left['decisions']}
+        units = {identity(d): (d.get('unit_id') or d.get('market_id'), d.get('independence_quality'))
+                 for d in left['decisions']}
     paired = []
     if set(am) != set(bm):
         raise ValueError('resolved decision identities differ')
@@ -269,7 +271,8 @@ def run(args: argparse.Namespace) -> dict:
             record = records.get(key) if records is not None else None
             if records is not None and record is None:
                 raise ValueError('a resolved decision has no trusted input row')
-            paired.append({'market_id': x['market_id'], 'unit_id': units.get(key) or x['market_id'],
+            unit_id, independence = units.get(key) or (x['market_id'], None)
+            paired.append({'market_id': x['market_id'], 'unit_id': unit_id, 'independence_quality': independence,
                            'decision_key': x.get('decision_key'), 'official_outcome': x['official_outcome'],
                            'baseline': proxy_side(sealed_left[key], ap.get(key, {}), record),
                            'candidate': proxy_side(sealed_right[key], bp.get(key, {}), record)})

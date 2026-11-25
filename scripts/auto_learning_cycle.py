@@ -61,7 +61,8 @@ DEFAULTS = {
     # Proof-gated automatic promotion of the paper research champion (never live trading).
     'auto_promote': True,
     'promotion_min_units': 20,          # independent units (event tickers / city-days) with a settled disagreement
-    'promotion_min_confidence': 0.80,   # bootstrap probability that the paired proxy-P&L delta is positive
+    'promotion_min_confidence': 0.95,   # bootstrap P(paired proxy-P&L delta > 0); high because it is checked
+                                        # every cycle for every candidate (repeated looks inflate false passes)
     'promotion_min_buy_ratio': 0.25,    # candidate resolved buys / champion resolved buys (no "trade nothing")
     'promotion_bootstrap_samples': 2000,
 }
@@ -833,13 +834,16 @@ def proof_of_improvement(rows: list[dict], *, champion_buys: int, candidate_buys
     the configured confidence, the total is positive, and the candidate still trades (buy ratio).
     """
     units: dict[str, float] = {}
-    unpriced = 0
+    unpriced = pooled = 0
     for row in rows:
         a, b = row['baseline'].get('proxy_pnl_usd'), row['candidate'].get('proxy_pnl_usd')
         if a is None or b is None:
             unpriced += 1
             continue
-        unit = str(row.get('unit_id') or row.get('market_id'))
+        if row.get('independence_quality', 'event_ticker') == 'event_ticker':
+            unit = str(row.get('unit_id') or row.get('market_id'))
+        else:  # no event ticker: contracts may share a settlement, so they form one pooled unit
+            unit, pooled = '\x00contract-only', pooled + 1
         units[unit] = units.get(unit, 0.0) + (b - a)
     values = [units[key] for key in sorted(units)]
     delta = round(sum(values), 6)
@@ -851,6 +855,8 @@ def proof_of_improvement(rows: list[dict], *, champion_buys: int, candidate_buys
         confidence = round(wins / samples, 4)
     ratio = None if champion_buys == 0 else round(candidate_buys / champion_buys, 4)
     blockers = []
+    if unpriced:
+        blockers.append(f'{unpriced} paired decision(s) with unverified price, basis or stake')
     if len(values) < cfg['promotion_min_units']:
         blockers.append(f'{len(values)}/{cfg["promotion_min_units"]} independent units with settled disagreements')
     if confidence is None or confidence < cfg['promotion_min_confidence']:
@@ -861,6 +867,7 @@ def proof_of_improvement(rows: list[dict], *, champion_buys: int, candidate_buys
     if ratio is not None and ratio < cfg['promotion_min_buy_ratio']:
         blockers.append(f'buys {ratio:.0%} of the champion\'s < {cfg["promotion_min_buy_ratio"]:.0%}')
     return {'units': len(values), 'decisions': len(rows) - unpriced, 'unpriced_decisions': unpriced,
+            'pooled_contract_only_decisions': pooled,
             'delta_usd': delta, 'confidence': confidence, 'champion_resolved_buys': champion_buys,
             'candidate_resolved_buys': candidate_buys, 'buy_ratio': ratio, 'passes': not blockers,
             'blockers': blockers}
@@ -951,24 +958,54 @@ def promote_proven(work: Work, cfg: dict, board: dict, cycle_id: str) -> dict | 
     previous = champion_record(work)
     note = (f'restored by rollback guard {winner["candidate_id"]}' if winner['kind'] == 'rollback_guard'
             else f'auto-promoted {winner["candidate_id"]}: {winner["hypothesis"][:200]}')
-    record = set_champion(work, commit=winner['commit'], parameters=winner['parameters'],
-                          parameters_sha256=winner['parameters_sha256'], note=note, set_by='auto-promotion',
-                          promoted_candidate=winner['candidate_id'], cycle_id=cycle_id, proof=proof)
-    candidate_event(work, winner['candidate_id'], 'concluded', verdict='promoted', reason='passed the promotion proof',
-                    delta=board['groups'][winner['candidate_id']].get('delta', {}), proof=proof,
-                    needs_operator_review=False)
+    # Order matters for crash recovery (reconcile_champion_state): an unused guard equal to the champion,
+    # or a promoted candidate still marked active, is concluded at the start of the next cycle.
+    for other in candidate_records(work):  # one guard at a time: it covers the latest change only
+        if other['status'] == 'active' and other['kind'] == 'rollback_guard' and other['candidate_id'] != winner['candidate_id']:
+            candidate_event(work, other['candidate_id'], 'concluded', verdict='superseded',
+                            reason=f'champion changed again ({winner["candidate_id"]} promoted)', delta={}, proof={},
+                            needs_operator_review=False)
     guard = None
     if winner['kind'] != 'rollback_guard' and not any(
             r['status'] == 'active' and r['key'] == previous['key'] for r in candidate_records(work)):
         guard = register_candidate(
             work, commit=previous['commit'], parameters=previous['parameters'],
             parameters_sha256=previous['parameters_sha256'], branch=None, registered_by='auto-promotion',
-            champion=champion_record(work), kind='rollback_guard',
+            champion=previous, kind='rollback_guard',
             hypothesis=f'Rollback guard for {winner["candidate_id"]}: the previous champion {previous["key"][:24]} '
                        'returns automatically if it proves better than the new champion.')
+    record = set_champion(work, commit=winner['commit'], parameters=winner['parameters'],
+                          parameters_sha256=winner['parameters_sha256'], note=note, set_by='auto-promotion',
+                          promoted_candidate=winner['candidate_id'], cycle_id=cycle_id, proof=proof)
+    candidate_event(work, winner['candidate_id'], 'concluded', verdict='promoted', reason='passed the promotion proof',
+                    delta=board['groups'][winner['candidate_id']].get('delta', {}), proof=proof,
+                    needs_operator_review=False)
     return {'candidate_id': winner['candidate_id'], 'kind': winner['kind'], 'champion_key': version_key(
         record['commit'], record['parameters_sha256']), 'previous_key': previous['key'], 'proof': proof,
         'rollback_guard': guard}
+
+
+def reconcile_champion_state(work: Work) -> list[str]:
+    """Repair a promotion interrupted between its steps (caller holds the work lock)."""
+    champion = champion_record(work)
+    repairs = []
+    if git('rev-parse', '--verify', 'refs/heads/champion^{commit}', cwd=work.agent_repo) != champion['commit']:
+        git('update-ref', 'refs/heads/champion', champion['commit'], cwd=work.agent_repo)
+        repairs.append('agent-repo champion ref')
+    history = read_jsonl(work.champion_history) if work.champion_history.exists() else []
+    stored = {k: v for k, v in champion.items() if k != 'key'}
+    if not history or {k: history[-1].get(k) for k in ('commit', 'parameters_sha256', 'set_at')} != \
+            {k: stored.get(k) for k in ('commit', 'parameters_sha256', 'set_at')}:
+        append_jsonl(work.champion_history, {**stored, 'reconciled': True})
+        repairs.append('champion history')
+    for record in candidate_records(work):
+        if record['status'] == 'active' and record['key'] == champion['key']:
+            promoted = champion.get('promoted_candidate') == record['candidate_id']
+            candidate_event(work, record['candidate_id'], 'concluded', verdict='promoted' if promoted else 'equals_champion',
+                            reason='reconciled: this version is the champion', delta={}, proof={},
+                            needs_operator_review=False)
+            repairs.append(f'concluded {record["candidate_id"]}')
+    return repairs
 
 
 def evaluate_candidates(work: Work, cfg: dict, board: dict) -> list[dict]:
@@ -980,7 +1017,9 @@ def evaluate_candidates(work: Work, cfg: dict, board: dict) -> list[dict]:
             continue
         group = board['groups'].get(record['candidate_id'], {})
         proof = group.get('proof') or {}
-        candidate_age = age_days(record['registered_at'])
+        # The testing window restarts with the champion, as the proof does.
+        champion_set = board['champion'].get('set_at')
+        candidate_age = age_days(max(record['registered_at'], champion_set) if champion_set else record['registered_at'])
         failures = sum(1 for e in record['events'][-cfg['max_candidate_failures']:] if e.get('status') == 'active'
                        and e.get('replay_failure'))
         verdict = reason = None
@@ -1118,6 +1157,7 @@ def cmd_run(args) -> int:
                 raise CycleError(f'free space {free} bytes below min_free_bytes {cfg["min_free_bytes"]}; '
                                  'no cycle work started')
             summary['stale_containers_removed'] = remove_stale_containers(cfg, work)
+            summary['reconciled'] = reconcile_champion_state(work)
             summary['outcomes'] = process_outcomes(cfg, work, cycle, cycle_id)
             snapshot = {'status': 'skipped'} if args.skip_snapshot else take_snapshot(cfg, work, cycle)
             summary['snapshot'] = snapshot
@@ -1335,8 +1375,8 @@ def cmd_adopt_pair(args) -> int:
             raise CycleError('inputs do not match the comparison input hash')
         runs = comparison['runs']
         stores = [Path(args.baseline_store).resolve(strict=True), Path(args.candidate_store).resolve(strict=True)]
-        sides = [{'commit': run['git_commit'], 'experiment_id': run['experiment_id'], 'store': str(store)}
-                 for run, store in zip(runs, stores)]
+        sides = [{'commit': run['git_commit'], 'parameters_sha256': run.get('control_parameters_sha256'),
+                  'experiment_id': run['experiment_id'], 'store': str(store)} for run, store in zip(runs, stores)]
         pair_id = f'adopted-{utcnow():%Y%m%dT%H%M%SZ}-{args.label}'
         record = create_pair(work, pair_id=pair_id, label=args.label, candidate_id=args.candidate_id,
                              comparison_path=comparison_path, comparison=comparison, inputs=inputs,

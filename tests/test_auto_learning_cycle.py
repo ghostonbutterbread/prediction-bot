@@ -257,10 +257,16 @@ class AutoLearningCycleTest(unittest.TestCase):
         self.assertIn('## Champion changes', report)
         self.assertIn('promoted automatically only when a candidate passes the proof', report)
 
+        # A promotion interrupted before its candidate was concluded is repaired by the next cycle.
+        with (self.work / 'candidates' / registered['candidate_id'] / 'events.jsonl').open('a') as stream:
+            stream.write(json.dumps({'at': '2026-11-24T00:00:00+00:00', 'status': 'active'}) + '\n')
+
         # Later the old policy's weak YES buys win: the guard proves the old champion better and restores it.
         self.append_rows([collector_row(i, letter) for i, letter in zip(range(9, 13), 'BCBC')])
         self.assertIn(f'{guard["candidate_id"]}: 4/4 decisions changed',
                       self.cli('run', '--work', self.work, '--verbose').stdout)
+        cycle = json.loads(sorted(self.work.glob('cycles/*/cycle.json'))[-1].read_text())
+        self.assertEqual(cycle['reconciled'], [f'concluded {registered["candidate_id"]}'])
         outcomes.update({9: 'YES', 10: 'YES', 11: 'YES', 12: 'YES'})
         self.resolutions.write_text(''.join(json.dumps(resolution(f'KXHIGHNY-26AUG12-T8{i}', o)) + '\n'
                                             for i, o in outcomes.items()))
@@ -306,12 +312,21 @@ class ProofOfImprovementTest(unittest.TestCase):
         self.assertTrue(0.5 < first['confidence'] < 0.9, first)
         self.assertEqual(first['delta_usd'], 2.0)
 
+    def test_contracts_without_an_event_ticker_pool_into_one_unit(self):
+        rows = [{**row, 'independence_quality': 'contract_only'} for row in self.rows([(f'M{i}', 1.0) for i in range(25)])]
+        result = self.proof(rows)
+        self.assertEqual((result['units'], result['pooled_contract_only_decisions']), (1, 25))
+        self.assertFalse(result['passes'])
+
     def test_trading_nothing_unpriced_rows_and_losses_are_blocked(self):
         gains = [(f'E{i}', 1.0) for i in range(20)]
         self.assertIn('buys 10%', self.proof(self.rows(gains), champion_buys=10, candidate_buys=1)['blockers'][0])
-        unpriced = self.rows(gains) + [{'unit_id': 'X', 'market_id': 'x', 'baseline': {'proxy_pnl_usd': None},
-                                        'candidate': {'proxy_pnl_usd': 5.0}}]
-        self.assertEqual(self.proof(unpriced)['unpriced_decisions'], 1)
+        unpriced = self.rows(gains) + [{'unit_id': 'X', 'market_id': 'x', 'baseline': {'proxy_pnl_usd': 0.0},
+                                        'candidate': {'proxy_pnl_usd': None}}]
+        blocked = self.proof(unpriced)
+        self.assertEqual(blocked['unpriced_decisions'], 1)
+        self.assertFalse(blocked['passes'])  # an unverifiable price can never be dropped silently
+        self.assertIn('unverified price', blocked['blockers'][0])
         losing = self.proof(self.rows([(f'E{i}', -1.0) for i in range(20)]))
         self.assertEqual(losing['confidence'], 0.0)
         self.assertIn('paired proxy P&L delta is not positive', losing['blockers'])
