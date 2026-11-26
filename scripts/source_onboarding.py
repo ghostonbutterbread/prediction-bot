@@ -260,12 +260,11 @@ def check_registry(old: dict, new: dict, onboarded: set[str],
             problems.append(f'a patch may not change {", ".join(PROTECTED_SOURCE_FIELDS)}')
         if problems:
             raise Rejected(f'{source_id}: ' + '; '.join(problems))
+    if set(declared) - onboarded:
+        raise Rejected(f'--source names sources this pipeline did not onboard: {sorted(set(declared) - onboarded)}')
+    patched |= set(declared)
     if not added and not patched:
-        if not declared:
-            raise Rejected('the registry is unchanged: name the onboarded source(s) a parser fix is for with --source')
-        if declared - onboarded:
-            raise Rejected(f'--source names sources this pipeline did not onboard: {sorted(declared - onboarded)}')
-        patched = set(declared)
+        raise Rejected('the registry is unchanged: name the onboarded source(s) a parser fix is for with --source')
     return added, patched
 
 
@@ -376,8 +375,10 @@ def run_review(cfg: dict, tree: Path, base: str, merge: str, proposal: dict, tes
     out.write_text(result.stdout + result.stderr)
     first = next((line.strip().strip('*`# ') for line in result.stdout.splitlines() if line.strip()), '')
     verdict = re.fullmatch(r'VERDICT:\s*\**\s*(PASS|BLOCK)\**', first)
-    if result.returncode or not verdict:
-        raise NoVerdict(f'reviewer gave no verdict (exit {result.returncode}); see {out}')
+    if result.returncode:
+        raise Deferred(f'reviewer failed (exit {result.returncode}); see {out}')
+    if not verdict:
+        raise NoVerdict(f'reviewer gave no verdict line; see {out}')
     if verdict.group(1) == 'BLOCK':
         raise Rejected(f'independent review BLOCK; findings in {out}')
     return str(out)
@@ -487,7 +488,7 @@ def process(work: Work, cfg: dict, proposal: dict) -> dict:
             added, patched = check_registry(old_registry, new_registry, work.onboarded_ids(),
                                             set(proposal.get('sources') or ()))
             check_mappings(git('show', f'{base}:{MAPPINGS_MODULE}', cwd=tree), (tree / MAPPINGS_MODULE).read_text(),
-                           added | work.onboarded_ids())
+                           added | patched)
             counts = check_cap(old_registry, new_registry, load_catalog((tree / CATALOG).read_text()),
                                cfg['max_sources_per_city'])
         except (ValueError, KeyError, TypeError, AttributeError, OSError, SyntaxError) as exc:
