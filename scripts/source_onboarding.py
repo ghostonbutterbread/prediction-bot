@@ -493,10 +493,10 @@ def process(work: Work, cfg: dict, proposal: dict) -> dict:
                            added | patched)
             counts = check_cap(old_registry, new_registry, load_catalog((tree / CATALOG).read_text()),
                                cfg['max_sources_per_city'])
-            new_by_id = {s['source_id']: s for s in new_registry['sources']}
-            untraded = sorted({new_by_id[i]['city_id'] for i in added} - traded_cities(cfg)) if added else []
+            added_cities = {s['city_id'] for s in new_registry['sources'] if s['source_id'] in added}
         except (ValueError, KeyError, TypeError, AttributeError, OSError, SyntaxError) as exc:
             raise Rejected(f'malformed change: {type(exc).__name__}: {exc}') from exc
+        untraded = sorted(added_cities - traded_cities(cfg)) if added_cities else []
         if untraded:
             raise Rejected(f'no market for {", ".join(untraded)} in the last {TRADED_WINDOW_HOURS}h of collected rows: '
                            'local sources are fetched only for cities with listed markets')
@@ -610,26 +610,33 @@ def row_sources(snapshot_path: Path, row: dict) -> tuple[dict, list[dict]]:
 
 
 def sample_rows(cfg: dict, since: datetime, sample: int) -> tuple[int, list[tuple[dict, list[dict]]]]:
-    """Evenly sampled collected rows observed since `since`: (rows in the window, [(raw row, sources)])."""
+    """Collected rows observed since `since`, spread over the whole window: (rows in the window, [(raw, sources)])."""
     index_rows = recent_index_rows(Path(cfg['replay_index']), since)
     if not index_rows:
         return 0, []
-    step = max(1, len(index_rows) // sample)
+    count, n = len(index_rows), min(sample, len(index_rows))
+    picks = sorted({round(i * (count - 1) / max(1, n - 1)) for i in range(n)})  # first to last, evenly spaced
     snapshots = Path(cfg['market_snapshots'])
-    return len(index_rows), [row_sources(snapshots, row) for row in index_rows[::step][:sample]]
+    return count, [row_sources(snapshots, index_rows[i]) for i in picks]
 
 
 def row_cities(rows: list[tuple[dict, list[dict]]]) -> set[str]:
     return {city for city in (dig(raw, CITY_PATH) for raw, _ in rows) if isinstance(city, str)}
 
 
-def traded_cities(cfg: dict, hours: int = TRADED_WINDOW_HOURS, sample: int = 600) -> set[str]:
+def market_cities(cfg: dict, since: datetime) -> set[str]:
+    """Cities of every market collected since `since` (one row per market, so none is missed by sampling)."""
+    latest = {row.get('market_id'): row for row in recent_index_rows(Path(cfg['replay_index']), since)}
+    snapshots = Path(cfg['market_snapshots'])
+    return row_cities([row_sources(snapshots, row) for row in latest.values()])
+
+
+def traded_cities(cfg: dict, hours: int = TRADED_WINDOW_HOURS) -> set[str]:
     """Cities with collected markets recently (the engine fetches local sources only for these)."""
     try:
-        _, rows = sample_rows(cfg, now() - timedelta(hours=hours), sample)
-    except (OSError, ValueError) as exc:
-        raise Deferred(f'cannot read collected rows to find traded cities: {exc}') from exc
-    cities = row_cities(rows)
+        cities = market_cities(cfg, now() - timedelta(hours=hours))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise Deferred(f'cannot read collected rows to find traded cities: {type(exc).__name__}: {exc}') from exc
     if not cities:
         raise Deferred(f'no collected rows in the last {hours}h to find traded cities')
     return cities
@@ -709,8 +716,9 @@ def cmd_watch(args) -> int:
     moment = now()
     watches = work.watches()
     active = [w for w in watches if parse_time(w['until']) > moment and not w.get('completed_at')]
-    index_count, sampled = sample_rows(cfg, moment - timedelta(hours=args.hours), args.sample)
-    sampled_cities = row_cities(sampled)
+    since = moment - timedelta(hours=args.hours)
+    index_count, sampled = sample_rows(cfg, since, args.sample)
+    window_cities = market_cities(cfg, since) if sampled else set()
     report = {'generated_at': iso(moment), 'window_hours': args.hours, 'index_rows': index_count,
               'sampled_rows': len(sampled), 'sources': {}}
     for watch in active:
@@ -719,7 +727,7 @@ def cmd_watch(args) -> int:
         metrics = source_metrics(rows, watch['source_id'])
         if not rows and moment - live_at < timedelta(hours=1):
             metrics['issues'] = []  # first collection pass may not have run yet
-        elif not metrics['rows'] and sampled and watch['city_id'] not in sampled_cities:
+        elif not metrics['rows'] and sampled and watch['city_id'] not in window_cities:
             # Not a source defect: the engine fetches local sources only for cities with listed markets.
             metrics['issues'] = []
             metrics['note'] = f'idle: no {watch["city_id"]} markets collected in the window'

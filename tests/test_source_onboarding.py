@@ -36,12 +36,14 @@ def write_collected_rows(snapshots, index, rows):
     """Collector archive + replay index for (observed_at, city_id, sources) rows."""
     offset = 0
     with Path(snapshots).open('wb') as raw_out, Path(index).open('w') as index_out:
-        for observed, city_id, sources in rows:
-            row = json.dumps({'observed_at': observed.isoformat(), 'decision_artifact': {'source_context': {'data': {
-                'weather_source_snapshot': {'sources': sources, 'station_resolution': {'city_id': city_id}}}}}}).encode() + b'\n'
+        for number, (observed, city_id, sources) in enumerate(rows):
+            market_id = f'{city_id}-market-{number % 4}'
+            row = json.dumps({'observed_at': observed.isoformat(), 'market_id': market_id, 'decision_artifact': {
+                'source_context': {'data': {'weather_source_snapshot': {
+                    'sources': sources, 'station_resolution': {'city_id': city_id}}}}}}).encode() + b'\n'
             raw_out.write(row)
-            index_out.write(json.dumps({'observed_at': observed.isoformat(), 'byte_offset': offset,
-                                        'byte_length': len(row)}) + '\n')
+            index_out.write(json.dumps({'observed_at': observed.isoformat(), 'market_id': market_id,
+                                        'byte_offset': offset, 'byte_length': len(row)}) + '\n')
             offset += len(row)
 
 
@@ -260,6 +262,28 @@ class OnboardEndToEndTest(unittest.TestCase):
         self.assertEqual(self.restarts(), 0)
         status = self.run_cli('status', '--work', str(self.work))[1]
         self.assertIn('Not traded now (new sources there are rejected): miami_fl', status)
+        # A rarely listed city counts once it has any market in the window, however many rows others have.
+        moment = datetime.now(timezone.utc)
+        write_collected_rows(self.tmp / 'snapshots.jsonl', self.tmp / 'index.jsonl',
+                             [(moment - timedelta(minutes=900 - i), 'atlanta_ga', []) for i in range(800)]
+                             + [(moment - timedelta(minutes=5), 'miami_fl', [])]
+                             + [(moment - timedelta(minutes=4 - i), 'atlanta_ga', []) for i in range(3)])
+        self.sh('git', 'fetch', '-q', 'origin', cwd=self.agent)
+        again = self.propose('source/miami-again', miami)
+        self.run_cli('onboard', '--work', str(self.work))
+        self.assertEqual(self.proposal(again)['status'], 'live')
+
+    def test_unreadable_collected_rows_defer_instead_of_rejecting(self):
+        (self.tmp / 'index.jsonl').write_text('')
+        proposal_id = self.propose('source/new', self.add_source('src_local_new_weather'))
+        self.run_cli('onboard', '--work', str(self.work))
+        self.assertEqual(self.proposal(proposal_id)['status'], 'pending')
+        self.assertIn('traded cities', self.proposal(proposal_id)['reason'])
+        (self.tmp / 'index.jsonl').write_text('{"observed_at": "%s"}\n' % datetime.now(timezone.utc).isoformat())
+        self.run_cli('onboard', '--work', str(self.work))
+        self.assertEqual(self.proposal(proposal_id)['status'], 'pending')
+        self.assertIn('KeyError', self.proposal(proposal_id)['reason'])
+        self.assertIn('traded cities unknown', self.run_cli('status', '--work', str(self.work))[1])
 
     def test_review_block_and_scope_violation_are_rejected_without_deploying(self):
         self.verdict('VERDICT: BLOCK\n1. parser reads the wrong day\n')
