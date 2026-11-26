@@ -168,12 +168,12 @@ class OnboardEndToEndTest(unittest.TestCase):
             code = onboarding.main(list(args))
         return code, out.getvalue()
 
-    def propose(self, branch, edit):
+    def propose(self, branch, edit, *extra):
         self.sh('git', 'checkout', '-q', '-b', branch, 'origin/beta', cwd=self.agent)
         edit(self.agent)
         self.sh('git', 'commit', '-qam', branch, cwd=self.agent)
         self.sh('git', 'checkout', '-q', 'beta', cwd=self.agent)
-        code, out = self.run_cli('propose', '--work', str(self.work), '--branch', branch, '--note', f'{branch} test')
+        code, out = self.run_cli('propose', '--work', str(self.work), '--branch', branch, '--note', f'{branch} test', *extra)
         self.assertEqual(code, 0)
         return json.loads(out)['id']
 
@@ -219,6 +219,18 @@ class OnboardEndToEndTest(unittest.TestCase):
         self.assertEqual(self.run_cli('onboard', '--work', str(self.work))[0], 0)
         self.assertEqual(self.proposal(patch_id)['status'], 'live')
         self.assertEqual(len(json.loads((self.work / 'watches.json').read_text())[0]['patches']), 1)
+        # A parser-only fix names the onboarded source it is for.
+        def parser_fix(repo):
+            path = repo / 'bot/feeds/weather_local_other.py'
+            path.write_text(path.read_text().replace("OTHER_LOCAL_URLS = {", "OTHER_LOCAL_URLS = {'src_local_new_weather': 'https://example.test/v3', "))
+        self.sh('git', 'fetch', '-q', 'origin', cwd=self.agent)
+        unnamed = self.propose('source/parser-unnamed', parser_fix)
+        self.run_cli('onboard', '--work', str(self.work))
+        self.assertIn('--source', self.proposal(unnamed)['reason'])
+        named = self.propose('source/parser-named', parser_fix, '--source', 'src_local_new_weather')
+        self.run_cli('onboard', '--work', str(self.work))
+        self.assertEqual(self.proposal(named)['status'], 'live')
+        self.assertEqual(len(json.loads((self.work / 'watches.json').read_text())[0]['patches']), 2)
 
     def test_review_block_and_scope_violation_are_rejected_without_deploying(self):
         self.verdict('VERDICT: BLOCK\n1. parser reads the wrong day\n')
@@ -250,7 +262,8 @@ class OnboardEndToEndTest(unittest.TestCase):
     def test_busy_checkout_defers_and_a_moved_branch_is_rejected(self):
         proposal_id = self.propose('source/new', self.add_source('src_local_new_weather'))
         (self.beta / 'README.md').write_text('local edit\n')
-        self.run_cli('onboard', '--work', str(self.work))
+        self.assertIn('DEFERRED', self.run_cli('onboard', '--work', str(self.work))[1])
+        self.assertEqual(self.run_cli('onboard', '--work', str(self.work))[1], '')  # same reason: reported once
         self.assertEqual(self.proposal(proposal_id)['status'], 'pending')
         self.assertIn('uncommitted', self.proposal(proposal_id)['reason'])
         self.sh('git', 'checkout', '-q', 'README.md', cwd=self.beta)
@@ -275,8 +288,13 @@ class OnboardEndToEndTest(unittest.TestCase):
             path.write_text(path.read_text().replace('https://old.test/forecast', 'https://elsewhere.test'))
         def broken(repo):
             (repo / onboarding.REGISTRY).write_text('{not json')
+        def mutate(repo):
+            self.add_source('src_local_f_weather')(repo)
+            path = repo / 'bot/feeds/weather_local_other.py'
+            path.write_text(path.read_text() + "OTHER_LOCAL_URLS['src_local_old_weather'] = 'https://elsewhere.test'\n")
         cases = {'rename': (rename, 'deleted'), 'symlink': (symlink, 'mode 120000'),
-                 'repoint': (repoint, 'OTHER_LOCAL_URLS may only change'), 'broken': (broken, 'malformed')}
+                 'repoint': (repoint, 'OTHER_LOCAL_URLS may only change'), 'broken': (broken, 'malformed'),
+                 'mutate': (mutate, 'not modified elsewhere')}
         ids = {name: self.propose(f'source/{name}', edit) for name, (edit, _) in cases.items()}
         gone = self.propose('source/gone', self.add_source('src_local_d_weather'))
         self.sh('git', 'branch', '-D', 'source/gone', cwd=self.agent)
@@ -296,6 +314,9 @@ class OnboardEndToEndTest(unittest.TestCase):
         self.run_cli('onboard', '--work', str(self.work))
         self.assertEqual(self.proposal(proposal_id)['status'], 'pending')
         self.assertIn('no verdict', self.proposal(proposal_id)['reason'])
+        for _ in range(onboarding.MAX_NO_VERDICT - 1):
+            self.run_cli('onboard', '--work', str(self.work))
+        self.assertEqual(self.proposal(proposal_id)['status'], 'rejected')
         self.assertEqual(self.restarts(), 0)
 
     def test_restart_command_failure_rolls_back_and_prior_auto_restarts_do_not(self):
@@ -310,15 +331,24 @@ class OnboardEndToEndTest(unittest.TestCase):
         self.assertIn('did not stay up', self.proposal(failing)['reason'])
         self.assertNotIn('src_local_other_weather', {s['source_id'] for s in self.origin_registry()['sources']})
 
-    def test_failed_rollback_is_reported_and_never_retried(self):
+    def test_failed_rollback_is_reported_and_pauses_onboarding_until_acknowledged(self):
         self.state(crash_on=[1, 2])
         proposal_id = self.propose('source/crash', self.add_source('src_local_new_weather'))
         code, out = self.run_cli('onboard', '--work', str(self.work))
         self.assertEqual(code, 1)
         self.assertIn('[CRON_FAILURE]', out)
+        self.assertIn('not pushed', out)
         self.assertEqual(self.proposal(proposal_id)['status'], 'failed')
+        # Operator repairs: pushes the revert; meanwhile nothing else may go live.
+        waiting = self.propose('source/next', self.add_source('src_local_next_weather'))
+        self.assertEqual(self.run_cli('onboard', '--work', str(self.work)), (0, ''))
+        self.assertEqual((self.proposal(waiting)['status'], self.restarts()), ('pending', 2))
+        self.assertIn('BLOCKED', self.run_cli('status', '--work', str(self.work))[1])
+        self.sh('git', 'push', '-q', 'origin', 'beta', cwd=self.beta)
+        self.run_cli('acknowledge', '--work', str(self.work), '--id', proposal_id, '--note', 'revert pushed')
+        self.state(crash_on=[])
         self.run_cli('onboard', '--work', str(self.work))
-        self.assertEqual(self.restarts(), 2)
+        self.assertEqual(self.proposal(waiting)['status'], 'live')
 
 
 class WatchTest(unittest.TestCase):
@@ -335,6 +365,8 @@ class WatchTest(unittest.TestCase):
                            {'source_id': 'open_meteo', 'scoreable_forecast': True, 'forecast_high': 82},
                            {'source_id': 'src_local_new_weather', 'scoreable_forecast': i % 3 != 0,
                             'forecast_high': 95, 'market_target_date': '2026-11-26', 'source_target_date': '2026-11-26',
+                            'forecast_measurement_kind': 'high',
+                            'forecast_start': '2026-11-27T07:00:00-05:00' if i == 1 else '2026-11-26T07:00:00-05:00',
                             'source_fetched_at': (observed - timedelta(minutes=1)).isoformat()}]
                 row = json.dumps({'observed_at': observed.isoformat(), 'decision_artifact': {'source_context': {
                     'data': {'weather_source_snapshot': {'sources': sources}}}}}).encode() + b'\n'
@@ -360,6 +392,7 @@ class WatchTest(unittest.TestCase):
         entry = report['sources']['src_local_new_weather']
         self.assertEqual((entry['rows'], entry['scoreable'], entry['median_gap_f']), (6, 4, 14.0))
         self.assertIn('median gap to other sources 14.0F', entry['issues'])
+        self.assertIn('1 rows whose forecast period starts on another date than the market', entry['issues'])
         self.assertEqual(report['completed'], ['src_local_done_weather'])
         self.assertIn('src_local_new_weather', out.getvalue())
         self.assertEqual(len((work / 'storage-history.jsonl').read_text().splitlines()), 1)

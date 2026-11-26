@@ -8,7 +8,8 @@ for two weeks. `scripts/source_onboarding.py` owns the gate; it never touches tr
 
 1. The source agent works in its own clone (`<work>/agent-repo`, remote `origin` = the collector's checkout),
    branches from `origin/beta`, adds a registry entry plus a page parser (and a test with a saved page), commits and
-   runs `propose --branch <branch> --note '<what and why>'`. The proposal pins the branch commit.
+   runs `propose --branch <branch> --note '<what and why>'`. The proposal pins the branch commit. A parser-only fix
+   (registry unchanged) names the onboarded source(s) it is for with `--source <id>`.
 2. `onboard` (agentless cron) processes pending proposals one at a time, in a temporary worktree merged onto the
    collector checkout's current `beta`:
    - **scope**: only `docs/weather/city_registry_starter.json`, `bot/feeds/weather_local*.py` and
@@ -31,7 +32,10 @@ for two weeks. `scripts/source_onboarding.py` owns the gate; it never touches tr
    (never retried) and prints `[CRON_FAILURE]`. A busy, moved or diverged checkout, a git network failure or a
    missing reviewer verdict **defers** the queue to the next run; any other failed check (including a source site
    that is down during the probe) **rejects** the proposal with the reason, which the agent reads from `status`.
-   After a rollback the branch's commits are reverted history: rebuild the change on a fresh branch.
+   After a rollback the branch's commits are reverted history: rebuild the change on a fresh branch. While a `failed`
+   proposal exists, `onboard` does nothing (status shows `BLOCKED`) until the operator repairs the checkout/collector
+   and runs `acknowledge --id <id> --note '...'`. A reviewer that answers without a verdict line is retried and the
+   proposal rejected after three attempts; a deferral is reported once per new reason.
 4. Added sources are recorded in `watches.json` for `watch_days` (14). `watch` (run by the source agent morning and
    night) samples the last 12 h of collected rows and reports per watched source: rows present, scoreable share,
    unavailable reasons, median gap to the other sources' highs, source clocks after the decision time, source/market

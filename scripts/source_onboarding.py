@@ -57,6 +57,13 @@ class Deferred(Exception):
     """A precondition outside the proposal is not met (busy checkout, network, reviewer); retried next run."""
 
 
+class NoVerdict(Deferred):
+    """The reviewer answered without a verdict line; retried, then rejected after MAX_NO_VERDICT attempts."""
+
+
+MAX_NO_VERDICT = 3
+
+
 class OnboardingError(Exception):
     """Infrastructure failure needing the operator (e.g. a rollback that did not complete)."""
 
@@ -199,8 +206,10 @@ def local_mappings(text: str) -> dict[str, dict[str, str]]:
 
 def check_mappings(old_text: str, new_text: str, allowed_ids: set[str]) -> None:
     old, new = local_mappings(old_text), local_mappings(new_text)
-    if set(old) != set(new):
-        raise Rejected(f'{MAPPINGS_MODULE} must keep {", ".join(LOCAL_MAPPINGS)} as literal dicts')
+    uses = Counter(node.id for node in ast.walk(ast.parse(new_text)) if isinstance(node, ast.Name) and node.id in LOCAL_MAPPINGS)
+    if set(old) != set(new) or any(uses[name] != 1 for name in new):
+        raise Rejected(f'{MAPPINGS_MODULE} must define each of {", ".join(LOCAL_MAPPINGS)} once, as a literal dict '
+                       'that is not modified elsewhere in the module')
     for name in LOCAL_MAPPINGS:
         changed = {k for k in old[name].keys() | new[name].keys() if old[name].get(k) != new[name].get(k)}
         if changed - allowed_ids:
@@ -211,8 +220,11 @@ def check_mappings(old_text: str, new_text: str, allowed_ids: set[str]) -> None:
                     raise Rejected(f'{name}[{source_id!r}] must be an https URL')
 
 
-def check_registry(old: dict, new: dict, onboarded: set[str]) -> tuple[set[str], set[str]]:
-    """Return (added, patched) local source ids; only additions and patches of onboarded sources pass."""
+def check_registry(old: dict, new: dict, onboarded: set[str],
+                   declared: set[str] | frozenset[str] = frozenset()) -> tuple[set[str], set[str]]:
+    """Return (added, patched) local source ids; only additions and patches of onboarded sources pass.
+
+    A parser-only fix leaves the registry unchanged; it names the onboarded sources it fixes (`declared`)."""
     if old.get('cities') != new.get('cities') or old.get('version') != new.get('version'):
         raise Rejected('the registry cities and version may not change')
     old_sources = {s['source_id']: s for s in old['sources']}
@@ -249,7 +261,11 @@ def check_registry(old: dict, new: dict, onboarded: set[str]) -> tuple[set[str],
         if problems:
             raise Rejected(f'{source_id}: ' + '; '.join(problems))
     if not added and not patched:
-        raise Rejected('no source is added or patched in the registry')
+        if not declared:
+            raise Rejected('the registry is unchanged: name the onboarded source(s) a parser fix is for with --source')
+        if declared - onboarded:
+            raise Rejected(f'--source names sources this pipeline did not onboard: {sorted(declared - onboarded)}')
+        patched = set(declared)
     return added, patched
 
 
@@ -361,7 +377,7 @@ def run_review(cfg: dict, tree: Path, base: str, merge: str, proposal: dict, tes
     first = next((line.strip().strip('*`# ') for line in result.stdout.splitlines() if line.strip()), '')
     verdict = re.fullmatch(r'VERDICT:\s*\**\s*(PASS|BLOCK)\**', first)
     if result.returncode or not verdict:
-        raise Deferred(f'reviewer gave no verdict (exit {result.returncode}); see {out}')
+        raise NoVerdict(f'reviewer gave no verdict (exit {result.returncode}); see {out}')
     if verdict.group(1) == 'BLOCK':
         raise Rejected(f'independent review BLOCK; findings in {out}')
     return str(out)
@@ -425,9 +441,11 @@ def go_live(work: Work, cfg: dict, beta: Path, base: str, merge: str, proposal: 
     except Deferred as exc:
         raise OnboardingError(f'{proposal["id"]}: collector failed after go-live and the revert did not '
                               f'complete ({exc}); check {cfg["collector_unit"]} and {beta}') from exc
-    if not restored:
-        raise OnboardingError(f'{proposal["id"]}: collector is not running even after rollback: {restored_state}')
     revert = git('rev-parse', 'HEAD', cwd=beta)
+    if not restored:
+        raise OnboardingError(f'{proposal["id"]}: collector is not running even after rollback ({restored_state}); '
+                              f'the revert {revert[:12]} is committed in {beta} but not pushed ({branch} on '
+                              f'{remote} still has the merge)')
     try:
         git('push', '-q', remote, f'{revert}:refs/heads/{branch}', cwd=beta, timeout=300)
     except Deferred as exc:
@@ -466,7 +484,8 @@ def process(work: Work, cfg: dict, proposal: dict) -> dict:
             check_scope(changed, cfg['allowed_paths'])
             old_registry = json.loads(git('show', f'{base}:{REGISTRY}', cwd=tree))
             new_registry = json.loads((tree / REGISTRY).read_text())
-            added, patched = check_registry(old_registry, new_registry, work.onboarded_ids())
+            added, patched = check_registry(old_registry, new_registry, work.onboarded_ids(),
+                                            set(proposal.get('sources') or ()))
             check_mappings(git('show', f'{base}:{MAPPINGS_MODULE}', cwd=tree), (tree / MAPPINGS_MODULE).read_text(),
                            added | work.onboarded_ids())
             counts = check_cap(old_registry, new_registry, load_catalog((tree / CATALOG).read_text()),
@@ -731,6 +750,9 @@ def cmd_status(args) -> int:
           + ', '.join(f'{city} {slots}' for city, slots in sorted(free.items())))
     for record in work.proposal_records()[-10:]:
         print(f'- proposal {record["id"]} [{record["status"]}] {record["branch"]} — {record.get("reason") or record["note"][:80]}')
+    for record in work.proposal_records():
+        if record['status'] == 'failed':
+            print(f'BLOCKED: onboarding is paused until the operator repairs and acknowledges {record["id"]}')
     for watch in work.watches():
         state = 'completed' if watch.get('completed_at') else f'watch until {watch["until"][:10]}'
         print(f'- source {watch["source_id"]} ({watch["city_id"]}) live {watch["live_at"][:10]}, {state}, '
@@ -745,9 +767,22 @@ def cmd_propose(args) -> int:
     if any(r['status'] == 'pending' and r['branch'] == args.branch for r in work.proposal_records()):
         raise SystemExit(f'{args.branch} already has a pending proposal')
     record = {'id': f'{now():%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:6]}', 'branch': args.branch, 'commit': commit,
-              'note': args.note, 'proposed_at': now().isoformat(), 'status': 'pending', 'events': []}
+              'note': args.note, 'sources': sorted(set(args.source or ())), 'proposed_at': now().isoformat(),
+              'status': 'pending', 'events': []}
     work.save_proposal(record)
     print(json.dumps({'status': 'proposed', 'id': record['id'], 'commit': commit}))
+    return 0
+
+
+def cmd_acknowledge(args) -> int:
+    work = Work(Path(args.work))
+    record = next((r for r in work.proposal_records() if r['id'] == args.id and r['status'] == 'failed'), None)
+    if record is None:
+        raise SystemExit(f'no failed proposal {args.id}')
+    record.update(status='failed_acknowledged')
+    record['events'].append({'at': iso(now()), 'event': 'acknowledged', 'reason': args.note})
+    work.save_proposal(record)
+    print(json.dumps({'status': 'acknowledged', 'id': args.id}))
     return 0
 
 
@@ -755,9 +790,12 @@ def cmd_onboard(args) -> int:
     work = Work(Path(args.work))
     cfg = work.config()
     lines = []
+    if any(r['status'] == 'failed' for r in work.proposal_records()):
+        return 0  # an incomplete rollback was reported; nothing goes live until the operator acknowledges it
     try:
         with work.lock():
             for record in [r for r in work.proposal_records() if r['status'] == 'pending']:
+                previous = record.get('reason')
                 try:
                     result = process(work, cfg, record)
                     record.update(status='live', reason=None, result=result)
@@ -766,9 +804,19 @@ def cmd_onboard(args) -> int:
                 except Rejected as exc:
                     record.update(status='rejected', reason=str(exc))
                     lines.append(f'REJECTED {record["id"]} ({record["branch"]}): {exc}')
+                except NoVerdict as exc:
+                    attempts = 1 + sum(e['event'] == 'no_verdict' for e in record['events'])
+                    record['events'].append({'at': iso(now()), 'event': 'no_verdict', 'reason': str(exc)})
+                    if attempts < MAX_NO_VERDICT:
+                        record['reason'] = f'deferred: {exc}'
+                        work.save_proposal(record)
+                        break
+                    record.update(status='rejected', reason=f'{exc} ({attempts} attempts)')
+                    lines.append(f'REJECTED {record["id"]} ({record["branch"]}): {record["reason"]}')
                 except Deferred as exc:
                     record['reason'] = f'deferred: {exc}'
-                    lines.append(f'DEFERRED {record["id"]}: {exc}')
+                    if record['reason'] != previous:  # report a new reason once, not every run
+                        lines.append(f'DEFERRED {record["id"]}: {exc}')
                     record['events'].append({'at': iso(now()), 'event': 'deferred', 'reason': str(exc)})
                     work.save_proposal(record)
                     break  # the precondition is shared; retry next run
@@ -812,7 +860,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument('--work', required=True)
     p.add_argument('--branch', required=True)
     p.add_argument('--note', required=True, help='what the change adds or fixes and why')
+    p.add_argument('--source', action='append', help='onboarded source a parser-only fix is for (repeatable)')
     p.set_defaults(func=cmd_propose)
+    p = sub.add_parser('acknowledge', help='operator: clear a failed rollback after repairing it')
+    p.add_argument('--work', required=True)
+    p.add_argument('--id', required=True)
+    p.add_argument('--note', required=True)
+    p.set_defaults(func=cmd_acknowledge)
     p = sub.add_parser('watch')
     p.add_argument('--work', required=True)
     p.add_argument('--hours', type=int, default=12)
