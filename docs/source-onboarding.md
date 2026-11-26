@@ -23,6 +23,9 @@ for two weeks. `scripts/source_onboarding.py` owns the gate; it never touches tr
      stay ≤ `max_sources_per_city` (10; today most cities record 8) for every city the change touches;
    - **tests**: the local-source and registry test modules plus any test file the branch changes (registry
      counts in those tests are floors, so a new source never needs to edit them);
+   - **traded city**: an added source's city must have collected markets in the last 48 h (the engine fetches
+     local sources only for those cities; every market in the window is read, so no city is missed); unreadable or
+     empty collected rows defer rather than reject; status lists traded cities and their free slots;
    - **live probe**: the proposal's own parser fetches each added/patched source and must return a plausible dated
      high for today or tomorrow in the city's timezone;
    - **independent review** (`claude -p`, read-only): `VERDICT: PASS` required; BLOCK rejects the proposal.

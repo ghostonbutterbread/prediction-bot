@@ -32,6 +32,21 @@ def local(source_id, city_id='atlanta_ga', **extra):
 CATALOG = [{'source_id': 'nws'}, {'source_id': 'open_meteo'}]
 
 
+def write_collected_rows(snapshots, index, rows):
+    """Collector archive + replay index for (observed_at, city_id, sources) rows."""
+    offset = 0
+    with Path(snapshots).open('wb') as raw_out, Path(index).open('w') as index_out:
+        for number, (observed, city_id, sources) in enumerate(rows):
+            market_id = f'{city_id}-market-{number % 4}'
+            row = json.dumps({'observed_at': observed.isoformat(), 'market_id': market_id, 'decision_artifact': {
+                'source_context': {'data': {'weather_source_snapshot': {
+                    'sources': sources, 'station_resolution': {'city_id': city_id}}}}}}).encode() + b'\n'
+            raw_out.write(row)
+            index_out.write(json.dumps({'observed_at': observed.isoformat(), 'market_id': market_id,
+                                        'byte_offset': offset, 'byte_length': len(row)}) + '\n')
+            offset += len(row)
+
+
 class MechanicalChecksTest(unittest.TestCase):
     def test_scope_allows_only_source_paths(self):
         allowed = onboarding.DEFAULTS['allowed_paths']
@@ -147,6 +162,8 @@ class OnboardEndToEndTest(unittest.TestCase):
         self.run_cli('init', '--work', str(self.work), '--beta', str(self.beta), '--python', sys.executable,
                      '--unit', 'collector.service', '--replay-index', str(self.tmp / 'index.jsonl'),
                      '--market-snapshots', str(self.tmp / 'snapshots.jsonl'), '--capture-root', str(self.tmp / 'captures'))
+        write_collected_rows(self.tmp / 'snapshots.jsonl', self.tmp / 'index.jsonl',
+                             [(datetime.now(timezone.utc) - timedelta(hours=1), 'atlanta_ga', [])])
         config = json.loads((self.work / 'config.json').read_text())
         config.update(probe=False, restart_settle_seconds=0, test_modules=['tests.test_weather_local_dummy'])
         (self.work / 'config.json').write_text(json.dumps(config))
@@ -231,6 +248,42 @@ class OnboardEndToEndTest(unittest.TestCase):
         self.run_cli('onboard', '--work', str(self.work))
         self.assertEqual(self.proposal(named)['status'], 'live')
         self.assertEqual(len(json.loads((self.work / 'watches.json').read_text())[0]['patches']), 2)
+
+    def test_new_source_for_a_city_without_collected_markets_is_rejected(self):
+        def miami(repo):
+            path = repo / onboarding.REGISTRY
+            data = json.loads(path.read_text())
+            data['sources'].append(local('src_local_mia_weather', 'miami_fl'))
+            path.write_text(json.dumps(data, indent=2))
+        proposal_id = self.propose('source/miami', miami)
+        self.run_cli('onboard', '--work', str(self.work))
+        self.assertEqual(self.proposal(proposal_id)['status'], 'rejected')
+        self.assertIn('no market for miami_fl', self.proposal(proposal_id)['reason'])
+        self.assertEqual(self.restarts(), 0)
+        status = self.run_cli('status', '--work', str(self.work))[1]
+        self.assertIn('Not traded now (new sources there are rejected): miami_fl', status)
+        # A rarely listed city counts once it has any market in the window, however many rows others have.
+        moment = datetime.now(timezone.utc)
+        write_collected_rows(self.tmp / 'snapshots.jsonl', self.tmp / 'index.jsonl',
+                             [(moment - timedelta(minutes=900 - i), 'atlanta_ga', []) for i in range(800)]
+                             + [(moment - timedelta(minutes=5), 'miami_fl', [])]
+                             + [(moment - timedelta(minutes=4 - i), 'atlanta_ga', []) for i in range(3)])
+        self.sh('git', 'fetch', '-q', 'origin', cwd=self.agent)
+        again = self.propose('source/miami-again', miami)
+        self.run_cli('onboard', '--work', str(self.work))
+        self.assertEqual(self.proposal(again)['status'], 'live')
+
+    def test_unreadable_collected_rows_defer_instead_of_rejecting(self):
+        (self.tmp / 'index.jsonl').write_text('')
+        proposal_id = self.propose('source/new', self.add_source('src_local_new_weather'))
+        self.run_cli('onboard', '--work', str(self.work))
+        self.assertEqual(self.proposal(proposal_id)['status'], 'pending')
+        self.assertIn('traded cities', self.proposal(proposal_id)['reason'])
+        (self.tmp / 'index.jsonl').write_text('{"observed_at": "%s"}\n' % datetime.now(timezone.utc).isoformat())
+        self.run_cli('onboard', '--work', str(self.work))
+        self.assertEqual(self.proposal(proposal_id)['status'], 'pending')
+        self.assertIn('KeyError', self.proposal(proposal_id)['reason'])
+        self.assertIn('traded cities unknown', self.run_cli('status', '--work', str(self.work))[1])
 
     def test_review_block_and_scope_violation_are_rejected_without_deploying(self):
         self.verdict('VERDICT: BLOCK\n1. parser reads the wrong day\n')
@@ -357,23 +410,18 @@ class WatchTest(unittest.TestCase):
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         moment = datetime.now(timezone.utc)
         snapshots, index = tmp / 'snapshots.jsonl', tmp / 'index.jsonl'
-        offset = 0
-        with snapshots.open('wb') as raw_out, index.open('w') as index_out:
-            for i in range(6):
-                observed = moment - timedelta(hours=2, minutes=-i)
-                sources = [{'source_id': 'nws', 'scoreable_forecast': True, 'forecast_high': 80},
-                           {'source_id': 'open_meteo', 'scoreable_forecast': True, 'forecast_high': 82},
-                           {'source_id': 'src_local_new_weather', 'scoreable_forecast': i % 3 != 0,
-                            'forecast_high': 95, 'market_target_date': '2026-11-26', 'source_target_date': '2026-11-26',
-                            'forecast_measurement_kind': 'high',
-                            'forecast_start': '2026-11-27T07:00:00-05:00' if i == 1 else '2026-11-26T07:00:00-05:00',
-                            'source_fetched_at': (observed - timedelta(minutes=1)).isoformat()}]
-                row = json.dumps({'observed_at': observed.isoformat(), 'decision_artifact': {'source_context': {
-                    'data': {'weather_source_snapshot': {'sources': sources}}}}}).encode() + b'\n'
-                raw_out.write(row)
-                index_out.write(json.dumps({'observed_at': observed.isoformat(), 'byte_offset': offset,
-                                            'byte_length': len(row)}) + '\n')
-                offset += len(row)
+        rows = []
+        for i in range(6):
+            observed = moment - timedelta(hours=2, minutes=-i)
+            rows.append((observed, 'atlanta_ga', [
+                {'source_id': 'nws', 'scoreable_forecast': True, 'forecast_high': 80},
+                {'source_id': 'open_meteo', 'scoreable_forecast': True, 'forecast_high': 82},
+                {'source_id': 'src_local_new_weather', 'scoreable_forecast': i % 3 != 0,
+                 'forecast_high': 95, 'market_target_date': '2026-11-26', 'source_target_date': '2026-11-26',
+                 'forecast_measurement_kind': 'high',
+                 'forecast_start': '2026-11-27T07:00:00-05:00' if i == 1 else '2026-11-26T07:00:00-05:00',
+                 'source_fetched_at': (observed - timedelta(minutes=1)).isoformat()}]))
+        write_collected_rows(snapshots, index, rows)
         work = tmp / 'work'
         work.mkdir()
         (tmp / 'captures').mkdir()
@@ -384,7 +432,9 @@ class WatchTest(unittest.TestCase):
             {'source_id': 'src_local_new_weather', 'city_id': 'atlanta_ga', 'live_at': (moment - timedelta(days=1)).isoformat(),
              'until': (moment + timedelta(days=13)).isoformat(), 'patches': []},
             {'source_id': 'src_local_done_weather', 'city_id': 'miami_fl', 'live_at': (moment - timedelta(days=15)).isoformat(),
-             'until': (moment - timedelta(days=1)).isoformat(), 'patches': []}]))
+             'until': (moment - timedelta(days=1)).isoformat(), 'patches': []},
+            {'source_id': 'src_local_idle_weather', 'city_id': 'nashville_tn', 'live_at': (moment - timedelta(days=1)).isoformat(),
+             'until': (moment + timedelta(days=13)).isoformat(), 'patches': []}]))
         out = io.StringIO()
         with redirect_stdout(out):
             self.assertEqual(onboarding.main(['watch', '--work', str(work)]), 0)
@@ -394,6 +444,8 @@ class WatchTest(unittest.TestCase):
         self.assertIn('median gap to other sources 14.0F', entry['issues'])
         self.assertIn('1 rows whose forecast period starts on another date than the market', entry['issues'])
         self.assertEqual(report['completed'], ['src_local_done_weather'])
+        idle = report['sources']['src_local_idle_weather']
+        self.assertEqual((idle['issues'], idle['note']), ([], 'idle: no nashville_tn markets collected in the window'))
         self.assertIn('src_local_new_weather', out.getvalue())
         self.assertEqual(len((work / 'storage-history.jsonl').read_text().splitlines()), 1)
 
