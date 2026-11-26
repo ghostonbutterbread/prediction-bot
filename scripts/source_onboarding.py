@@ -11,6 +11,7 @@ report the source agent reads. See docs/source-onboarding.md.
 from __future__ import annotations
 
 import argparse
+import ast
 import contextlib
 import fcntl
 import fnmatch
@@ -89,6 +90,8 @@ def git(*args: str, cwd: Path, timeout: float = 120) -> str:
         return run(['git', *IDENTITY, *args], cwd=cwd, timeout=timeout).stdout.strip()
     except subprocess.CalledProcessError as exc:
         raise Deferred(f'git {args[0]} failed in {cwd}: {(exc.stderr or exc.stdout).strip()[-300:]}') from exc
+    except subprocess.TimeoutExpired as exc:
+        raise Deferred(f'git {args[0]} timed out after {timeout}s in {cwd}') from exc
 
 
 def write_json(path: Path, value) -> None:
@@ -128,6 +131,16 @@ class Work:
                 raise Deferred('another onboarding run holds the lock') from None
             yield
 
+    @contextlib.contextmanager
+    def updating_watches(self):
+        """Short read-modify-write of watches.json, shared by onboard and watch."""
+        self.root.mkdir(parents=True, exist_ok=True)
+        with open(self.root / '.watches.lock', 'w') as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            watches = self.watches()
+            yield watches
+            write_json(self.watches_path, watches)
+
     def proposal_records(self) -> list[dict]:
         return sorted((json.loads(p.read_text()) for p in self.proposals.glob('*/proposal.json')),
                       key=lambda r: r['proposed_at'])
@@ -144,12 +157,58 @@ class Work:
 
 # ----- mechanical checks -------------------------------------------------------------------------
 
+def changed_paths(tree: Path, base: str, merge: str) -> list[str]:
+    """Every path the merge touches (renames split into delete + add); only regular files may be added or modified."""
+    raw = git('diff', '--no-renames', '--raw', '-z', base, merge, cwd=tree).split('\0')
+    paths, problems = [], []
+    for meta, path in zip(raw[0::2], raw[1::2]):
+        if not meta:
+            continue
+        _, new_mode, _, _, status = meta.lstrip(':').split(' ')
+        paths.append(path)
+        if status == 'D':
+            problems.append(f'{path} deleted')
+        elif new_mode not in ('100644', '100755'):
+            problems.append(f'{path} has mode {new_mode} (symlinks and submodules are not allowed)')
+    if problems:
+        raise Rejected('; '.join(problems))
+    return paths
+
+
 def check_scope(changed: list[str], allowed: list[str]) -> None:
     outside = [path for path in changed if not any(fnmatch.fnmatchcase(path, glob) for glob in allowed)]
     if outside:
         raise Rejected(f'changes outside the allowed source paths: {", ".join(sorted(outside))}')
     if not changed:
         raise Rejected('the branch changes nothing')
+
+
+LOCAL_MAPPINGS = ('OTHER_LOCAL_ADAPTERS', 'OTHER_LOCAL_URLS', 'OTHER_LOCAL_UNAVAILABLE_REASONS')
+MAPPINGS_MODULE = 'bot/feeds/weather_local_other.py'
+
+
+def local_mappings(text: str) -> dict[str, dict[str, str]]:
+    """Literal source_id -> value mappings that steer existing sources (compared, never executed)."""
+    found = {}
+    for node in ast.parse(text).body:
+        target = node.targets[0] if isinstance(node, ast.Assign) and len(node.targets) == 1 else getattr(node, 'target', None)
+        if isinstance(target, ast.Name) and target.id in LOCAL_MAPPINGS and isinstance(node.value, ast.Dict):
+            found[target.id] = {ast.literal_eval(k): ast.unparse(v) for k, v in zip(node.value.keys, node.value.values)}
+    return found
+
+
+def check_mappings(old_text: str, new_text: str, allowed_ids: set[str]) -> None:
+    old, new = local_mappings(old_text), local_mappings(new_text)
+    if set(old) != set(new):
+        raise Rejected(f'{MAPPINGS_MODULE} must keep {", ".join(LOCAL_MAPPINGS)} as literal dicts')
+    for name in LOCAL_MAPPINGS:
+        changed = {k for k in old[name].keys() | new[name].keys() if old[name].get(k) != new[name].get(k)}
+        if changed - allowed_ids:
+            raise Rejected(f'{name} may only change for added or onboarded sources: {sorted(changed - allowed_ids)}')
+        if name == 'OTHER_LOCAL_URLS':
+            for source_id in changed & new[name].keys():
+                if not str(ast.literal_eval(new[name][source_id])).startswith('https://'):
+                    raise Rejected(f'{name}[{source_id!r}] must be an https URL')
 
 
 def check_registry(old: dict, new: dict, onboarded: set[str]) -> tuple[set[str], set[str]]:
@@ -299,7 +358,8 @@ def run_review(cfg: dict, tree: Path, base: str, merge: str, proposal: dict, tes
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise Deferred(f'reviewer unavailable: {exc}') from exc
     out.write_text(result.stdout + result.stderr)
-    verdict = re.search(r'VERDICT:\s*\**\s*(PASS|BLOCK)', result.stdout)
+    first = next((line.strip().strip('*`# ') for line in result.stdout.splitlines() if line.strip()), '')
+    verdict = re.fullmatch(r'VERDICT:\s*\**\s*(PASS|BLOCK)\**', first)
     if result.returncode or not verdict:
         raise Deferred(f'reviewer gave no verdict (exit {result.returncode}); see {out}')
     if verdict.group(1) == 'BLOCK':
@@ -315,60 +375,82 @@ def unit_state(unit: str) -> dict:
 
 
 def restart_collector(cfg: dict) -> tuple[bool, dict]:
+    """Restart the unit; healthy means the same main process is still running after the settle time."""
     unit = cfg['collector_unit']
-    before = unit_state(unit)
-    run(['systemctl', '--user', 'restart', unit], timeout=120)
-    time.sleep(min(5, cfg['restart_settle_seconds']))
-    started = unit_state(unit)
-    time.sleep(max(0, cfg['restart_settle_seconds'] - 5))
-    settled = unit_state(unit)
+    try:
+        run(['systemctl', '--user', 'restart', unit], timeout=120)
+        time.sleep(min(5, cfg['restart_settle_seconds']))
+        started = unit_state(unit)
+        time.sleep(max(0, cfg['restart_settle_seconds'] - 5))
+        settled = unit_state(unit)
+    except (subprocess.SubprocessError, OSError, ValueError) as exc:
+        return False, {'error': f'{type(exc).__name__}: {exc}'}
     ok = (settled.get('ActiveState') == 'active' and settled.get('SubState') == 'running'
           and settled.get('MainPID') not in (None, '0') and settled.get('MainPID') == started.get('MainPID')
-          and settled.get('NRestarts') == before.get('NRestarts'))
-    return ok, {'before': before, 'started': started, 'settled': settled}
+          and settled.get('NRestarts') == started.get('NRestarts'))
+    return ok, {'started': started, 'settled': settled}
+
+
+def checkout_ready(cfg: dict, beta: Path) -> str:
+    """The collector checkout must be clean, on the branch and equal to the remote branch; returns its HEAD."""
+    remote, branch = cfg['remote'], cfg['branch']
+    if git('status', '--porcelain', '--untracked-files=no', cwd=beta):
+        raise Deferred(f'{beta} has uncommitted changes')
+    if git('rev-parse', '--abbrev-ref', 'HEAD', cwd=beta) != branch:
+        raise Deferred(f'{beta} is not on {branch}')
+    head = git('rev-parse', 'HEAD', cwd=beta)
+    if head != git('rev-parse', f'{remote}/{branch}', cwd=beta):
+        raise Deferred(f'{beta} differs from {remote}/{branch}')
+    return head
 
 
 def go_live(work: Work, cfg: dict, beta: Path, base: str, merge: str, proposal: dict) -> dict:
     remote, branch = cfg['remote'], cfg['branch']
+    git('fetch', '-q', remote, branch, cwd=beta, timeout=300)
+    if checkout_ready(cfg, beta) != base:  # re-checked: tests and review can take a while
+        raise Deferred(f'{branch} moved during review; the proposal will be rebuilt on the new tip')
     git('merge', '--ff-only', '-q', merge, cwd=beta)
     try:
-        git('push', '-q', remote, f'HEAD:{branch}', cwd=beta, timeout=300)
+        git('push', '-q', remote, f'{merge}:refs/heads/{branch}', cwd=beta, timeout=300)
     except Deferred:
-        git('reset', '-q', '--hard', base, cwd=beta)  # the checkout was clean: this drops only our fast-forward
+        git('reset', '-q', '--keep', base, cwd=beta)  # drops only our fast-forward; refuses to touch local edits
         raise
     ok, state = restart_collector(cfg)
     if ok:
         return {'merge': merge, 'restart': state}
-    # The collector did not stay up on the new code: revert, push, restart, verify.
+    # The collector did not stay up on the new code: revert, restart (restore collection first), then push.
     try:
         git('revert', '-m', '1', '--no-edit', merge, cwd=beta)
-        git('push', '-q', remote, f'HEAD:{branch}', cwd=beta, timeout=300)
         restored, restored_state = restart_collector(cfg)
-    except (Deferred, subprocess.SubprocessError, OSError) as exc:
-        raise OnboardingError(f'{proposal["id"]}: collector failed after go-live and the rollback did not '
+    except Deferred as exc:
+        raise OnboardingError(f'{proposal["id"]}: collector failed after go-live and the revert did not '
                               f'complete ({exc}); check {cfg["collector_unit"]} and {beta}') from exc
     if not restored:
         raise OnboardingError(f'{proposal["id"]}: collector is not running even after rollback: {restored_state}')
-    raise Rejected(f'collector did not stay up after restart ({state["settled"]}); merge reverted as '
-                   f'{git("rev-parse", "--short", "HEAD", cwd=beta)} and collector restored')
+    revert = git('rev-parse', 'HEAD', cwd=beta)
+    try:
+        git('push', '-q', remote, f'{revert}:refs/heads/{branch}', cwd=beta, timeout=300)
+    except Deferred as exc:
+        raise OnboardingError(f'{proposal["id"]}: collector restored on revert {revert[:12]}, but pushing the '
+                              f'revert failed ({exc}); push {branch} from {beta}') from exc
+    raise Rejected(f'collector did not stay up after restart ({state}); merge reverted as {revert[:12]} and the '
+                   f'collector restored. Rebuild the change on a fresh branch from origin/beta (its commits are now '
+                   f'reverted history)')
 
 
 def process(work: Work, cfg: dict, proposal: dict) -> dict:
     beta = Path(cfg['beta_checkout'])
     remote, branch = cfg['remote'], cfg['branch']
     git('fetch', '-q', remote, branch, cwd=beta, timeout=300)
-    if git('status', '--porcelain', '--untracked-files=no', cwd=beta):
-        raise Deferred(f'{beta} has uncommitted changes')
-    if git('rev-parse', '--abbrev-ref', 'HEAD', cwd=beta) != branch:
-        raise Deferred(f'{beta} is not on {branch}')
-    base = git('rev-parse', 'HEAD', cwd=beta)
-    if base != git('rev-parse', f'{remote}/{branch}', cwd=beta):
-        raise Deferred(f'{beta} differs from {remote}/{branch}')
+    base = checkout_ready(cfg, beta)
     ref = f'refs/source-proposals/{proposal["id"]}'
     folder = work.proposals / proposal['id']
     tree = work.tmp / proposal['id']
     try:
-        git('fetch', '-q', str(work.agent_repo), f'+refs/heads/{proposal["branch"]}:{ref}', cwd=beta)
+        try:
+            git('fetch', '-q', str(work.agent_repo), f'+refs/heads/{proposal["branch"]}:{ref}', cwd=beta)
+        except Deferred as exc:
+            raise Rejected(f'branch {proposal["branch"]} could not be fetched from the agent clone ({exc})') from exc
         if git('rev-parse', ref, cwd=beta) != proposal['commit']:
             raise Rejected('the branch moved after it was proposed; propose it again')
         shutil.rmtree(tree, ignore_errors=True)
@@ -379,13 +461,18 @@ def process(work: Work, cfg: dict, proposal: dict) -> dict:
         except Deferred:
             raise Rejected(f'does not merge cleanly onto {branch} {base[:12]}') from None
         merge = git('rev-parse', 'HEAD', cwd=tree)
-        changed = git('diff', '--name-only', base, merge, cwd=tree).splitlines()
-        check_scope(changed, cfg['allowed_paths'])
-        old_registry = json.loads(git('show', f'{base}:{REGISTRY}', cwd=tree))
-        new_registry = json.loads((tree / REGISTRY).read_text())
-        added, patched = check_registry(old_registry, new_registry, work.onboarded_ids())
-        counts = check_cap(old_registry, new_registry, load_catalog((tree / CATALOG).read_text()),
-                           cfg['max_sources_per_city'])
+        try:
+            changed = changed_paths(tree, base, merge)
+            check_scope(changed, cfg['allowed_paths'])
+            old_registry = json.loads(git('show', f'{base}:{REGISTRY}', cwd=tree))
+            new_registry = json.loads((tree / REGISTRY).read_text())
+            added, patched = check_registry(old_registry, new_registry, work.onboarded_ids())
+            check_mappings(git('show', f'{base}:{MAPPINGS_MODULE}', cwd=tree), (tree / MAPPINGS_MODULE).read_text(),
+                           added | work.onboarded_ids())
+            counts = check_cap(old_registry, new_registry, load_catalog((tree / CATALOG).read_text()),
+                               cfg['max_sources_per_city'])
+        except (ValueError, KeyError, TypeError, AttributeError, OSError, SyntaxError) as exc:
+            raise Rejected(f'malformed change: {type(exc).__name__}: {exc}') from exc
         tests = run_tests(cfg, tree, changed, folder / 'tests.log')
         probe = run_probe(cfg, tree, added | patched, folder / 'probe.json')
         review = run_review(cfg, tree, base, merge, proposal, tests, probe, folder / 'review.md')
@@ -396,16 +483,15 @@ def process(work: Work, cfg: dict, proposal: dict) -> dict:
         with contextlib.suppress(Deferred):
             git('update-ref', '-d', ref, cwd=beta)
     by_id = {s['source_id']: s for s in new_registry['sources']}
-    watches = work.watches()
-    for source_id in sorted(added):
-        live_at = now()
-        watches.append({'source_id': source_id, 'city_id': by_id[source_id]['city_id'], 'url': by_id[source_id]['url'],
-                        'proposal': proposal['id'], 'live_at': iso(live_at),
-                        'until': iso(live_at + timedelta(days=cfg['watch_days'])), 'patches': []})
-    for watch in watches:
-        if watch['source_id'] in patched:
-            watch['patches'].append({'proposal': proposal['id'], 'at': iso(now()), 'merge': live['merge']})
-    write_json(work.watches_path, watches)
+    with work.updating_watches() as watches:
+        for source_id in sorted(added):
+            live_at = now()
+            watches.append({'source_id': source_id, 'city_id': by_id[source_id]['city_id'], 'url': by_id[source_id]['url'],
+                            'proposal': proposal['id'], 'live_at': iso(live_at),
+                            'until': iso(live_at + timedelta(days=cfg['watch_days'])), 'patches': []})
+        for watch in watches:
+            if watch['source_id'] in patched:
+                watch['patches'].append({'proposal': proposal['id'], 'at': iso(now()), 'merge': live['merge']})
     return {'added': sorted(added), 'patched': sorted(patched), 'tests': tests, 'review': review,
             'city_counts': counts, **live}
 
@@ -503,7 +589,7 @@ def source_metrics(rows: list[tuple[dict, list[dict]]], source_id: str) -> dict:
         present += 1
         sizes.append(len(json.dumps(source, separators=(',', ':'))))
         if not source.get('scoreable_forecast'):
-            reasons[(source.get('source_metadata') or {}).get('availability_reason')
+            reasons[source.get('availability_reason') or (source.get('source_metadata') or {}).get('availability_reason')
                     or source.get('forecast_availability') or 'unavailable'] += 1
             continue
         scoreable += 1
@@ -519,8 +605,10 @@ def source_metrics(rows: list[tuple[dict, list[dict]]], source_id: str) -> dict:
         as_of = parse_time(source.get('source_as_of') or source.get('as_of'))
         if observed and ((fetched and fetched > observed + timedelta(minutes=5)) or (as_of and as_of > observed + timedelta(minutes=5))):
             clock_bad += 1
-        market_date, source_date = source.get('market_target_date'), source.get('source_target_date')
-        if market_date and source_date and market_date != source_date:
+        # A daytime high's forecast period must start on the market date (in the source's own timezone).
+        market_date, period_start = source.get('market_target_date'), source.get('forecast_start')
+        if (source.get('forecast_measurement_kind') == 'high' and market_date and isinstance(period_start, str)
+                and period_start[:10] != market_date):
             date_bad += 1
     issues = []
     if not present:
@@ -532,7 +620,7 @@ def source_metrics(rows: list[tuple[dict, list[dict]]], source_id: str) -> dict:
     if clock_bad:
         issues.append(f'{clock_bad} rows with a source clock after the decision time')
     if date_bad:
-        issues.append(f'{date_bad} rows whose source date differs from the market date')
+        issues.append(f'{date_bad} rows whose forecast period starts on another date than the market')
     return {'rows': present, 'scoreable': scoreable, 'unavailable_reasons': dict(reasons.most_common(4)),
             'median_gap_f': round(statistics.median(diffs), 2) if diffs else None,
             'high_range_f': [min(highs), max(highs)] if highs else None,
@@ -581,11 +669,12 @@ def cmd_watch(args) -> int:
             metrics['issues'] = []  # first collection pass may not have run yet
         report['sources'][watch['source_id']] = {**metrics, 'city_id': watch['city_id'], 'live_at': watch['live_at'],
                                                  'until': watch['until'], 'patches': len(watch['patches'])}
-    for watch in watches:
-        if not watch.get('completed_at') and parse_time(watch['until']) <= moment:
-            watch['completed_at'] = iso(moment)
-            report.setdefault('completed', []).append(watch['source_id'])
-    write_json(work.watches_path, watches)
+    if any(not w.get('completed_at') and parse_time(w['until']) <= moment for w in watches):
+        with work.updating_watches() as current:  # re-read: onboard may have added a watch meanwhile
+            for watch in current:
+                if not watch.get('completed_at') and parse_time(watch['until']) <= moment:
+                    watch['completed_at'] = iso(moment)
+                    report.setdefault('completed', []).append(watch['source_id'])
     with work.storage_history.open('a') as stream:
         stream.write(json.dumps(storage_snapshot(cfg)) + '\n')
     history = [json.loads(line) for line in work.storage_history.read_text().splitlines() if line.strip()]
@@ -656,7 +745,7 @@ def cmd_propose(args) -> int:
     if any(r['status'] == 'pending' and r['branch'] == args.branch for r in work.proposal_records()):
         raise SystemExit(f'{args.branch} already has a pending proposal')
     record = {'id': f'{now():%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:6]}', 'branch': args.branch, 'commit': commit,
-              'note': args.note, 'proposed_at': iso(now()), 'status': 'pending', 'events': []}
+              'note': args.note, 'proposed_at': now().isoformat(), 'status': 'pending', 'events': []}
     work.save_proposal(record)
     print(json.dumps({'status': 'proposed', 'id': record['id'], 'commit': commit}))
     return 0
@@ -683,6 +772,12 @@ def cmd_onboard(args) -> int:
                     record['events'].append({'at': iso(now()), 'event': 'deferred', 'reason': str(exc)})
                     work.save_proposal(record)
                     break  # the precondition is shared; retry next run
+                except OnboardingError as exc:
+                    # Never retried automatically: the operator must look at the collector and checkout first.
+                    record.update(status='failed', reason=str(exc))
+                    record['events'].append({'at': iso(now()), 'event': 'failed', 'reason': str(exc)})
+                    work.save_proposal(record)
+                    raise
                 record['events'].append({'at': iso(now()), 'event': record['status'], 'reason': record.get('reason')})
                 work.save_proposal(record)
     except Deferred as exc:

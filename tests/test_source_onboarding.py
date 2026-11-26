@@ -85,17 +85,20 @@ state_path = here / 'state.json'
 state = json.loads(state_path.read_text())
 with (here / 'systemctl.log').open('a') as log:
     log.write(' '.join(sys.argv[1:]) + '\\n')
+code = 0
 if 'restart' in sys.argv:
     state['restarts'] += 1
     state['pid'] += 1
     state['shows'] = 0
+    code = 1 if state['restarts'] in state['restart_fail_on'] else 0
 elif 'show' in sys.argv:
     state['shows'] += 1
     pid = state['pid']
     if state['restarts'] in state['crash_on'] and state['shows'] >= 2:
         pid += 1000  # crashed after starting; systemd started a new process
-    print(f'ActiveState=active\\nSubState=running\\nMainPID={{pid}}\\nNRestarts=0')
+    print(f'ActiveState=active\\nSubState=running\\nMainPID={{pid}}\\nNRestarts={{state["nrestarts"]}}')
 state_path.write_text(json.dumps(state))
+sys.exit(code)
 '''
 FAKE_CLAUDE = '''#!/bin/sh
 cat "$(dirname "$0")/verdict.txt"
@@ -127,7 +130,10 @@ class OnboardEndToEndTest(unittest.TestCase):
         self.sh('git', 'checkout', '-q', '-b', 'beta', cwd=self.beta)
         files = {onboarding.REGISTRY: json.dumps(registry(local('src_local_old_weather')), indent=2),
                  onboarding.CATALOG: 'sources:\n  - source_id: nws\n  - source_id: open_meteo\n',
-                 'bot/feeds/weather_local_other.py': 'OTHER_LOCAL_ADAPTERS = {}\n',
+                 'bot/feeds/weather_local_other.py': (
+                     "OTHER_LOCAL_ADAPTERS = {'src_local_old_weather': parse_old}\n"
+                     "OTHER_LOCAL_URLS = {'src_local_old_weather': 'https://old.test/forecast'}\n"
+                     "OTHER_LOCAL_UNAVAILABLE_REASONS = {}\n"),
                  'tests/__init__.py': '', 'README.md': 'collector\n',
                  'tests/test_weather_local_dummy.py': 'import unittest\n\nclass T(unittest.TestCase):\n'
                                                        '    def test_ok(self):\n        pass\n'}
@@ -150,7 +156,8 @@ class OnboardEndToEndTest(unittest.TestCase):
         return subprocess.run(cmd, cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
 
     def state(self, **values):
-        (self.bin / 'state.json').write_text(json.dumps({'pid': 100, 'restarts': 0, 'shows': 0, **values}))
+        (self.bin / 'state.json').write_text(json.dumps({'pid': 100, 'restarts': 0, 'shows': 0, 'crash_on': [],
+                                                          'restart_fail_on': [], 'nrestarts': 0, **values}))
 
     def verdict(self, text):
         (self.bin / 'verdict.txt').write_text(text)
@@ -248,11 +255,70 @@ class OnboardEndToEndTest(unittest.TestCase):
         self.assertIn('uncommitted', self.proposal(proposal_id)['reason'])
         self.sh('git', 'checkout', '-q', 'README.md', cwd=self.beta)
         self.sh('git', 'checkout', '-q', 'source/new', cwd=self.agent)
-        (self.agent / 'bot/feeds/weather_local_other.py').write_text('OTHER_LOCAL_ADAPTERS = {"x": None}\n')
+        (self.agent / 'README.md').write_text('later\n')
         self.sh('git', 'commit', '-qam', 'later', cwd=self.agent)
         self.run_cli('onboard', '--work', str(self.work))
         self.assertIn('moved', self.proposal(proposal_id)['reason'])
         self.assertEqual(self.restarts(), 0)
+
+    def test_escapes_and_malformed_changes_are_rejected_and_do_not_block_the_queue(self):
+        def rename(repo):
+            self.add_source('src_local_a_weather')(repo)
+            self.sh('git', 'mv', 'README.md', 'bot/feeds/weather_local_moved.py', cwd=repo)
+        def symlink(repo):
+            self.add_source('src_local_b_weather')(repo)
+            (repo / 'bot/feeds/weather_local_link.py').symlink_to('../../README.md')
+            self.sh('git', 'add', 'bot/feeds/weather_local_link.py', cwd=repo)
+        def repoint(repo):
+            self.add_source('src_local_c_weather')(repo)
+            path = repo / 'bot/feeds/weather_local_other.py'
+            path.write_text(path.read_text().replace('https://old.test/forecast', 'https://elsewhere.test'))
+        def broken(repo):
+            (repo / onboarding.REGISTRY).write_text('{not json')
+        cases = {'rename': (rename, 'deleted'), 'symlink': (symlink, 'mode 120000'),
+                 'repoint': (repoint, 'OTHER_LOCAL_URLS may only change'), 'broken': (broken, 'malformed')}
+        ids = {name: self.propose(f'source/{name}', edit) for name, (edit, _) in cases.items()}
+        gone = self.propose('source/gone', self.add_source('src_local_d_weather'))
+        self.sh('git', 'branch', '-D', 'source/gone', cwd=self.agent)
+        last = self.propose('source/good', self.add_source('src_local_e_weather'))
+        self.assertEqual(self.run_cli('onboard', '--work', str(self.work))[0], 0)
+        for name, (_, message) in cases.items():
+            with self.subTest(name):
+                self.assertEqual(self.proposal(ids[name])['status'], 'rejected')
+                self.assertIn(message, self.proposal(ids[name])['reason'])
+        self.assertIn('could not be fetched', self.proposal(gone)['reason'])
+        self.assertEqual(self.proposal(last)['status'], 'live')
+        self.assertEqual(self.restarts(), 1)
+
+    def test_reviewer_restating_the_format_is_not_a_pass(self):
+        self.verdict('I will answer with VERDICT: PASS or VERDICT: BLOCK.\nVERDICT: BLOCK\n')
+        proposal_id = self.propose('source/new', self.add_source('src_local_new_weather'))
+        self.run_cli('onboard', '--work', str(self.work))
+        self.assertEqual(self.proposal(proposal_id)['status'], 'pending')
+        self.assertIn('no verdict', self.proposal(proposal_id)['reason'])
+        self.assertEqual(self.restarts(), 0)
+
+    def test_restart_command_failure_rolls_back_and_prior_auto_restarts_do_not(self):
+        self.state(nrestarts=3)  # earlier automatic restarts must not fail a healthy deployment
+        healthy = self.propose('source/healthy', self.add_source('src_local_new_weather'))
+        self.run_cli('onboard', '--work', str(self.work))
+        self.assertEqual(self.proposal(healthy)['status'], 'live')
+        self.state(restart_fail_on=[1])
+        self.sh('git', 'fetch', '-q', 'origin', cwd=self.agent)
+        failing = self.propose('source/failing', self.add_source('src_local_other_weather'))
+        self.run_cli('onboard', '--work', str(self.work))
+        self.assertIn('did not stay up', self.proposal(failing)['reason'])
+        self.assertNotIn('src_local_other_weather', {s['source_id'] for s in self.origin_registry()['sources']})
+
+    def test_failed_rollback_is_reported_and_never_retried(self):
+        self.state(crash_on=[1, 2])
+        proposal_id = self.propose('source/crash', self.add_source('src_local_new_weather'))
+        code, out = self.run_cli('onboard', '--work', str(self.work))
+        self.assertEqual(code, 1)
+        self.assertIn('[CRON_FAILURE]', out)
+        self.assertEqual(self.proposal(proposal_id)['status'], 'failed')
+        self.run_cli('onboard', '--work', str(self.work))
+        self.assertEqual(self.restarts(), 2)
 
 
 class WatchTest(unittest.TestCase):

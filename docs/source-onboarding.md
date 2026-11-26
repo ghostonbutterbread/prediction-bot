@@ -12,7 +12,9 @@ for two weeks. `scripts/source_onboarding.py` owns the gate; it never touches tr
 2. `onboard` (agentless cron) processes pending proposals one at a time, in a temporary worktree merged onto the
    collector checkout's current `beta`:
    - **scope**: only `docs/weather/city_registry_starter.json`, `bot/feeds/weather_local*.py` and
-     `tests/test_weather_local*.py` may change;
+     `tests/test_weather_local*.py` may be added or modified, as regular files (renames count as a deletion, and
+     deletions, symlinks and submodules are rejected); the `OTHER_LOCAL_*` mappings in
+     `bot/feeds/weather_local_other.py` must stay literal dicts and may change only for added or onboarded sources;
    - **registry**: sources may be added (`src_local_*`, `role: forecast`, `type: local_met`, https URL, starting
      `watch_only`, `trust_score: 0`, `verified: false`) or patched if this pipeline onboarded them; cities, other
      sources and trust fields may not change;
@@ -22,11 +24,14 @@ for two weeks. `scripts/source_onboarding.py` owns the gate; it never touches tr
    - **live probe**: the proposal's own parser fetches each added/patched source and must return a plausible dated
      high for today or tomorrow in the city's timezone;
    - **independent review** (`claude -p`, read-only): `VERDICT: PASS` required; BLOCK rejects the proposal.
-3. On PASS: fast-forward the collector checkout, push `beta`, `systemctl --user restart` the collector and require the
-   same main process to still be running after `restart_settle_seconds`. Otherwise the merge is reverted, pushed and
-   the collector restarted again (an incomplete rollback prints `[CRON_FAILURE]`). A busy or diverged checkout,
-   network failure or missing reviewer **defers** the proposal to the next run; any other failed check **rejects** it
-   with the reason, which the agent reads from `status`.
+3. On PASS: re-check that the collector checkout is clean and still at the reviewed base, fast-forward it to the
+   reviewed merge commit, push exactly that commit to `beta`, `systemctl --user restart` the collector and require
+   the same main process to still be running after `restart_settle_seconds`. Otherwise the merge is reverted, the
+   collector restarted on the revert, then the revert pushed. An incomplete rollback marks the proposal `failed`
+   (never retried) and prints `[CRON_FAILURE]`. A busy, moved or diverged checkout, a git network failure or a
+   missing reviewer verdict **defers** the queue to the next run; any other failed check (including a source site
+   that is down during the probe) **rejects** the proposal with the reason, which the agent reads from `status`.
+   After a rollback the branch's commits are reverted history: rebuild the change on a fresh branch.
 4. Added sources are recorded in `watches.json` for `watch_days` (14). `watch` (run by the source agent morning and
    night) samples the last 12 h of collected rows and reports per watched source: rows present, scoreable share,
    unavailable reasons, median gap to the other sources' highs, source clocks after the decision time, source/market
@@ -34,7 +39,10 @@ for two weeks. `scripts/source_onboarding.py` owns the gate; it never touches tr
    patches problems through the same gate; a patch keeps the original watch window.
 
 A parser runs inside the collector process. `ProWeatherEngine` isolates each adapter (a failing parser makes only its
-source unavailable), and the gate's review blocks I/O, unbounded work and wrong date/period mapping. Global (all-city)
+source unavailable), and the gate's review blocks I/O, unbounded work and wrong date/period mapping. The gate catches
+mistakes, not a hostile agent: tests and the probe run proposal code as the operator before review, the agent already
+has a shell, and edits to shared parser helpers used by existing sources are guarded only by the review (the watch
+covers onboarded sources). Global (all-city)
 sources, catalog entries and sources needing API keys or accounts are out of scope for automatic onboarding.
 
 ## Operating
