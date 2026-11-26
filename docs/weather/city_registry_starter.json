@@ -1217,6 +1217,38 @@
       "collection_blocker": null
     },
     {
+      "source_id": "src_local_waga_weather",
+      "city_id": "atlanta_ga",
+      "name": "FOX 5 Atlanta Weather (WAGA)",
+      "type": "local_met",
+      "role": "forecast",
+      "platform": "public_broadcast_weather_html",
+      "url": "https://www.fox5atlanta.com/weather",
+      "coverage_area": [
+        "Atlanta"
+      ],
+      "verified": false,
+      "status": "watch_only",
+      "trust_score": 0,
+      "metrics": {
+        "accuracy": 0,
+        "timeliness": 0,
+        "specificity": 0,
+        "consistency": 0,
+        "resolution_alignment": 0,
+        "hype_penalty": 0,
+        "sample_size": 0
+      },
+      "last_reviewed": "2026-11-26",
+      "collection_status": "dated_predictor_adapter_available",
+      "notes": [
+        "Agent-proposed via source onboarding; public FOX Television Stations Nuxt page labelled Atlanta, GA whose weeklyData carries offset-qualified day/night dates: a second Atlanta forecaster with a dated prior-night low (WXIA's low is a partial-day hourly minimum).",
+        "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
+      ],
+      "collection_adapter": "fox_nuxt_daily_v1",
+      "collection_blocker": null
+    },
+    {
       "source_id": "src_local_ktbc_weather",
       "city_id": "austin_tx",
       "name": "FOX 7 Austin Weather (KTBC)",
