@@ -1953,6 +1953,38 @@
       "collection_capability": "dated_high_and_prior_night_low_predictors"
     },
     {
+      "source_id": "src_local_wfld_weather",
+      "city_id": "chicago_il",
+      "name": "FOX 32 Chicago Weather (WFLD)",
+      "type": "local_met",
+      "role": "forecast",
+      "platform": "public_broadcast_weather_html",
+      "url": "https://www.fox32chicago.com/weather",
+      "coverage_area": [
+        "Chicago"
+      ],
+      "verified": false,
+      "status": "watch_only",
+      "trust_score": 0,
+      "metrics": {
+        "accuracy": 0,
+        "timeliness": 0,
+        "specificity": 0,
+        "consistency": 0,
+        "resolution_alignment": 0,
+        "hype_penalty": 0,
+        "sample_size": 0
+      },
+      "last_reviewed": "2026-11-26",
+      "collection_status": "dated_predictor_adapter_available",
+      "notes": [
+        "Agent-proposed via source onboarding; public FOX Television Stations Nuxt page labelled Chicago, IL whose weeklyData carries offset-qualified day/night dates, so it adds Chicago's only local prior-night low predictor (WLS publishes highs only).",
+        "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
+      ],
+      "collection_adapter": "fox_nuxt_daily_v1",
+      "collection_blocker": null
+    },
+    {
       "source_id": "src_local_6abc_weather",
       "city_id": "trenton_nj",
       "name": "6abc StormTracker 6 Central New Jersey",
