@@ -42,7 +42,7 @@ DEFAULTS = {
     'schema': 1, 'remote': 'origin', 'branch': 'beta', 'max_sources_per_city': 10, 'watch_days': 14,
     'allowed_paths': [REGISTRY, 'bot/feeds/weather_local*.py', 'tests/test_weather_local*.py'],
     'test_modules': ['tests.test_weather_local_other', 'tests.test_weather_local_registry',
-                     'tests.test_weather_local_fox', 'tests.test_weather_local_tegna'],
+                     'tests.test_weather_local_fox', 'tests.test_weather_local_tegna', 'tests.test_weather_broad_collection'],
     'probe': True, 'restart_settle_seconds': 90, 'review_timeout_seconds': 1800, 'test_timeout_seconds': 900,
     'review_command': ['claude', '-p', '{prompt}', '--allowedTools',
                        'Bash(git diff:*) Bash(git log:*) Bash(git show:*) Read Grep Glob', '--output-format', 'text'],
