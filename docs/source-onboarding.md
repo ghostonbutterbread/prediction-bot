@@ -21,7 +21,8 @@ for two weeks. `scripts/source_onboarding.py` owns the gate; it never touches tr
      sources and trust fields may not change;
    - **cap**: a city's recorded sources = every catalog entry + its local forecasts + its station observation must
      stay ≤ `max_sources_per_city` (10; today most cities record 8) for every city the change touches;
-   - **tests**: the local-source test modules plus any test file the branch changes;
+   - **tests**: the local-source and registry test modules plus any test file the branch changes (registry
+     counts in those tests are floors, so a new source never needs to edit them);
    - **live probe**: the proposal's own parser fetches each added/patched source and must return a plausible dated
      high for today or tomorrow in the city's timezone;
    - **independent review** (`claude -p`, read-only): `VERDICT: PASS` required; BLOCK rejects the proposal.

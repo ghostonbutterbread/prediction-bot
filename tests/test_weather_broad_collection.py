@@ -545,8 +545,9 @@ class CollectionRegistryTests(unittest.TestCase):
         # Five previously supported global-only provider locations now share
         # the registry; local/source definitions and their trust are unchanged.
         self.assertEqual(len(data['cities']), 29)
-        self.assertEqual(len(data['sources']), 62)
-        self.assertEqual(len({s['source_id'] for s in data['sources']}), 62)
+        # The 62 original definitions are a floor: onboarded local sources add to it (docs/source-onboarding.md).
+        self.assertGreaterEqual(len(data['sources']), 62)
+        self.assertEqual(len({s['source_id'] for s in data['sources']}), len(data['sources']))
         candidates = registry.collection_sources('Las Vegas')
         self.assertEqual([s['source_id'] for s in candidates], ['src_local_kvvu_weather'])
         self.assertEqual(registry.collection_sources('las_vegas_nv'), candidates)
