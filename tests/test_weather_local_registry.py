@@ -65,10 +65,10 @@ class LocalRegistryWiringTests(unittest.TestCase):
         assert registry.source_path is not None
         data = json.loads(registry.source_path.read_text())
         locals_by_id = {s['source_id']: s for s in data['sources'] if s['source_id'].startswith('src_local_')}
-        self.assertEqual(len(locals_by_id), 24)
+        self.assertEqual(len(locals_by_id), 25)
         self.assertEqual(len(OTHER_LOCAL_UNAVAILABLE_REASONS), 4)
         available = set(locals_by_id) - set(OTHER_LOCAL_UNAVAILABLE_REASONS)
-        self.assertEqual(len(available), 20)
+        self.assertEqual(len(available), 21)
         for source_id in available:
             with self.subTest(source_id=source_id):
                 source = locals_by_id[source_id]
