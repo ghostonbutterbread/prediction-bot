@@ -37,6 +37,8 @@ SOURCE_ID = re.compile(r'^src_local_[a-z0-9_]{3,60}$')
 STATION_OBSERVATIONS_PER_CITY = 1
 PROTECTED_SOURCE_FIELDS = ('verified', 'status', 'trust_score', 'metrics', 'last_reviewed', 'role', 'type', 'city_id')
 SOURCES_PATH = ('decision_artifact', 'source_context', 'data', 'weather_source_snapshot', 'sources')
+CITY_PATH = ('decision_artifact', 'source_context', 'data', 'weather_source_snapshot', 'station_resolution', 'city_id')
+TRADED_WINDOW_HOURS = 48
 IDENTITY = ['-c', 'user.name=Hermes Source Onboarding', '-c', 'user.email=hermes-agent@localhost.invalid']
 DEFAULTS = {
     'schema': 1, 'remote': 'origin', 'branch': 'beta', 'max_sources_per_city': 10, 'watch_days': 14,
@@ -491,8 +493,13 @@ def process(work: Work, cfg: dict, proposal: dict) -> dict:
                            added | patched)
             counts = check_cap(old_registry, new_registry, load_catalog((tree / CATALOG).read_text()),
                                cfg['max_sources_per_city'])
+            new_by_id = {s['source_id']: s for s in new_registry['sources']}
+            untraded = sorted({new_by_id[i]['city_id'] for i in added} - traded_cities(cfg)) if added else []
         except (ValueError, KeyError, TypeError, AttributeError, OSError, SyntaxError) as exc:
             raise Rejected(f'malformed change: {type(exc).__name__}: {exc}') from exc
+        if untraded:
+            raise Rejected(f'no market for {", ".join(untraded)} in the last {TRADED_WINDOW_HOURS}h of collected rows: '
+                           'local sources are fetched only for cities with listed markets')
         tests = run_tests(cfg, tree, changed, folder / 'tests.log')
         probe = run_probe(cfg, tree, added | patched, folder / 'probe.json')
         review = run_review(cfg, tree, base, merge, proposal, tests, probe, folder / 'review.md')
@@ -588,14 +595,44 @@ def recent_index_rows(index: Path, since: datetime, max_bytes: int = 64 << 20) -
     return rows[::-1]
 
 
+def dig(value, path):
+    for key in path:
+        value = value.get(key) if isinstance(value, dict) else None
+    return value
+
+
 def row_sources(snapshot_path: Path, row: dict) -> tuple[dict, list[dict]]:
     with snapshot_path.open('rb') as handle:
         handle.seek(row['byte_offset'])
         raw = json.loads(handle.read(row['byte_length']))
-    value = raw
-    for key in SOURCES_PATH:
-        value = value.get(key) if isinstance(value, dict) else None
+    value = dig(raw, SOURCES_PATH)
     return raw, value if isinstance(value, list) else []
+
+
+def sample_rows(cfg: dict, since: datetime, sample: int) -> tuple[int, list[tuple[dict, list[dict]]]]:
+    """Evenly sampled collected rows observed since `since`: (rows in the window, [(raw row, sources)])."""
+    index_rows = recent_index_rows(Path(cfg['replay_index']), since)
+    if not index_rows:
+        return 0, []
+    step = max(1, len(index_rows) // sample)
+    snapshots = Path(cfg['market_snapshots'])
+    return len(index_rows), [row_sources(snapshots, row) for row in index_rows[::step][:sample]]
+
+
+def row_cities(rows: list[tuple[dict, list[dict]]]) -> set[str]:
+    return {city for city in (dig(raw, CITY_PATH) for raw, _ in rows) if isinstance(city, str)}
+
+
+def traded_cities(cfg: dict, hours: int = TRADED_WINDOW_HOURS, sample: int = 600) -> set[str]:
+    """Cities with collected markets recently (the engine fetches local sources only for these)."""
+    try:
+        _, rows = sample_rows(cfg, now() - timedelta(hours=hours), sample)
+    except (OSError, ValueError) as exc:
+        raise Deferred(f'cannot read collected rows to find traded cities: {exc}') from exc
+    cities = row_cities(rows)
+    if not cities:
+        raise Deferred(f'no collected rows in the last {hours}h to find traded cities')
+    return cities
 
 
 def source_metrics(rows: list[tuple[dict, list[dict]]], source_id: str) -> dict:
@@ -672,14 +709,9 @@ def cmd_watch(args) -> int:
     moment = now()
     watches = work.watches()
     active = [w for w in watches if parse_time(w['until']) > moment and not w.get('completed_at')]
-    since = moment - timedelta(hours=args.hours)
-    sampled = []
-    index_rows = recent_index_rows(Path(cfg['replay_index']), since)
-    if index_rows:
-        step = max(1, len(index_rows) // args.sample)
-        snapshots = Path(cfg['market_snapshots'])
-        sampled = [row_sources(snapshots, row) for row in index_rows[::step][:args.sample]]
-    report = {'generated_at': iso(moment), 'window_hours': args.hours, 'index_rows': len(index_rows),
+    index_count, sampled = sample_rows(cfg, moment - timedelta(hours=args.hours), args.sample)
+    sampled_cities = row_cities(sampled)
+    report = {'generated_at': iso(moment), 'window_hours': args.hours, 'index_rows': index_count,
               'sampled_rows': len(sampled), 'sources': {}}
     for watch in active:
         live_at = parse_time(watch['live_at'])
@@ -687,6 +719,10 @@ def cmd_watch(args) -> int:
         metrics = source_metrics(rows, watch['source_id'])
         if not rows and moment - live_at < timedelta(hours=1):
             metrics['issues'] = []  # first collection pass may not have run yet
+        elif not metrics['rows'] and sampled and watch['city_id'] not in sampled_cities:
+            # Not a source defect: the engine fetches local sources only for cities with listed markets.
+            metrics['issues'] = []
+            metrics['note'] = f'idle: no {watch["city_id"]} markets collected in the window'
         report['sources'][watch['source_id']] = {**metrics, 'city_id': watch['city_id'], 'live_at': watch['live_at'],
                                                  'until': watch['until'], 'patches': len(watch['patches'])}
     if any(not w.get('completed_at') and parse_time(w['until']) <= moment for w in watches):
@@ -704,7 +740,7 @@ def cmd_watch(args) -> int:
     lines = [f'Source watch {stamp} — {len(active)} source(s) under watch, {len(sampled)} rows sampled from '
              f'the last {args.hours}h']
     for source_id, entry in report['sources'].items():
-        flag = '; '.join(entry['issues']) or 'ok'
+        flag = '; '.join(entry['issues']) or entry.get('note') or 'ok'
         lines.append(f'- {source_id} ({entry["city_id"]}, live {entry["live_at"][:10]}, until {entry["until"][:10]}): '
                      f'{entry["scoreable"]}/{entry["rows"]} scoreable, gap {entry["median_gap_f"]}F, '
                      f'{entry["bytes_per_row"]} B/row — {flag}')
@@ -747,8 +783,17 @@ def cmd_status(args) -> int:
     registry = json.loads((beta / REGISTRY).read_text())
     counts = city_source_counts(registry, load_catalog((beta / CATALOG).read_text()))
     free = {city: cfg['max_sources_per_city'] - count for city, count in counts.items()}
-    print(f'Cap: {cfg["max_sources_per_city"]} sources per city; free slots by city: '
-          + ', '.join(f'{city} {slots}' for city, slots in sorted(free.items())))
+    try:
+        traded = traded_cities(cfg)
+    except Deferred as exc:
+        traded = set(free)
+        print(f'(traded cities unknown: {exc})')
+    print(f'Cap: {cfg["max_sources_per_city"]} sources per city; free slots in traded cities (markets collected in '
+          f'the last {TRADED_WINDOW_HOURS}h): ' + ', '.join(f'{city} {slots}' for city, slots in sorted(free.items())
+                                                            if city in traded))
+    idle = sorted(set(free) - traded)
+    if idle:
+        print(f'Not traded now (new sources there are rejected): {", ".join(idle)}')
     for record in work.proposal_records()[-10:]:
         print(f'- proposal {record["id"]} [{record["status"]}] {record["branch"]} — {record.get("reason") or record["note"][:80]}')
     for record in work.proposal_records():
