@@ -1,4 +1,4 @@
-"""Inert adapters for the observed WXIA/KUSA/KENS/WUSA public HTML transport.
+"""Inert adapters for the observed WXIA/KUSA/KENS/WUSA/KHOU public HTML transport.
 
 The site renders numeric forecasts server-side. Its weather-10-day JavaScript
 only expands HTML templates; there is no required extra weather API request.
@@ -14,10 +14,11 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from bot.feeds.weather_local import LocalForecastUnavailable
 
 
-# These are the four source markets' existing city-registry timezones, not
+# These are the source markets' existing city-registry timezones, not
 # provider issue-time claims or an allowlist of observed dates/temperatures.
 _MARKET_ZONES = {'atlanta': 'America/New_York', 'denver': 'America/Denver',
-                 'san antonio': 'America/Chicago', 'washington': 'America/New_York'}
+                 'san antonio': 'America/Chicago', 'washington': 'America/New_York',
+                 'houston': 'America/Chicago'}
 _WEEKDAYS = ('Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun')
 _MONTHS = ('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec')
 _VOID = frozenset(('area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr'))
@@ -182,8 +183,11 @@ def parse_tegna_daily(page: str, *, city: str, target_date: str,
         semantics = 'forecast_point_sample_bounds_inclusive_not_full_day'
         locator = 'weather-hourly.weather-hourly__row'
     else:
-        wanted_date = f'{_MONTHS[target.month - 1]} {target.day}'
-        rows = [row for row in parser.rows['weather-10-day'] if _field(row, 'date') == wanted_date]
+        # Observed pages zero-pad early-month days ("Dec 01"); accept either
+        # spelling of the same label. Two matching rows still fail closed below.
+        month = _MONTHS[target.month - 1]
+        wanted_dates = {f'{month} {target.day}', f'{month} {target.day:02d}'}
+        rows = [row for row in parser.rows['weather-10-day'] if _field(row, 'date') in wanted_dates]
         if not rows:
             raise LocalForecastUnavailable('target_date_not_in_source_forecast')
         if len(rows) != 1:
