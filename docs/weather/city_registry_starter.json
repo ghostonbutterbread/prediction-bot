@@ -1249,6 +1249,38 @@
       "collection_blocker": null
     },
     {
+      "source_id": "src_local_wanf_weather",
+      "city_id": "atlanta_ga",
+      "name": "Atlanta News First Weather (WANF)",
+      "type": "local_met",
+      "role": "forecast",
+      "platform": "public_broadcast_weather_html",
+      "url": "https://www.atlantanewsfirst.com/weather/",
+      "coverage_area": [
+        "Atlanta"
+      ],
+      "verified": false,
+      "status": "watch_only",
+      "trust_score": 0,
+      "metrics": {
+        "accuracy": 0,
+        "timeliness": 0,
+        "specificity": 0,
+        "consistency": 0,
+        "resolution_alignment": 0,
+        "hype_penalty": 0,
+        "sample_size": 0
+      },
+      "last_reviewed": "2026-11-27",
+      "collection_status": "dated_predictor_adapter_available",
+      "notes": [
+        "Agent-proposed via source onboarding; public Gray Fusion page whose wx-current-conditions-v3 dailyForecast carries dated validTimeLocal rows, location Atlanta/GA and ianaTimeZone America/New_York: a third Atlanta forecaster (Gray) beside WXIA (TEGNA) and WAGA (FOX), with a dated prior-night low.",
+        "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
+      ],
+      "collection_adapter": "gray_fusion_daily_v1",
+      "collection_blocker": null
+    },
+    {
       "source_id": "src_local_ktbc_weather",
       "city_id": "austin_tx",
       "name": "FOX 7 Austin Weather (KTBC)",
