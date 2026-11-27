@@ -57,6 +57,10 @@ def local_geography_reason(location: dict, *, city: str, city_id: str) -> str | 
                 # Observed Sinclair declares the full name beside its code.
                 # Interpret that known spelling without rewriting either value.
                 state_code = 'OK'
+            if key == 'state' and state_code == 'D.C.':
+                # Observed FOX 5 DC labels the district "Washington, D.C.".
+                # Same interpretation-only rule: the source label is kept.
+                state_code = 'DC'
             if state_code != registered['state']:
                 return 'source_forecast_state_mismatch'
     lat, lon = location.get('latitude'), location.get('longitude')

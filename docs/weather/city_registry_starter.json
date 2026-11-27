@@ -1857,6 +1857,38 @@
       "collection_blocker": null
     },
     {
+      "source_id": "src_local_wttg_weather",
+      "city_id": "washington_dc",
+      "name": "FOX 5 DC Weather (WTTG)",
+      "type": "local_met",
+      "role": "forecast",
+      "platform": "public_broadcast_weather_html",
+      "url": "https://www.fox5dc.com/weather",
+      "coverage_area": [
+        "Washington"
+      ],
+      "verified": false,
+      "status": "watch_only",
+      "trust_score": 0,
+      "metrics": {
+        "accuracy": 0,
+        "timeliness": 0,
+        "specificity": 0,
+        "consistency": 0,
+        "resolution_alignment": 0,
+        "hype_penalty": 0,
+        "sample_size": 0
+      },
+      "last_reviewed": "2026-11-27",
+      "collection_status": "dated_predictor_adapter_available",
+      "notes": [
+        "Agent-proposed via source onboarding; public FOX Television Stations Nuxt page labelled \"Washington, D.C.\" whose weeklyData carries offset-qualified day/night dates: a second Washington forecaster with a dated prior-night low (WUSA's low is a partial-day hourly minimum).",
+        "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
+      ],
+      "collection_adapter": "fox_nuxt_daily_v1",
+      "collection_blocker": null
+    },
+    {
       "source_id": "src_local_abc7ny_weather",
       "city_id": "newark_nj",
       "name": "ABC7 New York Tri-State Weather",
