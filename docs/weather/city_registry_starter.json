@@ -1441,6 +1441,38 @@
       "collection_blocker": null
     },
     {
+      "source_id": "src_local_khou_weather",
+      "city_id": "houston_tx",
+      "name": "KHOU 11 Weather (KHOU)",
+      "type": "local_met",
+      "role": "forecast",
+      "platform": "public_broadcast_weather_html",
+      "url": "https://www.khou.com/weather",
+      "coverage_area": [
+        "Houston"
+      ],
+      "verified": false,
+      "status": "watch_only",
+      "trust_score": 0,
+      "metrics": {
+        "accuracy": 0,
+        "timeliness": 0,
+        "specificity": 0,
+        "consistency": 0,
+        "resolution_alignment": 0,
+        "hype_penalty": 0,
+        "sample_size": 0
+      },
+      "last_reviewed": "2026-11-27",
+      "collection_status": "dated_predictor_adapter_available",
+      "notes": [
+        "Agent-proposed via source onboarding; public TEGNA page whose tracking tag declares market Houston, TX and whose server-rendered 10-day rows carry weekday plus month/day labels: a second Houston forecaster beside KRIV (FOX 26). Its low is the TEGNA target-date hourly-point minimum, not a full-day low.",
+        "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
+      ],
+      "collection_adapter": "tegna_public_html_v1",
+      "collection_blocker": null
+    },
+    {
       "source_id": "src_local_kvvu_weather",
       "city_id": "las_vegas_nv",
       "name": "FOX5 Las Vegas Weather (KVVU)",
