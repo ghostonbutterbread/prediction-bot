@@ -18,7 +18,7 @@ from bot.feeds.weather_local import LocalForecastUnavailable
 # provider issue-time claims or an allowlist of observed dates/temperatures.
 _MARKET_ZONES = {'atlanta': 'America/New_York', 'dallas': 'America/Chicago', 'denver': 'America/Denver',
                  'san antonio': 'America/Chicago', 'washington': 'America/New_York',
-                 'houston': 'America/Chicago', 'san diego': 'America/Los_Angeles'}
+                 'houston': 'America/Chicago', 'san diego': 'America/Los_Angeles', 'minneapolis': 'America/Chicago'}
 _WEEKDAYS = ('Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun')
 _MONTHS = ('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec')
 _VOID = frozenset(('area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr'))

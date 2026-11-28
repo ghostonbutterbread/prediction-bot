@@ -1665,6 +1665,38 @@
       "collection_blocker": null
     },
     {
+      "source_id": "src_local_kare_weather",
+      "city_id": "minneapolis_mn",
+      "name": "KARE 11 Minneapolis-St. Paul Weather (KARE)",
+      "type": "local_met",
+      "role": "forecast",
+      "platform": "public_broadcast_weather_html",
+      "url": "https://www.kare11.com/weather",
+      "coverage_area": [
+        "Minneapolis"
+      ],
+      "verified": false,
+      "status": "watch_only",
+      "trust_score": 0,
+      "metrics": {
+        "accuracy": 0,
+        "timeliness": 0,
+        "specificity": 0,
+        "consistency": 0,
+        "resolution_alignment": 0,
+        "hype_penalty": 0,
+        "sample_size": 0
+      },
+      "last_reviewed": "2026-11-28",
+      "collection_status": "dated_predictor_adapter_available",
+      "notes": [
+        "Agent-proposed via source onboarding; public TEGNA page whose tracking tag declares market Minneapolis, MN and whose server-rendered 10-day rows carry weekday plus month/day labels: a second Minneapolis forecaster beside KMSP-TV (FOX 9). Its low is the TEGNA target-date hourly-point minimum, not a full-day low.",
+        "Collection is independent of trust/selection. Source-specific capture and date/geography checks determine usability; no settlement authority is asserted."
+      ],
+      "collection_adapter": "tegna_public_html_v1",
+      "collection_blocker": null
+    },
+    {
       "source_id": "src_local_wvue_weather",
       "city_id": "new_orleans_la",
       "name": "FOX 8 New Orleans Weather (WVUE)",
