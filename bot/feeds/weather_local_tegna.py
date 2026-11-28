@@ -16,7 +16,7 @@ from bot.feeds.weather_local import LocalForecastUnavailable
 
 # These are the source markets' existing city-registry timezones, not
 # provider issue-time claims or an allowlist of observed dates/temperatures.
-_MARKET_ZONES = {'atlanta': 'America/New_York', 'dallas': 'America/Chicago', 'denver': 'America/Denver',
+_MARKET_ZONES = {'atlanta': 'America/New_York', 'dallas': 'America/Chicago', 'denver': 'America/Denver', 'seattle': 'America/Los_Angeles',
                  'san antonio': 'America/Chicago', 'washington': 'America/New_York',
                  'houston': 'America/Chicago', 'san diego': 'America/Los_Angeles'}
 _WEEKDAYS = ('Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun')
