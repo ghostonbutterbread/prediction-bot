@@ -51,6 +51,18 @@ PAGE = (
     '<div class="weather-hourly__row"><span class="weather-hourly__hour weather-hourly__hour_visible_true">8 PM</span><span class="weather-hourly__day weather-hourly__day_visible_true">Fri</span><div class="weather-hourly__temperature-high">53&deg;</div></div>\n'
     '<div class="weather-hourly__row"><span class="weather-hourly__hour weather-hourly__hour_visible_true">9 PM</span><span class="weather-hourly__day weather-hourly__day_visible_true">Fri</span><div class="weather-hourly__temperature-high">51&deg;</div></div></div>'
 )
+# Captured 2026-11-27 18:09:26 UTC (12:09 CST) from https://www.khou.com/weather:
+# the page served the hourly module as 12 unfilled templates (empty hour/day,
+# temperature "&deg;" only) while its 10-day rows were identical to PAGE's. The
+# same projection rules apply; its pinned SHA-256 proves the reconstruction.
+BLANK_CAPTURE_SHA256 = 'b378b385d4362acbfe15c4f0dc86a7da544fa67c83bdcf5ef3ad0bc1b66f51f1'
+BLANK_FETCHED_AT = datetime.fromisoformat('2026-11-27T18:09:26.274606+00:00')
+BLANK_FIXTURE_SHA256 = 'a47a96542e92ca02300907931db2df6189eb53a943bcecab6ab705039d40ec9b'
+BLANK_HOURLY_ROW = ('<div class="weather-hourly__row"><span class="weather-hourly__hour weather-hourly__hour_visible_true">'
+                    '</span><span class="weather-hourly__day weather-hourly__day_visible_true"></span>'
+                    '<div class="weather-hourly__temperature-high">&deg;</div></div>')
+BLANK_HOURLY_PAGE = (PAGE[:PAGE.index('<div data-module="weather-hourly">')]
+                     + '<div data-module="weather-hourly">' + '\n'.join([BLANK_HOURLY_ROW] * 12) + '</div>')
 
 
 class KhouHoustonTegnaTests(unittest.TestCase):
@@ -117,6 +129,23 @@ class KhouHoustonTegnaTests(unittest.TestCase):
                  'source_hourly_forecast_clock_ambiguous')):
             with self.subTest(reason=reason, target=target), self.assertRaisesRegex(LocalForecastUnavailable, reason):
                 self.parse(target, kind, **overrides)
+
+    def test_unfilled_hourly_templates_are_reported_as_blank_not_as_a_clock_problem(self):
+        self.assertEqual(hashlib.sha256(BLANK_HOURLY_PAGE.encode('utf-8')).hexdigest(), BLANK_FIXTURE_SHA256)
+        options = {'city': 'Houston', 'timezone_name': 'America/Chicago', 'fetched_at': BLANK_FETCHED_AT}
+        for target in ('2026-11-27', '2026-11-28'):
+            with self.subTest(target=target), self.assertRaisesRegex(
+                    LocalForecastUnavailable, '^source_hourly_forecast_rows_blank$'):
+                parse_tegna_daily(BLANK_HOURLY_PAGE, target_date=target, measurement_kind='low', **options)
+        # The same capture's dated 10-day high stays usable.
+        parsed = parse_tegna_daily(BLANK_HOURLY_PAGE, target_date='2026-11-28', measurement_kind='high', **options)
+        self.assertEqual((parsed['high'], parsed['raw_forecast']['date']), (75, 'Nov 28'))
+        # Mutation: one filled row among blanks is a broken sequence, not "blank".
+        partial = BLANK_HOURLY_PAGE.replace(
+            BLANK_HOURLY_ROW, BLANK_HOURLY_ROW.replace('true"></span>', 'true">12 PM</span>', 1)
+            .replace('true"></span>', 'true">Fri</span>', 1).replace('>&deg;<', '>62&deg;<'), 1)
+        with self.assertRaisesRegex(LocalForecastUnavailable, 'source_hourly_forecast_sequence_invalid'):
+            parse_tegna_daily(partial, target_date='2026-11-27', measurement_kind='low', **options)
 
     def test_registry_dispatches_khou_through_the_tegna_adapter(self):
         registry = WeatherRegistry.from_file()

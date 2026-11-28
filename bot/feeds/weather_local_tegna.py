@@ -107,6 +107,11 @@ def _hourly_minimum(rows, target, local_capture):
     """
     if not rows:
         raise LocalForecastUnavailable('target_date_missing_low_forecast_period')
+    # Observed variant: every hourly row is an unfilled template (no hour, day
+    # or number). That is missing source data, not an ambiguous clock.
+    if all(not _field(row, 'hour') and not _field(row, 'day')
+           and _field(row, 'temperature-high').removesuffix('°').strip() == '' for row in rows):
+        raise LocalForecastUnavailable('source_hourly_forecast_rows_blank')
     first = rows[0]
     first_hour, first_day = _field(first, 'hour'), _field(first, 'day')
     anchor = local_capture.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
